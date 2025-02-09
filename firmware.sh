@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# To run this file copy this below and run it.
-# wget -qO - https://raw.githubusercontent.com/mikecarper/meshfirmware/refs/heads/main/firmware.sh | bash
-
-
 set -euo pipefail
 
 # Trap errors and output file and line number.
@@ -233,7 +229,7 @@ build_release_menu() {
 
 # Allow the user to select a firmware release version.
 select_release() {
-    local versions_tags versions_labels chosen_release chosen_index auto_selected i selection
+    local versions_tags versions_labels chosen_index auto_selected i selection
     local term_width max_len col_label_width col_width num_per_row num_entries index_width
     local label formatted pre_colored stable_colored
     local yellow green reset
@@ -259,7 +255,7 @@ select_release() {
             echo "No release version found matching --version $VERSION_ARG"
             exit 1
         fi
-        chosen_release="$auto_selected"
+        #chosen_release="$auto_selected"
     else
         echo "Available firmware release versions:"
 
@@ -324,13 +320,13 @@ select_release() {
         echo ""
 		
 		# Prompt for the user's selection.
-        read -r -p "Enter the number of your selection: " selection
+        read -r -p "Enter the number of your selection: " selection < /dev/tty
         if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt "$num_entries" ]; then
             echo "Invalid selection. Exiting."
             exit 1
         fi
         chosen_index=$((selection - 1))
-        chosen_release="${versions_labels[$chosen_index]}"
+        #chosen_release="${versions_labels[$chosen_index]}"
     fi
 
     # Save the selected tag to the cached file.
@@ -467,7 +463,7 @@ detect_device() {
             printf "%d) %s\n" $((idx+1)) "${filtered_device_lines[$idx]}"
         done
         while true; do
-            read -r -p "Please select a device [1-${#filtered_device_lines[@]}]: " selection
+            read -r -p "Please select a device [1-${#filtered_device_lines[@]}]: " selection < /dev/tty
             if [[ "$selection" =~ ^[1-9][0-9]*$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le "${#filtered_device_lines[@]}" ]; then
                 detected_raw="${filtered_device_lines[$((selection-1))]}"
                 break
@@ -550,8 +546,8 @@ choose_operation() {
 	if [ -n "$OPERATION_ARG" ]; then
 		operation="$OPERATION_ARG"
 	else
-		if echo "$matching_files" | grep -qi "esp32"; then
-			read -r -p "Do you want to (u)pdate [default] or (i)nstall? [U/i]: " op_choice
+		if printf '%s\n' "${matching_files[@]}" | grep -qi "esp32"; then
+			read -r -p "Do you want to (u)pdate [default] or (i)nstall? [U/i]: " op_choice < /dev/tty
 			op_choice=${op_choice:-u}
 			if [[ "$op_choice" =~ ^[Ii] ]]; then
 				operation="install"
@@ -598,7 +594,7 @@ select_firmware_file() {
                 for i in "${!update_candidates[@]}"; do
                     echo "$((i+1)). $(basename "${update_candidates[$i]}")"
                 done
-                read -r -p "Select which firmware file to use [1-${#update_candidates[@]}]: " file_choice
+                read -r -p "Select which firmware file to use [1-${#update_candidates[@]}]: " file_choice < /dev/tty
                 if ! [[ "$file_choice" =~ ^[0-9]+$ ]] ||
                    [ "$file_choice" -lt 1 ] ||
                    [ "$file_choice" -gt "${#update_candidates[@]}" ]; then
@@ -628,7 +624,7 @@ prompt_for_firmware() {
     for i in "${!file_list[@]}"; do
         echo "$((i+1)). $(basename "${file_list[$i]}")"
     done
-    read -r -p "Select which firmware file to use [1-${#file_list[@]}]: " count_choice
+    read -r -p "Select which firmware file to use [1-${#file_list[@]}]: " count_choice < /dev/tty
     if ! [[ "$count_choice" =~ ^[0-9]+$ ]] ||
        [ "$count_choice" -lt 1 ] ||
        [ "$count_choice" -gt "${#file_list[@]}" ]; then
@@ -747,7 +743,7 @@ run_update_script() {
     if $RUN_UPDATE; then
         user_choice="y"
     else
-        read -r -p "Would you like to update the firmware? (y/N): " user_choice
+        read -r -p "Would you like to update the firmware? (y/N): " user_choice < /dev/tty
         user_choice=${user_choice:-N}
     fi
     if ! [[ "$user_choice" =~ ^[Yy]$ ]]; then
