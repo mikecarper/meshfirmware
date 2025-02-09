@@ -771,7 +771,7 @@ run_update_script() {
     echo ""
 	if echo "$cmd" | grep -qi "esp32"; then
 		echo "Command to run for firmware operation:"
-		echo "$cmd"
+		echo "$abs_script -f $abs_selected"
 	fi
 
     if $RUN_UPDATE; then
