@@ -543,6 +543,18 @@ match_firmware_files() {
       done
       printf '\0'
     )
+
+	# If no matches are found for the device, fall back to *all* firmware files in the chosen tag.
+    if [ "${#matching_files[@]}" -eq 0 ]; then
+        echo "No firmware matched for the detected device: $detected_product"
+		mapfile -t matching_files < <(
+		  find "$FIRMWARE_ROOT/${chosen_tag}" -type f -iname "firmware-*" -print0 |
+		  while IFS= read -r -d '' file; do
+			# Print "basename<tab>full_path"
+			echo -e "$(basename "$file")\t$file"
+		  done | sort -f -k1,1 | cut -f2-
+		)
+    fi
 	
 	printf "%s\n" "${matching_files[@]}" > "${MATCHING_FILES_FILE}"
 }
@@ -602,9 +614,17 @@ select_firmware_file() {
                 selected_file="${update_candidates[0]}"
             elif [ ${#update_candidates[@]} -gt 1 ]; then
                 echo "Multiple matching update firmware files found:"
-                for i in "${!update_candidates[@]}"; do
-                    echo "$((i+1)). $(basename "${update_candidates[$i]}")"
-                done
+				# Figure out how many lines we'll print.
+				count_candidates=${#update_candidates[@]}
+				# The number of digits in that count — e.g., 2 if 10..99, 3 if 100..999
+				idx_width=${#count_candidates}
+
+				for i in "${!update_candidates[@]}"; do
+					# Print each line so that indices are right-aligned to idx_width.
+					printf "%${idx_width}d. %s\n" \
+						   $((i+1)) \
+						   "$(basename "${update_candidates[$i]}")"
+				done
                 read -r -p "Select which firmware file to use [1-${#update_candidates[@]}]: " file_choice < /dev/tty
                 if ! [[ "$file_choice" =~ ^[0-9]+$ ]] ||
                    [ "$file_choice" -lt 1 ] ||
@@ -810,9 +830,6 @@ run_update_script() {
 	
 
     # Execute update for ESP32 or non-ESP32 devices.
-	echo "$cmd"
-	read -r -p "Press [Enter] to continue..."
-
     if echo "$cmd" | grep -qi "esp32"; then
 		echo "Setting device into bootloader mode via baud 1200"
         $ESPTOOL_CMD --baud 1200 chip_id
