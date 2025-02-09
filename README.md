@@ -4,8 +4,7 @@ This Bash script automates the process of selecting, downloading, and applying f
 # Quick start
 Copy and run this in your linux terminal 
 ```bash
-cd ~
-wget -qO - https://raw.githubusercontent.com/mikecarper/meshfirmware/refs/heads/main/firmware.sh | bash
+cd ~ && wget -qO - https://raw.githubusercontent.com/mikecarper/meshfirmware/refs/heads/main/firmware.sh | bash
 ```
 
 # Do it the correct way
