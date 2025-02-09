@@ -1,4 +1,15 @@
 #!/usr/bin/env bash
+#
+: <<'EOF'
+
+# To run this file copy this below and run it.
+wget -qO - https://raw.githubusercontent.com/mikecarper/meshfirmware/refs/heads/main/firmware.sh | bash
+
+#
+EOF
+# 
+#
+
 set -euo pipefail
 
 # Trap errors and output file and line number.
