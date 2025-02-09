@@ -98,3 +98,5 @@ Run the script with the following syntax:
 *   \-h, --help  
     Display the help message and exit.
     
+![image](https://github.com/user-attachments/assets/2d19acfc-ea3b-45ae-8051-fcf604a3c8ae)
+
