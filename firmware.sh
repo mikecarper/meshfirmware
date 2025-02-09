@@ -19,17 +19,21 @@ MOUNT_FOLDER="/mnt/meshDeviceSD"
 
 # Settings for the repo
 GITHUB_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases"
-if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
-  PWD_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-else
-  # Fallback if the script is being run from a pipe (so no BASH_SOURCE).
+
+# If BASH_SOURCE[0] is not set, fall back to the current working directory.
+if [ -z "${BASH_SOURCE+x}" ] || [ -z "${BASH_SOURCE[0]+x}" ]; then
+  # The script is likely being run via a pipe, so there's no script file path
   PWD_SCRIPT="$(pwd)"
+else
+  PWD_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
+
+# Set Folders
 FIRMWARE_ROOT="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}"
 DOWNLOAD_DIR="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/downloads"
-CACHE_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/releases.json"
 
-# Vars to get passed around and cached.
+# Vars to get passed around and cached as files.
+CACHE_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/releases.json"
 VERSIONS_TAGS_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/01versions_tags.txt"
 VERSIONS_LABELS_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/02versions_labels.txt"
 CHOSEN_TAG_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/03chosen_tag.txt"
