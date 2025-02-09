@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# To run this file copy this below and run it.
+# wget -qO - https://raw.githubusercontent.com/mikecarper/meshfirmware/refs/heads/main/firmware.sh | bash
+
+
 set -euo pipefail
 
 # Trap errors and output file and line number.
@@ -15,7 +19,12 @@ MOUNT_FOLDER="/mnt/meshDeviceSD"
 
 # Settings for the repo
 GITHUB_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases"
-PWD_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+  PWD_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+  # Fallback if the script is being run from a pipe (so no BASH_SOURCE).
+  PWD_SCRIPT="$(pwd)"
+fi
 FIRMWARE_ROOT="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}"
 DOWNLOAD_DIR="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/downloads"
 CACHE_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/releases.json"
