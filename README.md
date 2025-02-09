@@ -15,6 +15,10 @@ cd meshfirmware
 chmod +x firmware.sh
 ./firmware.sh
 ```
+As one line
+```
+cd ~ && git clone https://github.com/mikecarper/meshfirmware.git && cd meshfirmware && chmod +x firmware.sh && ./firmware.sh
+```
 
 
 Overview
