@@ -94,7 +94,7 @@ Run the script with the following syntax:
     Set the operation mode to **update** (this is the default if not otherwise specified).
     
 *   \--run  
-    Automatically run the update script without prompting the user.
+    Automatically update firmware without prompting the user.
     
 *   \-h, --help  
     Display the help message and exit.
