@@ -43,7 +43,6 @@ The script performs the following key tasks:
         
     *   Downloads any missing firmware zip assets to a dedicated download directory.
         
-    *   Unzips the downloaded assets into a structured folder layout (firmware///).
         
 4.  **Device Detection & Firmware Matching:**
     
