@@ -674,7 +674,7 @@ prepare_script() {
 
     abs_script="$(cd "$(dirname "$script_to_run")" && pwd)/$(basename "$script_to_run")"
     abs_selected="$(cd "$(dirname "$selected_file")" && pwd)/$(basename "$selected_file")"
-    echo "$abs_script -f $abs_selected" > "${CMD_FILE}"
+    printf "%s\n" "$abs_script" "$abs_selected" > "${CMD_FILE}"
 }
 
 
@@ -743,7 +743,10 @@ get_locked_service() {
 # Run the firmware update/install script.
 run_update_script() {
     local cmd user_choice PYTHON ESPTOOL_CMD
-    cmd=$(cat "${CMD_FILE}")
+	mapfile -t cmd_array < "$CMD_FILE"
+	abs_script="${cmd_array[0]}"
+	abs_selected="${cmd_array[1]}"
+	cmd="${cmd_array[*]}"
     detected_dev=$(cat "${DEVICE_INFO_FILE}")
     echo ""
 	if echo "$cmd" | grep -qi "esp32"; then
@@ -807,13 +810,15 @@ run_update_script() {
 	
 
     # Execute update for ESP32 or non-ESP32 devices.
+	echo "$cmd"
+	read -r -p "Press [Enter] to continue..."
+
     if echo "$cmd" | grep -qi "esp32"; then
 		echo "Setting device into bootloader mode via baud 1200"
         $ESPTOOL_CMD --baud 1200 chip_id
         sleep 5
-		echo "Running the update"
-        echo "$cmd"
-		"$cmd"
+		echo "Running: \"$abs_script\" -f \"$abs_selected\""
+		"$abs_script" -f "$abs_selected"
     else
 		echo "Setting device into bootloader mode via meshtastic --enter-dfu"
 		old_output=$(sudo blkid -c /dev/null)
@@ -823,16 +828,19 @@ run_update_script() {
 		
 		new_output=$(sudo blkid -c /dev/null)
 		
+		device_id=""
 		while IFS= read -r line; do
 			if ! grep -Fxq "$line" <<< "$old_output"; then
 				device_id=$(echo "$line" | awk '{print $1}' | tr -d ':')
-				
 			fi
 		done <<< "$new_output"
-		
-		# Define the mount point (you can adjust this as needed)
-		MOUNT_FOLDER
-		
+
+		# Check if device_id was set
+		if [ -z "$device_id" ]; then
+			echo "Error: Device failed to enter DFU mode (no new block devices detected)."
+			exit 1
+		fi
+
 		# Check if the device is already mounted by looking in /proc/mounts.
 		if grep -q "^$device_id " /proc/mounts; then
 			echo "$device_id is already mounted."
