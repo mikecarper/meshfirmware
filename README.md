@@ -84,17 +84,18 @@ Run the script with the following syntax:
 
 ### Options
 
-*   \--version VERSION
+*   \--version VERSION  
     Specify a firmware release version to auto-select (searches for tags containing the provided string).
     
 *   \--install  
     Set the operation mode to **install** (used instead of update).
     
-*   \--update
+*   \--update  
     Set the operation mode to **update** (this is the default if not otherwise specified).
     
-*   \--run
+*   \--run  
     Automatically run the update script without prompting the user.
     
-*   \-h, --helpDisplay the help message and exit.
+*   \-h, --help  
+    Display the help message and exit.
     
