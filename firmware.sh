@@ -832,14 +832,14 @@ run_update_script() {
     # Execute update for ESP32 or non-ESP32 devices.
     if echo "$cmd" | grep -qi "esp32"; then
         export ESPTOOL_PORT=$device_port_name
-    echo "Setting device into bootloader mode via baud 1200"
+        echo "Setting device into bootloader mode via baud 1200"
         $ESPTOOL_CMD --baud 1200 chip_id -p "${device_port_name}"
         sleep 5
-    echo "Running: \"$abs_script\" -f \"$abs_selected\""
-    "$abs_script" -p "${device_port_name}" -f "$abs_selected"
+        echo "Running: \"$abs_script\" -f \"$abs_selected\""
+        "$abs_script" -p "${device_port_name}" -f "$abs_selected"
     else
-    echo "Setting device into bootloader mode via meshtastic --enter-dfu"
-    old_output=$(sudo blkid -c /dev/null)
+        echo "Setting device into bootloader mode via meshtastic --enter-dfu"
+        old_output=$(sudo blkid -c /dev/null)
         
         meshtastic --enter-dfu --port "${device_port_name}" || true
         sleep 5
