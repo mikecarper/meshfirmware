@@ -137,8 +137,8 @@ update_cache() {
                 rm -f "$tmpfile"
                 return
             }
-			
-			# Check if the newly downloaded file is valid JSON
+            
+            # Check if the newly downloaded file is valid JSON
             if ! jq -e . "$tmpfile" >/dev/null 2>&1; then
                 echo "Downloaded file is not valid JSON. Aborting."
                 rm -f "$tmpfile"
@@ -154,7 +154,7 @@ update_cache() {
                 new_md5=$(md5sum "$tmpfile"    | awk '{print $1}')
                 if [ "$old_md5" != "$new_md5" ]; then
                     echo "Release data changed. Updating cache and removing cached version lists. $old_md5 $new_md5"
-					cp "$CACHE_FILE" "$CACHE_FILE.old"
+                    cp "$CACHE_FILE" "$CACHE_FILE.old"
                     mv "${tmpfile}" "$CACHE_FILE"
                     rm -f "${VERSIONS_TAGS_FILE}" "${VERSIONS_LABELS_FILE}"
                 else
@@ -190,23 +190,23 @@ build_release_menu() {
     local releases_json="$1"
     declare -a versions_tags=()
     declare -a versions_labels=()
-	
-	# If the cached version files exist, reuse them.
+    
+    # If the cached version files exist, reuse them.
     if [[ -f "$VERSIONS_TAGS_FILE" && -f "$VERSIONS_LABELS_FILE" ]]; then
         mapfile -t versions_tags < "$VERSIONS_TAGS_FILE"
         mapfile -t versions_labels < "$VERSIONS_LABELS_FILE"
-		return
-	fi
+        return
+    fi
 
     # Parse each release item from JSON.
-	echo "Parsing JSON."
+    echo "Parsing JSON."
     mapfile -t release_items < <(echo "$releases_json" | jq -c '.[]')
     if [ ${#release_items[@]} -eq 0 ]; then
         echo "No releases found. Exiting."
         exit 1
     fi
 
-	echo -n "Building Menu"
+    echo -n "Building Menu"
     for item in "${release_items[@]}"; do
         local tag prerelease draft suffix label
         tag=$(echo "$item" | jq -r '.tag_name')
@@ -229,9 +229,9 @@ build_release_menu() {
         [ -n "$suffix" ] && label="$label $suffix"
         versions_tags+=("$tag")
         versions_labels+=("$label")
-		echo -n "."
+        echo -n "."
     done
-	echo ""
+    echo ""
 
     # Save the arrays for later use.
     printf "%s\n" "${versions_tags[@]}" > "${VERSIONS_TAGS_FILE}"
@@ -284,8 +284,8 @@ select_release() {
         # Figure out how many digits we need for the highest index (the total count).
         num_entries=${#versions_labels[@]}
         index_width=${#num_entries}  # Number of digits in the total count.
-		
-		# Decide how wide we want the label portion itself (allow a little extra padding).
+        
+        # Decide how wide we want the label portion itself (allow a little extra padding).
         col_label_width=$(( max_len + 2 ))
 
         # The total column width = index portion + ") " + label portion + space.
@@ -308,7 +308,7 @@ select_release() {
         # Print the list in dynamically determined columns.
         for i in "${!versions_labels[@]}"; do
             label="${versions_labels[$i]}"
-			formatted=$(printf "%*d) %-*s " "$index_width" $((i+1)) "$col_label_width" "$label")
+            formatted=$(printf "%*d) %-*s " "$index_width" $((i+1)) "$col_label_width" "$label")
             
             # Apply yellow to the first pre-release and green to the first stable entry.
             if [[ "$label" == *"(pre-release)"* ]] && [ $pre_colored -eq 0 ]; then
@@ -319,18 +319,18 @@ select_release() {
                 stable_colored=1
             fi
 
-			# Print the (possibly colored) entry.
+            # Print the (possibly colored) entry.
             printf "%s" "$formatted"
-			
-			# Every time we hit 'num_per_row' in a row, insert a newline.
+            
+            # Every time we hit 'num_per_row' in a row, insert a newline.
             if (( (i+1) % num_per_row == 0 )); then
                 echo ""
             fi
         done
-		# If the last row was not complete, ensure we move to a new line.
+        # If the last row was not complete, ensure we move to a new line.
         echo ""
-		
-		# Prompt for the user's selection.
+        
+        # Prompt for the user's selection.
         read -r -p "Enter the number of your selection: " selection < /dev/tty
         if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt "$num_entries" ]; then
             echo "Invalid selection. Exiting."
@@ -365,7 +365,7 @@ download_assets() {
       exit 1
     fi
 
-	StreamOutput=0
+    StreamOutput=0
     mkdir -p "$DOWNLOAD_DIR"
     for asset in "${assets[@]}"; do
         local decoded asset_name asset_url local_file
@@ -374,26 +374,26 @@ download_assets() {
         asset_url=$(echo "$decoded" | jq -r '.url')
         local_file="${DOWNLOAD_DIR}/${asset_name}"
         if [ -f "$local_file" ]; then
-			if [ $StreamOutput -eq 0 ]
-			then
-				echo -n "Already downloaded $asset_name "
-				StreamOutput=1
-			else
-				echo -n "$asset_name "
-			fi
+            if [ $StreamOutput -eq 0 ]
+            then
+                echo -n "Already downloaded $asset_name "
+                StreamOutput=1
+            else
+                echo -n "$asset_name "
+            fi
         else
-			if [ $StreamOutput -eq 1 ]
-			then
-				echo ""
-			fi
+            if [ $StreamOutput -eq 1 ]
+            then
+                echo ""
+            fi
             echo "Downloading $asset_name..."
-			curl -SL --progress-bar -o "$local_file" "$asset_url"
+            curl -SL --progress-bar -o "$local_file" "$asset_url"
         fi
     done
-	if [ $StreamOutput -eq 1 ]
-	then
-		echo ""
-	fi
+    if [ $StreamOutput -eq 1 ]
+    then
+        echo ""
+    fi
     echo "$download_pattern" > "${DOWNLOAD_PATTERN_FILE}"
 }
 
@@ -412,7 +412,7 @@ unzip_assets() {
         {name: .name} | @base64'
     )
     
-	StreamOutput=0
+    StreamOutput=0
     for asset in "${assets[@]}"; do
         local decoded asset_name
         decoded=$(echo "$asset" | base64 --decode)
@@ -423,30 +423,30 @@ unzip_assets() {
             target_dir="${FIRMWARE_ROOT}/${chosen_tag}/${product}"
             mkdir -p "$target_dir"
             if [ -z "$(ls -A "$target_dir" 2>/dev/null)" ]; then
-				if [ $StreamOutput -eq 1 ]; then
-					echo ""
-				fi
+                if [ $StreamOutput -eq 1 ]; then
+                    echo ""
+                fi
 
                 echo "Unzipping $asset_name into $target_dir..."
                 unzip -o "$local_file" -d "$target_dir"
-				StreamOutput=0
+                StreamOutput=0
             else
-				if [ $StreamOutput -eq 0 ]
-				then
-					echo -n "Files already exist for $asset_name "
-					StreamOutput=1
-				else
-					echo -n "$asset_name "
-				fi
+                if [ $StreamOutput -eq 0 ]
+                then
+                    echo -n "Files already exist for $asset_name "
+                    StreamOutput=1
+                else
+                    echo -n "$asset_name "
+                fi
             fi
         else
             echo "Asset $asset_name does not match expected naming convention. Skipping unzip."
         fi
     done
-	if [ $StreamOutput -eq 1 ]
-	then
-		echo ""
-	fi
+    if [ $StreamOutput -eq 1 ]
+    then
+        echo ""
+    fi
 }
 
 # Detect the connected USB device.
@@ -544,44 +544,44 @@ match_firmware_files() {
       printf '\0'
     )
 
-	# If no matches are found for the device, fall back to *all* firmware files in the chosen tag.
+    # If no matches are found for the device, fall back to *all* firmware files in the chosen tag.
     if [ "${#matching_files[@]}" -eq 0 ]; then
         echo "No firmware matched for the detected device: $detected_product"
-		mapfile -t matching_files < <(
-		  find "$FIRMWARE_ROOT/${chosen_tag}" -type f -iname "firmware-*" -print0 |
-		  while IFS= read -r -d '' file; do
-			# Print "basename<tab>full_path"
-			echo -e "$(basename "$file")\t$file"
-		  done | sort -f -k1,1 | cut -f2-
-		)
+        mapfile -t matching_files < <(
+          find "$FIRMWARE_ROOT/${chosen_tag}" -type f -iname "firmware-*" -print0 |
+          while IFS= read -r -d '' file; do
+            # Print "basename<tab>full_path"
+            echo -e "$(basename "$file")\t$file"
+          done | sort -f -k1,1 | cut -f2-
+        )
     fi
-	
-	printf "%s\n" "${matching_files[@]}" > "${MATCHING_FILES_FILE}"
+    
+    printf "%s\n" "${matching_files[@]}" > "${MATCHING_FILES_FILE}"
 }
 
 # Determine whether to perform an update or install operation.
 choose_operation() {
     readarray -t matching_files < "${MATCHING_FILES_FILE}"
     count=${#matching_files[@]}
-	
-	operation="update"
-	local op_choice operation
-	if [ -n "$OPERATION_ARG" ]; then
-		operation="$OPERATION_ARG"
-	else
-		if printf '%s\n' "${matching_files[@]}" | grep -qi "esp32"; then
-			read -r -p "Do you want to (u)pdate [default] or (i)nstall? [U/i]: " op_choice < /dev/tty
-			op_choice=${op_choice:-u}
-			if [[ "$op_choice" =~ ^[Ii] ]]; then
-				operation="install"
-			else
-				operation="update"
-			fi
-		fi
-	fi
+    
+    operation="update"
+    local op_choice operation
+    if [ -n "$OPERATION_ARG" ]; then
+        operation="$OPERATION_ARG"
+    else
+        if printf '%s\n' "${matching_files[@]}" | grep -qi "esp32"; then
+            read -r -p "Do you want to (u)pdate [default] or (i)nstall? [U/i]: " op_choice < /dev/tty
+            op_choice=${op_choice:-u}
+            if [[ "$op_choice" =~ ^[Ii] ]]; then
+                operation="install"
+            else
+                operation="update"
+            fi
+        fi
+    fi
 
-	echo "$operation" > "${OPERATION_FILE}"
-	echo "Operation chosen: $operation"
+    echo "$operation" > "${OPERATION_FILE}"
+    echo "Operation chosen: $operation"
 }
 
 # Let the user select which firmware file to use if multiple are found.
@@ -614,17 +614,17 @@ select_firmware_file() {
                 selected_file="${update_candidates[0]}"
             elif [ ${#update_candidates[@]} -gt 1 ]; then
                 echo "Multiple matching update firmware files found:"
-				# Figure out how many lines we'll print.
-				count_candidates=${#update_candidates[@]}
-				# The number of digits in that count — e.g., 2 if 10..99, 3 if 100..999
-				idx_width=${#count_candidates}
+                # Figure out how many lines we'll print.
+                count_candidates=${#update_candidates[@]}
+                # The number of digits in that count — e.g., 2 if 10..99, 3 if 100..999
+                idx_width=${#count_candidates}
 
-				for i in "${!update_candidates[@]}"; do
-					# Print each line so that indices are right-aligned to idx_width.
-					printf "%${idx_width}d. %s\n" \
-						   $((i+1)) \
-						   "$(basename "${update_candidates[$i]}")"
-				done
+                for i in "${!update_candidates[@]}"; do
+                    # Print each line so that indices are right-aligned to idx_width.
+                    printf "%${idx_width}d. %s\n" \
+                           $((i+1)) \
+                           "$(basename "${update_candidates[$i]}")"
+                done
                 read -r -p "Select which firmware file to use [1-${#update_candidates[@]}]: " file_choice < /dev/tty
                 if ! [[ "$file_choice" =~ ^[0-9]+$ ]] ||
                    [ "$file_choice" -lt 1 ] ||
@@ -699,9 +699,9 @@ prepare_script() {
 
 
 get_locked_service() {
-	device_name=$(echo "$1" | awk -F'-> ' '{print $2}')
+    device_name=$(echo "$1" | awk -F'-> ' '{print $2}')
     # Accept an optional argument for the device; default to /dev/ttyACM0.
-	#local device_name="/dev/ttyACM0"
+    #local device_name="/dev/ttyACM0"
     #echo "Device: $device_name"
     
     # Get all users locking the device (skip the header line)
@@ -756,23 +756,23 @@ get_locked_service() {
     #    echo "Last checked PID: $last_pid"
     #    return 1
     #fi
-	echo "$found_service" | awk '{$1=$1};1'
+    echo "$found_service" | awk '{$1=$1};1'
 }
 
 
 # Run the firmware update/install script.
 run_update_script() {
     local cmd user_choice PYTHON ESPTOOL_CMD
-	mapfile -t cmd_array < "$CMD_FILE"
-	abs_script="${cmd_array[0]}"
-	abs_selected="${cmd_array[1]}"
-	cmd="${cmd_array[*]}"
+    mapfile -t cmd_array < "$CMD_FILE"
+    abs_script="${cmd_array[0]}"
+    abs_selected="${cmd_array[1]}"
+    cmd="${cmd_array[*]}"
     detected_dev=$(cat "${DEVICE_INFO_FILE}")
     echo ""
-	if echo "$cmd" | grep -qi "esp32"; then
-		echo "Command to run for firmware operation:"
-		echo "$abs_script -f $abs_selected"
-	fi
+    if echo "$cmd" | grep -qi "esp32"; then
+        echo "Command to run for firmware operation:"
+        echo "$abs_script -f $abs_selected"
+    fi
 
     if $RUN_UPDATE; then
         user_choice="y"
@@ -819,66 +819,67 @@ run_update_script() {
     if ! command -v meshtastic &> /dev/null; then
         pipx install "meshtastic[cli]"
     fi
-	
-	# Check if any services are locking up the device
-	echo "$detected_dev"
-	lockedService=$( get_locked_service "$detected_dev" )
-	if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
-		echo "Stopping service $lockedService..."
-		sudo systemctl stop "$lockedService"
-	fi
-	
-
+    
+    # Check if any services are locking up the device
+    echo "$detected_dev"
+    lockedService=$( get_locked_service "$detected_dev" )
+    if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
+        echo "Stopping service $lockedService..."
+        sudo systemctl stop "$lockedService"
+    fi
+    
+    device_port_name=$(echo "$detected_dev" | awk -F'-> ' '{print $2}')
     # Execute update for ESP32 or non-ESP32 devices.
     if echo "$cmd" | grep -qi "esp32"; then
-		echo "Setting device into bootloader mode via baud 1200"
-        $ESPTOOL_CMD --baud 1200 chip_id
+        export ESPTOOL_PORT=$device_port_name
+    echo "Setting device into bootloader mode via baud 1200"
+        $ESPTOOL_CMD --baud 1200 chip_id -p "${device_port_name}"
         sleep 5
-		echo "Running: \"$abs_script\" -f \"$abs_selected\""
-		"$abs_script" -f "$abs_selected"
+    echo "Running: \"$abs_script\" -f \"$abs_selected\""
+    "$abs_script" -p "${device_port_name}" -f "$abs_selected"
     else
-		echo "Setting device into bootloader mode via meshtastic --enter-dfu"
-		old_output=$(sudo blkid -c /dev/null)
-		
-        meshtastic --enter-dfu || true
+    echo "Setting device into bootloader mode via meshtastic --enter-dfu"
+    old_output=$(sudo blkid -c /dev/null)
+        
+        meshtastic --enter-dfu --port "${device_port_name}" || true
         sleep 5
-		
-		new_output=$(sudo blkid -c /dev/null)
-		
-		device_id=""
-		while IFS= read -r line; do
-			if ! grep -Fxq "$line" <<< "$old_output"; then
-				device_id=$(echo "$line" | awk '{print $1}' | tr -d ':')
-			fi
-		done <<< "$new_output"
+        
+        new_output=$(sudo blkid -c /dev/null)
+        
+        device_id=""
+        while IFS= read -r line; do
+            if ! grep -Fxq "$line" <<< "$old_output"; then
+                device_id=$(echo "$line" | awk '{print $1}' | tr -d ':')
+            fi
+        done <<< "$new_output"
 
-		# Check if device_id was set
-		if [ -z "$device_id" ]; then
-			echo "Error: Device failed to enter DFU mode (no new block devices detected)."
-			exit 1
-		fi
+        # Check if device_id was set
+        if [ -z "$device_id" ]; then
+            echo "Error: Device failed to enter DFU mode (no new block devices detected)."
+            exit 1
+        fi
 
-		# Check if the device is already mounted by looking in /proc/mounts.
-		if grep -q "^$device_id " /proc/mounts; then
-			echo "$device_id is already mounted."
-		else
-			echo "$device_id is not mounted. Mounting now..."
-			sudo mkdir -p "$MOUNT_FOLDER"
-			sudo mount "$device_id" "$MOUNT_FOLDER"
-		fi
-		
-		echo "Contents of $MOUNT_FOLDER:"
-		ls "$MOUNT_FOLDER"
-		
-		sudo cp -v "$abs_selected" "$MOUNT_FOLDER/"	
+        # Check if the device is already mounted by looking in /proc/mounts.
+        if grep -q "^$device_id " /proc/mounts; then
+            echo "$device_id is already mounted."
+        else
+            echo "$device_id is not mounted. Mounting now..."
+            sudo mkdir -p "$MOUNT_FOLDER"
+            sudo mount "$device_id" "$MOUNT_FOLDER"
+        fi
+        
+        echo "Contents of $MOUNT_FOLDER:"
+        ls "$MOUNT_FOLDER"
+        
+        sudo cp -v "$abs_selected" "$MOUNT_FOLDER/"    
         echo "Firmware update for non-ESP32 device completed."
     fi
-	
-	# Restart the stopped service.
-	if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
-		echo "Starting service $lockedService..."
-		sudo systemctl start "$lockedService"
-	fi
+    
+    # Restart the stopped service.
+    if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
+        echo "Starting service $lockedService..."
+        sudo systemctl start "$lockedService"
+    fi
 }
 
 ##################
