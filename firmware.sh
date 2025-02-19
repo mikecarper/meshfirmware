@@ -665,6 +665,8 @@ prepare_script() {
 	selected_file=$(cat "${SELECTED_FILE_FILE}")
 	operation=$(cat "${OPERATION_FILE}")
 	chosen_tag=$(cat "${CHOSEN_TAG_FILE}")
+	detected_dev=$(cat "${DEVICE_INFO_FILE}")
+	device_port_name=$(echo "$detected_dev" | awk -F'-> ' '{print $2}')
 	if [ "$operation" = "update" ]; then
 		script_to_run="$(dirname "$selected_file")/device-update.sh"
 	elif [ "$operation" = "install" ]; then
@@ -674,7 +676,14 @@ prepare_script() {
 	# Adjust baud rate for ESP32 firmware.
 	if echo "$selected_file" | grep -qi "esp32"; then
 		if [ -f "$script_to_run" ]; then
+			# Ensure the baud rate is set correctly
 			sed -i 's/--baud 115200/--baud 1200/g' "$script_to_run"
+
+			# Remove any existing --port argument
+			sed -i 's/--port [^ ]* //g' "$script_to_run"
+
+			# Add the new --port argument before --baud 1200, using a different delimiter (|)
+			sed -i "s|--baud 1200|--port ${device_port_name} --baud 1200 |g" "$script_to_run"
 		else
 			echo "No $(basename "$script_to_run") found. Skipping baud rate change."
 		fi
@@ -826,9 +835,9 @@ run_update_script() {
 	if echo "$cmd" | grep -qi "esp32"; then
 		export ESPTOOL_PORT=$device_port_name
 		echo "Setting device into bootloader mode via baud 1200"
-		$ESPTOOL_CMD --baud 1200 chip_id -p "${device_port_name}"
+		$ESPTOOL_CMD --port "${device_port_name}" --baud 1200 chip_id
 		sleep 5
-		echo "Running: \"$abs_script\" -f \"$abs_selected\""
+		echo "Running: \"$abs_script\"  -p \"${device_port_name}\" -f \"$abs_selected\""
 		"$abs_script" -p "${device_port_name}" -f "$abs_selected"
 	else
 		echo "Setting device into bootloader mode via meshtastic --enter-dfu"
