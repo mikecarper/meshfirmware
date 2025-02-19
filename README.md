@@ -15,6 +15,12 @@ or as one line
 cd ~ && git clone https://github.com/mikecarper/meshfirmware.git && cd meshfirmware && chmod +x firmware.sh && ./firmware.sh
 ```
 
+Video
+-----
+
+https://github.com/user-attachments/assets/2440d8cd-1cc5-4106-b7d9-9409ca8ba185
+
+
 
 Overview
 --------
