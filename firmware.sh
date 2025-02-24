@@ -124,51 +124,69 @@ check_internet() {
 
 # Update the GitHub release cache if needed.
 update_cache() {
-	if check_internet; then
-		# If we don't have a cache file or it's older than our timeout, attempt an update.
-		if [ ! -f "$CACHE_FILE" ] || [ "$(date +%s)" -ge "$(($(stat -c %Y "$CACHE_FILE") + CACHE_TIMEOUT_SECONDS))" ]; then
-			mkdir -p "$FIRMWARE_ROOT"
-			echo "Updating release cache from GitHub..."
+    if check_internet; then
+        # If we don't have a cache file or it's older than our timeout, attempt an update.
+        if [ ! -f "$CACHE_FILE" ] || [ "$(date +%s)" -ge "$(( $(stat -c %Y "$CACHE_FILE") + CACHE_TIMEOUT_SECONDS ))" ]; then
+            mkdir -p "$FIRMWARE_ROOT"
+            echo "Updating release cache from GitHub..."
 
-			# Download into a temp file first
-			tmpfile=$(mktemp)
-			curl -s "$GITHUB_API_URL" -o "$tmpfile" || {
-				echo "Failed to download release data."
-				rm -f "$tmpfile"
-				return
-			}
+            # Download into a temp file first
+            tmpfile=$(mktemp)
+            curl -s "$GITHUB_API_URL" -o "$tmpfile" || {
+                echo "Failed to download release data."
+                rm -f "$tmpfile"
+                return
+            }
 
-			# Check if the newly downloaded file is valid JSON
-			if ! jq -e . "$tmpfile" >/dev/null 2>&1; then
-				echo "Downloaded file is not valid JSON. Aborting."
-				rm -f "$tmpfile"
-				return
-			fi
+            # Check if the newly downloaded file is valid JSON
+            if ! jq -e . "$tmpfile" >/dev/null 2>&1; then
+                echo "Downloaded file is not valid JSON. Aborting."
+                rm -f "$tmpfile"
+                return
+            fi
 
-			# If we had no existing cache, just move it into place.
-			if [ ! -f "$CACHE_FILE" ]; then
-				mv "$tmpfile" "$CACHE_FILE"
-			else
-				# Compare the MD5 sums
-				old_md5=$(md5sum "$CACHE_FILE" | awk '{print $1}')
-				new_md5=$(md5sum "$tmpfile" | awk '{print $1}')
-				if [ "$old_md5" != "$new_md5" ]; then
-					echo "Release data changed. Updating cache and removing cached version lists. $old_md5 $new_md5"
-					cp "$CACHE_FILE" "$CACHE_FILE.old"
-					mv "${tmpfile}" "$CACHE_FILE"
-					rm -f "${VERSIONS_TAGS_FILE}" "${VERSIONS_LABELS_FILE}"
-				else
-					echo "Release data is unchanged. $old_md5 $new_md5"
-					rm -f "$tmpfile"
-				fi
-			fi
-		else
-			echo "Using cached release data (updated within the last 6 hours)."
-		fi
-	else
-		echo "No internet connection; using cached release data if available."
-	fi
+            # Filter out "download_count" and "body" keys from the JSON.
+            # This jq filter defines a recursive walk function.
+            filtered_tmp=$(mktemp)
+            jq 'def walk(f):
+                  . as $in
+                  | if type=="object" then
+                        reduce keys[] as $key ({}; . + { ($key): ($in[$key] | walk(f)) })
+                    elif type=="array" then map(walk(f))
+                    else . end;
+                walk(if type=="object" then del(.download_count, .body) else . end)' "$tmpfile" > "$filtered_tmp" || {
+                echo "Failed to filter JSON."
+                rm -f "$tmpfile" "$filtered_tmp"
+                return
+            }
+
+            # Use the filtered JSON for further processing.
+            if [ ! -f "$CACHE_FILE" ]; then
+                mv "$filtered_tmp" "$CACHE_FILE"
+                rm -f "$tmpfile"
+            else
+                # Compare the MD5 sums of the cached file and the newly filtered file.
+                old_md5=$(md5sum "$CACHE_FILE" | awk '{print $1}')
+                new_md5=$(md5sum "$filtered_tmp" | awk '{print $1}')
+                if [ "$old_md5" != "$new_md5" ]; then
+                    echo "Release data changed. Updating cache and removing cached version lists. $old_md5 $new_md5"
+                    cp "$CACHE_FILE" "$CACHE_FILE.old"
+                    mv "$filtered_tmp" "$CACHE_FILE"
+                    rm -f "${VERSIONS_TAGS_FILE}" "${VERSIONS_LABELS_FILE}"
+                else
+                    echo "Release data is unchanged. $old_md5 $new_md5"
+                    rm -f "$filtered_tmp"
+                fi
+                rm -f "$tmpfile"
+            fi
+        else
+            echo "Using cached release data (updated within the last 6 hours)."
+        fi
+    else
+        echo "No internet connection; using cached release data if available."
+    fi
 }
+
 
 # Retrieve release JSON data from the cache.
 get_release_data() {
@@ -557,8 +575,8 @@ choose_operation() {
 	readarray -t matching_files <"${MATCHING_FILES_FILE}"
 	count=${#matching_files[@]}
 
-	operation="update"
 	local op_choice operation
+	operation="update"
 	if [ -n "$OPERATION_ARG" ]; then
 		operation="$OPERATION_ARG"
 	else
@@ -573,7 +591,7 @@ choose_operation() {
 		fi
 	fi
 
-	echo "$operation" >"${OPERATION_FILE}"
+	echo "$operation" > "${OPERATION_FILE}"
 	echo "Operation chosen: $operation"
 }
 
