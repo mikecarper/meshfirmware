@@ -224,7 +224,7 @@ build_release_menu() {
 
 	echo -n "Building Menu"
 	for item in "${release_items[@]}"; do
-		local tag prerelease draft suffix label
+		local tag prerelease draft suffix label body
 		tag=$(echo "$item" | jq -r '.tag_name')
 		prerelease=$(echo "$item" | jq -r '.prerelease')
 		draft=$(echo "$item" | jq -r '.draft')
@@ -243,6 +243,15 @@ build_release_menu() {
 		fi
 		label="$tag"
 		[ -n "$suffix" ] && label="$label $suffix"
+
+		# Check if the release body contains the ⚠️ emoji.
+		body=$(echo "$item" | jq -r '.body')
+		if echo "$body" | grep -q '⚠️'; then
+			label="! $label"
+		else
+			label="  $label"
+		fi
+
 		versions_tags+=("$tag")
 		versions_labels+=("$label")
 		echo -n "."
@@ -259,16 +268,27 @@ select_release() {
 	local versions_tags versions_labels chosen_index auto_selected i selection
 	local term_width max_len col_label_width col_width num_per_row num_entries index_width
 	local label formatted pre_colored stable_colored
-	local yellow green reset
+	local yellow green cyan reset
 
 	# Use tput to set color codes.
-	yellow=$(tput setaf 3) # Yellow.
-	green=$(tput setaf 2)  # Green.
+	yellow=$(tput setaf 3) # Yellow for pre-releases.
+	green=$(tput setaf 2)  # Green for the first stable entry.
+	cyan=$(tput setaf 6)   # Cyan for the latest stable (without "!" or pre-release).
 	reset=$(tput sgr0)     # Reset.
 
 	# Load cached arrays from file.
 	readarray -t versions_tags <"$VERSIONS_TAGS_FILE"
 	readarray -t versions_labels <"$VERSIONS_LABELS_FILE"
+
+	# Determine the latest stable candidate: the first entry that does NOT start with "!" and does NOT contain "(pre-release)".
+	local latest_stable_index=-1
+	for i in "${!versions_labels[@]}"; do
+		label="${versions_labels[$i]}"
+		if [[ "$label" != "!"* ]] && [[ "$label" != *"(pre-release)"* ]]; then
+			latest_stable_index=$i
+			break
+		fi
+	done
 
 	if [ -n "$VERSION_ARG" ]; then
 		for i in "${!versions_tags[@]}"; do
@@ -282,7 +302,6 @@ select_release() {
 			echo "No release version found matching --version $VERSION_ARG"
 			exit 1
 		fi
-		#chosen_release="$auto_selected"
 	else
 		echo "Available firmware release versions:"
 
@@ -305,10 +324,6 @@ select_release() {
 		col_label_width=$((max_len + 2))
 
 		# The total column width = index portion + ") " + label portion + space.
-		#    - index_width: how many digits needed
-		#    - 2 for ") "
-		#    - col_label_width: max label size
-		#    - 1 for trailing space
 		col_width=$((index_width + 2 + col_label_width + 1))
 
 		# How many columns fit in our adjusted terminal width?
@@ -317,7 +332,7 @@ select_release() {
 			num_per_row=1
 		fi
 
-		# Flags to track whether we've already colored a pre-release or stable entry.
+		# Flags to track whether we've already colored a pre-release or a stable entry.
 		pre_colored=0
 		stable_colored=0
 
@@ -326,8 +341,11 @@ select_release() {
 			label="${versions_labels[$i]}"
 			formatted=$(printf "%*d) %-*s " "$index_width" $((i + 1)) "$col_label_width" "$label")
 
-			# Apply yellow to the first pre-release and green to the first stable entry.
-			if [[ "$label" == *"(pre-release)"* ]] && [ $pre_colored -eq 0 ]; then
+			# If this entry is the latest stable candidate, color it cyan.
+			if [ "$i" -eq "$latest_stable_index" ]; then
+				formatted="${cyan}${formatted}${reset}"
+			# Otherwise, apply yellow to the first pre-release and green to the first stable entry.
+			elif [[ "$label" == *"(pre-release)"* ]] && [ $pre_colored -eq 0 ]; then
 				formatted="${yellow}${formatted}${reset}"
 				pre_colored=1
 			elif [[ "$label" != *"(pre-release)"* ]] && [ $stable_colored -eq 0 ]; then
@@ -338,7 +356,7 @@ select_release() {
 			# Print the (possibly colored) entry.
 			printf "%s" "$formatted"
 
-			# Every time we hit 'num_per_row' in a row, insert a newline.
+			# Every time we hit 'num_per_row' entries in a row, insert a newline.
 			if (((i + 1) % num_per_row == 0)); then
 				echo ""
 			fi
@@ -353,7 +371,6 @@ select_release() {
 			exit 1
 		fi
 		chosen_index=$((selection - 1))
-		#chosen_release="${versions_labels[$chosen_index]}"
 	fi
 
 	# Save the selected tag to the cached file.
