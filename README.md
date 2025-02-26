@@ -18,7 +18,8 @@ cd ~ && git clone https://github.com/mikecarper/meshfirmware.git && cd meshfirmw
 Video
 -----
 
-https://github.com/user-attachments/assets/2440d8cd-1cc5-4106-b7d9-9409ca8ba185
+https://github.com/user-attachments/assets/06fc7b59-ed03-44d7-a4d1-a0492dec5d16
+
 
 
 
