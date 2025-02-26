@@ -57,9 +57,21 @@ VERSION_ARG=""
 OPERATION_ARG=""
 RUN_UPDATE=false
 
+# Global variable to track the spinner index.
+spinner_index=0
+# Array holding the spinner characters.
+spinner_chars=("-" "\\" "|" "/")
+
 #########################
 # Function Definitions
 #########################
+
+spinner() {
+	# Print the spinner character (using \r to overwrite the same line)
+	printf "\r%s" "${spinner_chars[spinner_index]}" >/dev/tty
+	# Update the index, wrapping around to 0 when reaching the end of the array.
+	spinner_index=$(((spinner_index + 1) % ${#spinner_chars[@]}))
+}
 
 # Display help and usage.
 show_help() {
@@ -145,7 +157,7 @@ update_cache() {
 				return
 			fi
 
-			# Filter out "download_count" and "body" keys from the JSON.
+			# Filter out "download_count" keys from the JSON.
 			# This jq filter defines a recursive walk function.
 			filtered_tmp=$(mktemp)
 			jq 'def walk(f):
@@ -154,7 +166,7 @@ update_cache() {
                         reduce keys[] as $key ({}; . + { ($key): ($in[$key] | walk(f)) })
                     elif type=="array" then map(walk(f))
                     else . end;
-                walk(if type=="object" then del(.download_count, .body) else . end)' "$tmpfile" >"$filtered_tmp" || {
+                walk(if type=="object" then del(.download_count) else . end)' "$tmpfile" >"$filtered_tmp" || {
 				echo "Failed to filter JSON."
 				rm -f "$tmpfile" "$filtered_tmp"
 				return
@@ -170,7 +182,6 @@ update_cache() {
 				new_md5=$(md5sum "$filtered_tmp" | awk '{print $1}')
 				if [ "$old_md5" != "$new_md5" ]; then
 					echo "Release data changed. Updating cache and removing cached version lists. $old_md5 $new_md5"
-					cp "$CACHE_FILE" "$CACHE_FILE.old"
 					mv "$filtered_tmp" "$CACHE_FILE"
 					rm -f "${VERSIONS_TAGS_FILE}" "${VERSIONS_LABELS_FILE}"
 				else
@@ -202,6 +213,7 @@ normalize() {
 }
 
 # Build the release menu and save version tags and labels.
+# Build the release menu and save version tags and labels.
 build_release_menu() {
 	local releases_json="$1"
 	declare -a versions_tags=()
@@ -214,20 +226,16 @@ build_release_menu() {
 		return
 	fi
 
-	# Parse each release item from JSON.
 	echo "Parsing JSON."
-	mapfile -t release_items < <(echo "$releases_json" | jq -c '.[]')
-	if [ ${#release_items[@]} -eq 0 ]; then
-		echo "No releases found. Exiting."
-		exit 1
-	fi
 
-	echo -n "Building Menu"
-	for item in "${release_items[@]}"; do
-		local tag prerelease draft suffix label body
-		tag=$(echo "$item" | jq -r '.tag_name')
-		prerelease=$(echo "$item" | jq -r '.prerelease')
-		draft=$(echo "$item" | jq -r '.draft')
+	# Use a single jq call to extract all needed fields.
+	# This will output one line per release item with fields separated by tabs:
+	# tag_name, prerelease, draft, body.
+	#
+	# Note: If the 'body' field contains newline characters, you may need to pre-process it.
+	while IFS=$'\t' read -r tag prerelease draft body; do
+		spinner
+		# Determine suffix based on the tag.
 		suffix=""
 		if [[ "$tag" =~ [Aa]lpha ]]; then
 			suffix="(alpha)"
@@ -236,16 +244,18 @@ build_release_menu() {
 		elif [[ "$tag" =~ [Rr][Cc] ]]; then
 			suffix="(rc)"
 		fi
+
+		# Override suffix based on draft or prerelease flags.
 		if [ "$draft" = "true" ]; then
 			suffix="(draft)"
 		elif [ "$prerelease" = "true" ] && [ -z "$suffix" ]; then
 			suffix="(pre-release)"
 		fi
+
 		label="$tag"
 		[ -n "$suffix" ] && label="$label $suffix"
 
 		# Check if the release body contains the ⚠️ emoji.
-		body=$(echo "$item" | jq -r '.body')
 		if echo "$body" | grep -q '⚠️'; then
 			label="! $label"
 		else
@@ -254,9 +264,10 @@ build_release_menu() {
 
 		versions_tags+=("$tag")
 		versions_labels+=("$label")
-		echo -n "."
-	done
-	echo ""
+		spinner
+	done < <(echo "$releases_json" | jq -r '.[] | [.tag_name, .prerelease, .draft, .body] | @tsv')
+
+	printf "\r"
 
 	# Save the arrays for later use.
 	printf "%s\n" "${versions_tags[@]}" >"${VERSIONS_TAGS_FILE}"
@@ -478,12 +489,12 @@ unzip_assets() {
 
 # Detect the connected USB device.
 detect_device() {
-	local lsusb_output filtered_device_lines detected_raw detected_line detected_dev fallback
+	local lsusb_output filtered_device_lines detected_raw detected_line detected_dev fallback newpath search_full
 	lsusb_output=$(lsusb)
 	mapfile -t all_device_lines < <(echo "$lsusb_output" | sed -n 's/.*ID [0-9a-fA-F]\{4\}:[0-9a-fA-F]\{4\} //p')
 	filtered_device_lines=()
 	for line in "${all_device_lines[@]}"; do
-		if ! echo "$line" | grep -qi "hub"; then
+		if ! echo "$line" | grep -qiE "hub|ethernet"; then
 			filtered_device_lines+=("$line")
 		fi
 	done
@@ -495,15 +506,104 @@ detect_device() {
 		exit 1
 	elif [ "${#filtered_device_lines[@]}" -eq 1 ]; then
 		detected_raw="${filtered_device_lines[0]}"
+		# Determine detected_dev for the single device:
+		search_full=$(echo "$detected_raw" | tr ' ' '_')
+		detected_dev=""
+		for link in /dev/serial/by-id/*; do
+			if [[ $(basename "$link") == *"$search_full"* ]]; then
+				detected_dev=$(readlink -f "$link")
+				break
+			fi
+		done
+		if [ -z "$detected_dev" ]; then
+			fallback=$(echo "$detected_raw" | cut -d' ' -f2- | tr ' ' '_')
+			for link in /dev/serial/by-id/*; do
+				if [[ $(basename "$link") == *"$fallback"* ]]; then
+					detected_dev=$(readlink -f "$link")
+					break
+				fi
+			done
+		fi
 	else
+		# Multiple devices detected; ensure meshtastic is available.
+		newpath=0
+		if ! command -v pipx &>/dev/null; then
+			sudo apt -y install pipx
+		fi
+		if ! command -v meshtastic &>/dev/null; then
+			pipx install "meshtastic[cli]"
+			newpath=1
+		fi
+		if [ $newpath -eq 1 ]; then
+			pipx ensurepath
+			# shellcheck disable=SC1091
+			source "$HOME/.bashrc"
+		fi
+
+		declare -a detected_devs menu_options
 		echo "Multiple USB devices detected:"
 		for idx in "${!filtered_device_lines[@]}"; do
-			printf "%d) %s\n" $((idx + 1)) "${filtered_device_lines[$idx]}"
+			local device_info search_full detected_dev version
+			device_info="${filtered_device_lines[$idx]}"
+			# Determine detected_dev for this device:
+			search_full=$(echo "$device_info" | tr ' ' '_')
+			detected_dev=""
+
+			for link in /dev/serial/by-id/*; do
+				if [[ $(basename "$link") == *"$search_full"* ]]; then
+					detected_dev=$(readlink -f "$link")
+					break
+				fi
+			done
+
+			if [ -z "$detected_dev" ]; then
+				fallback=$(echo "$device_info" | cut -d' ' -f2- | tr ' ' '_')
+				for link in /dev/serial/by-id/*; do
+					if [[ $(basename "$link") == *"$fallback"* ]]; then
+						detected_dev=$(readlink -f "$link")
+						break
+					fi
+				done
+			fi
+
+			detected_devs[idx]="$detected_dev"
+			# If we found a detected_dev, try to get its firmware version.
+			if [ -n "$detected_dev" ]; then
+				lockedService=$(get_locked_service "$detected_dev")
+				if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
+					spinner
+					sudo systemctl stop "$lockedService"
+				fi
+				spinner
+				# Run meshtastic --device-metadata and extract the firmware_version.
+				# Redirect stderr to hide extra log messages.
+				# Attempt to get the firmware version with a 10 second timeout.
+				version=$(timeout 12 meshtastic --port "$detected_dev" --device-metadata 2>/dev/null | awk -F': ' '/^firmware_version:/ {print $2; exit}' || true)
+				if [ -z "$version" ]; then
+					version="unknown version"
+				fi
+
+				if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
+					spinner
+					sudo systemctl start "$lockedService"
+				fi
+				spinner
+			else
+				version="unknown"
+			fi
+			menu_options[idx]="${device_info} -> ${detected_dev} (${version})"
 		done
+		# Print the menu with version information.
+		printf "\r"
+		for idx in "${!menu_options[@]}"; do
+			printf "%d) %s\n" $((idx + 1)) "${menu_options[$idx]}"
+		done
+		# Prompt user selection.
 		while true; do
-			read -r -p "Please select a device [1-${#filtered_device_lines[@]}]: " selection </dev/tty
-			if [[ "$selection" =~ ^[1-9][0-9]*$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le "${#filtered_device_lines[@]}" ]; then
+			read -r -p "Please select a device [1-${#menu_options[@]}]: " selection </dev/tty
+			if [[ "$selection" =~ ^[1-9][0-9]*$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le "${#menu_options[@]}" ]; then
 				detected_raw="${filtered_device_lines[$((selection - 1))]}"
+				detected_dev="${detected_devs[$((selection - 1))]}"
 				break
 			else
 				echo "Invalid selection. Try again."
@@ -512,24 +612,6 @@ detect_device() {
 	fi
 
 	detected_line=$(echo "$lsusb_output" | grep -i "$detected_raw" | head -n1)
-	local search_full
-	search_full=$(echo "$detected_raw" | tr ' ' '_')
-	detected_dev=""
-	for link in /dev/serial/by-id/*; do
-		if [[ $(basename "$link") == *"$search_full"* ]]; then
-			detected_dev=$(readlink -f "$link")
-			break
-		fi
-	done
-	if [ -z "$detected_dev" ]; then
-		fallback=$(echo "$detected_raw" | cut -d' ' -f2- | tr ' ' '_')
-		for link in /dev/serial/by-id/*; do
-			if [[ $(basename "$link") == *"$fallback"* ]]; then
-				detected_dev=$(readlink -f "$link")
-				break
-			fi
-		done
-	fi
 	echo "$detected_line -> $detected_dev" >"${DEVICE_INFO_FILE}"
 	normalize "$detected_raw" >"${DETECTED_PRODUCT_FILE}"
 }
@@ -540,6 +622,8 @@ match_firmware_files() {
 	chosen_tag=$(cat "${CHOSEN_TAG_FILE}")
 	download_pattern=$(cat "${DOWNLOAD_PATTERN_FILE}")
 	detected_product=$(cat "${DETECTED_PRODUCT_FILE}")
+	detected_info_file=$(cat "${DEVICE_INFO_FILE}")
+	device_name=$(echo "$detected_info_file" | awk -F'-> ' '{print $1}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
 	declare -A product_files
 	declare -A product_files_full
@@ -552,6 +636,7 @@ match_firmware_files() {
 			product_files["$prodNorm"]+="$file"$'\n'
 			product_files_full["$prodNorm"]+="$prod"$'\n'
 		fi
+		spinner
 	done < <(find "$FIRMWARE_ROOT/${chosen_tag}" -type f -iname "firmware-*" -print0)
 
 	matching_keys=()
@@ -562,18 +647,21 @@ match_firmware_files() {
 			echo "Firmware file match on: $(echo "${product_files_full[$prod]}" | head -n1)"
 			matching_keys+=("$prod")
 		fi
+		spinner
 	done
 
 	IFS=$'\n' read -r -d '' -a matching_files < <(
 		for key in "${matching_keys[@]}"; do
 			echo "${product_files[$key]}"
+			spinner
 		done
 		printf '\0'
 	)
 
+	printf "\r"
 	if [ ${#matching_files[@]} -eq 0 ]; then
-
 		USBproduct=$(lsusb -v 2>/dev/null |
+			grep -A 20 "${device_name}" |
 			grep "iProduct" |
 			grep -vi "Controller" |
 			sed -n 's/.*2[[:space:]]\+\([^[:space:]]\+\).*/\1/p' |
@@ -759,7 +847,12 @@ prepare_script() {
 }
 
 get_locked_service() {
-	device_name=$(echo "$1" | awk -F'-> ' '{print $2}')
+	# If the input contains "-> ", extract the part after it; otherwise, use the whole input.
+	if [[ "$1" == *"-> "* ]]; then
+		device_name=$(echo "$1" | awk -F'-> ' '{print $2}')
+	else
+		device_name="$1"
+	fi
 	# Accept an optional argument for the device; default to /dev/ttyACM0.
 	#local device_name="/dev/ttyACM0"
 	#echo "Device: $device_name"
@@ -821,7 +914,7 @@ get_locked_service() {
 
 # Run the firmware update/install script.
 run_update_script() {
-	local cmd user_choice PYTHON ESPTOOL_CMD
+	local cmd user_choice PYTHON ESPTOOL_CMD newpath device_name
 	mapfile -t cmd_array <"$CMD_FILE"
 	abs_script="${cmd_array[0]}"
 	abs_selected="${cmd_array[1]}"
@@ -863,25 +956,36 @@ run_update_script() {
 		}
 	fi
 
+	newpath=0
 	# Ensure pipx is installed.
 	if ! command -v pipx &>/dev/null; then
 		sudo apt -y install pipx
 	fi
 
 	# Determine the esptool command.
-	if "$PYTHON" -m esptool version >/dev/null 2>&1; then
-		ESPTOOL_CMD="$PYTHON -m esptool"
-	elif command -v esptool >/dev/null 2>&1; then
-		ESPTOOL_CMD="esptool"
-	elif command -v esptool.py >/dev/null 2>&1; then
-		ESPTOOL_CMD="esptool.py"
-	else
-		pipx install esptool
-		ESPTOOL_CMD="esptool.py"
+	if echo "$cmd" | grep -qi "esp32"; then
+		if "$PYTHON" -m esptool version >/dev/null 2>&1; then
+			ESPTOOL_CMD="$PYTHON -m esptool"
+		elif command -v esptool >/dev/null 2>&1; then
+			ESPTOOL_CMD="esptool"
+		elif command -v esptool.py >/dev/null 2>&1; then
+			ESPTOOL_CMD="esptool.py"
+		else
+			pipx install esptool
+			ESPTOOL_CMD="esptool.py"
+			newpath=1
+		fi
 	fi
 
 	if ! command -v meshtastic &>/dev/null; then
 		pipx install "meshtastic[cli]"
+		newpath=1
+	fi
+
+	if [ $newpath -eq 1 ]; then
+		pipx ensurepath
+		# shellcheck disable=SC1091
+		source "$HOME/.bashrc"
 	fi
 
 	# Check if any services are locking up the device
@@ -893,6 +997,7 @@ run_update_script() {
 	fi
 
 	device_port_name=$(echo "$detected_dev" | awk -F'-> ' '{print $2}')
+	device_name=$(echo "$detected_dev" | awk -F'-> ' '{print $1}' | sed -E 's/^Bus [0-9]+ Device [0-9]+: ID [[:alnum:]]+:[[:alnum:]]+ //')
 	# Execute update for ESP32 or non-ESP32 devices.
 	if echo "$cmd" | grep -qi "esp32"; then
 		export ESPTOOL_PORT=$device_port_name
@@ -901,25 +1006,42 @@ run_update_script() {
 		sleep 8
 		echo "Running: \"$abs_script\"  -p \"${device_port_name}\" -f \"$abs_selected\""
 		"$abs_script" -p "${device_port_name}" -f "$abs_selected"
+		echo "Firmware update for ESP32 device ${device_name} completed."
 	else
-		echo "Setting device into bootloader mode via meshtastic --enter-dfu"
-		old_output=$(sudo blkid -c /dev/null)
-
-		meshtastic --enter-dfu --port "${device_port_name}" || true
-		sleep 5
-
-		new_output=$(sudo blkid -c /dev/null)
-
+		attempt=0
+		max_attempts=3
 		device_id=""
-		while IFS= read -r line; do
-			if ! grep -Fxq "$line" <<<"$old_output"; then
-				device_id=$(echo "$line" | awk '{print $1}' | tr -d ':')
-			fi
-		done <<<"$new_output"
 
-		# Check if device_id was set
-		if [ -z "$device_id" ]; then
+		while [ $attempt -lt $max_attempts ]; do
+			echo "Setting device into bootloader mode via meshtastic --enter-dfu --port ${device_port_name}"
+			old_output=$(sudo blkid -c /dev/null)
+
+			meshtastic --enter-dfu --port "${device_port_name}" || true
+			sleep 5
+
+			new_output=$(sudo blkid -c /dev/null)
+
+			device_id=""
+			while IFS= read -r line; do
+				if ! grep -Fxq "$line" <<<"$old_output"; then
+					device_id=$(echo "$line" | awk '{print $1}' | tr -d ':')
+				fi
+			done <<<"$new_output"
+
+			if [ -n "$device_id" ]; then
+				break # New block device found, exit the loop.
+			fi
+
 			echo "Error: Device failed to enter DFU mode (no new block devices detected)."
+			attempt=$((attempt + 1))
+			if [ $attempt -lt $max_attempts ]; then
+				echo "Retrying ($attempt/$max_attempts)..."
+				sleep 5
+			fi
+		done
+
+		if [ -z "$device_id" ]; then
+			echo "Error: Device failed to enter DFU mode after $max_attempts attempts."
 			exit 1
 		fi
 
@@ -936,7 +1058,8 @@ run_update_script() {
 		ls "$MOUNT_FOLDER"
 
 		sudo cp -v "$abs_selected" "$MOUNT_FOLDER/"
-		echo "Firmware update for non-ESP32 device completed."
+		echo "Firmware update for non-ESP32 device ${device_name} completed."
+
 	fi
 
 	# Restart the stopped service.
