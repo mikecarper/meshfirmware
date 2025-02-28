@@ -3,7 +3,7 @@ This Bash script automates the process of selecting, downloading, and applying f
 
 # Quick start
 Copy and run this in your linux terminal 
-```
+```bash
 cd ~ && git clone https://github.com/mikecarper/meshfirmware.git && cd meshfirmware && chmod +x firmware.sh && ./firmware.sh
 ```
 <details>
