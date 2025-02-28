@@ -36,21 +36,21 @@ else
 fi
 
 # Set Folders
-FIRMWARE_ROOT="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}"
-DOWNLOAD_DIR="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/downloads"
+FIRMWARE_ROOT         ="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}"
+DOWNLOAD_DIR          ="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/downloads"
 
 # Vars to get passed around and cached as files.
-CACHE_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/releases.json"
-VERSIONS_TAGS_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/01versions_tags.txt"
-VERSIONS_LABELS_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/02versions_labels.txt"
-CHOSEN_TAG_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/03chosen_tag.txt"
-DOWNLOAD_PATTERN_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/04download_pattern.txt"
-DEVICE_INFO_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/05device_info.txt"
-DETECTED_PRODUCT_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/06detected_product.txt"
-MATCHING_FILES_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/07matching_files.txt"
-CMD_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/08cmd.txt"
-SELECTED_FILE_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/09selected_file.txt"
-OPERATION_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/10operation.txt"
+CACHE_FILE            ="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/releases.json"
+VERSIONS_TAGS_FILE    ="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/01versions_tags.txt"
+VERSIONS_LABELS_FILE  ="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/02versions_labels.txt"
+CHOSEN_TAG_FILE       ="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/03chosen_tag.txt"
+DOWNLOAD_PATTERN_FILE ="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/04download_pattern.txt"
+DEVICE_INFO_FILE      ="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/05device_info.txt"
+DETECTED_PRODUCT_FILE ="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/06detected_product.txt"
+MATCHING_FILES_FILE   ="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/07matching_files.txt"
+CMD_FILE              ="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/08cmd.txt"
+SELECTED_FILE_FILE    ="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/09selected_file.txt"
+OPERATION_FILE        ="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/10operation.txt"
 
 # Global argument variables.
 VERSION_ARG=""
