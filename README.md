@@ -1,4 +1,4 @@
-# 3rd party Firmware Selector for the Meshtastic project
+# 3rd party firmware selector for the Meshtastic project
 This Bash script automates the process of selecting, downloading, and applying firmware updates from the [meshtastic/firmware](https://github.com/meshtastic/firmware) GitHub repository. It is designed to simplify firmware management for meshtastic devices by handling everything from version selection to device update.
 
 # Quick start
