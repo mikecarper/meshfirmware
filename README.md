@@ -1,8 +1,14 @@
 # 3rd party firmware selector for the Meshtastic project
-This Bash script automates the process of selecting, downloading, and applying firmware updates from the [meshtastic/firmware](https://github.com/meshtastic/firmware) GitHub repository. It is designed to simplify firmware management for meshtastic devices by handling everything from version selection to device update.
+This Bash script automates the process of selecting, downloading, and applying firmware updates from the [meshtastic/firmware](https://github.com/meshtastic/firmware) GitHub repository via the USB port.
 
 # Quick start
 Copy and run this in your linux terminal 
+```
+cd ~ && git clone https://github.com/mikecarper/meshfirmware.git && cd meshfirmware && chmod +x firmware.sh && ./firmware.sh
+```
+<details>
+  <summary>Readable Code</summary>  
+    
 ```bash
 cd ~
 git clone https://github.com/mikecarper/meshfirmware.git
@@ -10,10 +16,9 @@ cd meshfirmware
 chmod +x firmware.sh
 ./firmware.sh
 ```
-or as one line
-```
-cd ~ && git clone https://github.com/mikecarper/meshfirmware.git && cd meshfirmware && chmod +x firmware.sh && ./firmware.sh
-```
+
+</details>
+
 
 Video
 -----
