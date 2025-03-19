@@ -251,6 +251,7 @@ build_release_menu() {
 		elif [ "$prerelease" = "true" ] && [ -z "$suffix" ]; then
 			suffix="(pre-release)"
 		fi
+		tag=$(echo "${tag}" | sed 's/^v//')
 
 		label="$tag"
 		[ -n "$suffix" ] && label="$label $suffix"
@@ -282,6 +283,7 @@ select_release() {
 	local yellow green cyan reset
 
 	# Use tput to set color codes.
+	red=$(tput setaf 1)    # Red for unreleased versions.
 	yellow=$(tput setaf 3) # Yellow for pre-releases.
 	green=$(tput setaf 2)  # Green for the first stable entry.
 	cyan=$(tput setaf 6)   # Cyan for the latest stable (without "!" or pre-release).
@@ -397,7 +399,7 @@ download_assets() {
 
 	mapfile -t assets < <(
 		echo "$releases_json" | jq -r --arg TAG "$chosen_tag" '
-        .[] | select(.tag_name==$TAG) | .assets[] |
+        .[] | select((.tag_name | ltrimstr("v")) == $TAG) | .assets[] |
         select(.name | test("^firmware-"; "i")) |
         select(.name | test("debug"; "i") | not) |
         {name: .name, url: .browser_download_url} | @base64'
@@ -417,18 +419,27 @@ download_assets() {
 		asset_url=$(echo "$decoded" | jq -r '.url')
 		local_file="${DOWNLOAD_DIR}/${asset_name}"
 		if [ -f "$local_file" ]; then
-			if [ $StreamOutput -eq 0 ]; then
-				echo -n "Already downloaded $asset_name "
-				StreamOutput=1
-			else
-				echo -n "$asset_name "
-			fi
+			echo "Already downloaded $asset_name "
+			StreamOutput=1
+			printf "\r"
+			tput cuu1
 		else
 			if [ $StreamOutput -eq 1 ]; then
 				echo ""
+				StreamOutput=0
 			fi
+			tmp_file=$(mktemp --tmpdir="$DOWNLOAD_DIR" "${asset_name}.tmp.XXXXXX")
 			echo "Downloading $asset_name..."
-			curl -SL --progress-bar -o "$local_file" "$asset_url"
+			if curl -SL --progress-bar -o "$tmp_file" "$asset_url"; then
+			    mv "$tmp_file" "$local_file"
+			else
+				echo "Download failed for $asset_name"
+				rm -f "$tmp_file"
+			fi
+			printf "\r"
+			tput cuu1
+			tput cuu1
+			tput el
 		fi
 	done
 	if [ $StreamOutput -eq 1 ]; then
