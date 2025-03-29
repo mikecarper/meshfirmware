@@ -38,6 +38,7 @@ fi
 # Set Folders
          FIRMWARE_ROOT="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}"
           DOWNLOAD_DIR="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/downloads"
+		  COMPILED_DIR="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/compiled"
 
 # Vars to get passed around and cached as files.
             CACHE_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/releases.json"
@@ -213,66 +214,84 @@ normalize() {
 }
 
 # Build the release menu and save version tags and labels.
-# Build the release menu and save version tags and labels.
 build_release_menu() {
 	local releases_json="$1"
-	declare -a versions_tags=()
-	declare -a versions_labels=()
+	# We'll build a temporary list of entries in the format: date<TAB>tag<TAB>label
+	local tmpfile
+	tmpfile=$(mktemp)
 
-	# If the cached version files exist, reuse them.
-	if [[ -f "$VERSIONS_TAGS_FILE" && -f "$VERSIONS_LABELS_FILE" ]]; then
-		mapfile -t versions_tags <"$VERSIONS_TAGS_FILE"
-		mapfile -t versions_labels <"$VERSIONS_LABELS_FILE"
-		return
-	fi
+	echo "Parsing JSON and adding built firmware entry if available."
 
-	echo "Parsing JSON."
-
-	# Use a single jq call to extract all needed fields.
-	# This will output one line per release item with fields separated by tabs:
-	# tag_name, prerelease, draft, body.
-	#
-	# Note: If the 'body' field contains newline characters, you may need to pre-process it.
-	while IFS=$'\t' read -r tag prerelease draft body; do
+	# Process JSON releases
+	while IFS=$'\t' read -r tag prerelease draft body created_at; do
 		spinner
 		# Determine suffix based on the tag.
 		suffix=""
+		# Strip time from created_at date
+		date="${created_at%%T*}"
+		suffix="$date"
+
 		if [[ "$tag" =~ [Aa]lpha ]]; then
-			suffix="(alpha)"
+			suffix="$suffix (alpha)"
 		elif [[ "$tag" =~ [Bb]eta ]]; then
-			suffix="(beta)"
+			suffix="$suffix (beta)"
 		elif [[ "$tag" =~ [Rr][Cc] ]]; then
-			suffix="(rc)"
+			suffix="$suffix (rc)"
 		fi
 
 		# Override suffix based on draft or prerelease flags.
 		if [ "$draft" = "true" ]; then
-			suffix="(draft)"
-		elif [ "$prerelease" = "true" ] && [ -z "$suffix" ]; then
-			suffix="(pre-release)"
+			suffix="$suffix (draft)"
+		elif [ "$prerelease" = "true" ]; then
+			suffix="$suffix (pre-release)"
 		fi
-		tag=$(echo "${tag}" | sed 's/^v//')
 
-		label="$tag"
-		[ -n "$suffix" ] && label="$label $suffix"
+		tag="${tag#v}"
 
-		# Check if the release body contains the ⚠️ emoji.
-		if echo "$body" | grep -q '⚠️'; then
+		label=$(printf "%-14s" "$tag")
+		label="$label $suffix"
+
+		# Check for the warning emoji in body.
+		if echo "$body" | grep -q -- '⚠️'; then
 			label="! $label"
 		else
 			label="  $label"
 		fi
 
+		# Write the entry to the temporary file.
+		echo -e "${date}\t${tag}\t${label}" >> "$tmpfile"
+		spinner
+	done < <(echo "$releases_json" | jq -r '.[] | [.tag_name, .prerelease, .draft, .body, .created_at] | @tsv')
+
+	# Check for the built firmware file and add its entry if it exists.
+	if [ -f "${COMPILED_DIR}/firmware.factory.bin" ]; then
+		built_date=$(stat -c %y "${COMPILED_DIR}/firmware.factory.bin" | cut -d' ' -f1)
+		tag="builtfirmware"
+		suffix="$built_date (nightly)"
+		label=$(printf "%-14s" "$tag")
+		label="! $label $suffix"
+		# No emoji check for built firmware.
+		echo -e "${built_date}\t${tag}\t${label}" >> "$tmpfile"
+	fi
+
+	# Sort all entries by date in descending order (newest first)
+	local sorted_entries
+	sorted_entries=$(sort -r "$tmpfile")
+	rm "$tmpfile"
+
+	# Build arrays from the sorted entries.
+	declare -a versions_tags=()
+	declare -a versions_labels=()
+
+	while IFS=$'\t' read -r date tag label; do
 		versions_tags+=("$tag")
 		versions_labels+=("$label")
-		spinner
-	done < <(echo "$releases_json" | jq -r '.[] | [.tag_name, .prerelease, .draft, .body] | @tsv')
-
-	printf "\r"
+	done <<< "$sorted_entries"
 
 	# Save the arrays for later use.
 	printf "%s\n" "${versions_tags[@]}" >"${VERSIONS_TAGS_FILE}"
 	printf "%s\n" "${versions_labels[@]}" >"${VERSIONS_LABELS_FILE}"
+	printf "\r"
 }
 
 # Allow the user to select a firmware release version.
@@ -354,8 +373,11 @@ select_release() {
 			label="${versions_labels[$i]}"
 			formatted=$(printf "%*d) %-*s " "$index_width" $((i + 1)) "$col_label_width" "$label")
 
+			# If the label contains "nightly" (case-insensitive), color it red.
+			if [[ "$label" =~ [Nn]ightly ]]; then
+				formatted="${red}${formatted}${reset}"
 			# If this entry is the latest stable candidate, color it cyan.
-			if [ "$i" -eq "$latest_stable_index" ]; then
+			elif [ "$i" -eq "$latest_stable_index" ]; then
 				formatted="${cyan}${formatted}${reset}"
 			# Otherwise, apply yellow to the first pre-release and green to the first stable entry.
 			elif [[ "$label" == *"(pre-release)"* ]] && [ $pre_colored -eq 0 ]; then
@@ -404,6 +426,15 @@ download_assets() {
         select(.name | test("debug"; "i") | not) |
         {name: .name, url: .browser_download_url} | @base64'
 	)
+	
+	# Search for lingering temporary files in the DOWNLOAD_DIR
+	tmp_files=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -name '*.tmp*')
+	if [ -n "$tmp_files" ]; then
+		echo "Found temporary files in $DOWNLOAD_DIR:"
+		echo "$tmp_files"
+		echo "Cleaning them up..."
+		find "$DOWNLOAD_DIR" -maxdepth 1 -type f -name '*.tmp*' -delete
+	fi
 
 	if [ ${#assets[@]} -eq 0 ]; then
 		echo "No firmware assets found for release $chosen_tag matching criteria."
@@ -1092,8 +1123,13 @@ release_json=$(get_release_data)
 build_release_menu "$release_json" # ${VERSIONS_TAGS_FILE} ${VERSIONS_LABELS_FILE}
 select_release                     # ${CHOSEN_TAG_FILE}
 
-download_assets # ${DOWNLOAD_PATTERN_FILE}
-unzip_assets
+chosen_tag=$(cat "${CHOSEN_TAG_FILE}")
+if [ "$chosen_tag" = "builtfirmware" ]; then
+    echo "Built firmware selected; skipping download and unzip."
+else
+    download_assets # ${DOWNLOAD_PATTERN_FILE}
+    unzip_assets
+fi
 detect_device        # ${DEVICE_INFO_FILE} ${DETECTED_PRODUCT_FILE}
 match_firmware_files # ${MATCHING_FILES_FILE}
 choose_operation     # ${OPERATION_FILE}
