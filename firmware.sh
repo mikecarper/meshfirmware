@@ -21,11 +21,13 @@ trap 'echo "Error occurred in ${BASH_SOURCE[0]} at line ${LINENO}"' ERR
 # Define the repo
 REPO_OWNER="meshtastic"
 REPO_NAME="firmware"
+REPO_NAME_ALT="meshtastic.github.io"
 CACHE_TIMEOUT_SECONDS=$((6 * 3600)) # 6 hours
 MOUNT_FOLDER="/mnt/meshDeviceSD"
 
 # Settings for the repo
 GITHUB_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases"
+REPO_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME_ALT}/contents"
 
 # If BASH_SOURCE[0] is not set, fall back to the current working directory.
 if [ -z "${BASH_SOURCE+x}" ] || [ -z "${BASH_SOURCE[0]+x}" ]; then
@@ -408,8 +410,14 @@ select_release() {
 		chosen_index=$((selection - 1))
 	fi
 
+	# If the chosen tag is "builtfirmware", set tag to "firmware.factory.bin"
+	tag="${versions_tags[$chosen_index]}"
+	if [ "$tag" = "builtfirmware" ]; then
+		tag="firmware.factory.bin"
+	fi
+
 	# Save the selected tag to the cached file.
-	echo "${versions_tags[$chosen_index]}" >"${CHOSEN_TAG_FILE}"
+	echo "${tag}" > "${CHOSEN_TAG_FILE}"
 }
 
 # Download firmware assets for the chosen release.
@@ -488,7 +496,7 @@ unzip_assets() {
 
 	mapfile -t assets < <(
 		echo "$releases_json" | jq -r --arg TAG "$chosen_tag" '
-        .[] | select(.tag_name==$TAG) | .assets[] |
+        .[] | select((.tag_name | sub("^v";"")) == $TAG) | .assets[] |
         select(.name | test("^firmware-"; "i")) |
         select(.name | test("debug"; "i") | not) |
         {name: .name} | @base64'
@@ -514,11 +522,14 @@ unzip_assets() {
 				StreamOutput=0
 			else
 				if [ $StreamOutput -eq 0 ]; then
-					echo -n "Files already exist for $asset_name "
+					echo "Files already exist for "
+					echo "$asset_name "
 					StreamOutput=1
 				else
-					echo -n "$asset_name "
+					echo "$asset_name "
 				fi
+				printf "\r"
+				tput cuu1
 			fi
 		else
 			echo "Asset $asset_name does not match expected naming convention. Skipping unzip."
@@ -666,50 +677,61 @@ match_firmware_files() {
 	detected_product=$(cat "${DETECTED_PRODUCT_FILE}")
 	detected_info_file=$(cat "${DEVICE_INFO_FILE}")
 	device_name=$(echo "$detected_info_file" | awk -F'-> ' '{print $1}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-
+	echo "$device_name" | sed 's/.*ID [^ ]* //'
+	
+	USBproduct=$(lsusb -v 2>/dev/null |
+		grep -A 20 "${device_name}" |
+		grep "iProduct" |
+		grep -vi "Controller" |
+		sed -n 's/.*2[[:space:]]\+\([^[:space:]]\+\).*/\1/p' |
+		head -n 1 |
+		tr '[:upper:]' '[:lower:]')
+	
 	declare -A product_files
 	declare -A product_files_full
-	while IFS= read -r -d '' file; do
-		local fname prod prodNorm
-		fname=$(basename "$file")
-		if [[ "$fname" =~ ^firmware-(.*)${download_pattern//v/}(-update)?\.(bin|uf2|zip)$ ]]; then
-			prod="${BASH_REMATCH[1]}"
-			prodNorm=$(normalize "$prod")
-			product_files["$prodNorm"]+="$file"$'\n'
-			product_files_full["$prodNorm"]+="$prod"$'\n'
-		fi
-		spinner
-	done < <(find "$FIRMWARE_ROOT/${chosen_tag}" -type f -iname "firmware-*" -print0)
+	if [ -f "$FIRMWARE_ROOT/compiled/${chosen_tag}" ]; then
+		found_file=$(cat "$FIRMWARE_ROOT/compiled/${chosen_tag}" | grep -aFin "$USBproduct" | cut -d: -f1)
+		readarray -t matching_files < <( echo "$FIRMWARE_ROOT/compiled/${chosen_tag}" )
+	else
+		while IFS= read -r -d '' file; do
+			local fname prod prodNorm
+			fname=$(basename "$file")
+			if [[ "$fname" =~ ^firmware-(.*)${download_pattern//v/}(-update)?\.(bin|uf2|zip)$ ]]; then
+				prod="${BASH_REMATCH[1]}"
+				prodNorm=$(normalize "$prod")
+				product_files["$prodNorm"]+="$file"$'\n'
+				product_files_full["$prodNorm"]+="$prod"$'\n'
+			fi
+			spinner
+		done < <(find "$FIRMWARE_ROOT/${chosen_tag}" -type f -iname "firmware-*" -print0)
+	fi
+
 
 	matching_keys=()
-	for prod in "${!product_files[@]}"; do
-		local norm_prod
-		norm_prod=$(normalize "$prod")
-		if [[ "$norm_prod" == *"$detected_product"* ]] || [[ "$detected_product" == *"$norm_prod"* ]]; then
-			echo "Firmware file match on: $(echo "${product_files_full[$prod]}" | head -n1)"
-			matching_keys+=("$prod")
-		fi
-		spinner
-	done
-
-	IFS=$'\n' read -r -d '' -a matching_files < <(
-		for key in "${matching_keys[@]}"; do
-			echo "${product_files[$key]}"
+	if [ -z "${product_files+x}" ] || [ ${#product_files[@]} -eq 0 ]; then
+		for prod in "${!product_files[@]}"; do
+			local norm_prod
+			norm_prod=$(normalize "$prod")
+			if [[ "$norm_prod" == *"$detected_product"* ]] || [[ "$detected_product" == *"$norm_prod"* ]]; then
+				echo "Firmware file match on: $(echo "${product_files_full[$prod]}" | head -n1)"
+				matching_keys+=("$prod")
+			fi
 			spinner
 		done
-		printf '\0'
-	)
+	fi
+
+	if [ ${#matching_files[@]} -eq 0 ]; then
+		IFS=$'\n' read -r -d '' -a matching_files < <(
+			for key in "${matching_keys[@]}"; do
+				echo "${product_files[$key]}"
+				spinner
+			done
+			printf '\0'
+		)
+	fi
 
 	printf "\r"
 	if [ ${#matching_files[@]} -eq 0 ]; then
-		USBproduct=$(lsusb -v 2>/dev/null |
-			grep -A 20 "${device_name}" |
-			grep "iProduct" |
-			grep -vi "Controller" |
-			sed -n 's/.*2[[:space:]]\+\([^[:space:]]\+\).*/\1/p' |
-			head -n 1 |
-			tr '[:upper:]' '[:lower:]')
-
 		echo "Doing a deep search for $USBproduct in $FIRMWARE_ROOT/${chosen_tag}/*"
 		# Capture all matching file paths (each on a new line)
 		found_files=$(grep -aFrin --exclude="*-ota.zip" "$USBproduct" "$FIRMWARE_ROOT/${chosen_tag}" | cut -d: -f1)
@@ -861,6 +883,37 @@ prepare_script() {
 		script_to_run="$(dirname "$selected_file")/device-update.sh"
 	elif [ "$operation" = "install" ]; then
 		script_to_run="$(dirname "$selected_file")/device-install.sh"
+	fi
+	
+	if [ ! -f "$script_to_run" ]; then
+		# Fetch the contents and filter directories that start with "firmware"
+		newest_folder=$(curl -s "$REPO_API_URL" | jq -r '[.[] | select(.type=="dir" and (.name | startswith("firmware")))] | sort_by(.name) | last | .name')
+
+		if [ -z "$newest_folder" ]; then
+			echo "No firmware folder found in the repository."
+			exit 1
+		fi
+
+		echo "Newest firmware folder: $newest_folder"
+
+		# Assume the default branch is main; construct base raw URL.
+		BASE_RAW_URL="https://raw.githubusercontent.com/meshtastic/meshtastic.github.io/main"
+
+		# Construct raw URLs for the desired files
+		INSTALL_URL="${BASE_RAW_URL}/${newest_folder}/device-install.sh"
+		UPDATE_URL="${BASE_RAW_URL}/${newest_folder}/device-update.sh"
+
+		# Destination directory
+		DEST_DIR="${FIRMWARE_ROOT}/compiled"
+		mkdir -p "$DEST_DIR"
+
+		echo "Downloading device-install.sh from $INSTALL_URL ..."
+		curl -s -L "$INSTALL_URL" -o "${DEST_DIR}/device-install.sh" && echo "Downloaded to ${DEST_DIR}/device-install.sh"
+
+		echo "Downloading device-update.sh from $UPDATE_URL ..."
+		curl -s -L "$UPDATE_URL" -o "${DEST_DIR}/device-update.sh" && echo "Downloaded to ${DEST_DIR}/device-update.sh"
+
+		echo "Download complete."
 	fi
 
 	# Adjust baud rate for ESP32 firmware.
@@ -1124,7 +1177,7 @@ build_release_menu "$release_json" # ${VERSIONS_TAGS_FILE} ${VERSIONS_LABELS_FIL
 select_release                     # ${CHOSEN_TAG_FILE}
 
 chosen_tag=$(cat "${CHOSEN_TAG_FILE}")
-if [ "$chosen_tag" = "builtfirmware" ]; then
+if [ "$chosen_tag" = "firmware.factory.bin" ]; then
     echo "Built firmware selected; skipping download and unzip."
 else
     download_assets # ${DOWNLOAD_PATTERN_FILE}
