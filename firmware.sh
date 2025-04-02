@@ -28,6 +28,8 @@ MOUNT_FOLDER="/mnt/meshDeviceSD"
 # Settings for the repo
 GITHUB_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases"
 REPO_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME_ALT}/contents"
+WEB_HARDWARE_LIST_URL="https://raw.githubusercontent.com/${REPO_OWNER}/web-flasher/refs/heads/main/types/resources.ts"
+
 
 # If BASH_SOURCE[0] is not set, fall back to the current working directory.
 if [ -z "${BASH_SOURCE+x}" ] || [ -z "${BASH_SOURCE[0]+x}" ]; then
@@ -44,6 +46,7 @@ fi
 
 # Vars to get passed around and cached as files.
             CACHE_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/releases.json"
+        RESOURCES_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/resources.ts"
     VERSIONS_TAGS_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/01versions_tags.txt"
   VERSIONS_LABELS_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/02versions_labels.txt"
        CHOSEN_TAG_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/03chosen_tag.txt"
@@ -198,6 +201,15 @@ update_cache() {
 		fi
 	else
 		echo "No internet connection; using cached release data if available."
+	fi
+}
+
+update_hardware_list() {
+	# Check if RESOURCES_FILE exists and is newer than 6 hours; if not, download it.
+	if [ ! -f "$RESOURCES_FILE" ] || [ "$(find "$RESOURCES_FILE" -mmin +360)" ]; then
+		echo "Downloading resources.ts from GitHub..."
+		mkdir -p "$(dirname "$RESOURCES_FILE")"
+		curl -s -L "$WEB_HARDWARE_LIST_URL" -o "$RESOURCES_FILE"
 	fi
 }
 
@@ -677,7 +689,11 @@ match_firmware_files() {
 	detected_product=$(cat "${DETECTED_PRODUCT_FILE}")
 	detected_info_file=$(cat "${DEVICE_INFO_FILE}")
 	device_name=$(echo "$detected_info_file" | awk -F'-> ' '{print $1}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-	echo "$device_name" | sed 's/.*ID [^ ]* //'
+	# Remove everything up to (and including) "ID "
+	temp="${device_name#*ID }"
+	# Remove the first word from the remainder (the device ID) plus the following space.
+	result="${temp#* }"
+	echo "$result"
 	
 	USBproduct=$(lsusb -v 2>/dev/null |
 		grep -A 20 "${device_name}" |
@@ -690,20 +706,20 @@ match_firmware_files() {
 	declare -A product_files
 	declare -A product_files_full
 	if [ -f "$FIRMWARE_ROOT/compiled/${chosen_tag}" ]; then
-		found_file=$(cat "$FIRMWARE_ROOT/compiled/${chosen_tag}" | grep -aFin "$USBproduct" | cut -d: -f1)
 		readarray -t matching_files < <( echo "$FIRMWARE_ROOT/compiled/${chosen_tag}" )
 	else
 		while IFS= read -r -d '' file; do
 			local fname prod prodNorm
 			fname=$(basename "$file")
-			if [[ "$fname" =~ ^firmware-(.*)${download_pattern//v/}(-update)?\.(bin|uf2|zip)$ ]]; then
-				prod="${BASH_REMATCH[1]}"
+			# Updated regex: group 1 is the prefix, group 2 is the product part.
+			if [[ "$fname" =~ ^(firmware-|littlefs-|littlefswebui-)(.*)${download_pattern//v/}(-update)?\.(bin|uf2|zip)$ ]]; then
+				prod="${BASH_REMATCH[2]}"
 				prodNorm=$(normalize "$prod")
 				product_files["$prodNorm"]+="$file"$'\n'
 				product_files_full["$prodNorm"]+="$prod"$'\n'
 			fi
 			spinner
-		done < <(find "$FIRMWARE_ROOT/${chosen_tag}" -type f -iname "firmware-*" -print0)
+		done < <( find "$FIRMWARE_ROOT/${chosen_tag}" -type f \( -iname "firmware-*" -o -iname "littlefs-*" -o -iname "littlefswebui-*" \) -print0 )
 	fi
 
 
@@ -754,7 +770,7 @@ match_firmware_files() {
 	if [ "${#matching_files[@]}" -eq 0 ]; then
 		echo "No firmware matched for the detected device: $detected_product"
 		mapfile -t matching_files < <(
-			find "$FIRMWARE_ROOT/${chosen_tag}" -type f -iname "firmware-*" -print0 |
+			find "$FIRMWARE_ROOT/${chosen_tag}" -type f \( -iname "firmware-*" -o -iname "littlefs-*" -o -iname "littlefswebui-*" \) -print0
 				while IFS= read -r -d '' file; do
 					# Print "basename<tab>full_path"
 					echo -e "$(basename "$file")\t$file"
@@ -768,20 +784,19 @@ match_firmware_files() {
 # Determine whether to perform an update or install operation.
 choose_operation() {
 	readarray -t matching_files <"${MATCHING_FILES_FILE}"
+	selected_file=$(cat "${SELECTED_FILE_FILE}")
 	count=${#matching_files[@]}
 
-	local op_choice operation
+	local operation
 	operation="update"
 	if [ -n "$OPERATION_ARG" ]; then
 		operation="$OPERATION_ARG"
 	else
 		if printf '%s\n' "${matching_files[@]}" | grep -qi "esp32"; then
-			read -r -p "Do you want to (u)pdate [default] or (i)nstall? [U/i]: " op_choice </dev/tty
-			op_choice=${op_choice:-u}
-			if [[ "$op_choice" =~ ^[Ii] ]]; then
-				operation="install"
-			else
+			if [[ "$selected_file" == *"-update"* ]]; then
 				operation="update"
+			else
+				operation="install"
 			fi
 		fi
 	fi
@@ -792,7 +807,7 @@ choose_operation() {
 
 # Let the user select which firmware file to use if multiple are found.
 select_firmware_file() {
-	local matching_files count selected_file file_choice update_candidates=()
+	local matching_files count selected_file file_choice firmware_candidates=()
 	operation=$(cat "${OPERATION_FILE}")
 	readarray -t matching_files <"${MATCHING_FILES_FILE}"
 	count=${#matching_files[@]}
@@ -806,47 +821,43 @@ select_firmware_file() {
 	if [ "$count" -eq 1 ]; then
 		selected_file="${matching_files[0]}"
 	else
-		# If we're in update mode, see if there's a single "-update.bin" file we can auto-select.
-		if [ "$operation" = "update" ]; then
-			for f in "${matching_files[@]}"; do
-				if [[ "$(basename "$f")" =~ -update\.bin$ ]]; then
-					update_candidates+=("$f")
-				fi
-			done
 
-			# If exactly one update candidate, auto-select it.
-			if [ ${#update_candidates[@]} -eq 1 ]; then
-				echo "Auto-selecting update firmware: $(basename "${update_candidates[0]}")"
-				selected_file="${update_candidates[0]}"
-			elif [ ${#update_candidates[@]} -gt 1 ]; then
-				echo "Multiple matching update firmware files found:"
-				# Figure out how many lines we'll print.
-				count_candidates=${#update_candidates[@]}
-				# The number of digits in that count — e.g., 2 if 10..99, 3 if 100..999
-				idx_width=${#count_candidates}
-
-				for i in "${!update_candidates[@]}"; do
-					# Print each line so that indices are right-aligned to idx_width.
-					printf "%${idx_width}d. %s\n" \
-						$((i + 1)) \
-						"$(basename "${update_candidates[$i]}")"
-				done
-				read -r -p "Select which firmware file to use [1-${#update_candidates[@]}]: " file_choice </dev/tty
-				if ! [[ "$file_choice" =~ ^[0-9]+$ ]] ||
-					[ "$file_choice" -lt 1 ] ||
-					[ "$file_choice" -gt "${#update_candidates[@]}" ]; then
-					echo "Invalid selection. Exiting."
-					exit 1
-				fi
-				selected_file="${update_candidates[$((file_choice - 1))]}"
-			else
-				# No -update.bin was found, so we prompt the user for all matching files.
-				selected_file="$(prompt_for_firmware)"
+		for f in "${matching_files[@]}"; do
+			if [[ "$(basename "$f")" =~ \.bin$ ]]; then
+				firmware_candidates+=("$f")
 			fi
+		done
+
+		# If exactly one firmware candidate, auto-select it.
+		if [ ${#firmware_candidates[@]} -eq 1 ]; then
+			echo "Auto-selecting firmware candidate: $(basename "${firmware_candidates[0]}")"
+			selected_file="${firmware_candidates[0]}"
+		elif [ ${#firmware_candidates[@]} -gt 1 ]; then
+			echo "Multiple matching firmware candidates files found:"
+			# Figure out how many lines we'll print.
+			count_candidates=${#firmware_candidates[@]}
+			# The number of digits in that count — e.g., 2 if 10..99, 3 if 100..999
+			idx_width=${#count_candidates}
+
+			for i in "${!firmware_candidates[@]}"; do
+				# Print each line so that indices are right-aligned to idx_width.
+				printf "%${idx_width}d. %s\n" \
+					$((i + 1)) \
+					"$(basename "${firmware_candidates[$i]}")"
+			done
+			read -r -p "Select which firmware file to use [1-${#firmware_candidates[@]}]: " file_choice </dev/tty
+			if ! [[ "$file_choice" =~ ^[0-9]+$ ]] ||
+				[ "$file_choice" -lt 1 ] ||
+				[ "$file_choice" -gt "${#firmware_candidates[@]}" ]; then
+				echo "Invalid selection. Exiting."
+				exit 1
+			fi
+			selected_file="${firmware_candidates[$((file_choice - 1))]}"
 		else
-			# Not in update mode, so we just prompt the user for which file to use.
+			# No .bin was found, so we prompt the user for all matching files.
 			selected_file="$(prompt_for_firmware)"
 		fi
+
 	fi
 
 	echo "$selected_file" >"${SELECTED_FILE_FILE}"
@@ -939,6 +950,7 @@ prepare_script() {
 
 	abs_script="$(cd "$(dirname "$script_to_run")" && pwd)/$(basename "$script_to_run")"
 	abs_selected="$(cd "$(dirname "$selected_file")" && pwd)/$(basename "$selected_file")"
+
 	printf "%s\n" "$abs_script" "$abs_selected" >"${CMD_FILE}"
 }
 
@@ -1016,8 +1028,53 @@ run_update_script() {
 	abs_selected="${cmd_array[1]}"
 	cmd="${cmd_array[*]}"
 	detected_dev=$(cat "${DEVICE_INFO_FILE}")
-	echo ""
-	if echo "$cmd" | grep -qi "esp32"; then
+	device_name=$(echo "$detected_dev" | awk -F'-> ' '{print $1}' | sed -E 's/^Bus [0-9]+ Device [0-9]+: ID [[:alnum:]]+:[[:alnum:]]+ //')
+	
+	if echo "$cmd" | grep -qi "meshtastic_firmware/compiled"; then
+		update_hardware_list
+		
+		# Extract the JSON-like array portion from the TypeScript file.
+		# It starts at the line with "OfflineHardwareList = [" and ends at the line with "];"
+		json_array=$(sed -n '/OfflineHardwareList = \[/,/\];/p' "$RESOURCES_FILE" | sed '1d;$d')
+		if [[ "$json_array" =~ \},$ ]]; then
+			json_array=$(echo -e "$json_array\n{}")
+		fi
+		
+		# Collapse each object into one line and then split objects by "},"
+		entries=$(echo "$json_array" | sed ':a;N;$!ba;s/\n/ /g' | sed 's/},/}\n/g')
+
+		# Read entries into an array.
+		IFS=$'\n' read -r -d '' -a entries_array < <(echo "$entries" && printf '\0')
+		
+		norm_device=$(normalize "$device_name")
+		architecture=""
+		
+		# Loop through each (now one-line) entry and check for a match.
+		for entry in "${entries_array[@]}"; do
+			# Extract platformioTarget and displayName using sed.
+			pt=$(echo "$entry" | sed -n 's/.*platformioTarget:[[:space:]]*"\([^"]*\)".*/\1/p')
+			dn=$(echo "$entry" | sed -n 's/.*displayName:[[:space:]]*"\([^"]*\)".*/\1/p')
+			
+			# If both are empty, skip this entry.
+			if [[ -z "$pt" && -z "$dn" ]]; then
+				continue
+			fi
+			
+			norm_pt=$(normalize "$pt")
+			norm_dn=$(normalize "$dn")
+			
+			# If the normalized device name is found in either field, we have a match.
+			if [[ "$norm_pt" == *"$norm_device"* ]] || [[ "$norm_device" == *"$norm_pt"* ]] || [[ "$norm_dn" == *"$norm_device"* ]] || [[ "$norm_device" == *"$norm_dn"* ]]; then
+				architecture=$(echo "$entry" | sed -n 's/.*architecture:[[:space:]]*"\([^"]*\)".*/\1/p')
+				break
+			fi
+			spinner
+		done
+		printf "\r"
+	fi
+	echo " "
+	
+	if echo "$cmd" | grep -qi "esp32" || echo "$architecture" | grep -qi "esp32"; then
 		echo "Command to run for firmware operation:"
 		echo "$abs_script -f $abs_selected"
 	else
@@ -1093,7 +1150,7 @@ run_update_script() {
 	fi
 
 	device_port_name=$(echo "$detected_dev" | awk -F'-> ' '{print $2}')
-	device_name=$(echo "$detected_dev" | awk -F'-> ' '{print $1}' | sed -E 's/^Bus [0-9]+ Device [0-9]+: ID [[:alnum:]]+:[[:alnum:]]+ //')
+
 	# Execute update for ESP32 or non-ESP32 devices.
 	if echo "$cmd" | grep -qi "esp32"; then
 		export ESPTOOL_PORT=$device_port_name
@@ -1186,7 +1243,7 @@ else
 fi
 detect_device        # ${DEVICE_INFO_FILE} ${DETECTED_PRODUCT_FILE}
 match_firmware_files # ${MATCHING_FILES_FILE}
-choose_operation     # ${OPERATION_FILE}
 select_firmware_file # ${SELECTED_FILE_FILE}
+choose_operation     # ${OPERATION_FILE}
 prepare_script       # ${CMD_FILE}
 run_update_script
