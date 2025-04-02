@@ -713,6 +713,7 @@ match_firmware_files() {
 			local norm_prod
 			norm_prod=$(normalize "$prod")
 			if [[ "$norm_prod" == *"$detected_product"* ]] || [[ "$detected_product" == *"$norm_prod"* ]]; then
+				printf "\r"
 				echo "Firmware file match on: $(echo "${product_files_full[$prod]}" | head -n1)"
 				matching_keys+=("$prod")
 			fi
@@ -720,7 +721,7 @@ match_firmware_files() {
 		done
 	fi
 
-	if [ ${#matching_files[@]} -eq 0 ]; then
+	if [ -z "${matching_files+x}" ] || [ ${#matching_files[@]} -eq 0 ]; then
 		IFS=$'\n' read -r -d '' -a matching_files < <(
 			for key in "${matching_keys[@]}"; do
 				echo "${product_files[$key]}"
