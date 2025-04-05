@@ -42,7 +42,6 @@ fi
 # Set Folders
          FIRMWARE_ROOT="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}"
           DOWNLOAD_DIR="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/downloads"
-		  COMPILED_DIR="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/compiled"
 
 # Vars to get passed around and cached as files.
             CACHE_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/releases.json"
@@ -57,6 +56,7 @@ fi
               CMD_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/08cmd.txt"
     SELECTED_FILE_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/09selected_file.txt"
         OPERATION_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/10operation.txt"
+     ARCHITECTURE_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/11architecture.txt"
 
 # Global argument variables.
 VERSION_ARG=""
@@ -277,16 +277,33 @@ build_release_menu() {
 		spinner
 	done < <(echo "$releases_json" | jq -r '.[] | [.tag_name, .prerelease, .draft, .body, .created_at] | @tsv')
 
-	# Check for the built firmware file and add its entry if it exists.
-	if [ -f "${COMPILED_DIR}/firmware.factory.bin" ]; then
-		built_date=$(stat -c %y "${COMPILED_DIR}/firmware.factory.bin" | cut -d' ' -f1)
-		tag="builtfirmware"
-		suffix="$built_date (nightly)"
-		label=$(printf "%-14s" "$tag")
-		label="! $label $suffix"
-		# No emoji check for built firmware.
-		echo -e "${built_date}\t${tag}\t${label}" >> "$tmpfile"
-	fi
+    # Check if any subdirectory name in FIRMWARE_ROOT (skip "downloads") is not in the tag_names from above.
+	for folder in "$FIRMWARE_ROOT"/*; do
+		# Skip if not a directory.
+		[ -d "$folder" ] || continue
+		folder_name=$(basename "$folder")
+		
+		# Skip the downloads folder.
+		if [ "$folder_name" = "downloads" ]; then
+			continue
+		fi
+		
+		# Convert folder name to lowercase for matching.
+		folder_lower=$(echo "$folder_name" | tr '[:upper:]' '[:lower:]')
+		
+		# Check if this folder name is present (case-insensitive) anywhere in $tmpfile.
+		if ! grep -qi "$folder_lower" "$tmpfile"; then
+			# Get the modification date (mtime) in YYYY-MM-DD format.
+			mtime=$(stat -c %y "$folder" | cut -d' ' -f1)
+			
+			# Build the label: version tag, then date, then "(nightly)"
+			label="! ${folder_name} ${mtime} (nightly)"
+			
+			# Write the entry to the temporary file.
+			# Format: date<TAB>tag<TAB>label
+			echo -e "${mtime}\t${folder_name}\t${label}" >> "$tmpfile"
+		fi
+	done
 
 	# Sort all entries by date in descending order (newest first)
 	local sorted_entries
@@ -705,9 +722,7 @@ match_firmware_files() {
 	
 	declare -A product_files
 	declare -A product_files_full
-	if [ -f "$FIRMWARE_ROOT/compiled/${chosen_tag}" ]; then
-		readarray -t matching_files < <( echo "$FIRMWARE_ROOT/compiled/${chosen_tag}" )
-	else
+
 		while IFS= read -r -d '' file; do
 			local fname prod prodNorm
 			fname=$(basename "$file")
@@ -720,7 +735,6 @@ match_firmware_files() {
 			fi
 			spinner
 		done < <( find "$FIRMWARE_ROOT/${chosen_tag}" -type f \( -iname "firmware-*" -o -iname "littlefs-*" -o -iname "littlefswebui-*" \) -print0 )
-	fi
 
 
 	matching_keys=()
@@ -785,14 +799,14 @@ match_firmware_files() {
 choose_operation() {
 	readarray -t matching_files <"${MATCHING_FILES_FILE}"
 	selected_file=$(cat "${SELECTED_FILE_FILE}")
-	count=${#matching_files[@]}
+	architecture=$(cat "${ARCHITECTURE_FILE}")
 
 	local operation
 	operation="update"
 	if [ -n "$OPERATION_ARG" ]; then
 		operation="$OPERATION_ARG"
 	else
-		if printf '%s\n' "${matching_files[@]}" | grep -qi "esp32"; then
+		if echo "$architecture" | grep -qi "esp32"; then
 			if [[ "$selected_file" == *"-update"* ]]; then
 				operation="update"
 			else
@@ -808,7 +822,6 @@ choose_operation() {
 # Let the user select which firmware file to use if multiple are found.
 select_firmware_file() {
 	local matching_files count selected_file file_choice firmware_candidates=()
-	operation=$(cat "${OPERATION_FILE}")
 	readarray -t matching_files <"${MATCHING_FILES_FILE}"
 	count=${#matching_files[@]}
 
@@ -827,6 +840,8 @@ select_firmware_file() {
 				firmware_candidates+=("$f")
 			fi
 		done
+		# Sort the firmware_candidates array.
+		readarray -t firmware_candidates < <(printf '%s\n' "${firmware_candidates[@]}" | sort)
 
 		# If exactly one firmware candidate, auto-select it.
 		if [ ${#firmware_candidates[@]} -eq 1 ]; then
@@ -891,6 +906,8 @@ prepare_script() {
 	chosen_tag=$(cat "${CHOSEN_TAG_FILE}")
 	detected_dev=$(cat "${DEVICE_INFO_FILE}")
 	device_port_name=$(echo "$detected_dev" | awk -F'-> ' '{print $2}')
+	architecture=$(cat "${ARCHITECTURE_FILE}")
+	
 	if [ "$operation" = "update" ]; then
 		script_to_run="$(dirname "$selected_file")/device-update.sh"
 	elif [ "$operation" = "install" ]; then
@@ -929,7 +946,7 @@ prepare_script() {
 	fi
 
 	# Adjust baud rate for ESP32 firmware.
-	if echo "$selected_file" | grep -qi "esp32"; then
+	if echo "$architecture" | grep -qi "esp32"; then
 		if [ -f "$script_to_run" ]; then
 			# Ensure the baud rate is set correctly
 			sed -i 's/--baud 115200/--baud 1200/g' "$script_to_run"
@@ -1020,17 +1037,17 @@ get_locked_service() {
 	echo "$found_service" | awk '{$1=$1};1'
 }
 
-# Run the firmware update/install script.
-run_update_script() {
-	local cmd user_choice PYTHON ESPTOOL_CMD newpath device_name
-	mapfile -t cmd_array <"$CMD_FILE"
-	abs_script="${cmd_array[0]}"
-	abs_selected="${cmd_array[1]}"
-	cmd="${cmd_array[*]}"
-	detected_dev=$(cat "${DEVICE_INFO_FILE}")
-	device_name=$(echo "$detected_dev" | awk -F'-> ' '{print $1}' | sed -E 's/^Bus [0-9]+ Device [0-9]+: ID [[:alnum:]]+:[[:alnum:]]+ //')
+detect_esp() {
+	architecture=""
+	if printf '%s\n' "${matching_files[@]}" | grep -qi "esp32"; then
+		architecture="esp32"
+		
+		echo "$architecture" > "${ARCHITECTURE_FILE}"
+		return
+	fi
 	
-	if echo "$cmd" | grep -qi "meshtastic_firmware/compiled"; then
+	chosen_tag=$(cat "${CHOSEN_TAG_FILE}")
+	if grep -E -q "${chosen_tag}.*nightly" "$VERSIONS_LABELS_FILE"; then
 		update_hardware_list
 		
 		# Extract the JSON-like array portion from the TypeScript file.
@@ -1071,10 +1088,24 @@ run_update_script() {
 			spinner
 		done
 		printf "\r"
+		
+		echo "$architecture" > "${ARCHITECTURE_FILE}"
 	fi
-	echo " "
+}
+
+# Run the firmware update/install script.
+run_update_script() {
+	local cmd user_choice PYTHON ESPTOOL_CMD newpath device_name
+	mapfile -t cmd_array <"$CMD_FILE"
+	abs_script="${cmd_array[0]}"
+	abs_selected="${cmd_array[1]}"
+	cmd="${cmd_array[*]}"
+	detected_dev=$(cat "${DEVICE_INFO_FILE}")
+	device_name=$(echo "$detected_dev" | awk -F'-> ' '{print $1}' | sed -E 's/^Bus [0-9]+ Device [0-9]+: ID [[:alnum:]]+:[[:alnum:]]+ //')
+	architecture=$(cat "${ARCHITECTURE_FILE}")
+
 	
-	if echo "$cmd" | grep -qi "esp32" || echo "$architecture" | grep -qi "esp32"; then
+	if echo "$architecture" | grep -qi "esp32"; then
 		echo "Command to run for firmware operation:"
 		echo "$abs_script -f $abs_selected"
 	else
@@ -1116,7 +1147,7 @@ run_update_script() {
 	fi
 
 	# Determine the esptool command.
-	if echo "$cmd" | grep -qi "esp32"; then
+	if echo "$architecture" | grep -qi "esp32"; then
 		if "$PYTHON" -m esptool version >/dev/null 2>&1; then
 			ESPTOOL_CMD="$PYTHON -m esptool"
 		elif command -v esptool >/dev/null 2>&1; then
@@ -1152,7 +1183,7 @@ run_update_script() {
 	device_port_name=$(echo "$detected_dev" | awk -F'-> ' '{print $2}')
 
 	# Execute update for ESP32 or non-ESP32 devices.
-	if echo "$cmd" | grep -qi "esp32"; then
+	if echo "$architecture" | grep -qi "esp32"; then
 		export ESPTOOL_PORT=$device_port_name
 		echo "Setting device into bootloader mode via baud 1200"
 		$ESPTOOL_CMD --port "${device_port_name}" --baud 1200 chip_id || true
@@ -1235,15 +1266,18 @@ build_release_menu "$release_json" # ${VERSIONS_TAGS_FILE} ${VERSIONS_LABELS_FIL
 select_release                     # ${CHOSEN_TAG_FILE}
 
 chosen_tag=$(cat "${CHOSEN_TAG_FILE}")
-if [ "$chosen_tag" = "firmware.factory.bin" ]; then
-    echo "Built firmware selected; skipping download and unzip."
+if grep -E -q "${chosen_tag}.*nightly" "$VERSIONS_LABELS_FILE"; then
+    download_pattern="-${chosen_tag}"
+    echo "Nightly build selected; skipping download and unzip."
+    echo "$download_pattern" >"${DOWNLOAD_PATTERN_FILE}"
 else
-    download_assets # ${DOWNLOAD_PATTERN_FILE}
+    download_assets   # ${DOWNLOAD_PATTERN_FILE}
     unzip_assets
 fi
 detect_device        # ${DEVICE_INFO_FILE} ${DETECTED_PRODUCT_FILE}
 match_firmware_files # ${MATCHING_FILES_FILE}
 select_firmware_file # ${SELECTED_FILE_FILE}
+detect_esp			 # ${ARCHITECTURE_FILE}
 choose_operation     # ${OPERATION_FILE}
 prepare_script       # ${CMD_FILE}
 run_update_script
