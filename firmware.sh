@@ -580,13 +580,20 @@ detect_device() {
 			filtered_device_lines+=("$line")
 		fi
 	done
+
 	if [ "${#filtered_device_lines[@]}" -eq 0 ]; then
-		filtered_device_lines=("${all_device_lines[@]}")
+		# Prompt user to either re-scan or quit.
+		echo "$lsusb_output" | sed -n 's/.*ID [0-9a-fA-F]\{4\}:[0-9a-fA-F]\{4\} //p'
+		read -rp "Press Enter to look again or q to quit: " choice < /dev/tty
+		if [[ "$choice" =~ ^[Qq]$ ]]; then
+			echo "Exiting."
+			exit 0
+		else
+			detect_device  # Call itself again.
+			return
+		fi
 	fi
-	if [ "${#filtered_device_lines[@]}" -eq 0 ]; then
-		echo "No matching USB devices found."
-		exit 1
-	elif [ "${#filtered_device_lines[@]}" -eq 1 ]; then
+	if [ "${#filtered_device_lines[@]}" -eq 1 ]; then
 		detected_raw="${filtered_device_lines[0]}"
 		# Determine detected_dev for the single device:
 		search_full=$(echo "$detected_raw" | tr ' ' '_')
@@ -693,7 +700,9 @@ detect_device() {
 		done
 	fi
 
+
 	detected_line=$(echo "$lsusb_output" | grep -i "$detected_raw" | head -n1)
+	
 	echo "$detected_line -> $detected_dev" >"${DEVICE_INFO_FILE}"
 	normalize "$detected_raw" >"${DETECTED_PRODUCT_FILE}"
 }
@@ -1039,6 +1048,7 @@ get_locked_service() {
 
 detect_esp() {
 	architecture=""
+	echo "$architecture" > "${ARCHITECTURE_FILE}"
 	if printf '%s\n' "${matching_files[@]}" | grep -qi "esp32"; then
 		architecture="esp32"
 		
