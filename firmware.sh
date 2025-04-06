@@ -290,9 +290,12 @@ build_release_menu() {
 		
 		# Convert folder name to lowercase for matching.
 		folder_lower=$(echo "$folder_name" | tr '[:upper:]' '[:lower:]')
+		if [[ "$folder_lower" == v* ]]; then
+			folder_lower="${folder_lower:1}"
+		fi
 		
 		# Check if this folder name is present (case-insensitive) anywhere in $tmpfile.
-		if ! grep -qi "$folder_lower" "$tmpfile"; then
+		if ! grep -qi "$folder_lower" "$tmpfile"; then		
 			# Get the modification date (mtime) in YYYY-MM-DD format.
 			mtime=$(stat -c %y "$folder" | cut -d' ' -f1)
 			
@@ -437,12 +440,6 @@ select_release() {
 			exit 1
 		fi
 		chosen_index=$((selection - 1))
-	fi
-
-	# If the chosen tag is "builtfirmware", set tag to "firmware.factory.bin"
-	tag="${versions_tags[$chosen_index]}"
-	if [ "$tag" = "builtfirmware" ]; then
-		tag="firmware.factory.bin"
 	fi
 
 	# Save the selected tag to the cached file.
@@ -845,7 +842,7 @@ select_firmware_file() {
 	else
 
 		for f in "${matching_files[@]}"; do
-			if [[ "$(basename "$f")" =~ \.bin$ ]]; then
+			if [[ "$(basename "$f")" =~ \.(bin|uf2)$ ]]; then
 				firmware_candidates+=("$f")
 			fi
 		done
@@ -917,41 +914,15 @@ prepare_script() {
 	device_port_name=$(echo "$detected_dev" | awk -F'-> ' '{print $2}')
 	architecture=$(cat "${ARCHITECTURE_FILE}")
 	
-	if [ "$operation" = "update" ]; then
-		script_to_run="$(dirname "$selected_file")/device-update.sh"
-	elif [ "$operation" = "install" ]; then
-		script_to_run="$(dirname "$selected_file")/device-install.sh"
-	fi
-	
-	if [ ! -f "$script_to_run" ]; then
-		# Fetch the contents and filter directories that start with "firmware"
-		newest_folder=$(curl -s "$REPO_API_URL" | jq -r '[.[] | select(.type=="dir" and (.name | startswith("firmware")))] | sort_by(.name) | last | .name')
-
-		if [ -z "$newest_folder" ]; then
-			echo "No firmware folder found in the repository."
-			exit 1
+	script_to_run=""
+	abs_selected=""
+	if [ "$selected_file" ]; then
+		if [ "$operation" = "update" ]; then
+			script_to_run="$(dirname "$selected_file")/device-update.sh"
+		elif [ "$operation" = "install" ]; then
+			script_to_run="$(dirname "$selected_file")/device-install.sh"
 		fi
-
-		echo "Newest firmware folder: $newest_folder"
-
-		# Assume the default branch is main; construct base raw URL.
-		BASE_RAW_URL="https://raw.githubusercontent.com/meshtastic/meshtastic.github.io/main"
-
-		# Construct raw URLs for the desired files
-		INSTALL_URL="${BASE_RAW_URL}/${newest_folder}/device-install.sh"
-		UPDATE_URL="${BASE_RAW_URL}/${newest_folder}/device-update.sh"
-
-		# Destination directory
-		DEST_DIR="${FIRMWARE_ROOT}/compiled"
-		mkdir -p "$DEST_DIR"
-
-		echo "Downloading device-install.sh from $INSTALL_URL ..."
-		curl -s -L "$INSTALL_URL" -o "${DEST_DIR}/device-install.sh" && echo "Downloaded to ${DEST_DIR}/device-install.sh"
-
-		echo "Downloading device-update.sh from $UPDATE_URL ..."
-		curl -s -L "$UPDATE_URL" -o "${DEST_DIR}/device-update.sh" && echo "Downloaded to ${DEST_DIR}/device-update.sh"
-
-		echo "Download complete."
+		abs_selected="$(cd "$(dirname "$selected_file")" && pwd)/$(basename "$selected_file")"
 	fi
 
 	# Adjust baud rate for ESP32 firmware.
@@ -970,12 +941,13 @@ prepare_script() {
 		fi
 	fi
 
-	if [ ! -x "$script_to_run" ]; then
-		chmod +x "$script_to_run"
+	abs_script=""
+	if [ "$script_to_run" ]; then
+		if [ ! -x "$script_to_run" ]; then
+			chmod +x "$script_to_run"
+			abs_script="$(cd "$(dirname "$script_to_run")" && pwd)/$(basename "$script_to_run")"
+		fi
 	fi
-
-	abs_script="$(cd "$(dirname "$script_to_run")" && pwd)/$(basename "$script_to_run")"
-	abs_selected="$(cd "$(dirname "$selected_file")" && pwd)/$(basename "$selected_file")"
 
 	printf "%s\n" "$abs_script" "$abs_selected" >"${CMD_FILE}"
 }
