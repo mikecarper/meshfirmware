@@ -441,6 +441,7 @@ select_release() {
 		fi
 		chosen_index=$((selection - 1))
 	fi
+	tag="${versions_tags[$chosen_index]}"
 
 	# Save the selected tag to the cached file.
 	echo "${tag}" > "${CHOSEN_TAG_FILE}"
@@ -1084,6 +1085,7 @@ run_update_script() {
 	cmd="${cmd_array[*]}"
 	detected_dev=$(cat "${DEVICE_INFO_FILE}")
 	device_name=$(echo "$detected_dev" | awk -F'-> ' '{print $1}' | sed -E 's/^Bus [0-9]+ Device [0-9]+: ID [[:alnum:]]+:[[:alnum:]]+ //')
+	device_name=$(echo "$device_name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -s '[:space:]')
 	architecture=$(cat "${ARCHITECTURE_FILE}")
 
 	
