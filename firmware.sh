@@ -1386,7 +1386,11 @@ run_update_script() {
 	basename_device_port_name="$(basename "$device_port_name")"
 	backup_config_name="config_backup.${architecture}.${device_name}.${basename_device_port_name}.$(date +%s).yaml"
 	backup_config_name_sanitized=$(echo "$backup_config_name" | tr '/' '_')
-	meshtastic --port "${device_port_name}" --export-config > "${backup_config_name_sanitized}"
+	if meshtastic --port "${device_port_name}" --export-config > "${backup_config_name_sanitized}"; then
+		echo "Backup configuration created: ${backup_config_name_sanitized}"
+	else
+		echo "Warning: Timed out waiting for connection completion. Skipping config backup." >&2
+	fi
 
 	# Execute update for ESP32 or non-ESP32 devices.
 	if echo "$architecture" | grep -qi "esp32"; then
