@@ -1404,8 +1404,8 @@ run_update_script() {
 		echo "Running: \"$abs_script\"  -p \"${device_port_name}\" -f \"$basename_selected\""
 		"$abs_script" -p "${device_port_name}" -f "$basename_selected"
 		echo "Firmware $operation for ESP32 device ${device_name} completed on port ${device_port_name}."
-		echo "Configuration can be restored using this if it was wiped out"
 		if [ -f "${backup_config_name_sanitized}" ]; then
+			echo "Configuration can be restored using this if it was wiped out"
 			echo "meshtastic --configure \"${backup_config_name_sanitized}\""
 		fi
 		
@@ -1462,8 +1462,8 @@ run_update_script() {
 
 		sudo cp -v "$abs_selected" "$MOUNT_FOLDER/"
 		echo "Firmware $operation for ESP32 device ${device_name} completed on port ${device_port_name}."
-		echo "Configuration can be restored using this if it was wiped out"
 		if [ -f "${backup_config_name_sanitized}" ]; then
+			echo "Configuration can be restored using this if it was wiped out"
 			echo "meshtastic --configure \"${backup_config_name_sanitized}\""
 		fi
 
