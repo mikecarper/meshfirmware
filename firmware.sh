@@ -205,7 +205,7 @@ update_bleota() {
 		# If we don't have a cache file or it's older than our timeout, attempt an update.
 		if [ ! -f "$BLEOTA_FILE" ] || [ "$(date +%s)" -ge "$(($(stat -c %Y "$BLEOTA_FILE") + CACHE_TIMEOUT_SECONDS))" ]; then
 			mkdir -p "$FIRMWARE_ROOT"
-			echo "Updating release data from GitHub..."
+			echo "Checking if bluetooth over the air bin files from GitHub needs to be updated..."
 
 			# Download into a temp file first
 			tmpfile=$(mktemp)
@@ -233,8 +233,7 @@ update_bleota() {
 					echo "Release data changed. Updating cache and removing cached version lists. $old_md5 $new_md5"
 					mv "$tmpfile" "$BLEOTA_FILE"
 				else
-					echo "Release data is unchanged. $old_md5 $new_md5"
-					rm -f "$tmpfile"
+					touch "$BLEOTA_FILE"
 				fi
 			fi
 		fi
@@ -274,8 +273,6 @@ update_bleota() {
 			echo "No files starting with 'bleota' found in up to 3 firmware folders."
 			exit 1
 		fi
-
-		echo "Using folder: $found_folder"
 		
 		# Proceed with processing of $found_folder:
 		selected_file=$(cat "${SELECTED_FILE_FILE}")
@@ -1063,14 +1060,26 @@ prepare_script() {
 	# Adjust baud rate for ESP32 firmware.
 	if echo "$architecture" | grep -qi "esp32"; then
 		if [ -f "$script_to_run" ]; then
-			# Ensure the baud rate is set correctly
-			sed -i 's/--baud 115200/--baud 1200/g' "$script_to_run"
+			# Changes for update
+			if [[ "$script_to_run" == *update* ]]; then
+				# Ensure the baud rate is set correctly
+				sed -i 's/--baud 115200/--baud 1200/g' "$script_to_run"
 
-			# Remove any existing --port argument
-			sed -i 's/--port [^ ]* //g' "$script_to_run"
+				# Remove any existing --port argument
+				sed -i 's/--port [^ ]* //g' "$script_to_run"
 
-			# Add the new --port argument before --baud 1200, using a different delimiter (|)
-			sed -i "s|--baud 1200|--port ${device_port_name} --baud 1200 |g" "$script_to_run"
+				# Add the new --port argument before --baud 1200, using a different delimiter (|)
+				sed -i "s|--baud 1200|--port ${device_port_name} --baud 1200 |g" "$script_to_run"
+			else
+				# Changes for install
+				if ! grep -q '^ESPTOOL_CMD="$ESPTOOL_CMD --baud 1200"$' "$script_to_run"; then
+					sed -i '/^set -e/i ESPTOOL_CMD="$ESPTOOL_CMD --baud 1200"' "$script_to_run"
+				fi
+				#if ! grep -q '^.*sleep 5$' "$script_to_run"; then
+				#fi
+
+			fi
+
 		else
 			echo "No $(basename "$script_to_run") found. Skipping baud rate change."
 		fi
@@ -1240,17 +1249,19 @@ run_update_script() {
 	device_name=$(echo "$detected_dev" | awk -F'-> ' '{print $1}' | sed -E 's/^Bus [0-9]+ Device [0-9]+: ID [[:alnum:]]+:[[:alnum:]]+ //')
 	device_name=$(echo "$device_name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -s '[:space:]')
 	architecture=$(cat "${ARCHITECTURE_FILE}")
+	operation=$(cat "${OPERATION_FILE}")
 	basename_selected="$(basename "$abs_selected")"
-	
-	cat $CMD_FILE
+	device_port_name=$(echo "$detected_dev" | awk -F'-> ' '{print $2}')
+
 	if echo "$architecture" | grep -qi "esp32"; then
 		update_bleota
 
-		echo "Command to run for firmware operation:"
-		echo "$abs_script -f $basename_selected"
+		echo "Command to run for firmware $operation:"
+		echo "$abs_script -p ${device_port_name} -f $basename_selected"
 	else
 		echo "$basename_selected"
 	fi
+
 
 	if $RUN_UPDATE; then
 		user_choice="y"
@@ -1320,7 +1331,11 @@ run_update_script() {
 		sudo systemctl stop "$lockedService"
 	fi
 
-	device_port_name=$(echo "$detected_dev" | awk -F'-> ' '{print $2}')
+	
+	# Make a backup of the config.
+	basename_device_port_name="$(basename "$device_port_name")"
+	backup_config_name="config_backup.${architecture}.${device_name}.${basename_device_port_name}.$(date +%s).yaml"
+	meshtastic --port "${device_port_name}" --export-config > "${backup_config_name}"
 
 	# Execute update for ESP32 or non-ESP32 devices.
 	if echo "$architecture" | grep -qi "esp32"; then
@@ -1333,7 +1348,9 @@ run_update_script() {
 		
 		echo "Running: \"$abs_script\"  -p \"${device_port_name}\" -f \"$basename_selected\""
 		"$abs_script" -p "${device_port_name}" -f "$basename_selected"
-		echo "Firmware update for ESP32 device ${device_name} completed."
+		echo "Firmware $operation for ESP32 device ${device_name} completed on port ${device_port_name}."
+		echo "Configuration can be restored using this if it was wiped out"
+		echo "meshtastic --configure ${backup_config_name}"
 		
 		popd > /dev/null
 	else
@@ -1387,7 +1404,9 @@ run_update_script() {
 		ls "$MOUNT_FOLDER"
 
 		sudo cp -v "$abs_selected" "$MOUNT_FOLDER/"
-		echo "Firmware update for non-ESP32 device ${device_name} completed."
+		echo "Firmware $operation for ESP32 device ${device_name} completed on port ${device_port_name}."
+		echo "Configuration can be restored using this if it was wiped out"
+		echo "meshtastic --configure ${backup_config_name}"
 
 	fi
 
