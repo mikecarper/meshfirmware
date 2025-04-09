@@ -1108,12 +1108,12 @@ index bacf48f..c75bcd9 100755
 +       echo ""
 +       echo "Trying to flash ${FILENAME} at offset 0x00"
         $ESPTOOL_CMD write_flash 0x00 "${FILENAME}"
-+       sleep 5
++       sleep 7
 +       echo ""
         echo "Trying to flash ${OTAFILE} at offset ${OTA_OFFSET}"
 -       $ESPTOOL_CMD write_flash $OTA_OFFSET "${OTAFILE}"
 +       $ESPTOOL_CMD write_flash ${OTA_OFFSET} "${OTAFILE}"
-+       sleep 5
++       sleep 9
 +       echo ""
         echo "Trying to flash ${SPIFFSFILE}, at offset ${OFFSET}"
 -       $ESPTOOL_CMD write_flash $OFFSET "${SPIFFSFILE}"
@@ -1385,7 +1385,8 @@ run_update_script() {
 	# Make a backup of the config.
 	basename_device_port_name="$(basename "$device_port_name")"
 	backup_config_name="config_backup.${architecture}.${device_name}.${basename_device_port_name}.$(date +%s).yaml"
-	meshtastic --port "${device_port_name}" --export-config > "${backup_config_name}"
+	backup_config_name_sanitized=$(echo "$backup_config_name" | tr '/' '_')
+	meshtastic --port "${device_port_name}" --export-config > "${backup_config_name_sanitized}"
 
 	# Execute update for ESP32 or non-ESP32 devices.
 	if echo "$architecture" | grep -qi "esp32"; then
@@ -1400,7 +1401,9 @@ run_update_script() {
 		"$abs_script" -p "${device_port_name}" -f "$basename_selected"
 		echo "Firmware $operation for ESP32 device ${device_name} completed on port ${device_port_name}."
 		echo "Configuration can be restored using this if it was wiped out"
-		echo "meshtastic --configure \"${backup_config_name}\""
+		if [ -f "${backup_config_name_sanitized}" ]; then
+			echo "meshtastic --configure \"${backup_config_name_sanitized}\""
+		fi
 		
 		popd > /dev/null
 	else
@@ -1456,7 +1459,9 @@ run_update_script() {
 		sudo cp -v "$abs_selected" "$MOUNT_FOLDER/"
 		echo "Firmware $operation for ESP32 device ${device_name} completed on port ${device_port_name}."
 		echo "Configuration can be restored using this if it was wiped out"
-		echo "meshtastic --configure \"${backup_config_name}\""
+		if [ -f "${backup_config_name_sanitized}" ]; then
+			echo "meshtastic --configure \"${backup_config_name_sanitized}\""
+		fi
 
 	fi
 
