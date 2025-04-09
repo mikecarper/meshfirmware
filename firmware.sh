@@ -1266,7 +1266,7 @@ run_update_script() {
 	if $RUN_UPDATE; then
 		user_choice="y"
 	else
-		read -r -p "Would you like to update the firmware? (y/N): " user_choice </dev/tty
+		read -r -p "Would you like to $operation the firmware? (y/N): " user_choice </dev/tty
 		user_choice=${user_choice:-N}
 	fi
 	if ! [[ "$user_choice" =~ ^[Yy]$ ]]; then
