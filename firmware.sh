@@ -2,18 +2,33 @@
 #
 : <<'EOF'
 
-# To run this file copy this below and run it.
+# To run this file, copy this line below and run it.
 cd ~ && wget -qO - https://raw.githubusercontent.com/mikecarper/meshfirmware/refs/heads/main/firmware.sh | bash
 
 #
 EOF
-#
-#
-
-set -euo pipefail
-
+# Strict errors.
 # Trap errors and output file and line number.
+set -euo pipefail
 trap 'echo "Error occurred in ${BASH_SOURCE[0]} at line ${LINENO}"' ERR
+
+# If BASH_SOURCE[0] is not set, fall back to the current working directory.
+if [ -z "${BASH_SOURCE+x}" ] || [ -z "${BASH_SOURCE[0]+x}" ]; then
+	# The script is likely being run via a pipe, so there's no script file path
+	PWD_SCRIPT="$(pwd)"
+else
+	PWD_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+
+# Global argument variables.
+VERSION_ARG=""
+OPERATION_ARG=""
+RUN_UPDATE=false
+
+# Global variable to track the spinner index.
+spinner_index=0
+# Array holding the spinner characters.
+spinner_chars=("-" "\\" "|" "/")
 
 #########################
 # Configuration Variables
@@ -26,26 +41,16 @@ CACHE_TIMEOUT_SECONDS=$((6 * 3600)) # 6 hours
 MOUNT_FOLDER="/mnt/meshDeviceSD"
 
 # Settings for the repo
-GITHUB_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases"
-REPO_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME_ALT}/contents"
-WEB_HARDWARE_LIST_URL="https://raw.githubusercontent.com/${REPO_OWNER}/web-flasher/refs/heads/main/types/resources.ts"
-
-
-# If BASH_SOURCE[0] is not set, fall back to the current working directory.
-if [ -z "${BASH_SOURCE+x}" ] || [ -z "${BASH_SOURCE[0]+x}" ]; then
-	# The script is likely being run via a pipe, so there's no script file path
-	PWD_SCRIPT="$(pwd)"
-else
-	PWD_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-fi
-
+        GITHUB_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases"
+          REPO_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME_ALT}/contents"
+ WEB_HARDWARE_LIST_URL="https://raw.githubusercontent.com/${REPO_OWNER}/web-flasher/refs/heads/main/types/resources.ts"
 # Set Folders
          FIRMWARE_ROOT="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}"
           DOWNLOAD_DIR="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/downloads"
-
 # Vars to get passed around and cached as files.
-            CACHE_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/releases.json"
+         RELEASES_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/releases.json"
         RESOURCES_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/resources.ts"
+		   BLEOTA_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/bleota.json"
     VERSIONS_TAGS_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/01versions_tags.txt"
   VERSIONS_LABELS_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/02versions_labels.txt"
        CHOSEN_TAG_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/03chosen_tag.txt"
@@ -58,15 +63,6 @@ fi
         OPERATION_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/10operation.txt"
      ARCHITECTURE_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/11architecture.txt"
 
-# Global argument variables.
-VERSION_ARG=""
-OPERATION_ARG=""
-RUN_UPDATE=false
-
-# Global variable to track the spinner index.
-spinner_index=0
-# Array holding the spinner characters.
-spinner_chars=("-" "\\" "|" "/")
 
 #########################
 # Function Definitions
@@ -141,10 +137,10 @@ check_internet() {
 }
 
 # Update the GitHub release cache if needed.
-update_cache() {
+update_releases() {
 	if check_internet; then
 		# If we don't have a cache file or it's older than our timeout, attempt an update.
-		if [ ! -f "$CACHE_FILE" ] || [ "$(date +%s)" -ge "$(($(stat -c %Y "$CACHE_FILE") + CACHE_TIMEOUT_SECONDS))" ]; then
+		if [ ! -f "$RELEASES_FILE" ] || [ "$(date +%s)" -ge "$(($(stat -c %Y "$RELEASES_FILE") + CACHE_TIMEOUT_SECONDS))" ]; then
 			mkdir -p "$FIRMWARE_ROOT"
 			echo "Updating release cache from GitHub..."
 
@@ -179,16 +175,16 @@ update_cache() {
 			}
 
 			# Use the filtered JSON for further processing.
-			if [ ! -f "$CACHE_FILE" ]; then
-				mv "$filtered_tmp" "$CACHE_FILE"
+			if [ ! -f "$RELEASES_FILE" ]; then
+				mv "$filtered_tmp" "$RELEASES_FILE"
 				rm -f "$tmpfile"
 			else
 				# Compare the MD5 sums of the cached file and the newly filtered file.
-				old_md5=$(md5sum "$CACHE_FILE" | awk '{print $1}')
+				old_md5=$(md5sum "$RELEASES_FILE" | awk '{print $1}')
 				new_md5=$(md5sum "$filtered_tmp" | awk '{print $1}')
 				if [ "$old_md5" != "$new_md5" ]; then
 					echo "Release data changed. Updating cache and removing cached version lists. $old_md5 $new_md5"
-					mv "$filtered_tmp" "$CACHE_FILE"
+					mv "$filtered_tmp" "$RELEASES_FILE"
 					rm -f "${VERSIONS_TAGS_FILE}" "${VERSIONS_LABELS_FILE}"
 				else
 					echo "Release data is unchanged. $old_md5 $new_md5"
@@ -204,6 +200,109 @@ update_cache() {
 	fi
 }
 
+update_bleota() {
+	if check_internet; then
+		# If we don't have a cache file or it's older than our timeout, attempt an update.
+		if [ ! -f "$BLEOTA_FILE" ] || [ "$(date +%s)" -ge "$(($(stat -c %Y "$BLEOTA_FILE") + CACHE_TIMEOUT_SECONDS))" ]; then
+			mkdir -p "$FIRMWARE_ROOT"
+			echo "Updating release data from GitHub..."
+
+			# Download into a temp file first
+			tmpfile=$(mktemp)
+			curl -s "$REPO_API_URL" -o "$tmpfile" || {
+				echo "Failed to download release data."
+				rm -f "$tmpfile"
+				return
+			}
+			
+			# Check if the newly downloaded file is valid JSON
+			if ! jq -e . "$tmpfile" >/dev/null 2>&1; then
+				echo "Downloaded file is not valid JSON. Aborting."
+				rm -f "$tmpfile"
+				return
+			fi
+			
+			# Use the filtered JSON for further processing.
+			if [ ! -f "$BLEOTA_FILE" ]; then
+				mv "$tmpfile" "$BLEOTA_FILE"
+			else
+				# Compare the MD5 sums of the cached file and the newly filtered file.
+				old_md5=$(md5sum "$BLEOTA_FILE" | awk '{print $1}')
+				new_md5=$(md5sum "$tmpfile" | awk '{print $1}')
+				if [ "$old_md5" != "$new_md5" ]; then
+					echo "Release data changed. Updating cache and removing cached version lists. $old_md5 $new_md5"
+					mv "$tmpfile" "$BLEOTA_FILE"
+				else
+					echo "Release data is unchanged. $old_md5 $new_md5"
+					rm -f "$tmpfile"
+				fi
+			fi
+		fi
+		firmware_dir_list=$(cat "${BLEOTA_FILE}")	
+
+		# Get a list of firmware directories sorted in reverse order (latest first).
+		firmware_folders=$(echo "$firmware_dir_list" \
+		  | jq -r '.[] | select(.type=="dir") | select(.name | startswith("firmware")) | .name' \
+		  | sort -r)
+
+		attempt=1
+		found_folder=""
+
+		# Loop over each folder in firmware_folders, but only try up to 3.
+		for folder in $firmware_folders; do
+
+			folder_url="${REPO_API_URL}/${folder}"
+			folder_contents=$(curl -s "$folder_url")
+			
+			# Filter for files that start with "bleota"
+			file_urls=$(echo "$folder_contents" \
+			  | jq -r '.[] | select(.type=="file") | select(.name | startswith("bleota")) | .download_url')
+			
+			if [ -n "$file_urls" ]; then
+				found_folder="$folder"
+				break
+			fi
+			
+			attempt=$((attempt+1))
+			if [ $attempt -gt 3 ]; then
+				break
+			fi
+			echo "Attempt $attempt: Checking folder: $folder"
+		done
+		
+		if [ -z "$found_folder" ]; then
+			echo "No files starting with 'bleota' found in up to 3 firmware folders."
+			exit 1
+		fi
+
+		echo "Using folder: $found_folder"
+		
+		# Proceed with processing of $found_folder:
+		selected_file=$(cat "${SELECTED_FILE_FILE}")
+		folder=$(dirname "$selected_file")
+		folder_url="${REPO_API_URL}/${found_folder}"
+		folder_contents=$(curl -s "$folder_url")
+		file_urls=$(echo "$folder_contents" \
+		  | jq -r '.[] | select(.type=="file") | select(.name | startswith("bleota")) | .download_url')
+
+		# Download each matching file, but only if it doesn't exist already.
+		for url in $file_urls; do
+		  filename=$(basename "$url")
+		  destination="$folder/$filename"
+		  if [ ! -f "$destination" ]; then
+			echo "Downloading $filename from $url..."
+			curl -s -L -o "$destination" "$url"
+		  fi
+		done
+	else
+		echo "Use local versions"
+		#bleota.bin
+		#bleota-s3.bin
+		#bleota-c3.bin
+	fi
+	echo ""
+}
+
 update_hardware_list() {
 	# Check if RESOURCES_FILE exists and is newer than 6 hours; if not, download it.
 	if [ ! -f "$RESOURCES_FILE" ] || [ "$(find "$RESOURCES_FILE" -mmin +360)" ]; then
@@ -215,11 +314,11 @@ update_hardware_list() {
 
 # Retrieve release JSON data from the cache.
 get_release_data() {
-	if [ ! -f "$CACHE_FILE" ]; then
+	if [ ! -f "$RELEASES_FILE" ]; then
 		echo "No cached release data available. Exiting."
 		exit 1
 	fi
-	cat "$CACHE_FILE"
+	cat "$RELEASES_FILE"
 }
 
 # Normalize strings (remove dashes, underscores, spaces, and convert to lowercase).
@@ -569,6 +668,7 @@ unzip_assets() {
 
 # Detect the connected USB device.
 detect_device() {
+	# /dev/ttyACM0
 	local lsusb_output filtered_device_lines detected_raw detected_line detected_dev fallback newpath search_full
 	lsusb_output=$(lsusb)
 	mapfile -t all_device_lines < <(echo "$lsusb_output" | sed -n 's/.*ID [0-9a-fA-F]\{4\}:[0-9a-fA-F]\{4\} //p')
@@ -602,10 +702,21 @@ detect_device() {
 				break
 			fi
 		done
+		
 		if [ -z "$detected_dev" ]; then
 			fallback=$(echo "$detected_raw" | cut -d' ' -f2- | tr ' ' '_')
 			for link in /dev/serial/by-id/*; do
 				if [[ $(basename "$link") == *"$fallback"* ]]; then
+					detected_dev=$(readlink -f "$link")
+					break
+				fi
+			done
+		fi
+		
+		if [ -z "$detected_dev" ]; then
+			third_fallback=$(echo "$detected_raw" | tr ' ' '_' | tr '/' '_' | sed 's/^/usb-/')
+			for link in /dev/serial/by-id/*; do
+				if [[ $(basename "$link") == *"$third_fallback"* ]]; then
 					detected_dev=$(readlink -f "$link")
 					break
 				fi
@@ -627,6 +738,7 @@ detect_device() {
 			source "$HOME/.bashrc"
 		fi
 
+		
 		declare -a detected_devs menu_options
 		echo "Multiple USB devices detected:"
 		for idx in "${!filtered_device_lines[@]}"; do
@@ -634,7 +746,7 @@ detect_device() {
 			device_info="${filtered_device_lines[$idx]}"
 			# Determine detected_dev for this device:
 			search_full=$(echo "$device_info" | tr ' ' '_')
-			detected_dev=""
+			detected_dev="" 
 
 			for link in /dev/serial/by-id/*; do
 				if [[ $(basename "$link") == *"$search_full"* ]]; then
@@ -647,6 +759,16 @@ detect_device() {
 				fallback=$(echo "$device_info" | cut -d' ' -f2- | tr ' ' '_')
 				for link in /dev/serial/by-id/*; do
 					if [[ $(basename "$link") == *"$fallback"* ]]; then
+						detected_dev=$(readlink -f "$link")
+						break
+					fi
+				done
+			fi
+			
+			if [ -z "$detected_dev" ]; then
+				third_fallback=$(echo "$device_info" | tr ' ' '_' | tr '/' '_' | sed 's/^/usb-/')
+				for link in /dev/serial/by-id/*; do
+					if [[ $(basename "$link") == *"$third_fallback"* ]]; then
 						detected_dev=$(readlink -f "$link")
 						break
 					fi
@@ -713,11 +835,12 @@ match_firmware_files() {
 	detected_product=$(cat "${DETECTED_PRODUCT_FILE}")
 	detected_info_file=$(cat "${DEVICE_INFO_FILE}")
 	device_name=$(echo "$detected_info_file" | awk -F'-> ' '{print $1}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+	device_port_name=$(echo "$detected_info_file" | awk -F'-> ' '{print $2}')
 	# Remove everything up to (and including) "ID "
 	temp="${device_name#*ID }"
 	# Remove the first word from the remainder (the device ID) plus the following space.
 	result="${temp#* }"
-	echo "$result"
+	echo "$result -> $device_port_name"
 	
 	USBproduct=$(lsusb -v 2>/dev/null |
 		grep -A 20 "${device_name}" |
@@ -734,14 +857,14 @@ match_firmware_files() {
 			local fname prod prodNorm
 			fname=$(basename "$file")
 			# Updated regex: group 1 is the prefix, group 2 is the product part.
-			if [[ "$fname" =~ ^(firmware-|littlefs-|littlefswebui-)(.*)${download_pattern//v/}(-update)?\.(bin|uf2|zip)$ ]]; then
+			if [[ "$fname" =~ ^(firmware-)(.*)${download_pattern//v/}(-update)?\.(bin|uf2|zip)$ ]]; then
 				prod="${BASH_REMATCH[2]}"
 				prodNorm=$(normalize "$prod")
 				product_files["$prodNorm"]+="$file"$'\n'
 				product_files_full["$prodNorm"]+="$prod"$'\n'
 			fi
 			spinner
-		done < <( find "$FIRMWARE_ROOT/${chosen_tag}" -type f \( -iname "firmware-*" -o -iname "littlefs-*" -o -iname "littlefswebui-*" \) -print0 )
+		done < <( find "$FIRMWARE_ROOT/${chosen_tag}" -type f \( -iname "firmware-*" \) -print0 )
 
 
 	matching_keys=()
@@ -778,6 +901,14 @@ match_firmware_files() {
 			echo "No firmware files match the detected product ($detected_product) ($USBproduct). Exiting."
 			exit 1
 		fi
+		
+		# Filter the found files so that only files whose basename starts with "firmware-" are kept.
+		found_files=$(echo "$found_files" | while IFS= read -r line; do
+			base=$(basename "$line")
+			if [[ "$base" == firmware-* ]]; then
+				echo "$line"
+			fi
+		done)
 
 		# Populate matching_files array with all found file paths.
 		IFS=$'\n' read -r -d '' -a matching_files < <(
@@ -791,13 +922,16 @@ match_firmware_files() {
 	if [ "${#matching_files[@]}" -eq 0 ]; then
 		echo "No firmware matched for the detected device: $detected_product"
 		mapfile -t matching_files < <(
-			find "$FIRMWARE_ROOT/${chosen_tag}" -type f \( -iname "firmware-*" -o -iname "littlefs-*" -o -iname "littlefswebui-*" \) -print0
+			find "$FIRMWARE_ROOT/${chosen_tag}" -type f \( -iname "firmware-*" \) -print0
 				while IFS= read -r -d '' file; do
 					# Print "basename<tab>full_path"
 					echo -e "$(basename "$file")\t$file"
 				done | sort -f -k1,1 | cut -f2-
 		)
 	fi
+	
+	# Post-process the matching_files array to remove duplicate entries.
+	readarray -t matching_files < <(printf "%s\n" "${matching_files[@]}" | sort -u)
 
 	printf "%s\n" "${matching_files[@]}" >"${MATCHING_FILES_FILE}"
 }
@@ -941,13 +1075,18 @@ prepare_script() {
 			echo "No $(basename "$script_to_run") found. Skipping baud rate change."
 		fi
 	fi
+	
+	if [ -f "$script_to_run" ]; then
+		# Make the firmware- check look at the basename of the file.
+		sed -i 's|if \[\[ $FILENAME != firmware-\* ]]; then|if \[\[ $(basename "$FILENAME") != firmware-\* ]]; then|' "$script_to_run"
+	fi
 
 	abs_script=""
 	if [ "$script_to_run" ]; then
 		if [ ! -x "$script_to_run" ]; then
 			chmod +x "$script_to_run"
-			abs_script="$(cd "$(dirname "$script_to_run")" && pwd)/$(basename "$script_to_run")"
 		fi
+		abs_script="$(cd "$(dirname "$script_to_run")" && pwd)/$(basename "$script_to_run")"
 	fi
 
 	printf "%s\n" "$abs_script" "$abs_selected" >"${CMD_FILE}"
@@ -966,6 +1105,9 @@ get_locked_service() {
 
 	# Get all users locking the device (skip the header line)
 	local users
+	if ! command -v lsof &>/dev/null; then
+		sudo apt install -y lsof
+	fi
 	users=$(sudo lsof "$device_name" | awk 'NR>1 {print $3}' | sort -u)
 	if [ -z "$users" ]; then
 		#echo "No process found locking ${device_name}."
@@ -1020,16 +1162,19 @@ get_locked_service() {
 }
 
 detect_esp() {
+	selected_file=$(cat "${SELECTED_FILE_FILE}")
+	chosen_tag=$(cat "${CHOSEN_TAG_FILE}")
 	architecture=""
 	echo "$architecture" > "${ARCHITECTURE_FILE}"
-	if printf '%s\n' "${matching_files[@]}" | grep -qi "esp32"; then
+	
+	if echo "$selected_file" | grep -qi "esp32"; then
 		architecture="esp32"
 		
 		echo "$architecture" > "${ARCHITECTURE_FILE}"
 		return
 	fi
 	
-	chosen_tag=$(cat "${CHOSEN_TAG_FILE}")
+
 	if grep -E -q "${chosen_tag}.*nightly" "$VERSIONS_LABELS_FILE"; then
 		update_hardware_list
 		
@@ -1046,7 +1191,15 @@ detect_esp() {
 		# Read entries into an array.
 		IFS=$'\n' read -r -d '' -a entries_array < <(echo "$entries" && printf '\0')
 		
-		norm_device=$(normalize "$device_name")
+				# Get just the filename.
+		base=$(basename "$selected_file")
+		# Remove the "firmware-" prefix.
+		temp=${base#firmware-}
+		# Build a pattern that should be removed at the end.
+		pattern="-$chosen_tag.bin"
+		# Remove the trailing pattern.
+		result=${temp%$pattern}
+		norm_device=$(normalize "$result")
 		architecture=""
 		
 		# Loop through each (now one-line) entry and check for a match.
@@ -1087,13 +1240,16 @@ run_update_script() {
 	device_name=$(echo "$detected_dev" | awk -F'-> ' '{print $1}' | sed -E 's/^Bus [0-9]+ Device [0-9]+: ID [[:alnum:]]+:[[:alnum:]]+ //')
 	device_name=$(echo "$device_name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -s '[:space:]')
 	architecture=$(cat "${ARCHITECTURE_FILE}")
-
+	basename_selected="$(basename "$abs_selected")"
 	
+	cat $CMD_FILE
 	if echo "$architecture" | grep -qi "esp32"; then
+		update_bleota
+
 		echo "Command to run for firmware operation:"
-		echo "$abs_script -f $abs_selected"
+		echo "$abs_script -f $basename_selected"
 	else
-		basename "$abs_selected"
+		echo "$basename_selected"
 	fi
 
 	if $RUN_UPDATE; then
@@ -1172,9 +1328,14 @@ run_update_script() {
 		echo "Setting device into bootloader mode via baud 1200"
 		$ESPTOOL_CMD --port "${device_port_name}" --baud 1200 chip_id || true
 		sleep 8
-		echo "Running: \"$abs_script\"  -p \"${device_port_name}\" -f \"$abs_selected\""
-		"$abs_script" -p "${device_port_name}" -f "$abs_selected"
+		# Change directory to the script's folder.
+		pushd "$(dirname "$abs_selected")" > /dev/null || { echo "Failed to change directory"; exit 1; }
+		
+		echo "Running: \"$abs_script\"  -p \"${device_port_name}\" -f \"$basename_selected\""
+		"$abs_script" -p "${device_port_name}" -f "$basename_selected"
 		echo "Firmware update for ESP32 device ${device_name} completed."
+		
+		popd > /dev/null
 	else
 		attempt=0
 		max_attempts=3
@@ -1241,7 +1402,7 @@ run_update_script() {
 # Main Execution #
 ##################
 parse_args "$@"
-update_cache
+update_releases
 
 # Build the release menu and allow selection.
 release_json=$(get_release_data)
