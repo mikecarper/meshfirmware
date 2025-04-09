@@ -338,7 +338,7 @@ build_release_menu() {
 		# Determine suffix based on the tag.
 		suffix=""
 		# Strip time from created_at date
-		date="${created_at%%T*}"
+		date="${created_at}"
 		suffix="$date"
 
 		if [[ "$tag" =~ [Aa]lpha ]]; then
@@ -392,8 +392,14 @@ build_release_menu() {
 		
 		# Check if this folder name is present (case-insensitive) anywhere in $tmpfile.
 		if ! grep -qi "$folder_lower" "$tmpfile"; then		
-			# Get the modification date (mtime) in YYYY-MM-DD format.
-			mtime=$(stat -c %y "$folder" | cut -d' ' -f1)
+			# Find the first firmware-* file in the folder.
+			first_file=$(find "$folder" -maxdepth 1 -type f -iname "firmware-*" | head -n 1)
+			if [ -n "$first_file" ]; then
+				mtime=$(date -u -d "$(stat -c %y "$first_file")" +"%Y-%m-%dT%H:%M:%SZ")
+			else
+				# Fallback: if no firmware-* file is found, use the folder's modification time.
+				mtime=$(date -u -d "$(stat -c %y "$folder")" +"%Y-%m-%dT%H:%M:%SZ")
+			fi
 			
 			# Build the label: version tag, then date, then "(nightly)"
 			label="! ${folder_name} ${mtime} (nightly)"
@@ -1072,12 +1078,56 @@ prepare_script() {
 				sed -i "s|--baud 1200|--port ${device_port_name} --baud 1200 |g" "$script_to_run"
 			else
 				# Changes for install
-				if ! grep -q '^ESPTOOL_CMD="$ESPTOOL_CMD --baud 1200"$' "$script_to_run"; then
-					sed -i '/^set -e/i ESPTOOL_CMD="$ESPTOOL_CMD --baud 1200"' "$script_to_run"
-				fi
-				#if ! grep -q '^.*sleep 5$' "$script_to_run"; then
-				#fi
+				if ! grep -q '^.*sleep 5$' "$script_to_run"; then
+				
+					# Create a temporary diff file.
+					diff_file=$(mktemp)
 
+					cat << 'EOF' > "$diff_file"
+index bacf48f..c75bcd9 100755
+--- a/device-install.sh
++++ b/device-install.sh
+@@ -56,6 +56,7 @@ else
+        echo "Error: esptool not found"
+        exit 1
+ fi
++ESPTOOL_CMD="$ESPTOOL_CMD --baud 1200"
+
+ set -e
+ 
+ # Usage info
+@@ -190,13 +191,21 @@ if [ -f "${FILENAME}" ] && [ -n "${FILENAME##*"update"*}" ]; then
+                exit 1
+        fi
+
+-       echo "Trying to flash ${FILENAME}, but first erasing and writing system information"
++       echo ""
++       echo "First erasing the flash"
+        $ESPTOOL_CMD erase_flash
++       sleep 5
++       echo ""
++       echo "Trying to flash ${FILENAME} at offset 0x00"
+        $ESPTOOL_CMD write_flash 0x00 "${FILENAME}"
++       sleep 5
++       echo ""
+        echo "Trying to flash ${OTAFILE} at offset ${OTA_OFFSET}"
+-       $ESPTOOL_CMD write_flash $OTA_OFFSET "${OTAFILE}"
++       $ESPTOOL_CMD write_flash ${OTA_OFFSET} "${OTAFILE}"
++       sleep 5
++       echo ""
+        echo "Trying to flash ${SPIFFSFILE}, at offset ${OFFSET}"
+-       $ESPTOOL_CMD write_flash $OFFSET "${SPIFFSFILE}"
++       $ESPTOOL_CMD write_flash ${OFFSET} "${SPIFFSFILE}"
+
+ else
+        show_help
+EOF
+					# Apply the diff to $script_to_run
+					patch --fuzz=3 --ignore-whitespace "$script_to_run" < "$diff_file"
+
+					# Remove the temporary diff file.
+					rm -f "$diff_file"
+				fi
 			fi
 
 		else
@@ -1350,7 +1400,7 @@ run_update_script() {
 		"$abs_script" -p "${device_port_name}" -f "$basename_selected"
 		echo "Firmware $operation for ESP32 device ${device_name} completed on port ${device_port_name}."
 		echo "Configuration can be restored using this if it was wiped out"
-		echo "meshtastic --configure ${backup_config_name}"
+		echo "meshtastic --configure \"${backup_config_name}\""
 		
 		popd > /dev/null
 	else
@@ -1406,7 +1456,7 @@ run_update_script() {
 		sudo cp -v "$abs_selected" "$MOUNT_FOLDER/"
 		echo "Firmware $operation for ESP32 device ${device_name} completed on port ${device_port_name}."
 		echo "Configuration can be restored using this if it was wiped out"
-		echo "meshtastic --configure ${backup_config_name}"
+		echo "meshtastic --configure \"${backup_config_name}\""
 
 	fi
 
