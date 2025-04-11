@@ -1134,11 +1134,6 @@ EOF
 			echo "No $(basename "$script_to_run") found. Skipping baud rate change."
 		fi
 	fi
-	
-	if [ -f "$script_to_run" ]; then
-		# Make the firmware- check look at the basename of the file.
-		sed -i 's|if \[\[ $FILENAME != firmware-\* ]]; then|if \[\[ $(basename "$FILENAME") != firmware-\* ]]; then|' "$script_to_run"
-	fi
 
 	abs_script=""
 	if [ "$script_to_run" ]; then
@@ -1257,7 +1252,7 @@ detect_esp() {
 		# Build a pattern that should be removed at the end.
 		pattern="-$chosen_tag.bin"
 		# Remove the trailing pattern.
-		result=${temp%$pattern}
+		result=${temp%"$pattern"}
 		norm_device=$(normalize "$result")
 		architecture=""
 		
@@ -1312,7 +1307,6 @@ run_update_script() {
 		echo "$basename_selected"
 	fi
 
-
 	if $RUN_UPDATE; then
 		user_choice="y"
 	else
@@ -1323,6 +1317,35 @@ run_update_script() {
 		echo "Script done. Firmware was NOT UPDATED"
 		exit 0
 	fi
+	
+		# Ensure pipx & meshtastic are installed.
+	if ! command -v pipx &>/dev/null; then
+		sudo apt -y install pipx
+	fi
+	if ! command -v meshtastic &>/dev/null; then
+		pipx install "meshtastic[cli]"
+		pipx ensurepath
+		# shellcheck disable=SC1091
+		source "$HOME/.bashrc"
+	fi
+	
+	# Check radio
+	while true; do
+		echo "checking radio on port \"${device_port_name}\""
+		if ! output=$(meshtastic --port "${device_port_name}" --get serial.mode 2>&1); then
+			echo "Error: 'meshtastic --get serial.mode' failed."
+			echo "Output:"
+			echo "$output"
+			read -rp "Press Enter to try again or type 'skip' to skip this check: " response
+			if [ "$response" = "skip" ]; then
+				echo "Skipping the check."
+				break
+			fi
+			sleep 1
+		else
+			break
+		fi
+	done
 
 	# Locate a Python interpreter.
 	PYTHON=""
@@ -1341,12 +1364,6 @@ run_update_script() {
 		}
 	fi
 
-	newpath=0
-	# Ensure pipx is installed.
-	if ! command -v pipx &>/dev/null; then
-		sudo apt -y install pipx
-	fi
-
 	# Determine the esptool command.
 	if echo "$architecture" | grep -qi "esp32"; then
 		if "$PYTHON" -m esptool version >/dev/null 2>&1; then
@@ -1358,19 +1375,10 @@ run_update_script() {
 		else
 			pipx install esptool
 			ESPTOOL_CMD="esptool.py"
-			newpath=1
+			pipx ensurepath
+			# shellcheck disable=SC1091
+			source "$HOME/.bashrc"
 		fi
-	fi
-
-	if ! command -v meshtastic &>/dev/null; then
-		pipx install "meshtastic[cli]"
-		newpath=1
-	fi
-
-	if [ $newpath -eq 1 ]; then
-		pipx ensurepath
-		# shellcheck disable=SC1091
-		source "$HOME/.bashrc"
 	fi
 
 	# Check if any services are locking up the device
@@ -1403,6 +1411,8 @@ run_update_script() {
 		
 		echo "Running: \"$abs_script\"  -p \"${device_port_name}\" -f \"$basename_selected\""
 		"$abs_script" -p "${device_port_name}" -f "$basename_selected"
+		echo ""
+		echo "If you see no errors above then"
 		echo "Firmware $operation for ESP32 device ${device_name} completed on port ${device_port_name}."
 		if [ -f "${backup_config_name_sanitized}" ]; then
 			echo "Configuration can be restored using this if it was wiped out"
@@ -1461,6 +1471,7 @@ run_update_script() {
 		ls "$MOUNT_FOLDER"
 
 		sudo cp -v "$abs_selected" "$MOUNT_FOLDER/"
+		echo ""
 		echo "Firmware $operation for ESP32 device ${device_name} completed on port ${device_port_name}."
 		if [ -f "${backup_config_name_sanitized}" ]; then
 			echo "Configuration can be restored using this if it was wiped out"
