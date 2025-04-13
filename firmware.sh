@@ -1407,12 +1407,12 @@ run_update_script() {
 		echo ""
 		echo "If you see no errors above then"
 		echo "Firmware $operation for ESP32 device ${device_name} completed on port ${device_port_name}."
+		popd > /dev/null
 		if [ -f "${backup_config_name_sanitized}" ]; then
 			echo "Configuration can be restored using this if it was wiped out"
 			echo "meshtastic --configure \"${backup_config_name_sanitized}\""
 		fi
-		
-		popd > /dev/null
+
 	else
 		attempt=0
 		max_attempts=3
