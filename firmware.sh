@@ -1328,24 +1328,6 @@ run_update_script() {
 		# shellcheck disable=SC1091
 		source "$HOME/.bashrc"
 	fi
-	
-	# Check radio
-	while true; do
-		echo "checking radio on port \"${device_port_name}\""
-		if ! output=$(meshtastic --port "${device_port_name}" --get serial.mode 2>&1); then
-			echo "Error: 'meshtastic --get serial.mode' failed."
-			echo "Output:"
-			echo "$output"
-			read -rp "Press Enter to try again or type 'skip' to skip this check: " response
-			if [ "$response" = "skip" ]; then
-				echo "Skipping the check."
-				break
-			fi
-			sleep 1
-		else
-			break
-		fi
-	done
 
 	# Locate a Python interpreter.
 	PYTHON=""
@@ -1391,14 +1373,25 @@ run_update_script() {
 
 	
 	# Make a backup of the config.
+	echo "Making a backup of the configuration."
 	basename_device_port_name="$(basename "$device_port_name")"
 	backup_config_name="config_backup.${architecture}.${device_name}.${basename_device_port_name}.$(date +%s).yaml"
 	backup_config_name_sanitized=$(echo "$backup_config_name" | tr '/' '_')
-	if meshtastic --port "${device_port_name}" --export-config > "${backup_config_name_sanitized}"; then
-		echo "Backup configuration created: ${backup_config_name_sanitized}"
-	else
-		echo "Warning: Timed out waiting for connection completion. Skipping config backup." >&2
-	fi
+	while true; do
+		if meshtastic --port "${device_port_name}" --export-config > "${backup_config_name_sanitized}"; then
+			echo "Backup configuration created: ${backup_config_name_sanitized}"
+			break
+		else
+			echo "Warning: Timed out waiting for connection completion. Config backup not done." >&2
+			read -rp "Press Enter to try again or type 'skip' to skip the creation: " response
+			if [ "$response" = "skip" ]; then
+				echo "Skipping config backup."
+				rm -f "${backup_config_name_sanitized}"
+				break
+			fi
+			sleep 1
+		fi
+	done
 
 	# Execute update for ESP32 or non-ESP32 devices.
 	if echo "$architecture" | grep -qi "esp32"; then
