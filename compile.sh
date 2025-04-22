@@ -6,14 +6,19 @@ ORIG_DIR="$(pwd)"
 
 # search for platformio.ini containing meshtastic
 found=false
-while true; do
-    if [[ -f "platformio.ini" ]] && grep -q "github.com/meshtastic" platformio.ini; then
+count=0
+while [ $count -lt 2 ]; do
+    parent="$(dirname "$PWD")"
+	file=$(find "$PWD" -type f -name platformio.ini -exec grep -q "github.com/meshtastic" {} \; -print | sort -r | tail -n 1)
+
+    if [[ -n "$file" ]]; then
+		parent="$(dirname "$file")"
         found=true
+		cd "$parent"
         break
     fi
-
+    count=$((count + 1))
     # determine parent directory
-    parent="$(dirname "$PWD")"
     # if we’re at / (or somehow can’t go up), break out
     if [[ "$parent" == "$PWD" ]]; then
         break
@@ -23,9 +28,10 @@ done
 
 if ! $found; then
     echo " platformio.ini with meshtastic not found in any parent directories."
-    read -rp "Would you like to clone https://github.com/meshtastic/firmware here? [y/N] " ans
+    read -rp "Would you like to clone https://github.com/meshtastic/firmware here $parent? [y/N] " ans
     case "$ans" in
         [Yy]* )
+			cd "$parent"
             git clone https://github.com/meshtastic/firmware && cd firmware
             # after cloning, you probably want to repeat the search or just proceed
             if [[ -f "platformio.ini" ]] && grep -q "github.com/meshtastic" platformio.ini; then
@@ -40,6 +46,7 @@ if ! $found; then
             ;;
     esac
 fi
+echo "$PWD"
 
 # Cleanup function that returns back.
 cleanup() {
@@ -335,6 +342,16 @@ if [ -z "$env_arg" ]; then
     read -rp "Target: $basename. Press Enter to continue..."
 fi
 
+if ! command -v platformio &>/dev/null; then
+	pipx install "platformio"
+	newpath=1
+fi
+if [ $newpath -eq 1 ]; then
+	pipx ensurepath
+	# shellcheck disable=SC1091
+	source "$HOME/.bashrc"
+fi
+
 platformio pkg update -e "$selected_env"
 echo "Building for $selected_env with PLATFORMIO_BUILD_FLAGS: > $PLATFORMIO_BUILD_FLAGS <"
 
@@ -473,4 +490,15 @@ if [ -f "$VPN_INFO" ]; then
 
         echo "Finished processing $connection."
     done < "$VPN_INFO"
+fi
+
+if [[ -f "${ORIG_DIR:?}/firmware.sh" ]]; then
+    # ensure the target directory exists
+    sudo mkdir -p "/meshtastic_firmware/${VERSION}"
+
+    for file in "$OUTDIR"/*; do
+        [[ -f "$file" ]] || continue
+        basefile=${file##*/}  # same as basename
+        cp -- "$file" "/meshtastic_firmware/${VERSION}/$basefile"
+    done
 fi
