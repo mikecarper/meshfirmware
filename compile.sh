@@ -131,11 +131,23 @@ if [ -z "$selected_env" ]; then
             if [ ${#built_envs[@]} -gt 0 ]; then
                 echo ""
                 echo "Already built environments:"
-                # Loop through the global env list. When the env name is found in built_envs, print its number and name.
+                
+                # Loop through the global env list. When the env name is found in built_envs, print its number, name, and last build version.
                 for i in "${!envs[@]}"; do
                     env_name="${envs[$i]}"
                     if [ -n "${built_envs[$env_name]:-}" ]; then
-                        printf "%d) %s\n" $((i+1)) "$env_name"
+
+                        # Capture the newest version folder for this env:
+                        versionLastBuild=$(
+                            find release -type f -path "release/*/$env_name/*" \
+                              | sed -n "s|release/\([^/]*\)/$env_name/.*|\1|p" \
+                              | sort -V \
+                              | tail -n1
+                        )
+
+                        # Print index, env name, and last build version
+                        printf "%d) %s   (last build: %s)\n" \
+                            $((i+1)) "$env_name" "$versionLastBuild"
                     fi
                 done
             fi
@@ -232,10 +244,17 @@ echo "All platformio.ini files have been updated."
 EOF
 )"
 
+# --- Option 2: Enable Remote Hardware ---
 options+=("Enable Remote Hardware")
 actions+=("$enableRHAction")
 
-# --- Option 3: Enable Remote Hardware + apply extra patch ---
+# --- Option 3: Apply extra patch only ---
+if [ -n "$extraPatchFile" ]; then
+    options+=("Apply $extraPatchFile")
+    actions+=("echo 'Applying $extraPatchFile...' && git apply $extraPatchFile")
+fi
+
+# --- Option 4: Enable Remote Hardware + apply extra patch ---
 # Only add if extra patch exists and no env patch exists,
 # OR if both exist we’ll add a dedicated option later.
 if [ -n "$extraPatchFile" ] && [ -z "$envPatchFile" ]; then
@@ -245,7 +264,7 @@ echo 'Applying $extraPatchFile...'
 git apply $extraPatchFile")
 fi
 
-# --- Option 4: Enable Remote Hardware + apply extra patch + apply env patch ---
+# --- Option 5: Enable Remote Hardware + apply extra patch + apply env patch ---
 if [ -n "$extraPatchFile" ] && [ -n "$envPatchFile" ]; then
     options+=("Enable Remote Hardware + apply $extraPatchFile + apply ${envPatchFile}")
     actions+=("$enableRHAction
@@ -255,7 +274,7 @@ echo 'Applying ${envPatchFile}...'
 git apply ${envPatchFile}")
 fi
 
-# --- Option 5: Apply env patch only ---
+# --- Option 6: Apply env patch only ---
 # Two cases: when extra patch is absent OR as an additional option if both exist.
 if [ -n "$envPatchFile" ]; then
     # If extra patch is absent, this will be the only env option.
@@ -299,7 +318,7 @@ fi
 
 # The shell vars the build tool expects to find
 export APP_VERSION=$VERSION
-OUTDIR="release/$VERSION"
+OUTDIR="release/$VERSION/$selected_env"
 
 rm -f "${OUTDIR:?}"/firmware* || true
 if [ -d "${OUTDIR:?}" ]; then
@@ -382,68 +401,76 @@ if [ -f "$VPN_INFO" ]; then
     # Trap SIGINT (Ctrl-C) to kill all child processes and exit.
     trap 'echo "Interrupted by Ctrl-C. Exiting."; kill 0; exit 1' SIGINT
 
-    # Loop through each non-empty, non-comment line in the VPN info file.
-    while IFS= read -r connection || [ -n "$connection" ]; do
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Skip empty lines or comments
+        [[ -z "$line" || "$line" =~ ^# ]] && continue
+
         echo ""
-        echo "$connection"
-        # Skip empty lines or lines beginning with '#' (comments)
-        [[ -z "$connection" || "$connection" =~ ^# ]] && continue
+        echo "=== Processing: $line ==="
 
-        # Prompt for the password once.
+        # Parse optional embedded password: user:pass@host vs user@host
+        if [[ "$line" =~ ^([^:]+):([^@]+)@(.+)$ ]]; then
+            user="${BASH_REMATCH[1]}"
+            PASSWORD="${BASH_REMATCH[2]}"
+            host="${BASH_REMATCH[3]}"
+            connection="$user@$host"
+            echo "[DEBUG] Using embedded password for $connection" >&2
+        else
+            connection="$line"
+            # Prompt once per connection
+            read -rp "Enter password for $connection (or 'skip'): " PASSWORD < /dev/tty
+            # erase prompt
+            printf "\r"; tput cuu1; tput el
+        fi
 
-        read -rp "Enter password for SCP/SSH: " PASSWORD < /dev/tty
-        printf "\r" # Move the cursor to the beginning of the line.
-        tput cuu1 # Move the cursor up one line.
-        tput el # Clear the entire line.
-        echo ""
+        # If they typed 'skip' or left it blank, we skip this connection
+        if [ "$PASSWORD" = "skip" ] || [ -z "$PASSWORD" ]; then
+            echo "Skipped $connection."
+            continue
+        fi
 
-        if [ "$PASSWORD" != "skip" ] && [ -n "$PASSWORD" ]; then
-            # The PASSWORD is not "skip" and it is not empty.
-            for file in "$OUTDIR"/*; do
-                [ -f "$file" ] || continue
-                basefile=$(basename "$file")
-                # Compute the local MD5 checksum.
-                local_md5=$(md5sum "$file" | awk '{print $1}')
-                attempt=1
-                success=0
+        # Now do the SCP loop
+        for file in "$OUTDIR"/*; do
+            [ -f "$file" ] || continue
+            basefile=$(basename "$file")
+            local_md5=$(md5sum "$file" | awk '{print $1}')
+            attempt=1
+            success=0
 
-                while [ $attempt -le $MAX_ATTEMPTS ]; do
-                    echo -n "$attempt: $basefile -> $connection..."
-                    printf "\r"
+            while [ $attempt -le $MAX_ATTEMPTS ]; do
+                echo -n "$attempt: $basefile -> $connection ..."
+                printf "\r"
 
-                    # Ensure the remote directory exists.
-                    sshpass -p "$PASSWORD" ssh -n -o StrictHostKeyChecking=no "$connection" "mkdir -p ~/meshfirmware/meshtastic_firmware/${VERSION}/"
+                # ensure remote dir
+                sshpass -p "$PASSWORD" ssh -n -o StrictHostKeyChecking=no \
+                      "$connection" "mkdir -p ~/meshfirmware/meshtastic_firmware/${VERSION}/"
 
-                    # Use timeout with --foreground so that Ctrl-C is delivered to the child process.
-                    timeout --foreground $SCP_TIMEOUT sshpass -p "$PASSWORD" scp -r -o StrictHostKeyChecking=no "$file" "${connection}:~/meshfirmware/meshtastic_firmware/${VERSION}/" < /dev/null
-                    scp_status=$?
+                timeout --foreground $SCP_TIMEOUT \
+                  sshpass -p "$PASSWORD" scp -o StrictHostKeyChecking=no \
+                    "$file" "${connection}:~/meshfirmware/meshtastic_firmware/${VERSION}/" < /dev/null
+                scp_status=$?
 
-                    if [ $scp_status -ne 0 ]; then
-                        #echo "scp failed (exit status $scp_status) for $basefile on $connection. Retrying..."
-                        attempt=$((attempt+1))
-                        continue
-                    fi
+                [ $scp_status -ne 0 ] && { ((attempt++)); continue; }
 
-                    # Compute the remote MD5 checksum via ssh.
-                    remote_md5=$(sshpass -p "$PASSWORD" ssh -n -o StrictHostKeyChecking=no "$connection" "md5sum ~/meshfirmware/meshtastic_firmware/${VERSION}/${basefile} 2>/dev/null" | awk '{print $1}')
+                remote_md5=$(sshpass -p "$PASSWORD" ssh -n -o StrictHostKeyChecking=no \
+                  "$connection" "md5sum ~/meshfirmware/meshtastic_firmware/${VERSION}/${basefile} 2>/dev/null" \
+                  | awk '{print $1}')
 
-
-                    if [ "$local_md5" = "$remote_md5" ]; then
-                        echo "$basefile copied to $connection (MD5 matched)."
-                        success=1
-                        break
-                    else
-                        echo "MD5 mismatch for $basefile on $connection. Retrying..."
-                        attempt=$((attempt+1))
-                    fi
-                done
-
-                if [ $success -ne 1 ]; then
-                    echo "Failed to copy $basefile to $connection after $MAX_ATTEMPTS attempts."
+                if [ "$local_md5" = "$remote_md5" ]; then
+                    echo "$basefile copied to $connection (MD5 matched)."
+                    success=1
+                    break
+                else
+                    echo "MD5 mismatch for $basefile on $connection. Retrying..."
+                    ((attempt++))
                 fi
             done
 
-            echo "Finished processing $connection."
-        fi
+            if [ $success -ne 1 ]; then
+                echo "Failed to copy $basefile to $connection after $MAX_ATTEMPTS attempts."
+            fi
+        done
+
+        echo "Finished processing $connection."
     done < "$VPN_INFO"
 fi
