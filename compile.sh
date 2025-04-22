@@ -342,6 +342,7 @@ if [ -z "$env_arg" ]; then
     read -rp "Target: $basename. Press Enter to continue..."
 fi
 
+newpath=0
 if ! command -v platformio &>/dev/null; then
 	pipx install "platformio"
 	newpath=1
