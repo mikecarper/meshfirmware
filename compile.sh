@@ -79,6 +79,7 @@ git fetch origin
 git switch master 2>/dev/null || git checkout master
 git reset --hard origin/master
 git fetch origin
+git pull
 git pull --recurse-submodules
 
 
