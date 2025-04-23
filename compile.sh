@@ -494,13 +494,15 @@ if [ -f "$VPN_INFO" ]; then
     done < "$VPN_INFO"
 fi
 
+echo "${ORIG_DIR:?}/firmware.sh"
 if [[ -f "${ORIG_DIR:?}/firmware.sh" ]]; then
     # ensure the target directory exists
-    sudo mkdir -p "/meshtastic_firmware/${VERSION}"
+    echo "Making dir ${ORIG_DIR:?}/meshtastic_firmware/${VERSION}"
+    mkdir -p "${ORIG_DIR:?}/meshtastic_firmware/${VERSION}"
 
     for file in "$OUTDIR"/*; do
         [[ -f "$file" ]] || continue
         basefile=${file##*/}  # same as basename
-        cp -- "$file" "/meshtastic_firmware/${VERSION}/$basefile"
+        cp -- "$file" "${ORIG_DIR:?}/meshtastic_firmware/${VERSION}/$basefile"
     done
 fi
