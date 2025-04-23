@@ -505,37 +505,55 @@ select_release() {
 		stable_colored=0
 
 		# Print the list in dynamically determined columns.
+        # --- 1) Collect all formatted entries into an array ---
+        declare -a formatted_entries=()
+
 		for i in "${!versions_labels[@]}"; do
 			label="${versions_labels[$i]}"
-			formatted=$(printf "%*d) %-*s " "$index_width" $((i + 1)) "$col_label_width" "$label")
+			entry=$(printf "%*d) %-*s " "$index_width" $((i + 1)) "$col_label_width" "$label")
 
 			# If the label contains "nightly" (case-insensitive), color it red.
 			if [[ "$label" =~ [Nn]ightly ]]; then
-				formatted="${red}${formatted}${reset}"
+				entry="${red}${entry}${reset}"
 			# If this entry is the latest stable candidate, color it cyan.
 			elif [ "$i" -eq "$latest_stable_index" ]; then
-				formatted="${cyan}${formatted}${reset}"
+				entry="${cyan}${entry}${reset}"
 			# Otherwise, apply yellow to the first pre-release and green to the first stable entry.
 			elif [[ "$label" == *"(pre-release)"* ]] && [ $pre_colored -eq 0 ]; then
-				formatted="${yellow}${formatted}${reset}"
+				entry="${yellow}${entry}${reset}"
 				pre_colored=1
 			elif [[ "$label" != *"(pre-release)"* ]] && [ $stable_colored -eq 0 ]; then
-				formatted="${green}${formatted}${reset}"
+				entry="${green}${entry}${reset}"
 				stable_colored=1
 			fi
 
 			# Print the (possibly colored) entry.
-			printf "%s" "$formatted"
-
-			# Every time we hit 'num_per_row' entries in a row, insert a newline.
-			if (((i + 1) % num_per_row == 0)); then
-				echo ""
-			fi
+			formatted_entries+=( "$entry" )
 		done
-		# If the last row was not complete, ensure we move to a new line.
-		echo ""
+
+        # --- Now print that array in reverse order ---
+        total=${#formatted_entries[@]}
+        rowcount=0
+        #num_per_row=${num_per_row:-1}
+
+        for (( idx=total-1; idx>=0; idx-- )); do
+            # Print the (possibly colored) entry.
+            printf "%s" "${formatted_entries[$idx]}"
+
+            (( rowcount++ )) || true
+            # Every time we hit 'num_per_row' entries in a row, insert a newline.
+            if (( rowcount % num_per_row == 0 )); then
+                echo ""
+            fi
+        done
+
+        # If the last row wasn't full, make sure we end on a newline.
+        if (( rowcount % num_per_row != 0 )); then
+            echo ""
+        fi
 
 		# Prompt for the user's selection.
+		echo ""
 		read -r -p "Enter the number of your selection: " selection </dev/tty
 		if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt "$num_entries" ]; then
 			echo "Invalid selection. Exiting."
@@ -677,13 +695,14 @@ detect_device() {
 	mapfile -t all_device_lines < <(echo "$lsusb_output" | sed -n 's/.*ID [0-9a-fA-F]\{4\}:[0-9a-fA-F]\{4\} //p')
 	filtered_device_lines=()
 	for line in "${all_device_lines[@]}"; do
-		if ! echo "$line" | grep -qiE "hub|ethernet"; then
+		if ! echo "$line" | grep -qiE "hub|ethernet|mouse|keyboard"; then
 			filtered_device_lines+=("$line")
 		fi
 	done
-
+    echo ""
 	if [ "${#filtered_device_lines[@]}" -eq 0 ]; then
 		# Prompt user to either re-scan or quit.
+        echo "USB devices found:"
 		echo "$lsusb_output" | sed -n 's/.*ID [0-9a-fA-F]\{4\}:[0-9a-fA-F]\{4\} //p'
 		read -rp "Press Enter to look again or q to quit: " choice < /dev/tty
 		if [[ "$choice" =~ ^[Qq]$ ]]; then
@@ -898,8 +917,8 @@ match_firmware_files() {
 	if [ ${#matching_files[@]} -eq 0 ]; then
 		echo "Doing a deep search for $USBproduct in $FIRMWARE_ROOT/${chosen_tag}/*"
 		# Capture all matching file paths (each on a new line)
-		found_files=$(grep -aFrin --exclude="*-ota.zip" "$USBproduct" "$FIRMWARE_ROOT/${chosen_tag}" | cut -d: -f1)
-
+		found_files=$(grep -aFrin --exclude="*-ota.zip" "$USBproduct" "$FIRMWARE_ROOT/${chosen_tag}" | cut -d: -f1 || true)
+        echo "s"
 		if [ -z "$found_files" ]; then
 			echo "No firmware files match the detected product ($detected_product) ($USBproduct). Exiting."
 			exit 1
