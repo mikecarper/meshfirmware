@@ -918,7 +918,7 @@ match_firmware_files() {
 		echo "Doing a deep search for $USBproduct in $FIRMWARE_ROOT/${chosen_tag}/*"
 		# Capture all matching file paths (each on a new line)
 		found_files=$(grep -aFrin --exclude="*-ota.zip" "$USBproduct" "$FIRMWARE_ROOT/${chosen_tag}" | cut -d: -f1 || true)
-        echo "s"
+
 		if [ -z "$found_files" ]; then
 			echo "No firmware files match the detected product ($detected_product) ($USBproduct). Exiting."
 			exit 1
