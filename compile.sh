@@ -176,7 +176,6 @@ fi
 # You can use it further in your script.
 echo "Final environment: $selected_env"
 
-
 VERSION=$(bin/buildinfo.py long)
 
 # Get the last 20 tags (sorted by creation date descending)
@@ -311,15 +310,7 @@ eval "${actions[$selected_index]}"
 
 
 
-if [ -f extra.bbs.patch ] || [ -f extra.patch ]; then
-    count=$(grep -IFirn "ROUTER_LATE" . --exclude=*.patch --exclude=*.diff --exclude=*.sh | wc -l)
-    if [ "$count" -ne 5 ]; then
-        echo "Warning: Expected 5 matches, but found $count."
-        grep -IFirn "ROUTER_LATE" . --exclude=*.patch --exclude=*.diff --exclude=*.sh
-    fi
-fi
-
-#VERSION_ORIGINAL="${VERSION}"
+VERSION=$(bin/buildinfo.py long)
 if grep -q "DMESHTASTIC_EXCLUDE_REMOTEHARDWARE=0" platformio.ini; then
     VERSION="${VERSION::-4}GPIO"
 fi
@@ -328,9 +319,9 @@ fi
 export APP_VERSION=$VERSION
 OUTDIR="release/$VERSION/$selected_env"
 
-rm -f "${OUTDIR:?}"/firmware* || true
+rm -f "${OUTDIR:?}"/firmware* > /dev/null 2>&1 || true
 if [ -d "${OUTDIR:?}" ]; then
-    rm -r "${OUTDIR:?}"/* || true
+    rm -r "${OUTDIR:?}"/* > /dev/null 2>&1 || true
 fi
 mkdir -p "$OUTDIR"
 
