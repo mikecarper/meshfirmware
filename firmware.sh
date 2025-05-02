@@ -43,13 +43,13 @@ MOUNT_FOLDER="/mnt/meshDeviceSD"
 # Settings for the repo
         GITHUB_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases"
           REPO_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME_ALT}/contents"
- WEB_HARDWARE_LIST_URL="https://raw.githubusercontent.com/${REPO_OWNER}/web-flasher/refs/heads/main/types/resources.ts"
+ WEB_HARDWARE_LIST_URL="https://raw.githubusercontent.com/${REPO_OWNER}/web-flasher/refs/heads/main/public/data/hardware-list.json"
 # Set Folders
          FIRMWARE_ROOT="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}"
           DOWNLOAD_DIR="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/downloads"
 # Vars to get passed around and cached as files.
          RELEASES_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/releases.json"
-        RESOURCES_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/resources.ts"
+        RESOURCES_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/hardware-list.json"
 		   BLEOTA_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/bleota.json"
     VERSIONS_TAGS_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/01versions_tags.txt"
   VERSIONS_LABELS_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/02versions_labels.txt"
@@ -510,25 +510,25 @@ select_release() {
 
 		for i in "${!versions_labels[@]}"; do
 			label="${versions_labels[$i]}"
-			entry=$(printf "%*d) %-*s " "$index_width" $((i + 1)) "$col_label_width" "$label")
+			formatted=$(printf "%*d) %-*s " "$index_width" $((i + 1)) "$col_label_width" "$label")
 
 			# If the label contains "nightly" (case-insensitive), color it red.
 			if [[ "$label" =~ [Nn]ightly ]]; then
-				entry="${red}${entry}${reset}"
+				formatted="${red}${formatted}${reset}"
 			# If this entry is the latest stable candidate, color it cyan.
 			elif [ "$i" -eq "$latest_stable_index" ]; then
-				entry="${cyan}${entry}${reset}"
+				formatted="${cyan}${formatted}${reset}"
 			# Otherwise, apply yellow to the first pre-release and green to the first stable entry.
 			elif [[ "$label" == *"(pre-release)"* ]] && [ $pre_colored -eq 0 ]; then
-				entry="${yellow}${entry}${reset}"
+				formatted="${yellow}${formatted}${reset}"
 				pre_colored=1
 			elif [[ "$label" != *"(pre-release)"* ]] && [ $stable_colored -eq 0 ]; then
-				entry="${green}${entry}${reset}"
+				formatted="${green}${formatted}${reset}"
 				stable_colored=1
 			fi
 
 			# Print the (possibly colored) entry.
-			formatted_entries+=( "$entry" )
+			formatted_entries+=( "$formatted" )
 		done
 
         # --- Now print that array in reverse order ---
@@ -539,7 +539,6 @@ select_release() {
         for (( idx=total-1; idx>=0; idx-- )); do
             # Print the (possibly colored) entry.
             printf "%s" "${formatted_entries[$idx]}"
-
             (( rowcount++ )) || true
             # Every time we hit 'num_per_row' entries in a row, insert a newline.
             if (( rowcount % num_per_row == 0 )); then
@@ -699,6 +698,7 @@ detect_device() {
 			filtered_device_lines+=("$line")
 		fi
 	done
+
     echo ""
 	if [ "${#filtered_device_lines[@]}" -eq 0 ]; then
 		# Prompt user to either re-scan or quit.
@@ -1181,7 +1181,7 @@ get_locked_service() {
 	if ! command -v lsof &>/dev/null; then
 		sudo apt install -y lsof
 	fi
-	users=$(sudo lsof "$device_name" | awk 'NR>1 {print $3}' | sort -u)
+	users=$(sudo lsof "$device_name" 2>/dev/null | awk 'NR>1 {print $3}' | sort -u)
 	if [ -z "$users" ]; then
 		#echo "No process found locking ${device_name}."
 		return 0
@@ -1246,59 +1246,50 @@ detect_esp() {
 		echo "$architecture" > "${ARCHITECTURE_FILE}"
 		return
 	fi
-	
 
 	if grep -E -q "${chosen_tag}.*nightly" "$VERSIONS_LABELS_FILE"; then
 		update_hardware_list
-		
-		# Extract the JSON-like array portion from the TypeScript file.
-		# It starts at the line with "OfflineHardwareList = [" and ends at the line with "];"
-		json_array=$(sed -n '/OfflineHardwareList = \[/,/\];/p' "$RESOURCES_FILE" | sed '1d;$d')
-		if [[ "$json_array" =~ \},$ ]]; then
-			json_array=$(echo -e "$json_array\n{}")
-		fi
-		
-		# Collapse each object into one line and then split objects by "},"
-		entries=$(echo "$json_array" | sed ':a;N;$!ba;s/\n/ /g' | sed 's/},/}\n/g')
+		echo "Searching for the hardware type; is this ESP32?"
 
-		# Read entries into an array.
-		IFS=$'\n' read -r -d '' -a entries_array < <(echo "$entries" && printf '\0')
-		
-				# Get just the filename.
+		# Get just the filename.
 		base=$(basename "$selected_file")
 		# Remove the "firmware-" prefix.
-		temp=${base#firmware-}
+		result=${base#firmware-}
+		# Remove the trailing -update.bin
+		result=${result%-update.bin}
+		
 		# Build a pattern that should be removed at the end.
 		pattern="-$chosen_tag.bin"
 		# Remove the trailing pattern.
-		result=${temp%"$pattern"}
-		norm_device=$(normalize "$result")
-		architecture=""
+		result=${result%"$pattern"}
 		
-		# Loop through each (now one-line) entry and check for a match.
-		for entry in "${entries_array[@]}"; do
-			# Extract platformioTarget and displayName using sed.
-			pt=$(echo "$entry" | sed -n 's/.*platformioTarget:[[:space:]]*"\([^"]*\)".*/\1/p')
-			dn=$(echo "$entry" | sed -n 's/.*displayName:[[:space:]]*"\([^"]*\)".*/\1/p')
-			
-			# If both are empty, skip this entry.
-			if [[ -z "$pt" && -z "$dn" ]]; then
-				continue
-			fi
-			
+		# Build a pattern that should be removed at the end.
+		pattern="-$chosen_tag"
+		# Remove the trailing pattern.
+		result=${result%"$pattern"}
+		
+		norm_device=$(normalize "$result")
+		json_data=$( cat "$RESOURCES_FILE" )
+		
+		# Convert the JSON string to an array of objects and loop over each
+		echo "$json_data" | jq -c '.[]' | while read -r entry; do
+			# Extract platformioTarget and displayName using jq
+			pt=$(echo "$entry" | jq -r '.platformioTarget')
+			dn=$(echo "$entry" | jq -r '.displayName')
+
+			# Normalize values (assuming you have a normalize function or just convert to lowercase)
 			norm_pt=$(normalize "$pt")
 			norm_dn=$(normalize "$dn")
-			
-			# If the normalized device name is found in either field, we have a match.
+
+			# If either normalized field matches the normalized device name, extract the architecture
 			if [[ "$norm_pt" == *"$norm_device"* ]] || [[ "$norm_device" == *"$norm_pt"* ]] || [[ "$norm_dn" == *"$norm_device"* ]] || [[ "$norm_device" == *"$norm_dn"* ]]; then
-				architecture=$(echo "$entry" | sed -n 's/.*architecture:[[:space:]]*"\([^"]*\)".*/\1/p')
+				architecture=$(echo "$entry" | jq -r '.architecture')
+				echo "$architecture" > "${ARCHITECTURE_FILE}"
 				break
 			fi
 			spinner
 		done
 		printf "\r"
-		
-		echo "$architecture" > "${ARCHITECTURE_FILE}"
 	fi
 }
 
