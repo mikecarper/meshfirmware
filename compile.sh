@@ -348,7 +348,7 @@ fi
 platformio pkg update -e "$selected_env"
 echo "Building for $selected_env with PLATFORMIO_BUILD_FLAGS: > $PLATFORMIO_BUILD_FLAGS <"
 
-pio run --environment "$selected_env" # -v
+pio run --environment "$selected_env"
 SRCELF=.pio/build/"$selected_env"/firmware.elf
 cp "$SRCELF" "$OUTDIR"/"$basename".elf
 
