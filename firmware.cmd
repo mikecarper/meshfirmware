@@ -30,7 +30,8 @@ if ([string]::IsNullOrEmpty($ScriptPath)) {
     $ScriptPath = (Get-Location).Path
 }
 
-
+$timeoutMeshtastic = 10 # Timeout duration in seconds
+$baud = 1200 # 115200
 $CACHE_TIMEOUT_SECONDS=6 * 3600 # 6 hours
 
 
@@ -323,8 +324,7 @@ function getMeshtasticNodeInfo($selectedComPort) {
 	
 		
 	if ($meshtasticError) {
-		Write-Host "Error"
-		Write-Host $meshtasticError
+		Write-Host "$selectedComPort error: $meshtasticError"
 		if ($meshtasticError -eq "Timed Out") {
 			return $meshtasticError 
 		}
@@ -1586,6 +1586,7 @@ if ($hw.Architecture -like 'esp32*') {
 
 		$cmd = "$bat -f $baseName -p $selectedComPort"
 		ApplyPatch $SelectedFirmwareFile
+		Write-Progress -Activity " " -Status " " -Completed
 		Write-Host ""
 		Write-Host $cmd
 		Read-Host -Prompt 'Press enter to run that'
@@ -1603,11 +1604,13 @@ else {
 		$before = Get-PSDrive -PSProvider FileSystem | Select-Object -ExpandProperty Name
 		
 		$result = runMeshtasticCommand $selectedComPort "--enter-dfu"
+		Write-Progress -Activity " " -Status " " -Completed
 		$meshtasticOutput = $result[0]
 		$meshtasticError  = $result[1]
 		Write-Host $meshtasticOutput
 		Write-Host $meshtasticError
 		
+		$endTime = (Get-Date).AddSeconds(15)
 		while ((Get-Date) -lt $endTime -and -not $newDrive) {
 			Start-Sleep -Seconds 1
 			$after = Get-PSDrive -PSProvider FileSystem | Select-Object -ExpandProperty Name
@@ -1620,6 +1623,9 @@ else {
 	}
 
 	if ($newDrive) {
+		if (-not $newDrive.ToString().EndsWith(':')) {
+			$newDrive += ':'
+		}
 		Write-Host "DFU mount is drive `"$newDrive`""
 		$dest = Join-Path -Path $newDrive -ChildPath (Split-Path $SelectedFirmwareFile -Leaf)
 		Read-Host "Press Enter Copy the Firmware to $dest"
