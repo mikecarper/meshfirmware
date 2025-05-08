@@ -1628,7 +1628,7 @@ else {
 		}
 		Write-Host "DFU mount is drive `"$newDrive`""
 		$dest = Join-Path -Path $newDrive -ChildPath (Split-Path $SelectedFirmwareFile -Leaf)
-		Read-Host "Press Enter Copy the Firmware to $dest"
+		# Read-Host "Press Enter Copy the Firmware to $dest"
 		Copy-Item -Path $SelectedFirmwareFile -Destination $dest -Force -ErrorAction Stop
 
 		Write-Host "Done." -ForegroundColor Green
