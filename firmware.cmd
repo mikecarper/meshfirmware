@@ -511,7 +511,7 @@ function getUSBComPort() {
 
 		# If there are no USB COM devices, display an error and loop again
 		if ($usbComDevices.Count -eq 0) {
-			Write-Host "No valid COM devices found. Please check the connection." -ForegroundColor Red
+			Write-Host "No valid COM devices found. Please check the connection. Trying again in 5 seconds." -ForegroundColor Red
 			Start-Sleep -Seconds 5  # Wait before trying again
 		} else {
 			$availableComPorts = $usbComDevices | Select-Object -ExpandProperty ComPort
