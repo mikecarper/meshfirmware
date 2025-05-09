@@ -3,6 +3,10 @@
 #Example execute:
 # powershell -ExecutionPolicy ByPass -File c:\git\meshfirmware\firmware.ps1
 
+Write-Host ""
+Write-Host ""
+Write-Host ""
+Write-Host ""
 
 # Flag to track if Ctrl-C has been pressed
 $scriptOver = $false
@@ -166,42 +170,45 @@ function run_cmd($ESPTOOL_CMD) {
 
 function check_requirements() {
 	# Check if Python is installed
-	$global:pythonCommand = Get-Command python -ErrorAction SilentlyContinue
-	if (-not $pythonCommand) {
-		# Get the latest stable Python version
-		$latestPythonVersion = Get-LatestPythonVersion
-		Write-Host "Python is not installed."
-
-		# Ask the user if they want to install Python
-		$installPython = Read-Host "Do you want to install Python $latestPythonVersion now? (Y/N)"
-		if ($installPython -eq 'Y' -or $installPython -eq 'y') {
-			Write-Host "Downloading and installing Python $latestPythonVersion..."
-
-			# Set Python installer URL for Windows
-			$pythonInstallerUrl = "https://www.python.org/ftp/python/$latestPythonVersion/python-$latestPythonVersion-amd64.exe"
-			$installerPath = "$env:TEMP\python_installer.exe"
-
-			# Download the Python installer
-			Invoke-WebRequest -Uri $pythonInstallerUrl -OutFile $installerPath
-
-			# Run the installer silently with 'Add Python to PATH' option enabled
-			Start-Process -FilePath $installerPath -ArgumentList "/quiet InstallAllUsers=1 PrependPath=1" -Wait
-
-			# Clean up the installer
-			Remove-Item $installerPath
-
-			Write-Host "Python $latestPythonVersion has been installed successfully."
-
-			# Recheck if Python is installed
-			$global:pythonCommand = Get-Command python -ErrorAction SilentlyContinue
-			if (-not $pythonCommand) {
-				Write-Host "Python installation failed. Please check your system."
-				exit
+	$null = & python --version 2>$null
+	if ($LASTEXITCODE -eq 0) {
+		$global:pythonCommand = "python"
+	}
+	else {
+		# -------- 1.  Discover latest stable Windows x64 installer --------
+		$dlPage = Invoke-WebRequest -Uri 'https://www.python.org/downloads/windows/' -UseBasicParsing
+		$fullUrl = ""
+		foreach ($x in $dlPage.Links) {
+			if ($x.href -like "*-amd64.exe" -and $x.href -notlike "*-arm64.exe" -and $x.href -notlike "*-webinstall.exe") {
+				$fullUrl = $x.href
+				break
 			}
-		} else {
-			Write-Host "Please install Python manually and run the script again."
+		}
+
+		# pull the version out of the URL for logging
+		if ($fullUrl -match 'python\-([\d\.]+)\-amd64\.exe') { $latestVersion = $Matches[1] }
+
+		Write-Host "Python not found - Downloading $fullUrl"
+
+		# -------- 2.  Download --------
+		$installer = Join-Path $env:TEMP ("python-$latestVersion-amd64.exe")
+		Invoke-WebRequest -Uri $fullUrl -OutFile $installer -UseBasicParsing
+
+		# -------- 3.  Install --------
+		Write-Host "Running installer (this may need UAC elevation)" -ForegroundColor Cyan
+		$installArgs = '/InstallAllUsers=1 PrependPath=1 Include_test=0'
+		$proc = Start-Process -FilePath $installer -ArgumentList $installArgs -PassThru -Wait
+		if ($proc.ExitCode -ne 0) {
+			Write-Host "Installer returned exit code $($proc.ExitCode)"
 			exit
 		}
+
+		# -------- 4.  Verify --------
+		$env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' +
+					[System.Environment]::GetEnvironmentVariable('Path','User')
+		$ver = & python --version
+		Write-Host "Success! $ver is now available in PATH."
+
 	}
 
 	# Check if meshtastic is installed
@@ -245,7 +252,7 @@ function check_requirements() {
 	}
 
 	Write-Progress -Activity "Update pip command line tool"
-	python.exe -m pip install --upgrade pip *> out-null
+	& python -m pip install --upgrade pip *> $null
 	Write-Progress -Activity " " -Status " " -Completed
 }
 
@@ -755,7 +762,6 @@ function BuildReleaseMenuData {
     # Save the arrays for later use.
     $versionsTags | Out-File -FilePath $VERSIONS_TAGS_FILE
     $versionsLabels | Out-File -FilePath $VERSIONS_LABELS_FILE
-    Write-Host ""
 }
 
 
