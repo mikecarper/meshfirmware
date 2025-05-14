@@ -110,24 +110,20 @@ function Get-LatestPythonVersion {
 }
 
 function get_esptool_cmd() {
-	try {
-		# Check if Python is installed and get the version
-		$pythonVersion = & $pythonCommand --version
-		Write-Progress -Status "Checking Versions" -Activity "Python interpreter found: $pythonVersion"
-		# Set the ESPTOOL command to use Python
-		$ESPTOOL_CMD = "$pythonCommand -m esptool"  # Construct as a single string
-	} catch {
-		# If Python is not found, check for esptool in the system PATH
-		Write-Host "Python interpreter not found. Checking for esptool..."
+	$esptoolPath = Get-Command esptool -ErrorAction SilentlyContinue
+	if ($esptoolPath) {
+		# If esptool is found, set the ESPTOOL command
+		$ESPTOOL_CMD = "esptool"  # Set esptool command
+	} else {
+		try {
+			# Check if Python is installed and get the version
+			$pythonVersion = & $pythonCommand --version
+			Write-Progress -Status "Checking Versions" -Activity "Python interpreter found: $pythonVersion"
+			# Set the ESPTOOL command to use Python
+			$ESPTOOL_CMD = "$pythonCommand -m esptool"  # Construct as a single string
+		}
 
-		$esptoolPath = Get-Command esptool -ErrorAction SilentlyContinue
-
-		if ($esptoolPath) {
-			# If esptool is found, set the ESPTOOL command
-			$ESPTOOL_CMD = "esptool"  # Set esptool command
-		} else {
-			# If neither Python nor esptool is found, fallback to python -m esptool
-			Write-Host "esptool not found. Falling back to python -m esptool."
+		 catch {
 			$ESPTOOL_CMD = "python -m esptool"  # Fallback to Python esptool
 		}
 	}
@@ -329,14 +325,12 @@ function getMeshtasticNodeInfo($selectedComPort) {
 	$meshtasticOutput = $result[0]
 	$meshtasticError  = $result[1]
 	
-		
 	if ($meshtasticError) {
 		Write-Host "$selectedComPort error: $meshtasticError"
 		if ($meshtasticError -eq "Timed Out") {
-			return $meshtasticError 
+			return "Timed Out"
 		}
 	}
-
 	
 	$meshtasticOutput = $meshtasticOutput -replace '(\{|\}|\,)', "$1`n"
 
@@ -371,7 +365,9 @@ function getMeshtasticNodeInfo($selectedComPort) {
 			}
 		}
 	}
-
+	if ([string]::IsNullOrWhiteSpace($deviceInfo.Name)) {
+		return "Timed Out"
+	}
 
 	return $deviceInfo
 }
@@ -481,6 +477,7 @@ function getUsbComDevices() {
 		else {
 			$deviceInfo = "Timed Out"
 		}
+		
 		if ($deviceInfo -eq "Timed Out") {
 			$usbComDevices += [PSCustomObject]@{
 				COMPort           = $_.drive_letter
@@ -488,7 +485,7 @@ function getUsbComDevices() {
 				FriendlyName      = $_.friendly_name
 				FirmwareVersion   = $_.firmware_revision
 				Meshtastic 	      = $deviceInfo
-			} 
+			}
 		}
         else {
 			$usbComDevices += [PSCustomObject]@{
@@ -504,10 +501,20 @@ function getUsbComDevices() {
 }
 
 function getUSBComPort() {
+	[CmdletBinding()]
+    param(
+        [switch] $SkipInfo = $false
+    )
+	
 	$selectedComPort = 0 
 	# Run in a loop until we get valid $comDevices
 	do {
-		$usbComDevices = getUsbComDevices
+		if ($SkipInfo) {
+			$usbComDevices = getUsbComDevices -SkipInfo
+		}
+		else {
+			$usbComDevices = getUsbComDevices
+		}
 
 		# If there are no USB COM devices, display an error and loop again
 		if ($usbComDevices.Count -eq 0) {
@@ -518,7 +525,7 @@ function getUSBComPort() {
 			if ($availableComPorts.Count -eq 1) {
 				$meshtasticVersion = $usbComDevices | Select-Object -ExpandProperty FirmwareVersion
 				$hwModelSlug = $usbComDevices | Select-Object -ExpandProperty Meshtastic
-				$selectedComPort = "$availableComPorts"
+				$selectedComPort = $usbComDevices | Select-Object -ExpandProperty ComPort
 				#Write-Host "$selectedComPort. Version: $meshtasticVersion. Hardware: $hwModelSlug."
 			}
 			else {
@@ -545,7 +552,8 @@ function getUSBComPort() {
 		}
 
 	} while ($usbComDevices.Count -eq 0 -and $selectedComPort -eq 0)  # Continue looping until we have at least one valid COM device
-	return ,$selectedComPort, $hwModelSlug, $meshtasticVersion, $usbComDevices
+
+	return $selectedComPort, $hwModelSlug, $meshtasticVersion, $usbComDevices
 }
 
 
@@ -656,6 +664,7 @@ function UpdateHardwareList {
         # Download the file
         Invoke-WebRequest -Uri $WEB_HARDWARE_LIST_URL -OutFile $HARDWARE_LIST
     }
+	Write-Progress -Activity " " -Status " " -Completed
 }
 
 
@@ -1019,9 +1028,12 @@ function GetHardwareInfo {
     param(
         [Parameter(Mandatory)]
         [string] $Slug,
-
         [Parameter(Mandatory)]
-        [string] $ListPath
+        [string] $ListPath,
+		[string] $SelectedFirmwareFile,
+		[string] $selectedComPort,
+		[string] $HWNameFile,
+		[string] $Version
     )
 
     if (-not (Test-Path $ListPath)) {
@@ -1053,9 +1065,10 @@ function GetHardwareInfo {
     }
 
     # Determine if those optional properties actually exist, otherwise default to $false
-    $requiresDfu = if ($entry.PSObject.Properties.Name -contains 'requiresDfu') { $entry.requiresDfu } else { $false }
-    $hasInkHud   = if ($entry.PSObject.Properties.Name -contains 'hasInkHud')   { $entry.hasInkHud   } else { $false }
-    $hasMui      = if ($entry.PSObject.Properties.Name -contains 'hasMui')      { $entry.hasMui      } else { $false }
+    $requiresDfu     = if ($entry.PSObject.Properties.Name -contains 'requiresDfu')     { $entry.requiresDfu     } else { $false }
+    $hasInkHud       = if ($entry.PSObject.Properties.Name -contains 'hasInkHud')       { $entry.hasInkHud       } else { $false }
+    $hasMui          = if ($entry.PSObject.Properties.Name -contains 'hasMui')          { $entry.hasMui          } else { $false }
+	$partitionScheme = if ($entry.PSObject.Properties.Name -contains 'partitionScheme') { $entry.partitionScheme } else { "4MB" }
 
     # Build and return a PSCustomObject
     return [PSCustomObject]@{
@@ -1065,6 +1078,11 @@ function GetHardwareInfo {
         RequiresDfu  = $requiresDfu
         HasInkHud    = $hasInkHud
 		HasMui       = $hasMui
+		FirmwareFile = $SelectedFirmwareFile
+		ComPort      = $selectedComPort
+		HWNameFile   = $HWNameFile
+		Version      = $Version
+		FlashSize    = $partitionScheme
     }
 }
 
@@ -1199,7 +1217,9 @@ function GetFirmwareFiles($HWNameShort) {
 	if ($best) {
 		return $best.BaseName
 	} else {
-		Write-Warning "No matching firmware file found $HWNameShortNorm"
+		if ($HWNameShortNorm -ne "timedout") {
+			Write-Warning "No matching firmware file found $HWNameShortNorm"
+		}
 	}
 }
 
@@ -1295,10 +1315,6 @@ function SelectHardware {
     # Return the slug
     return $chosen.hwModelSlug
 }
-
-
-
-
 
 
 function UpdateBleOta {
@@ -1489,121 +1505,221 @@ index 3ffca0b..e80233a 100644
 
 
 
+function GetHW() {
+	# Find nodes
+	$result = GetModelFromNode
+	$DFU_node = $result[0]
+	$Drive = $result[1]
+	if ($DFU_node) {
+		$HWNameShort = $DFU_node
+		Write-Host "Found Device in DFU update state $HWNameShort"
+		$selectedComPort = "NA"
+	}
+	else {
+		# Get node info
+		UpdateHardwareList
+		$result = getUSBComPort
+		$selectedComPort = $result[0]
+		$HWNameShort     = $result[1]
+		$OldVersion      = $result[2]
+		$devicesBefore   = $result[3]
+	}
 
-
-
-
-
-# Get release info
-check_requirements
-UpdateReleases
-BuildReleaseMenuData
-$tag = SelectRelease
-DownloadAssets
-UnzipAssets
-
-
-# Find nodes
-$result = GetModelFromNode
-$DFU_node = $result[0]
-$Drive = $result[1]
-if ($DFU_node) {
-	$HWNameShort = $DFU_node
-	Write-Host "Found Device in DFU update state $HWNameShort"
-	$selectedComPort = "NA"
-}
-else {
-	# Get node info
-	UpdateHardwareList
-	$result = getUSBComPort
-	$selectedComPort = $result[0]
-	$HWNameShort     = $result[1]
-	$OldVersion      = $result[2]
-	$devicesBefore   = $result[3]
-}
-
-$HWNameFile = GetFirmwareFiles $HWNameShort
-if (-not $HWNameFile -and $selectedComPort -eq "NA") {
-	# Get node info
-	UpdateHardwareList
-	$result = getUSBComPort
-	$selectedComPort = $result[0]
-	$HWNameShort     = $result[1]
-	$OldVersion      = $result[2]
-	$devicesBefore   = $result[3]
 	$HWNameFile = GetFirmwareFiles $HWNameShort
+	if (-not $HWNameFile -and $selectedComPort -eq "NA") {
+		# Get node info
+		UpdateHardwareList
+		$result = getUSBComPort
+		$selectedComPort = $result[0]
+		$HWNameShort     = $result[1]
+		$OldVersion      = $result[2]
+		$devicesBefore   = $result[3]
+		$HWNameFile = GetFirmwareFiles $HWNameShort
+	}
+	if ($HWNameFile) {
+		$SelectedFirmwareFile = SelectMatchingFile
+	}
+	else {
+		$HWNameFile = SelectHardware
+		GetFirmwareFiles $HWNameFile
+		$SelectedFirmwareFile = SelectMatchingFile
+	}
+	
+	$hw = GetHardwareInfo -Slug $HWNameFile -ListPath $HARDWARE_LIST -SelectedFirmwareFile $SelectedFirmwareFile -selectedComPort $selectedComPort -HWNameFile $HWNameFile -Version $OldVersion 
+	
+	Write-Progress -Activity " " -Status " " -Completed
+	return $hw
 }
-if ($HWNameFile) {
-	$SelectedFirmwareFile = SelectMatchingFile
-}
-else {
-	$HWNameFile = SelectHardware
-	GetFirmwareFiles $HWNameFile
-	$SelectedFirmwareFile = SelectMatchingFile
-}
 
+function flashESP32() {
+    param(
+        [Parameter(Mandatory)][pscustomobject]$hw      # must expose Architecture, SelectedFirmwareFile, selectedComPort/Drive
+    )
 
-
-
-
-$hw = GetHardwareInfo -Slug $HWNameFile -ListPath $HARDWARE_LIST
-Write-Host "Selected hardware:   $($hw.DisplayName)"
-Write-Host "  Architecture:      $($hw.Architecture)"
-Write-Host "  Requires DFU:      $($hw.RequiresDfu)"
-Write-Host "  Has Ink HUD:       $($hw.HasInkHud)"
-Write-Host "  Has Meshtastic UI: $($hw.HasMui)"
-Write-Host "  New Firmware:      $SelectedFirmwareFile"
-
-if ($selectedComPort -ne "NA") {
-	MakeConfigBackup $HWNameFile $selectedComPort
+	$fi = Get-Item $hw.FirmwareFile
+	$baseName = $fi.Name 
+	if ($baseName -like '*-update*') {
+		updateFlashViaEspTool $hw 
+	} else {
+		installFlashViaEspTool $hw 
+	}
 }
 
-if ($hw.Architecture -like 'esp32*') {
+function updateFlashViaEspTool {
+	param(
+        [Parameter(Mandatory)][pscustomobject]$hw 
+    )
+	
+	$SelectedFirmwareFile = $hw.FirmwareFile
+	$selectedComPort = $hw.ComPort
+	$fi = Get-Item $hw.FirmwareFile
+	$baseName = $fi.Name 
+	$SelectedFirmwareBasename = $baseName -replace '^firmware-', ''	
+
+
+	
+	$destFolder = Split-Path $SelectedFirmwareFile -Parent
+	Push-Location  $destFolder
+	
+
 	$ESPTOOL_CMD = get_esptool_cmd
+		
+	
+	Write-Host ""
+	Write-Host ""
+	Write-Host ""
+	Write-Host "Setting baud to 1200 for firmware update mode. $ESPTOOL_CMD --baud 1200 --port $selectedComPort chip_id"
+	$a = & $ESPTOOL_CMD "--baud" "1200" "--port" "$selectedComPort" "chip_id"
+	Start-Sleep -Seconds 1
+	$devicesAfter = getUSBComPort -SkipInfo
+	$selectedComPortPart2 = $devicesAfter[0]
+	Write-Host "Flashing $SelectedFirmwareFile at 0x10000. Write Meshtastic Firmware."
+	Write-Host "$ESPTOOL_CMD" "--baud" "115200" "--port" "$selectedComPortPart2" "write_flash" "0x10000" "$SelectedFirmwareFile"
+	Write-Host ""
+	& $ESPTOOL_CMD "--baud" "115200" "--port" "$selectedComPortPart2" "write_flash" "0x10000" "$SelectedFirmwareFile" | Write-Host
+
+	
+	Write-Host ""
+	Pop-Location
+}
+
+function installFlashViaEspTool {
+	param(
+        [Parameter(Mandatory)][pscustomobject]$hw 
+    )
+	
+	$SelectedFirmwareFile = $hw.FirmwareFile
+	$selectedComPort = $hw.ComPort
+	$fi = Get-Item $hw.FirmwareFile
+	$baseName = $fi.Name 
+	$SelectedFirmwareBasename = $baseName -replace '^firmware-', ''	
+
+	$OTA_OFFSET    = '0x260000'
+	$SPIFFS_OFFSET = '0x300000'
+	if ($hw.FlashSize  -eq '8MB') {
+		$OTA_OFFSET    = '0x340000'
+		$SPIFFS_OFFSET = '0x670000'
+	}
+	elseif ($hw.FlashSize -eq '16MB') {
+		$OTA_OFFSET    = '0x650000'
+		$SPIFFS_OFFSET = '0xc90000'
+	}
+	
+	$OTA_FILENAME = "bleota.bin"
+	if ($hw.Architecture -like '*-s3') {
+		$OTA_FILENAME = "bleota-s3.bin"
+	}
+	if ($hw.Architecture -like '*-c3') {
+		$OTA_FILENAME = "bleota-c3.bin"
+	}
+	
+	$SPIFFS_FILENAME = "littlefs-$SelectedFirmwareBasename"
+	if ($baseName -notlike '*-update*' -and $SelectedFirmwareFile -notlike '*-tft-*') {
+		$choice = Read-Host "`nFlash the Web UI as well?  [Y]es / [N]o (default N)"
+
+		if ($choice -match '^[Yy]') {
+			$SPIFFS_FILENAME = "littlefswebui-$SelectedFirmwareBasename"
+		}
+	}
+	#Write-Host "OTA_OFFSET set to:        $OTA_OFFSET"
+	#Write-Host "OTA_FILENAME set to:      $OTA_FILENAME"
+	#Write-Host "SPIFFS_OFFSET set to:     $SPIFFS_OFFSET"
+	#Write-Host "SPIFFS_FILENAME set to:   $SPIFFS_FILENAME"
+	
+	$destFolder = Split-Path $SelectedFirmwareFile -Parent
+	Push-Location  $destFolder
+	
+	foreach ($file in @($SelectedFirmwareFile, $OTA_FILENAME, $SPIFFS_FILENAME)) {
+		if (-not (Test-Path $file)) {
+			Write-Warning "File does not exist: $file"
+			Write-Warning "Terminating."
+			Return $false
+		}
+	}
+	
+
+	$ESPTOOL_CMD = get_esptool_cmd
+		
+	
+	Write-Host ""
+	Write-Host ""
+	Write-Host ""
+	Write-Host "Setting baud to 1200 for firmware update mode. $ESPTOOL_CMD --baud 1200 --port $selectedComPort chip_id"
+	$a = & $ESPTOOL_CMD "--baud" "1200" "--port" "$selectedComPort" "chip_id"
+	Start-Sleep -Seconds 1
+	$devicesAfter = getUSBComPort -SkipInfo
+	$selectedComPortPart2 = $devicesAfter[0]
+	Write-Host "Erasing the flash."
+	Write-Host "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 erase_flash"
+	& $ESPTOOL_CMD "--baud" "115200" "--port" "$selectedComPortPart2" "erase_flash" | Write-Host
+	Write-Host ""
+	Write-Host "Flashing $SelectedFirmwareFile at 0x00. Write Meshtastic Firmware."
+	Write-Host "$ESPTOOL_CMD" "--baud" "115200" "--port" "$selectedComPortPart2" "write_flash" "0x00" "$SelectedFirmwareFile"
+	Write-Host ""
+	& $ESPTOOL_CMD "--baud" "115200" "--port" "$selectedComPortPart2" "write_flash" "0x00" "$SelectedFirmwareFile" | Write-Host
+
 
 	Write-Host ""
-	Write-Host "  1) Enter firmware-update (DFU) mode and then run firmware update script"
-	Write-Host "  2) Run firmware update script"
-	$choice = Read-Host -Prompt 'Enter number of your selection'
-	
-	#UpdateBleOta -selectedFile $SelectedFirmwareFile
-	
-	if ($choice -eq 1) {
-		Read-Host "Press Enter to put node into Device Firmware Update (DFU) mode via baud $baud"
-		Write-Host "number of USB COM devices: $($devicesBefore.Count)"
-		Write-Host "Running $ESPTOOL_CMD --baud $baud --port $selectedComPort chip_id"
-		$output = run_cmd "$ESPTOOL_CMD --baud $baud --port $selectedComPort chip_id"
-		Write-Host $output
-		Start-Sleep -Seconds 8
-		
-		$devicesAfter = getUsbComDevices -SkipInfo
-		Write-Host "number of USB COM devices: $($devicesAfter.Count)"
-		$choice = 2
-	}
-	if ($choice -eq 2) {
-		$fi = Get-Item $SelectedFirmwareFile
-		$baseName = $fi.Name 
+	Write-Host ""
+	Write-Host ""
+	Write-Host "Waiting 10 seconds"
+	Start-Sleep -Seconds 10
+	$devicesAfter = getUSBComPort -SkipInfo
+	$selectedComPort = $devicesAfter[0]
+	Write-Host "Setting baud to 1200 for firmware update mode. $ESPTOOL_CMD --baud 1200 --port $selectedComPort chip_id"
+	$b = & $ESPTOOL_CMD "--baud" "1200" "--port" "$selectedComPort" "chip_id"
+	Start-Sleep -Seconds 1
+	Write-Host "Flashing $OTA_FILENAME at $OTA_OFFSET. Write Bluetooth Over The Air Update firmware."
+	Write-Host "$ESPTOOL_CMD" "--baud" "115200" "--port" "$selectedComPortPart2" "write_flash" "$OTA_OFFSET" "$OTA_FILENAME"
+	Write-Host ""
+	& $ESPTOOL_CMD "--baud" "115200" "--port" "$selectedComPortPart2" "write_flash" "$OTA_OFFSET" "$OTA_FILENAME" | Write-Host
 
-		if ($baseName -like '*-update*') {
-			$bat = Join-Path $fi.DirectoryName 'device-update.bat'
-		} else {
-			$bat = Join-Path $fi.DirectoryName 'device-install.bat'
-		}
 
-		$cmd = "$bat -f $baseName -p $selectedComPort"
-		ApplyPatch $SelectedFirmwareFile
-		Write-Progress -Activity " " -Status " " -Completed
-		Write-Host ""
-		Write-Host $cmd
-		Read-Host -Prompt 'Press enter to run that'
-		$destFolder = Split-Path $SelectedFirmwareFile -Parent
-		Push-Location  $destFolder
-		cmd /c $cmd
-		Pop-Location
-		break
-	}
+	Write-Host ""
+	Write-Host ""
+	Write-Host ""
+	Write-Host "Waiting 10 seconds"
+	Start-Sleep -Seconds 10
+	Write-Host "Setting baud to 1200 for firmware update mode. $ESPTOOL_CMD --baud 1200 --port $selectedComPort chip_id"
+	$c = & $ESPTOOL_CMD "--baud" "1200" "--port" "$selectedComPort" "chip_id"
+	Start-Sleep -Seconds 1
+	Write-Host "Flashing $SPIFFS_FILENAME at $SPIFFS_OFFSET. Write Filesystem firmware."
+	Write-Host "$ESPTOOL_CMD" "--baud" "115200" "--port" "$selectedComPortPart2" "write_flash" "$SPIFFS_OFFSET" "$SPIFFS_FILENAME"
+	Write-Host ""
+	& $ESPTOOL_CMD "--baud" "115200" "--port" "$selectedComPortPart2" "write_flash" "$SPIFFS_OFFSET" "$SPIFFS_FILENAME" | Write-Host
+	
+	
+	Write-Host ""
+	Pop-Location
 }
-else {
+
+
+function flashNotESP32 {
+	param(
+		[string] $SelectedFirmwareFile,
+		[string] $selectedComPort
+    )
+	
 	if ($selectedComPort -ne "NA") {
 		Read-Host "Press Enter to put node into Device Firmware Update (DFU) mode via meshtastic --port $selectedComPort --enter-dfu"
 		
@@ -1644,7 +1760,85 @@ else {
 }
 
 
+function InvokeFlash {
+    param(
+        [Parameter(Mandatory)][pscustomobject]$hw      # must expose Architecture, SelectedFirmwareFile, selectedComPort/Drive
+    )
+	Write-Progress -Activity " " -Status " " -Completed
 
+	try {
+		if ($hw.Architecture -like '*esp32*') {
+			flashESP32 -hw $hw
+		}
+		else {
+			flashNotESP32 -SelectedFirmwareFile $hw.FirmwareFile -selectedComPort $hw.ComPort
+		}
+
+		Write-Host "Flash completed."
+	}
+	catch {
+		Write-Warning "Flash failed: $_"
+	}
+	Write-Host ""
+	return ""
+}
+
+
+
+
+# Get release info
+check_requirements
+UpdateReleases
+BuildReleaseMenuData
+$tag = SelectRelease
+DownloadAssets
+UnzipAssets
+
+$hw = GetHW
+
+Write-Host "Selected hardware:   $($hw.DisplayName)"
+Write-Host "  Architecture:      $($hw.Architecture)"
+Write-Host "  Requires DFU:      $($hw.RequiresDfu)"
+Write-Host "  Has Ink HUD:       $($hw.HasInkHud)"
+Write-Host "  Has Meshtastic UI: $($hw.HasMui)"
+Write-Host "  New Firmware:      $($hw.FirmwareFile)"
+Write-Host "  COM Port:          $($hw.ComPort)"
+
+if ($hw.ComPort -ne "NA" -and $hw.Version -ne "--") {
+	MakeConfigBackup $hw.HWNameFile $hw.ComPort
+}
+$again = $true
+while ($again) {
+	$x = InvokeFlash $hw
+	$x
+	
+	if ($hw.Architecture -like 'esp32*') {
+		$choice = Read-Host "`nEverything OK?  [Y]es / [R]etry / change [C]OM port / [E]xit"
+		switch ($choice.ToUpper()) {
+			'Y' { $again = $false }
+			'R' { }                             # loop again with same port
+			'C' { 
+				getallUSBCom | Write-Host
+			
+				$hw.ComPort = Read-Host 'Enter new COM port (e.g. COM7)'; 
+			}
+			default { $again = $false }
+		}
+	}
+	else {
+		$choice = Read-Host "`nEverything OK?  [Y]es / [R]etry / change drive [D]letter / [E]xit"
+		switch ($choice.ToUpper()) {
+			'Y' { $again = $false }
+			'R' { }                             # loop again with same drive
+			'D' { 
+				GetModelFromNode | Write-Host
+						
+				$hw.ComPort = Read-Host 'Enter new drive letter (e.g. E:)\'; 
+			}
+			default { $again = $false }
+		}
+	}
+}
 
    
 # When the user finally hits Enter, the script will exit naturally.
