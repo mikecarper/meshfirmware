@@ -580,7 +580,8 @@ download_assets() {
         select(.name | test("debug"; "i") | not) |
         {name: .name, url: .browser_download_url} | @base64'
 	)
-	
+
+ 	mkdir -p "$DOWNLOAD_DIR"
 	# Search for lingering temporary files in the DOWNLOAD_DIR
 	tmp_files=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -name '*.tmp*')
 	if [ -n "$tmp_files" ]; then
@@ -596,7 +597,6 @@ download_assets() {
 	fi
 
 	StreamOutput=0
-	mkdir -p "$DOWNLOAD_DIR"
 	for asset in "${assets[@]}"; do
 		local decoded asset_name asset_url local_file
 		decoded=$(echo "$asset" | base64 --decode)
