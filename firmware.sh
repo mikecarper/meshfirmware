@@ -580,8 +580,8 @@ download_assets() {
         select(.name | test("debug"; "i") | not) |
         {name: .name, url: .browser_download_url} | @base64'
 	)
-
- 	mkdir -p "$DOWNLOAD_DIR"
+	mkdir -p "$DOWNLOAD_DIR"
+	
 	# Search for lingering temporary files in the DOWNLOAD_DIR
 	tmp_files=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -name '*.tmp*')
 	if [ -n "$tmp_files" ]; then
@@ -747,6 +747,7 @@ detect_device() {
 	else
 		# Multiple devices detected; ensure meshtastic is available.
 		newpath=0
+		source "$HOME/.bashrc"
 		if ! command -v pipx &>/dev/null; then
 			sudo apt -y install pipx
 		fi
@@ -762,6 +763,7 @@ detect_device() {
 
 		
 		declare -a detected_devs menu_options
+		declare -gA seen_dev=()
 		echo "Multiple USB devices detected:"
 		for idx in "${!filtered_device_lines[@]}"; do
 			local device_info search_full detected_dev version
@@ -773,16 +775,23 @@ detect_device() {
 			for link in /dev/serial/by-id/*; do
 				if [[ $(basename "$link") == *"$search_full"* ]]; then
 					detected_dev=$(readlink -f "$link")
-					break
+					if [[ -z ${seen_dev[$detected_dev]+_} ]]; then
+						break
+					fi
+					detected_dev=""
 				fi
 			done
+			
 
 			if [ -z "$detected_dev" ]; then
 				fallback=$(echo "$device_info" | cut -d' ' -f2- | tr ' ' '_')
 				for link in /dev/serial/by-id/*; do
 					if [[ $(basename "$link") == *"$fallback"* ]]; then
 						detected_dev=$(readlink -f "$link")
-						break
+						if [[ -z ${seen_dev[$detected_dev]+_} ]]; then
+							break
+						fi
+						detected_dev=""
 					fi
 				done
 			fi
@@ -792,9 +801,17 @@ detect_device() {
 				for link in /dev/serial/by-id/*; do
 					if [[ $(basename "$link") == *"$third_fallback"* ]]; then
 						detected_dev=$(readlink -f "$link")
-						break
+						if [[ -z ${seen_dev[$detected_dev]+_} ]]; then
+							break
+						fi
+						detected_dev=""
 					fi
 				done
+			fi
+			
+			# mark as taken so later iterations won’t reuse it
+			if [[ -n "$detected_dev" ]]; then 
+				seen_dev["$detected_dev"]=1
 			fi
 
 			detected_devs[idx]="$detected_dev"
@@ -803,6 +820,7 @@ detect_device() {
 				lockedService=$(get_locked_service "$detected_dev")
 				if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
 					spinner
+					#echo "Stopping $lockedService"
 					sudo systemctl stop "$lockedService"
 				fi
 				spinner
@@ -816,6 +834,7 @@ detect_device() {
 
 				if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
 					spinner
+					#echo "Starting $lockedService"
 					sudo systemctl start "$lockedService"
 				fi
 				spinner
