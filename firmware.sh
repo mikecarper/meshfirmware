@@ -1187,11 +1187,11 @@ EOF
 
 check_tty_lock () {
     local dev=$1
-    [[ -e $dev ]] || { echo "error: $dev not found" >&2; return 2; }
+    [[ -e $dev ]] || { return 2; }
 
     # Open the device on fd 3 read-write (<>). Most distros let "dialout"
     # members do this without sudo.
-    exec 3<>"$dev" 2>/dev/null || { echo "error: cannot open $dev" >&2; return 2; }
+    exec 3<>"$dev" 2>/dev/null || { return 2; }
 
     # Try to grab an exclusive, *non-blocking* lock on fd 3.
     if flock -n 3; then         # got the lock. device is FREE
@@ -1223,7 +1223,7 @@ get_locked_service() {
 	fi
 
 	# Get all users locking the device (skip the header line)
-	echo "Finding the service that has $device_name locked"
+	echo "Finding the service that has $device_name locked" > /dev/tty
 	local users
 	if ! command -v lsof &>/dev/null; then
 		sudo apt install -y lsof
