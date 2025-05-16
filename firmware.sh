@@ -749,6 +749,7 @@ detect_device() {
 		newpath=0
 		source "$HOME/.bashrc"
 		if ! command -v pipx &>/dev/null; then
+			echo "Installing pipx"
 			sudo apt -y install pipx
 		fi
 		if ! command -v meshtastic &>/dev/null; then
@@ -1184,6 +1185,28 @@ EOF
 	printf "%s\n" "$abs_script" "$abs_selected" >"${CMD_FILE}"
 }
 
+check_tty_lock () {
+    local dev=$1
+    [[ -e $dev ]] || { echo "error: $dev not found" >&2; return 2; }
+
+    # Open the device on fd 3 read-write (<>). Most distros let "dialout"
+    # members do this without sudo.
+    exec 3<>"$dev" 2>/dev/null || { echo "error: cannot open $dev" >&2; return 2; }
+
+    # Try to grab an exclusive, *non-blocking* lock on fd 3.
+    if flock -n 3; then         # got the lock. device is FREE
+        #echo "FREE"
+        flock -u 3              # immediately unlock
+        exec 3>&-               # close fd
+        return 0
+    else                        # lock failed. someone else holds it
+        #echo "BUSY"
+        exec 3>&-
+        return 1
+    fi
+}
+
+
 get_locked_service() {
 	# If the input contains "-> ", extract the part after it; otherwise, use the whole input.
 	if [[ "$1" == *"-> "* ]]; then
@@ -1194,8 +1217,13 @@ get_locked_service() {
 	# Accept an optional argument for the device; default to /dev/ttyACM0.
 	#local device_name="/dev/ttyACM0"
 	#echo "Device: $device_name"
+	
+	if check_tty_lock "$device_name"; then
+		return 0
+	fi
 
 	# Get all users locking the device (skip the header line)
+	echo "Finding the service that has $device_name locked"
 	local users
 	if ! command -v lsof &>/dev/null; then
 		sudo apt install -y lsof
@@ -1312,6 +1340,10 @@ detect_esp() {
 	fi
 }
 
+list_block_devs() {
+	lsblk -nrpo NAME | sort; 
+}
+
 # Run the firmware update/install script.
 run_update_script() {
 	local cmd user_choice PYTHON ESPTOOL_CMD newpath device_name
@@ -1349,6 +1381,7 @@ run_update_script() {
 	
 		# Ensure pipx & meshtastic are installed.
 	if ! command -v pipx &>/dev/null; then
+		echo "Installing pipx"
 		sudo apt -y install pipx
 	fi
 	if ! command -v meshtastic &>/dev/null; then
@@ -1449,19 +1482,14 @@ run_update_script() {
 
 		while [ $attempt -lt $max_attempts ]; do
 			echo "Setting device into bootloader mode via meshtastic --enter-dfu --port ${device_port_name}"
-			old_output=$(sudo blkid -c /dev/null)
+			old_output=$(list_block_devs)
 
 			meshtastic --enter-dfu --port "${device_port_name}" || true
 			sleep 5
 
-			new_output=$(sudo blkid -c /dev/null)
+			new_output=$(list_block_devs)
 
-			device_id=""
-			while IFS= read -r line; do
-				if ! grep -Fxq "$line" <<<"$old_output"; then
-					device_id=$(echo "$line" | awk '{print $1}' | tr -d ':')
-				fi
-			done <<<"$new_output"
+			device_id=$(comm -13 <(echo "$old_output") <(echo "$new_output") | head -n 1)
 
 			if [ -n "$device_id" ]; then
 				break # New block device found, exit the loop.
