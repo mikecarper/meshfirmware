@@ -142,7 +142,7 @@ update_releases() {
 		# If we don't have a cache file or it's older than our timeout, attempt an update.
 		if [ ! -f "$RELEASES_FILE" ] || [ "$(date +%s)" -ge "$(($(stat -c %Y "$RELEASES_FILE") + CACHE_TIMEOUT_SECONDS))" ]; then
 			mkdir -p "$FIRMWARE_ROOT"
-			echo "Updating release cache from GitHub..."
+			echo "Updating release cache from GitHub. $RELEASES_FILE $GITHUB_API_URL"
 
 			# Download into a temp file first
 			tmpfile=$(mktemp)
@@ -153,10 +153,11 @@ update_releases() {
 			}
 
 			# Check if the newly downloaded file is valid JSON
-			if ! jq -e . "$tmpfile" >/dev/null 2>&1; then
-				echo "Downloaded file is not valid JSON. Aborting."
+			if ! errmsg=$(jq -e . "$tmpfile" 2>&1 >/dev/null); then
+				echo "Downloaded file is not valid JSON:"
+				echo "$errmsg"
 				rm -f "$tmpfile"
-				return
+				return 1
 			fi
 
 			# Filter out "download_count" keys from the JSON.
@@ -205,7 +206,7 @@ update_bleota() {
 		# If we don't have a cache file or it's older than our timeout, attempt an update.
 		if [ ! -f "$BLEOTA_FILE" ] || [ "$(date +%s)" -ge "$(($(stat -c %Y "$BLEOTA_FILE") + CACHE_TIMEOUT_SECONDS))" ]; then
 			mkdir -p "$FIRMWARE_ROOT"
-			echo "Checking if bluetooth over the air bin files from GitHub needs to be updated..."
+			echo "Checking if bluetooth over the air bin files from GitHub needs to be updated. $BLEOTA_FILE $REPO_API_URL"
 
 			# Download into a temp file first
 			tmpfile=$(mktemp)
@@ -216,10 +217,11 @@ update_bleota() {
 			}
 			
 			# Check if the newly downloaded file is valid JSON
-			if ! jq -e . "$tmpfile" >/dev/null 2>&1; then
-				echo "Downloaded file is not valid JSON. Aborting."
+			if ! errmsg=$(jq -e . "$tmpfile" 2>&1 >/dev/null); then
+				echo "Downloaded file is not valid JSON:"
+				echo "$errmsg"
 				rm -f "$tmpfile"
-				return
+				return 1
 			fi
 			
 			# Use the filtered JSON for further processing.
@@ -303,7 +305,7 @@ update_bleota() {
 update_hardware_list() {
 	# Check if RESOURCES_FILE exists and is newer than 6 hours; if not, download it.
 	if [ ! -f "$RESOURCES_FILE" ] || [ "$(find "$RESOURCES_FILE" -mmin +360)" ]; then
-		echo "Downloading resources.ts from GitHub..."
+		echo "Downloading resources.ts from GitHub. $RESOURCES_FILE $WEB_HARDWARE_LIST_URL"
 		mkdir -p "$(dirname "$RESOURCES_FILE")"
 		curl -s -L "$WEB_HARDWARE_LIST_URL" -o "$RESOURCES_FILE"
 	fi
@@ -614,7 +616,7 @@ download_assets() {
 				StreamOutput=0
 			fi
 			tmp_file=$(mktemp --tmpdir="$DOWNLOAD_DIR" "${asset_name}.tmp.XXXXXX")
-			echo "Downloading $asset_name..."
+			echo "Downloading $asset_name $asset_url"
 			if curl -SL --progress-bar -o "$tmp_file" "$asset_url"; then
 			    mv "$tmp_file" "$local_file"
 			else
@@ -1438,7 +1440,7 @@ run_update_script() {
 	echo "Making a backup of the configuration."
 	basename_device_port_name="$(basename "$device_port_name")"
 	backup_config_name="config_backup.${architecture}.${device_name}.${basename_device_port_name}.$(date +%s).yaml"
-	backup_config_name_sanitized=$(echo "$backup_config_name" | tr '/' '_')
+	backup_config_name_sanitized=$(echo "$backup_config_name" | tr '/' '_' | tr ' ' '_')
 	while true; do
 		if meshtastic --port "${device_port_name}" --export-config > "${backup_config_name_sanitized}"; then
 			echo "Backup configuration created: ${backup_config_name_sanitized}"
