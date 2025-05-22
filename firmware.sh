@@ -139,6 +139,16 @@ check_internet() {
 # Update the GitHub release cache if needed.
 update_releases() {
 	if check_internet; then
+		# Ensure jq is present
+		if ! command -v jq >/dev/null 2>&1; then
+		    echo "jq not found – installing…"
+		    if ! sudo apt-get -y install jq; then         # first try: install directly
+		        echo "Package lists may be stale; updating and retrying…"
+		        sudo apt-get update
+		        sudo apt-get -y install jq
+		    fi
+		fi
+
 		# If we don't have a cache file or it's older than our timeout, attempt an update.
 		if [ ! -f "$RELEASES_FILE" ] || [ "$(date +%s)" -ge "$(($(stat -c %Y "$RELEASES_FILE") + CACHE_TIMEOUT_SECONDS))" ]; then
 			mkdir -p "$FIRMWARE_ROOT"
