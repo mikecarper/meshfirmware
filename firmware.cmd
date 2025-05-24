@@ -74,7 +74,7 @@ $cleanupFiles = @(
 # delete any that exist
 foreach ($f in $cleanupFiles) {
     if (Test-Path $f) {
-        Remove-Item $f -Force -ErrorAction SilentlyContinue
+        Remove-Item $f -Force -ErrorAction Ignore | Out-Null
     }
 }
 
@@ -706,9 +706,9 @@ function UpdateReleases {
 		$newMd5 = Get-FileHash $filteredTmp -Algorithm MD5
 		if ($oldMd5.Hash -ne $newMd5.Hash) {
 			Write-Progress -Activity "Release data changed. Updating cache and removing cached version lists. $($oldMd5.Hash) $($newMd5.Hash)"
-			Remove-Item $RELEASES_FILE
+			Remove-Item $RELEASES_FILE -ErrorAction Ignore | Out-Null
 			Move-Item $filteredTmp $RELEASES_FILE
-			Remove-Item $VERSIONS_TAGS_FILE, $VERSIONS_LABELS_FILE | Out-Null
+			Remove-Item $VERSIONS_TAGS_FILE, $VERSIONS_LABELS_FILE -ErrorAction Ignore | Out-Null
 		} else {
 			Write-Progress -Activity "Release data is unchanged. $($oldMd5.Hash) $($newMd5.Hash)"
 			
