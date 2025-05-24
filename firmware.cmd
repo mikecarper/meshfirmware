@@ -108,7 +108,7 @@ function FormatSize {
 
 
 function GetPortablePython {
-	$rel    = Invoke-RestMethod -Uri $PORTABLE_PYTHON_URL
+	$rel    = Invoke-RestMethod -Uri $PORTABLE_PYTHON_URL -Headers @{ 'User-Agent' = 'PowerShell' } -ErrorAction Stop
 
 	# pick the newest 64-bit portable ZIP (e.g. Winpython64-3.13.3.0dot.zip)
 	$asset  = $rel.assets |
@@ -126,9 +126,11 @@ function GetPortablePython {
 		New-Item -ItemType Directory -Path $FIRMWARE_ROOT -Force | Out-Null
 	}
 	
-	Write-Host "Downloading $($asset.name) $($asset.browser_download_url) $target"
-	Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $target -UseBasicParsing
-
+	if (-not (Test-Path $target) -or ((Get-Item $target).Length -eq 0)) {
+		Write-Host "Downloading $($asset.name) $($asset.browser_download_url) $target"
+		Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $target -UseBasicParsing -Headers @{ 'User-Agent' = 'PowerShell' } -ErrorAction Stop
+	}
+	
 	# 1) unzip to a temp workspace
 	$tempDir = Join-Path $env:TEMP ("wpytmp_" + [guid]::NewGuid())
 	Expand-Archive -LiteralPath $target -DestinationPath $tempDir -Force
@@ -291,12 +293,11 @@ function check_requirements() {
 		Write-Host "Meshtastic is not installed. Installing..."
 
 		# Install or upgrade meshtastic using pip3
-		& $pythonCommand -m pip install --upgrade "meshtastic[cli]"
-		Write-Host "Meshtastic installed/updated successfully."
+		& $pythonCommand -m pip install --upgrade --no-warn-script-location "meshtastic[cli]"
 	}
 	else {
 		Write-Progress -Activity "Update meshtastic command line tool"
-		& $pythonCommand -m pip install --upgrade "meshtastic[cli]" | out-null
+		& $pythonCommand -m pip install --upgrade --no-warn-script-location "meshtastic[cli]" | out-null
 	}
 	
 	# Check if esptool is installed
@@ -306,12 +307,11 @@ function check_requirements() {
 		Write-Host "esptool is not installed. Installing..."
 
 		# Install or upgrade esptool using pip3
-		& $pythonCommand -m pip install --upgrade "esptool[cli]"
-		Write-Host "esptool installed/updated successfully."
+		& $pythonCommand -m pip install --upgrade --no-warn-script-location "esptool"
 	}
 	else {
 		Write-Progress -Activity "Update esptool command line tool"
-		& $pythonCommand -m pip install --upgrade "esptool" | out-null
+		& $pythonCommand -m pip install --upgrade --no-warn-script-location "esptool" | out-null
 	}
 
 	Write-Progress -Activity " " -Status " " -Completed
