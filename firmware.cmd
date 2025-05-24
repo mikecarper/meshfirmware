@@ -1,7 +1,12 @@
-# 2>NUL & @powershell -nop -ep bypass "(gc '%~f0')-join[Environment]::NewLine|iex" && @EXIT /B 0
+# 2>NUL & @powershell -nop -ep bypass "(gc '%~f0')-join[Environment]::NewLine|iex" & goto :eof
 
 #Example execute:
 # powershell -ExecutionPolicy ByPass -File c:\git\meshfirmware\firmware.ps1
+
+# Typical defaults: gray text on a dark-blue (or black) background
+$Host.UI.RawUI.ForegroundColor = 'Gray'
+$Host.UI.RawUI.BackgroundColor = 'Black'    # or 'DarkBlue' if you prefer
+
 
 Write-Host ""
 Write-Host ""
@@ -12,38 +17,39 @@ Write-Host ""
 $scriptOver = $false
 
 # Register a Ctrl-C handler:
-$null = Register-ObjectEvent -InputObject ([System.Console]) `
-    -EventName CancelKeyPress -Action {
-        # $EventArgs is in scope here:
-        $EventArgs.Cancel = $true
-        
-        if (-not $scriptOver) {
-            # First Ctrl-C press: prompt user
-            Write-Host "`nCaught Ctrl-C." -ForegroundColor Yellow
-            $scriptOver = $true
-            Read-Host "Press Enter to exit (via Ctrl-C)"
-        } else {
-            # Second Ctrl-C press: exit without prompt
-            Write-Host "`nExiting script..." -ForegroundColor Red
-            exit
-        }
-    }
+$null = Register-ObjectEvent -InputObject ([System.Console]) -EventName CancelKeyPress -Action {
+	# $EventArgs is in scope here:
+	$EventArgs.Cancel = $true
+	
+	if (-not $scriptOver) {
+		# First Ctrl-C press: prompt user
+		Write-Host "`nCaught Ctrl-C." -ForegroundColor Yellow
+		$scriptOver = $true
+		Read-Host "Press Enter to exit (via Ctrl-C)"
+	} else {
+		# Second Ctrl-C press: exit without prompt
+		Write-Host "`nExiting script..." -ForegroundColor Red
+		exit
+	}
+}
 
 $ScriptPath = $PSScriptRoot
 if ([string]::IsNullOrEmpty($ScriptPath)) {
     $ScriptPath = (Get-Location).Path
 }
 
+$pythonCommand = ""
 $timeoutMeshtastic = 10 # Timeout duration in seconds
 $baud = 1200 # 115200
 $CACHE_TIMEOUT_SECONDS=6 * 3600 # 6 hours
 
-
         $GITHUB_API_URL="https://api.github.com/repos/meshtastic/firmware/releases"
           $REPO_API_URL="https://api.github.com/repos/meshtastic/meshtastic.github.io/contents"
  $WEB_HARDWARE_LIST_URL="https://raw.githubusercontent.com/meshtastic/web-flasher/refs/heads/main/public/data/hardware-list.json"
+   $PORTABLE_PYTHON_URL="https://api.github.com/repos/winpython/winpython/releases/latest"
  
          $FIRMWARE_ROOT="${ScriptPath}\meshtastic_firmware"
+   $PORTABLE_PYTHON_DIR="${ScriptPath}\meshtastic_firmware\winpython"
           $DOWNLOAD_DIR="${ScriptPath}\meshtastic_firmware\downloads"
          $RELEASES_FILE="${ScriptPath}\meshtastic_firmware\releases.json"
          $HARDWARE_LIST="${ScriptPath}\meshtastic_firmware\hardware-list.json"
@@ -101,6 +107,46 @@ function FormatSize {
 }
 
 
+function GetPortablePython {
+	# GitHub insists on a User-Agent header
+	$rel    = Invoke-RestMethod -Uri $PORTABLE_PYTHON_URL
+
+	# pick the newest 64-bit portable ZIP (e.g. Winpython64-3.13.3.0dot.zip)
+	$asset  = $rel.assets |
+			  Where-Object  { $_.name -match 'Winpython64-.*dot\.zip$' } |
+			  Sort-Object   -Property name -Descending |
+			  Select-Object -First 1
+
+	if (-not $asset) {
+		throw "No matching zip found in the latest release of $repo."
+	}
+
+	$target = Join-Path $FIRMWARE_ROOT $asset.name
+	Write-Host "Downloading $($asset.name) $($asset.browser_download_url) $target"
+	Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $target -UseBasicParsing
+
+	# 1) unzip to a temp workspace
+	$tempDir = Join-Path $env:TEMP ("wpytmp_" + [guid]::NewGuid())
+	Expand-Archive -LiteralPath $target -DestinationPath $tempDir -Force
+
+	# 2) locate license.txt ***inside the extracted tree***
+	$license = Get-ChildItem -Path $tempDir -Recurse -Filter license.txt `
+			  | Select-Object -First 1
+	if (-not $license) {
+		Remove-Item $tempDir -Recurse -Force
+		throw "license.txt not found in the WinPython zip aborting."
+	}
+
+	$zipRootDir = $license.Directory.FullName    # 'level where license.txt is found'
+
+	# 3) make final destination & move contents
+	New-Item -ItemType Directory -Path $PORTABLE_PYTHON_DIR -Force | Out-Null
+	Move-Item -Path (Join-Path $zipRootDir '*') -Destination $PORTABLE_PYTHON_DIR -Force
+
+	# 4) clean up the temp workspace
+	Remove-Item $tempDir -Recurse -Force
+}
+
 # Function to fetch the latest stable Python version from GitHub
 function Get-LatestPythonVersion {
     $url = "https://api.github.com/repos/actions/python-versions/releases/latest"
@@ -141,26 +187,67 @@ function get_esptool_cmd() {
 	return $ESPTOOL_CMD
 }
 
-function run_cmd($ESPTOOL_CMD) {
-    # Create two temporary files for capturing standard output and error
-    $tempOutputFile = Join-Path -Path $ScriptPath -ChildPath "esptool_output.txt"
-    $tempErrorFile = Join-Path -Path $ScriptPath -ChildPath "esptool_error.txt"
+if (-not ([type]::GetType('NativeMethods', $false))) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class NativeMethods {
+    [DllImport("shell32.dll", SetLastError = true)]
+    public static extern IntPtr CommandLineToArgvW(
+        [MarshalAs(UnmanagedType.LPWStr)] string lpCmdLine,
+        out int pNumArgs);
 
-    # Ensure we split the command and arguments properly into an array
-    $commandParts = $ESPTOOL_CMD.Split(" ")
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr LocalFree(IntPtr hMem);
+}
+'@
+}
 
-    # Start the process and capture both standard output and error to separate files
-    Start-Process -FilePath $commandParts[0] -ArgumentList $commandParts[1..$commandParts.Length] -PassThru -Wait -NoNewWindow -RedirectStandardOutput $tempOutputFile -RedirectStandardError $tempErrorFile | out-null
+function Split-CommandLine {
+    param([string]$cmd)
 
-    # Get the content of both the output and error files
-    $content = Get-Content $tempOutputFile
+    [int]   $argc = 0
+    [IntPtr]$argv = [NativeMethods]::CommandLineToArgvW($cmd, [ref]$argc)
+    if ($argv -eq [IntPtr]::Zero) { throw "Cannot parse: $cmd" }
 
-    # Clean up the temporary files
-    Remove-Item $tempOutputFile -Force
-    Remove-Item $tempErrorFile -Force
+    try {
+        # Copy the unmanaged pointer array into a managed IntPtr[]
+        $ptrArr = New-Object IntPtr[] $argc
+        [Runtime.InteropServices.Marshal]::Copy($argv, $ptrArr, 0, $argc)
 
-    # Return only the filtered content
-    return $content
+        # Convert each pointer to a managed string
+        $ptrArr | ForEach-Object {
+            [Runtime.InteropServices.Marshal]::PtrToStringUni($_)
+        }
+    }
+    finally {
+        [NativeMethods]::LocalFree($argv) | Out-Null
+    }
+}
+
+function run_cmd {
+    param(
+        [Parameter(Mandatory)][string] $CommandLine,
+        [switch] $Stream          # -Stream → live to console
+    )
+	
+
+    # --- split exe + args -----------------------------------------------
+    $parts = Split-CommandLine $CommandLine
+    $exe   = $parts[0]
+    $args  = if ($parts.Count -gt 1) { $parts[1..($parts.Count-1)] } else { @() }
+	Write-Progress -Activity "$exe" -Status "$args"
+
+    # --- stream or capture ----------------------------------------------
+    if ($Stream) {
+        & $exe @args 2>&1 | Write-Host
+		Write-Progress -Activity " " -Status " " -Completed
+        return
+    }
+
+    $output = & $exe @args 2>&1 | Out-String   # capture as ONE string
+	Write-Progress -Activity " " -Status " " -Completed
+    return $output.TrimEnd()
 }
 
 
@@ -171,84 +258,58 @@ function check_requirements() {
 		$global:pythonCommand = "python"
 	}
 	else {
-		# -------- 1.  Discover latest stable Windows x64 installer --------
-		$dlPage = Invoke-WebRequest -Uri 'https://www.python.org/downloads/windows/' -UseBasicParsing
-		$fullUrl = ""
-		foreach ($x in $dlPage.Links) {
-			if ($x.href -like "*-amd64.exe" -and $x.href -notlike "*-arm64.exe" -and $x.href -notlike "*-webinstall.exe") {
-				$fullUrl = $x.href
-				break
+		$testPythonCommand = "$PORTABLE_PYTHON_DIR\python\python.exe"
+		if (Test-Path -Path $testPythonCommand -PathType Leaf) {
+			$null = & $testPythonCommand --version 2>$null
+			if ($LASTEXITCODE -eq 0) {
+				$global:pythonCommand = $testPythonCommand
 			}
 		}
+		if ([string]::IsNullOrWhiteSpace($global:pythonCommand)) {
+			GetPortablePython
 
-		# pull the version out of the URL for logging
-		if ($fullUrl -match 'python\-([\d\.]+)\-amd64\.exe') { $latestVersion = $Matches[1] }
-
-		Write-Host "Python not found - Downloading $fullUrl"
-
-		# -------- 2.  Download --------
-		$installer = Join-Path $env:TEMP ("python-$latestVersion-amd64.exe")
-		Invoke-WebRequest -Uri $fullUrl -OutFile $installer -UseBasicParsing
-
-		# -------- 3.  Install --------
-		Write-Host "Running installer (this may need UAC elevation)" -ForegroundColor Cyan
-		$installArgs = '/InstallAllUsers=1 PrependPath=1 Include_test=0'
-		$proc = Start-Process -FilePath $installer -ArgumentList $installArgs -PassThru -Wait
-		if ($proc.ExitCode -ne 0) {
-			Write-Host "Installer returned exit code $($proc.ExitCode)"
-			exit
+			$testPythonCommand = "$PORTABLE_PYTHON_DIR\python\python.exe"
+			
+			$null = & $testPythonCommand --version 2>$null
+			if ($LASTEXITCODE -eq 0) {
+				$global:pythonCommand = $testPythonCommand
+			}
 		}
-
-		# -------- 4.  Verify --------
-		$env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' +
-					[System.Environment]::GetEnvironmentVariable('Path','User')
-		$ver = & python --version
-		Write-Host "Success! $ver is now available in PATH."
-
 	}
+	Write-Progress -Activity "Update pip command line tool"
+	& $pythonCommand -m ensurepip --upgrade *> $null
+    & $pythonCommand -m pip install --upgrade pip *> $null
 
 	# Check if meshtastic is installed
-	$meshtasticCommand = Get-Command meshtastic -ErrorAction SilentlyContinue
-	if (-not $meshtasticCommand) {
+	& $pythonCommand -m pip show meshtastic *> $null
+	$meshtasticInstalled = ($LASTEXITCODE -eq 0)
+	if (-not $meshtasticInstalled) {
 		Write-Host "Meshtastic is not installed. Installing..."
 
-		# Check if pip3 is installed
-		$pip3Command = Get-Command pip3 -ErrorAction SilentlyContinue
-		if (-not $pip3Command) {
-			Write-Host "pip3 is not installed. Installing pip3..."
-			# Download the get-pip.py script
-			$getPipUrl = "https://bootstrap.pypa.io/get-pip.py"
-			$getPipScriptPath = "$env:TEMP\get-pip.py"
-			Invoke-WebRequest -Uri $getPipUrl -OutFile $getPipScriptPath
-
-			# Run the script to install pip3
-			python $getPipScriptPath
-
-			# Clean up the get-pip.py script
-			Remove-Item $getPipScriptPath
-		}
-
 		# Install or upgrade meshtastic using pip3
-		pip3 install --upgrade "meshtastic[cli]"
+		& $pythonCommand -m pip install --upgrade "meshtastic[cli]"
 		Write-Host "Meshtastic installed/updated successfully."
 	}
 	else {
 		Write-Progress -Activity "Update meshtastic command line tool"
-		pip3 install --upgrade "meshtastic[cli]" | out-null
+		& $pythonCommand -m pip install --upgrade "meshtastic[cli]" | out-null
 	}
 	
-	$null = & python -m patch --version 2>$null
-	if ($LASTEXITCODE -ne 0) {
-		pip3 install --upgrade "patch"
-		Write-Host "patch installed/updated successfully."
+	# Check if esptool is installed
+	& $pythonCommand -m pip show esptool *> $null
+	$meshtasticInstalled = ($LASTEXITCODE -eq 0)
+	if (-not $meshtasticInstalled) {
+		Write-Host "esptool is not installed. Installing..."
+
+		# Install or upgrade esptool using pip3
+		& $pythonCommand -m pip install --upgrade "esptool[cli]"
+		Write-Host "esptool installed/updated successfully."
 	}
 	else {
-		Write-Progress -Activity "Update patch command line tool"
-		pip3 install --upgrade "patch" | out-null
+		Write-Progress -Activity "Update esptool command line tool"
+		& $pythonCommand -m pip install --upgrade "esptool" | out-null
 	}
 
-	Write-Progress -Activity "Update pip command line tool"
-	& python -m pip install --upgrade pip *> $null
 	Write-Progress -Activity " " -Status " " -Completed
 }
 
@@ -290,8 +351,8 @@ function runMeshtasticCommand($selectedComPort, $command) {
 
 	# Start the meshtastic process with a hidden window and capture the process ID
 	#Write-Host "Running meshtastic command on port $selectedComPort"
-	Write-Progress -Activity "running meshtastic --port $selectedComPort $command"
-	$process = Start-Process "meshtastic" -ArgumentList "--port $selectedComPort $command" -PassThru -WindowStyle Hidden -RedirectStandardOutput $tempOutputFile -RedirectStandardError $tempErrorFile
+	Write-Progress -Activity "running $pythonCommand -m meshtastic --port $selectedComPort $command"
+	$process = Start-Process "$pythonCommand" -ArgumentList " -m meshtastic --port $selectedComPort $command" -PassThru -WindowStyle Hidden -RedirectStandardOutput $tempOutputFile -RedirectStandardError $tempErrorFile
 	$processWait = $process.WaitForExit($timeoutMeshtastic * 1000)  # Timeout is in milliseconds
 	
 	
@@ -478,6 +539,16 @@ function getUsbComDevices() {
 			$deviceInfo = "Timed Out"
 		}
 		
+		#if ($deviceInfo -eq "Timed Out") {
+		#	$ESPTOOL_CMD = get_esptool_cmd
+		#	$output = run_cmd "$ESPTOOL_CMD --baud 115200 --port $($_.drive_letter) chip_id"
+		#	Write-Host $output
+		#	Write-Progress -Status "Checking USB Devices" -Activity "Checking for meshtastic on $($_.drive_letter)"
+		#	Start-Sleep -Seconds 5
+		#	$deviceInfo = getMeshtasticNodeInfo $_.drive_letter
+		#}
+		
+		
 		if ($deviceInfo -eq "Timed Out") {
 			$usbComDevices += [PSCustomObject]@{
 				COMPort           = $_.drive_letter
@@ -650,7 +721,7 @@ function UpdateReleases {
 	}
 }
 
-function UpdateHardwareList {    
+function UpdateHardwareList {
     # Check if the file exists and if it's older than 6 hours
     if (-not (Test-Path $HARDWARE_LIST) -or ((Get-Date) - (Get-Item $HARDWARE_LIST).LastWriteTime).TotalMinutes -gt 360) {
         Write-Progress -Activity "Downloading resources.ts from GitHub..."
@@ -723,9 +794,9 @@ function BuildReleaseMenuData {
     }
 
     # Check if any subdirectory name in FIRMWARE_ROOT (skip "downloads") is not in the tag_names from above.
-    Get-ChildItem -Path $FIRMWARE_ROOT | ForEach-Object {
+    Get-ChildItem -Path $FIRMWARE_ROOT -Directory | ForEach-Object {
         $folder = $_
-        if ($folder.PSIsContainer -and $folder.Name -ne "downloads") {
+        if ($folder.PSIsContainer -and $folder.Name -ne "downloads" -and $folder.Name -ne "winpython") {
             $folderName = $folder.Name.ToLower()
 
             if ($folderName -match "^v") {
@@ -1107,9 +1178,9 @@ function MakeConfigBackup {
 	while ($true) {
 		try {
 			# Run the meshtastic command and redirect output to the backup config file
-			Write-Host "Running meshtastic --port $selectedComPort --export-config > $backupConfigName"
+			Write-Host "Running -m meshtastic meshtastic --port $selectedComPort --export-config > $backupConfigName"
 			# Start the Meshtastic process and redirect both stdout and stderr to the backup config file
-			$process = Start-Process -FilePath "meshtastic" -ArgumentList "--port $selectedComPort --export-config" -PassThru -Wait -NoNewWindow -RedirectStandardOutput "$backupConfigName" -RedirectStandardError "$backupConfigName.error"
+			$process = Start-Process -FilePath "$pythonCommand" -ArgumentList " -m meshtastic --port $selectedComPort --export-config" -PassThru -Wait -NoNewWindow -RedirectStandardOutput "$backupConfigName" -RedirectStandardError "$backupConfigName.error"
 
 			# Check if the file has been created and output the file size
 			if (Test-Path "$backupConfigName") {
@@ -1588,15 +1659,56 @@ function updateFlashViaEspTool {
 	Write-Host ""
 	Write-Host ""
 	Write-Host ""
-	Write-Host "Setting baud to 1200 for firmware update mode. $ESPTOOL_CMD --baud 1200 --port $selectedComPort chip_id"
-	$a = & $ESPTOOL_CMD "--baud" "1200" "--port" "$selectedComPort" "chip_id"
-	Start-Sleep -Seconds 1
+
+
+	$attempt      = 0          # counter for Write-Progress
+	$delaySeconds = 3          # pause between retries
+
+	# Wake up port
+	while ($true) {
+		$attempt++
+
+		if ($attempt -gt 5) {
+			Write-Progress -Status "Unplug and replug the device" -Activity "Waiting for $selectedComPort. Attempt: $attempt"
+		}
+		else {
+			Write-Progress -Status "Putting device into 1200 baud update mode" -Activity "Waiting for $selectedComPort. Attempt: $attempt"
+		}
+
+		# run esptool and capture *all* output
+		$output = run_cmd "$ESPTOOL_CMD --baud 1200 --port $selectedComPort chip_id"
+
+		if ($output -match 'device attached to the system is not') {
+			if ($attempt -eq 5) {
+				Write-Host $output             # echo the error so the user sees it
+				Write-Warning "Turn on the screen on the device"
+				Write-Warning "Unplug and repug the device"
+				
+				[console]::Beep()
+				Read-Host "Press enter to Continue"
+
+			}
+			Start-Sleep -Seconds $delaySeconds
+			
+			$devicesAfter = getUSBComPort -SkipInfo
+			$selectedComPort = $devicesAfter[0]
+			
+			continue
+		}
+			
+		Write-Progress -Completed -Activity " " -Status "Port ready after $attempt attempt(s)"
+		#Write-Host $output
+		break       
+	}
+
+		
+	Start-Sleep -Seconds 12
 	$devicesAfter = getUSBComPort -SkipInfo
 	$selectedComPortPart2 = $devicesAfter[0]
 	Write-Host "Flashing $SelectedFirmwareFile at 0x10000. Write Meshtastic Firmware."
-	Write-Host "$ESPTOOL_CMD" "--baud" "115200" "--port" "$selectedComPortPart2" "write_flash" "0x10000" "$SelectedFirmwareFile"
+	Write-Host "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 write_flash 0x10000 $SelectedFirmwareFile"
 	Write-Host ""
-	& $ESPTOOL_CMD "--baud" "115200" "--port" "$selectedComPortPart2" "write_flash" "0x10000" "$SelectedFirmwareFile" | Write-Host
+	run_cmd "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 write_flash 0x10000 $SelectedFirmwareFile" -Stream
 
 	
 	Write-Host ""
@@ -1665,48 +1777,48 @@ function installFlashViaEspTool {
 	Write-Host ""
 	Write-Host ""
 	Write-Host "Setting baud to 1200 for firmware update mode. $ESPTOOL_CMD --baud 1200 --port $selectedComPort chip_id"
-	$a = & $ESPTOOL_CMD "--baud" "1200" "--port" "$selectedComPort" "chip_id"
+	$a = run_cmd "$ESPTOOL_CMD --baud 1200 --port $selectedComPort chip_id"
 	Start-Sleep -Seconds 1
 	$devicesAfter = getUSBComPort -SkipInfo
 	$selectedComPortPart2 = $devicesAfter[0]
 	Write-Host "Erasing the flash."
 	Write-Host "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 erase_flash"
-	& $ESPTOOL_CMD "--baud" "115200" "--port" "$selectedComPortPart2" "erase_flash" | Write-Host
+	run_cmd "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 erase_flash" -Stream
 	Write-Host ""
 	Write-Host "Flashing $SelectedFirmwareFile at 0x00. Write Meshtastic Firmware."
-	Write-Host "$ESPTOOL_CMD" "--baud" "115200" "--port" "$selectedComPortPart2" "write_flash" "0x00" "$SelectedFirmwareFile"
+	Write-Host "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 write_flash 0x00 $SelectedFirmwareFile"
 	Write-Host ""
-	& $ESPTOOL_CMD "--baud" "115200" "--port" "$selectedComPortPart2" "write_flash" "0x00" "$SelectedFirmwareFile" | Write-Host
+	run_cmd "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 write_flash 0x00 $SelectedFirmwareFile" -Stream
 
 
 	Write-Host ""
 	Write-Host ""
 	Write-Host ""
-	Write-Host "Waiting 10 seconds"
-	Start-Sleep -Seconds 10
+	Write-Host "Waiting 12 seconds"
+	Start-Sleep -Seconds 12
 	$devicesAfter = getUSBComPort -SkipInfo
 	$selectedComPort = $devicesAfter[0]
 	Write-Host "Setting baud to 1200 for firmware update mode. $ESPTOOL_CMD --baud 1200 --port $selectedComPort chip_id"
-	$b = & $ESPTOOL_CMD "--baud" "1200" "--port" "$selectedComPort" "chip_id"
+	$b = run_cmd "$ESPTOOL_CMD --baud 1200 --port $selectedComPort chip_id"
 	Start-Sleep -Seconds 1
 	Write-Host "Flashing $OTA_FILENAME at $OTA_OFFSET. Write Bluetooth Over The Air Update firmware."
-	Write-Host "$ESPTOOL_CMD" "--baud" "115200" "--port" "$selectedComPortPart2" "write_flash" "$OTA_OFFSET" "$OTA_FILENAME"
+	Write-Host "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 write_flash $OTA_OFFSET $OTA_FILENAME"
 	Write-Host ""
-	& $ESPTOOL_CMD "--baud" "115200" "--port" "$selectedComPortPart2" "write_flash" "$OTA_OFFSET" "$OTA_FILENAME" | Write-Host
+	run_cmd "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 write_flash $OTA_OFFSET $OTA_FILENAME" -Stream
 
 
 	Write-Host ""
 	Write-Host ""
 	Write-Host ""
-	Write-Host "Waiting 10 seconds"
-	Start-Sleep -Seconds 10
+	Write-Host "Waiting 12 seconds"
+	Start-Sleep -Seconds 12
 	Write-Host "Setting baud to 1200 for firmware update mode. $ESPTOOL_CMD --baud 1200 --port $selectedComPort chip_id"
-	$c = & $ESPTOOL_CMD "--baud" "1200" "--port" "$selectedComPort" "chip_id"
+	$c = run_cmd "$ESPTOOL_CMD --baud 1200 --port $selectedComPort chip_id"
 	Start-Sleep -Seconds 1
 	Write-Host "Flashing $SPIFFS_FILENAME at $SPIFFS_OFFSET. Write Filesystem firmware."
 	Write-Host "$ESPTOOL_CMD" "--baud" "115200" "--port" "$selectedComPortPart2" "write_flash" "$SPIFFS_OFFSET" "$SPIFFS_FILENAME"
 	Write-Host ""
-	& $ESPTOOL_CMD "--baud" "115200" "--port" "$selectedComPortPart2" "write_flash" "$SPIFFS_OFFSET" "$SPIFFS_FILENAME" | Write-Host
+	run_cmd "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 write_flash $SPIFFS_OFFSET $SPIFFS_FILENAME" -Stream
 	
 	
 	Write-Host ""
@@ -1721,7 +1833,7 @@ function flashNotESP32 {
     )
 	
 	if ($selectedComPort -ne "NA") {
-		Read-Host "Press Enter to put node into Device Firmware Update (DFU) mode via meshtastic --port $selectedComPort --enter-dfu"
+		Read-Host "Press Enter to put node into Device Firmware Update (DFU) mode via $pythonCommand -m meshtastic --port $selectedComPort --enter-dfu"
 		
 		$before = Get-PSDrive -PSProvider FileSystem | Select-Object -ExpandProperty Name
 		
@@ -1782,8 +1894,6 @@ function InvokeFlash {
 	Write-Host ""
 	return ""
 }
-
-
 
 
 # Get release info
