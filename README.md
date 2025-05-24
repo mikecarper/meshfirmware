@@ -6,6 +6,14 @@ The CMD and Bash script automates the process of selecting, downloading, and app
 Make sure file is named firmware.cmd and not firmware.cmd.txt  
 double click and run the file firmware.cmd
 
+Windows Video
+-----
+
+https://github.com/user-attachments/assets/ab68cb5e-63d5-4c73-ac4a-fdb76702fb20
+
+
+
+
 # Linux Quick start
 Copy and run this in your linux terminal 
 ```bash
@@ -25,7 +33,7 @@ chmod +x firmware.sh
 </details>
 
 
-Video
+Linux Video
 -----
 
 https://github.com/user-attachments/assets/06fc7b59-ed03-44d7-a4d1-a0492dec5d16
