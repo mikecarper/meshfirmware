@@ -108,7 +108,6 @@ function FormatSize {
 
 
 function GetPortablePython {
-	# GitHub insists on a User-Agent header
 	$rel    = Invoke-RestMethod -Uri $PORTABLE_PYTHON_URL
 
 	# pick the newest 64-bit portable ZIP (e.g. Winpython64-3.13.3.0dot.zip)
@@ -122,6 +121,11 @@ function GetPortablePython {
 	}
 
 	$target = Join-Path $FIRMWARE_ROOT $asset.name
+	# make sure the directory exists
+	if (-not (Test-Path $FIRMWARE_ROOT)) {
+		New-Item -ItemType Directory -Path $FIRMWARE_ROOT -Force | Out-Null
+	}
+	
 	Write-Host "Downloading $($asset.name) $($asset.browser_download_url) $target"
 	Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $target -UseBasicParsing
 
