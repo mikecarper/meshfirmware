@@ -7,10 +7,29 @@ cd ~ && wget -qO - https://raw.githubusercontent.com/mikecarper/meshfirmware/ref
 
 #
 EOF
+
 # Strict errors.
 # Trap errors and output file and line number.
 set -euo pipefail
-trap 'echo "Error occurred in ${BASH_SOURCE[0]} at line ${LINENO}"' ERR
+
+# Ensure we always restore on exit
+cleanup() {
+	USB_AUTOSUSPEND_END=$(cat /sys/module/usbcore/parameters/autosuspend)
+	if [[ "$USB_AUTOSUSPEND_END" != "$USB_AUTOSUSPEND" ]]; then
+		echo "$USB_AUTOSUSPEND" | sudo tee /sys/module/usbcore/parameters/autosuspend >/dev/null
+	fi
+}
+error_handler() {
+  local lineno=$1
+  echo "FAILED at ${BASH_SOURCE[0]}:${lineno}" >&2
+  cleanup
+  exit 1
+}
+
+trap 'error_handler $LINENO' ERR    # on any error
+trap cleanup EXIT                   # on any exit (error or normal)
+
+
 
 # If BASH_SOURCE[0] is not set, fall back to the current working directory.
 if [ -z "${BASH_SOURCE+x}" ] || [ -z "${BASH_SOURCE[0]+x}" ]; then
@@ -39,6 +58,12 @@ REPO_NAME="firmware"
 REPO_NAME_ALT="meshtastic.github.io"
 CACHE_TIMEOUT_SECONDS=$((6 * 3600)) # 6 hours
 MOUNT_FOLDER="/mnt/meshDeviceSD"
+USB_AUTOSUSPEND=$(cat /sys/module/usbcore/parameters/autosuspend)
+if [[ "$USB_AUTOSUSPEND" -ne -1 ]]; then
+	# Only disable (-1) if it isn’t already
+	echo "sudo needed to disable USB autosuspend and keep all USB ports active."
+	echo -1 | sudo tee /sys/module/usbcore/parameters/autosuspend >/dev/null
+fi
 
 # Settings for the repo
         GITHUB_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases"
@@ -728,7 +753,8 @@ detect_device() {
 	if [ "${#filtered_device_lines[@]}" -eq 1 ]; then
 		detected_raw="${filtered_device_lines[0]}"
 		# Determine detected_dev for the single device:
-		search_full=$(echo "$detected_raw" | tr ' ' '_')
+		search_full=$(echo "$detected_raw" | tr ' ' '_' | tr '(' '_' | tr ')' '_' | tr ',' '_')
+		#echo "$search_full" > /dev/tty
 		detected_dev=""
 		for link in /dev/serial/by-id/*; do
 			if [[ $(basename "$link") == *"$search_full"* ]]; then
@@ -738,7 +764,8 @@ detect_device() {
 		done
 		
 		if [ -z "$detected_dev" ]; then
-			fallback=$(echo "$detected_raw" | cut -d' ' -f2- | tr ' ' '_')
+			fallback=$(echo "$detected_raw" | cut -d' ' -f2- | tr ' ' '_' | tr '(' '_' | tr ')' '_' | tr ',' '_') 
+			#echo "$fallback" > /dev/tty
 			for link in /dev/serial/by-id/*; do
 				if [[ $(basename "$link") == *"$fallback"* ]]; then
 					detected_dev=$(readlink -f "$link")
@@ -748,7 +775,8 @@ detect_device() {
 		fi
 		
 		if [ -z "$detected_dev" ]; then
-			third_fallback=$(echo "$detected_raw" | tr ' ' '_' | tr '/' '_' | sed 's/^/usb-/')
+			third_fallback=$(echo "$detected_raw" | tr ' ' '_' | tr '(' '_' | tr ')' '_' | tr '/' '_' | tr ',' '_' | sed 's/^/usb-/')
+			#echo "$third_fallback" > /dev/tty
 			for link in /dev/serial/by-id/*; do
 				if [[ $(basename "$link") == *"$third_fallback"* ]]; then
 					detected_dev=$(readlink -f "$link")
@@ -907,19 +935,26 @@ match_firmware_files() {
 	declare -A product_files
 	declare -A product_files_full
 
-		while IFS= read -r -d '' file; do
-			local fname prod prodNorm
-			fname=$(basename "$file")
-			# Updated regex: group 1 is the prefix, group 2 is the product part.
-			if [[ "$fname" =~ ^(firmware-)(.*)${download_pattern//v/}(-update)?\.(bin|uf2|zip)$ ]]; then
-				prod="${BASH_REMATCH[2]}"
-				prodNorm=$(normalize "$prod")
-				product_files["$prodNorm"]+="$file"$'\n'
-				product_files_full["$prodNorm"]+="$prod"$'\n'
+	while IFS= read -r -d '' file; do
+		local fname prod prodNorm
+		fname=$(basename "$file")
+		# Updated regex: group 1 is the prefix, group 2 is the product part.
+		if [[ "$fname" =~ ^(firmware-)(.*)${download_pattern//v/}(-update)?\.(bin|uf2|zip)$ ]]; then
+			prod="${BASH_REMATCH[2]}"
+			prodNorm=$(normalize "$prod")
+			
+			# strip any tft|inkhud|eink suffix for grouping
+			if [[ $prodNorm =~ ^(.+?)(tft|inkhud|eink)$ ]]; then
+			  base=${BASH_REMATCH[1]}
+			else
+			  base=$prodNorm
 			fi
-			spinner
-		done < <( find "$FIRMWARE_ROOT/${chosen_tag}" -type f \( -iname "firmware-*" \) -print0 )
-
+			
+			product_files["$base"]+="$file"$'\n'
+			product_files_full["$base"]+="$prod"$'\n'
+		fi
+		spinner
+	done < <( find "$FIRMWARE_ROOT/${chosen_tag}" -type f \( -iname "firmware-*" \) -print0 )
 
 	matching_keys=()
 	if [ -z "${product_files+x}" ] || [ ${#product_files[@]} -eq 0 ]; then
