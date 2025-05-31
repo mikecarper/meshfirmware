@@ -40,6 +40,29 @@ https://github.com/user-attachments/assets/06fc7b59-ed03-44d7-a4d1-a0492dec5d16
 
 
 
+# Linux Compile the firmware
+Copy and run this in your linux terminal 
+```bash
+cd ~ && git clone https://github.com/mikecarper/meshfirmware.git && cd meshfirmware && chmod +x compile.sh && ./compile.sh
+```
+<details>
+  <summary>Readable Code</summary>  
+    
+```bash
+cd ~
+git clone https://github.com/mikecarper/meshfirmware.git
+cd meshfirmware
+chmod +x compile.sh
+./compile.sh
+```
+
+Linux Video
+-----
+
+https://github.com/user-attachments/assets/20117724-6e62-4c17-8879-aebb1ef48456
+
+
+
 
 Overview
 --------
