@@ -56,6 +56,8 @@ chmod +x compile.sh
 ./compile.sh
 ```
 
+</details>
+
 Linux Video
 -----
 
