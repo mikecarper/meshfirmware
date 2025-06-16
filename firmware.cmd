@@ -53,7 +53,7 @@ $CACHE_TIMEOUT_SECONDS=6 * 3600 # 6 hours
           $DOWNLOAD_DIR="${ScriptPath}\meshtastic_firmware\downloads"
          $RELEASES_FILE="${ScriptPath}\meshtastic_firmware\releases.json"
          $HARDWARE_LIST="${ScriptPath}\meshtastic_firmware\hardware-list.json"
-		   $BLEOTA_FILE="${ScriptPath}\meshtastic_firmware\bleota.json"
+           $BLEOTA_FILE="${ScriptPath}\meshtastic_firmware\bleota.json"
 		   
     $VERSIONS_TAGS_FILE="${ScriptPath}\meshtastic_firmware\01versions_tags.txt"
   $VERSIONS_LABELS_FILE="${ScriptPath}\meshtastic_firmware\02versions_labels.txt"
