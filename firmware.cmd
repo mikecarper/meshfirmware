@@ -1318,14 +1318,30 @@ function SelectMatchingFile {
         Write-Host "Only one firmware file found: $fullPaths" -ForegroundColor Yellow
         return $fullPaths
     }
-	
-	$fullPaths = $fullPaths | Sort-Object
+
+    $fullPaths = $fullPaths | Sort-Object
 
     # Otherwise, show menu of filenames
     Write-Host "Select a firmware file to use:" -ForegroundColor Cyan
     for ($i = 0; $i -lt $fullPaths.Count; $i++) {
         $leaf = Split-Path -Path $fullPaths[$i] -Leaf
-        Write-Host ("{0,2}) {1}" -f ($i + 1), $leaf)
+
+        # Determine if the file is "recommended"
+        $recommended = $false
+        if (
+            ($leaf -like '*-tft-*' -and $leaf -like '*-update*') -or
+            ($leaf -like '*-inkhud-*' -and $leaf -like '*-update*') -or
+            ($leaf -like '*-inkhud-*' -and $leaf -like '*.uf2')
+        ) {
+            $recommended = $true
+        }
+
+        $display = ("{0,2}) {1}" -f ($i + 1), $leaf)
+        if ($recommended) {
+            $display += " <- Recommended"
+        }
+
+        Write-Host $display
     }
 
     # Prompt until valid selection
