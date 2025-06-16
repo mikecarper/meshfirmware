@@ -1010,6 +1010,7 @@ function DownloadAssets {
 
         $tmpFile = Join-Path $DOWNLOAD_DIR ("{0}.tmp" -f ([Guid]::NewGuid()))
         try {
+            Write-Progress -Activity "$url"
             Invoke-WebRequest -Uri $url -OutFile $tmpFile -UseBasicParsing -ErrorAction Stop
             Move-Item -Path $tmpFile -Destination $dest -Force
         } catch {
@@ -1080,6 +1081,7 @@ function UnzipAssets {
             # if empty, unzip
             $hasFiles = Get-ChildItem -Path $targetDir -File -Recurse -ErrorAction SilentlyContinue
             if (-not $hasFiles) {
+                Write-Progress -Activity "$name"
                 Expand-Archive -Path $localFile -DestinationPath $targetDir -Force
             }
             else {
