@@ -2,7 +2,7 @@
 The CMD and Bash script automates the process of selecting, downloading, and applying firmware updates from the [meshtastic/firmware](https://github.com/meshtastic/firmware) GitHub repository via the USB port.
 
 # Windows Quick start
-[Download firmware.cmd (right click save)](https://github.com/mikecarper/meshfirmware/blob/main/firmware.cmd?raw=true)  
+[Download mtfirmware.cmd (right click save)](https://github.com/mikecarper/meshfirmware/blob/main/mtfirmware.cmd?raw=true)  
 Make sure file is named firmware.cmd and not firmware.cmd.txt  
 double click and run the file firmware.cmd
 
