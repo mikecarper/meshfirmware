@@ -3,7 +3,7 @@
 : <<'EOF'
 
 # To run this file, copy this line below and run it.
-cd ~ && wget -qO - https://raw.githubusercontent.com/mikecarper/meshfirmware/refs/heads/main/firmware.sh | bash
+cd ~ && wget -qO - https://raw.githubusercontent.com/mikecarper/meshfirmware/refs/heads/main/mcfirmware.sh | bash
 
 #
 EOF
