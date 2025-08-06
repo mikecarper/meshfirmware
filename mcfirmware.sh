@@ -3,7 +3,7 @@
 : <<'EOF'
 
 # To run this file, copy this line below and run it.
-cd ~ && wget -qO - https://raw.githubusercontent.com/mikecarper/meshfirmware/refs/heads/main/mcfirmware.sh | bash
+cd ~ && wget -qO - https://raw.githubusercontent.com/mikecarper/meshfirmware/refs/heads/main/firmware.sh | bash
 
 #
 EOF
@@ -187,7 +187,7 @@ choose_version_from_releases() {
 			while [[ -z $VERSION ]]; do
 				sleep 0.1
 				echo; echo "[3] Select version:"
-				select VERSION in "${VERSIONS[@]}"; do [[ -n $VERSION ]] && break; done
+				select VERSION in "${VERSIONS[@]}"; do [[ -n $VERSION ]] && break; done < /dev/tty
 			done
 		fi
 	fi
@@ -207,7 +207,7 @@ choose_version_from_releases() {
 			while [[ -z $TYPE ]]; do
 				sleep 0.1
 				echo; echo "[4] Select type 2:"
-				select TYPE in "${TYPES[@]}"; do [[ -n ${TYPE:-} ]] && break; done
+				select TYPE in "${TYPES[@]}"; do [[ -n ${TYPE:-} ]] && break; done < /dev/tty
 			done
 		fi
 	fi
@@ -287,7 +287,7 @@ choose_meshcore_firmware() {
 			while [[ -z $DEVICE ]]; do
 				sleep 0.1
 				echo; echo "[1] Select device:"
-				select DEVICE in "${DEVICES[@]}"; do [[ -n ${DEVICE:-} ]] && break; done
+				select DEVICE in "${DEVICES[@]}"; do [[ -n ${DEVICE:-} ]] && break; done < /dev/tty
 			done
 			echo "$DEVICE"
 		fi
@@ -305,7 +305,7 @@ choose_meshcore_firmware() {
 			while [[ -z $ROLE ]]; do
 				sleep 0.1
 				echo; echo "[2] Select role:"
-				select ROLE in "${ROLES[@]}"; do [[ -n ${ROLE:-} ]] && break; done
+				select ROLE in "${ROLES[@]}"; do [[ -n ${ROLE:-} ]] && break; done < /dev/tty
 			done
 		fi
 	fi
@@ -325,7 +325,7 @@ choose_meshcore_firmware() {
 			while [[ -z $VERSION ]]; do
 				sleep 0.1
 				echo; echo "[3] Select version:"
-				select VERSION in "${VERSIONS[@]}"; do [[ -n ${VERSION:-} ]] && break; done
+				select VERSION in "${VERSIONS[@]}"; do [[ -n ${VERSION:-} ]] && break; done < /dev/tty
 			done
 		fi
 	fi
@@ -345,7 +345,7 @@ choose_meshcore_firmware() {
 			while [[ -z $TYPE ]]; do
 				sleep 0.1
 				echo; echo "[4] Select type:"
-				select TYPE in "${TYPES[@]}"; do [[ -n ${TYPE:-} ]] && break; done
+				select TYPE in "${TYPES[@]}"; do [[ -n ${TYPE:-} ]] && break; done < /dev/tty
 			done
 		fi
 	fi
