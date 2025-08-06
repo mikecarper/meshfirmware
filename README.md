@@ -17,7 +17,7 @@ https://github.com/user-attachments/assets/ab68cb5e-63d5-4c73-ac4a-fdb76702fb20
 # Linux Quick start
 Copy and run this in your linux terminal 
 ```bash
-cd ~ && git clone https://github.com/mikecarper/meshfirmware.git && cd meshfirmware && chmod +x firmware.sh && ./firmware.sh
+cd ~ && git clone https://github.com/mikecarper/meshfirmware.git && cd meshfirmware && chmod +x mtfirmware.sh && ./mtfirmware.sh
 ```
 <details>
   <summary>Readable Code</summary>  
@@ -26,8 +26,8 @@ cd ~ && git clone https://github.com/mikecarper/meshfirmware.git && cd meshfirmw
 cd ~
 git clone https://github.com/mikecarper/meshfirmware.git
 cd meshfirmware
-chmod +x firmware.sh
-./firmware.sh
+chmod +x mtfirmware.sh
+./mtfirmware.sh
 ```
 
 </details>
@@ -43,7 +43,7 @@ https://github.com/user-attachments/assets/06fc7b59-ed03-44d7-a4d1-a0492dec5d16
 # Linux Compile the firmware
 Copy and run this in your linux terminal 
 ```bash
-cd ~ && git clone https://github.com/mikecarper/meshfirmware.git && cd meshfirmware && chmod +x compile.sh && ./compile.sh
+cd ~ && git clone https://github.com/mikecarper/meshfirmware.git && cd meshfirmware && chmod +x mtcompile.sh && ./mtcompile.sh
 ```
 <details>
   <summary>Readable Code</summary>  
@@ -52,8 +52,8 @@ cd ~ && git clone https://github.com/mikecarper/meshfirmware.git && cd meshfirmw
 cd ~
 git clone https://github.com/mikecarper/meshfirmware.git
 cd meshfirmware
-chmod +x compile.sh
-./compile.sh
+chmod +x mtcompile.sh
+./mtcompile.sh
 ```
 
 </details>
@@ -102,7 +102,7 @@ Usage
 Run the script with the following syntax:
 
 ```bash
-./firmware.sh [OPTIONS]   
+./mtfirmware.sh [OPTIONS]   
 ```
 
 ### Options
