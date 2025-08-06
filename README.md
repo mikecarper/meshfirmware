@@ -3,8 +3,8 @@ The CMD and Bash script automates the process of selecting, downloading, and app
 
 # Windows Quick start
 [Download mtfirmware.cmd (right click save)](https://github.com/mikecarper/meshfirmware/blob/main/mtfirmware.cmd?raw=true)  
-Make sure file is named firmware.cmd and not firmware.cmd.txt  
-double click and run the file firmware.cmd
+Make sure file is named mtfirmware.cmd and not mtfirmware.cmd.txt  
+double click and run the file mtfirmware.cmd
 
 Windows Video
 -----
