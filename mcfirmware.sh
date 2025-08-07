@@ -53,7 +53,8 @@ if [[ "$USB_AUTOSUSPEND" -ne -1 ]]; then
 	echo -1 | sudo tee /sys/module/usbcore/parameters/autosuspend >/dev/null
 fi
 
-REPO_OWNER="ripplebiz"
+MIN_BYTES=$((250 * 1024))   # 250 KB in bytes
+REPO_OWNER="meshcore-dev"
 REPO_NAME="MeshCore"
 RELEASE_INFO1_URL="https://flasher.meshcore.dev/config.json"
 RELEASE_INFO2_URL="https://flasher.meshcore.dev/releases"
@@ -70,7 +71,9 @@ RELEASE_INFO2_URL="https://flasher.meshcore.dev/releases"
     SELECTED_ROLE_FILE="${FIRMWARE_ROOT}/02role.txt"
  SELECTED_VERSION_FILE="${FIRMWARE_ROOT}/03version.txt"
     SELECTED_TYPE_FILE="${FIRMWARE_ROOT}/04type.txt"
-	 SELECTED_URL_FILE="${FIRMWARE_ROOT}/05selected_url.txt"
+     SELECTED_URL_FILE="${FIRMWARE_ROOT}/05selected_url.txt"
+  DOWNLOADED_FILE_FILE="${FIRMWARE_ROOT}/06downloaded_file.txt"
+           DEVICE_FILE="${FIRMWARE_ROOT}/07device_file.txt"
 
 
 
@@ -358,8 +361,102 @@ choose_meshcore_firmware() {
 	echo "$DEVICE" > "$SELECTED_DEVICE_FILE"
 	echo "$ROLE" > "$SELECTED_ROLE_FILE"
 	echo "$VERSION" > "$SELECTED_VERSION_FILE"
-	echo "$TYPE" >"$SELECTED_TYPE_FILE"
-    echo "$CHOSEN_FILE" >"$SELECTED_URL_FILE"
+	echo "$TYPE" > "$SELECTED_TYPE_FILE"
+	echo "firmware/$CHOSEN_FILE" > "$SELECTED_URL_FILE"
+}
+
+download_and_verify() {
+    local url=$1
+	local VERSION
+	[[ -f "$SELECTED_VERSION_FILE" ]] && VERSION="$(<"$SELECTED_VERSION_FILE")"
+	local bytes
+	local basename
+	basename=${url##*/}           # -> file.tar.gz?version=3
+	basename=${basename%%[\?#]*}  # -> file.tar.gz   (removes ?version=3 or #fragment)
+	local dest="${DOWNLOAD_DIR}/${VERSION}/${basename}"
+	
+	mkdir -p ${DOWNLOAD_DIR}/${VERSION}/
+
+	if [[ -f "$dest" ]]; then
+	    bytes=$(stat -c%s "$dest" 2>/dev/null);
+		if (( bytes < MIN_BYTES )); then
+			rm -f "$dest"
+		fi
+	fi
+
+	if [[ ! -f "$dest" ]]; then
+		echo "Downloading firmware to $dest"
+		wget -q --retry-connrefused --waitretry=1 -O "$dest" "$url" || return 1
+
+		bytes=$(stat -c%s "$dest" 2>/dev/null);
+		if (( bytes < MIN_BYTES )); then
+			echo "Download too small ($bytes bytes < $MIN_BYTES); removing $dest" >&2
+			rm -f "$dest"
+			return 1
+		fi
+
+		echo "Downloaded $dest – $bytes bytes OK"
+	else
+		bytes=$(stat -c%s "$dest" 2>/dev/null);
+		echo "Already downloaded $dest – $bytes bytes OK"
+	fi
+
+    echo "$dest" > "$DOWNLOADED_FILE_FILE"
+}
+
+choose_serial() {
+	local detected_dev
+    local devs labels               # arrays that hold paths and friendly names
+    local choice
+
+    scan() {                        # fill devs[] / labels[]
+        devs=()  labels=()
+        shopt -s nullglob           # make the glob expand to nothing if empty
+        for link in /dev/serial/by-id/*; do
+            devs+=( "$(readlink -f "$link")" )
+            labels+=( "$(basename "$link")" )
+        done
+        shopt -u nullglob
+    }
+
+    while :; do
+        scan
+
+        # ────────────────────────── nothing found ──────────────────────────
+        if ((${#devs[@]} == 0)); then
+            echo "No serial devices found under /dev/serial/by-id."
+            read -rp "Try again? [y/N] " yn
+            [[ $yn =~ ^[Yy]$ ]] || return 1         # give up
+            continue                                # rescan
+        fi
+
+        # ────────────────────────── single device ──────────────────────────
+        if ((${#devs[@]} == 1)); then
+			detected_dev="${devs[0]}"
+            echo "Only one device detected – selecting it automatically: $detected_dev"
+			echo "$detected_dev" > "$DEVICE_FILE"
+			return
+        fi
+
+        # ────────────────────────── menu ──────────────────────────
+        echo "Select a serial device:"
+        for i in "${!devs[@]}"; do
+            printf " %2d) %s  (%s)\n" $((i+1)) "${devs[$i]}" "${labels[$i]}"
+        done
+        echo "  0)  Scan again"
+
+        read -rp "Choice: " choice
+        if [[ $choice =~ ^[0-9]+$ ]]; then
+            if (( choice == 0 ));     then continue          # rescan
+            elif (( choice >= 1 && choice <= ${#devs[@]} )); then
+				detected_dev="${devs[choice-1]}"
+				echo "$detected_dev"
+				echo "$detected_dev" > "$DEVICE_FILE"
+				return
+            fi
+        fi
+        echo "Invalid selection – please try again."
+    done
 }
 
 # --------------------------------------------------
@@ -372,7 +469,6 @@ rm -f  \
   "$SELECTED_VERSION_FILE"     \
   "$SELECTED_TYPE_FILE"        \
   "$SELECTED_URL_FILE"
-
 URL_PATH=''
 while [[ -z $URL_PATH ]]; do
 	choose_meshcore_firmware
@@ -386,4 +482,10 @@ while [[ -z $URL_PATH ]]; do
 done
 [[ $URL_PATH != /* ]] && URL_PATH="/$URL_PATH"
 URL="https://flasher.meshcore.dev${URL_PATH}"
-echo "$URL"
+
+
+download_and_verify "$URL"
+
+
+choose_serial
+
