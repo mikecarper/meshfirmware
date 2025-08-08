@@ -77,6 +77,7 @@ RELEASE_INFO2_URL="https://flasher.meshcore.dev/releases"
   DOWNLOADED_FILE_FILE="${FIRMWARE_ROOT}/08downloaded_file.txt"
       DEVICE_PORT_FILE="${FIRMWARE_ROOT}/09device_port_file.txt"
           ESPTOOL_FILE="${FIRMWARE_ROOT}/10esptool_file.txt"
+       ERASE_FILE_FILE="${FIRMWARE_ROOT}/11erase_file.txt"
 
 
 
@@ -209,8 +210,8 @@ choose_version_from_releases() {
 			TYPE="${TYPES[0]}"
 			echo "Auto-selected type: $TYPE"
 		elif ((${#TYPES[@]} == 2)) && [[ " ${TYPES[*]} " == *" flash "* ]] && [[ " ${TYPES[*]} " == *" download "* ]]; then
-			TYPE="flash"
-			echo "Auto-selected type: flash"
+			TYPE="download"
+			echo "Auto-selected type: download"
 		else
 			while [[ -z $TYPE ]]; do
 				sleep 0.1
@@ -324,8 +325,8 @@ choose_meshcore_firmware() {
 	# ---------------- step 2 – architecture & erase -----------------------
 	if [[ -z "$ARCHITECTURE" ]]; then
 		ARCHITECTURE=$( _jq1 --arg d "$DEVICE" ".device[]|select(.name==\$d)|.type" )
-		ERASE_URL=$( _jq1 --arg d "$DEVICE" ".device[]|select(.name==\$d)|.erase" )
-		ERASE_URL="https://flasher.meshcore.dev/firmware/${ERASE_URL}"
+		ERASE_URL=$( _jq1 --arg d "$DEVICE" ".device[]|select(.name==\$d)|.erase // empty" )
+		[[ -n $ERASE_URL ]] && ERASE_URL="https://flasher.meshcore.dev/firmware/$ERASE_URL"
 	fi
 
     # ---------------- step 2 – role ---------------------------------------
@@ -401,6 +402,8 @@ choose_meshcore_firmware() {
 
 download_and_verify() {
     local url=$1
+	local dest_file=$2
+	local verify=$3
 	local VERSION
 	[[ -f "$SELECTED_VERSION_FILE" ]] && VERSION="$(<"$SELECTED_VERSION_FILE")"
 	local bytes
@@ -408,12 +411,16 @@ download_and_verify() {
 	basename=${url##*/}           # -> file.tar.gz?version=3
 	basename=${basename%%[\?#]*}  # -> file.tar.gz   (removes ?version=3 or #fragment)
 	local dest="${DOWNLOAD_DIR}/${VERSION}/${basename}"
-	
 	mkdir -p "${DOWNLOAD_DIR}/${VERSION}/"
+	
+	MIN_BYTES_LOCAL=$MIN_BYTES               # default
+    if [[ $verify -eq 0 ]]; then
+        MIN_BYTES_LOCAL=$((25*1024))         # 25 kB == 25*1024 bytes
+    fi
 
 	if [[ -f "$dest" ]]; then
 	    bytes=$(stat -c%s "$dest" 2>/dev/null);
-		if (( bytes < MIN_BYTES )); then
+		if (( bytes < MIN_BYTES_LOCAL )); then
 			rm -f "$dest"
 		fi
 	fi
@@ -423,8 +430,8 @@ download_and_verify() {
 		wget -q --retry-connrefused --waitretry=1 -O "$dest" "$url" || return 1
 
 		bytes=$(stat -c%s "$dest" 2>/dev/null);
-		if (( bytes < MIN_BYTES )); then
-			echo "Download too small ($bytes bytes < $MIN_BYTES); removing $dest" >&2
+		if (( bytes < MIN_BYTES_LOCAL )); then
+			echo "Download too small ($bytes bytes < $MIN_BYTES_LOCAL); removing $dest" >&2
 			rm -f "$dest"
 			return 1
 		fi
@@ -434,8 +441,30 @@ download_and_verify() {
 		bytes=$(stat -c%s "$dest" 2>/dev/null);
 		echo "Already downloaded $dest – $bytes bytes OK"
 	fi
+	
+	# --------------------------------------------------
+    # If the download is a ZIP, extract only the largest file
+    # --------------------------------------------------
+    if file "$dest" | grep -q 'Zip archive data'; then
+        echo "Archive detected; extracting largest file …"
+        local largest
+        largest=$(
+            unzip -l "$dest" |
+            awk 'NF>=4 && $1~/^[0-9]+$/ {size=$1; $1=$2=$3=""; sub(/^   */,""); print size "|" $0}' |
+            sort -t'|' -k1,1n | tail -n1 | cut -d'|' -f2-
+        )
 
-    echo "$dest" > "$DOWNLOADED_FILE_FILE"
+        if [[ -z "$largest" ]]; then
+            echo "ERROR: no entries in ZIP archive." >&2
+            return 1
+        fi
+
+        unzip -oq "$dest" "$largest" -d "${DOWNLOAD_DIR}/${VERSION}/"
+        dest="${DOWNLOAD_DIR}/${VERSION}/${largest}"   # point to extracted file
+        echo "Extracted $largest"
+    fi
+
+    echo "$dest" > "$dest_file"
 }
 
 choose_serial() {
@@ -499,7 +528,9 @@ check_tty_lock () {
 
     # Open the device on fd 3 read-write (<>). Most distros let "dialout"
     # members do this without sudo.
-    exec 3<>"$dev" 2>/dev/null || { return 2; }
+	if ! sudo bash -c "exec 3<> \"$dev\" 2>/dev/null"; then
+		return 2
+	fi
 
     # Try to grab an exclusive, *non-blocking* lock on fd 3.
     if flock -n 3; then         # got the lock. device is FREE
@@ -663,14 +694,13 @@ autodetect_device() {
 	[[ -f "$DEVICE_PORT_FILE"     ]] && DEVICE_PORT="$(<"$DEVICE_PORT_FILE")"
 	
 	# Stop the service.
-	lockedService=$(get_locked_service)
-	if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
-		echo "Stopping service $lockedService..."
-		sudo systemctl stop "$lockedService"
-	fi
+	#lockedService=$(get_locked_service)
+	#if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
+	#	echo "Stopping service $lockedService..."
+	#	sudo systemctl stop "$lockedService"
+	#fi
 
 	# Probe for ESP32
-	stty -F "$DEVICE_PORT" 1200
 	local ESPTOOL_CMD=""
 	get_espcmd
 	[[ -f "$ESPTOOL_FILE"     ]] && ESPTOOL_CMD="$(<"$ESPTOOL_FILE")"
@@ -691,13 +721,15 @@ autodetect_device() {
 		list_usb_block_devs
 		
 		if ! scan_and_maybe_mount; then
-			echo "No USB mass-storage device found, sending 1200-baud reset…"
-			sudo bash -c 'exec 3<> "${DEVICE_PORT}"; stty -F "${DEVICE_PORT}" 1200; sleep 1.5'
+			echo "No USB mass-storage device found, sending 1200-baud reset..."
+			sudo bash -c "exec 3<> \"$DEVICE_PORT\"; stty -F \"$DEVICE_PORT\" 1200; sleep 1.5"
 		fi
-		echo "Device not in DFU mode. Connect via the app and set into DFU or unplug/re-plug quickly 2x."
-		echo "Waiting for DFU"
+		
+		sleep 8
 		
 		if ! scan_and_maybe_mount; then
+			echo "Device not in DFU mode. Connect via the app and set into DFU or unplug/re-plug quickly 2x."
+			echo "Waiting for DFU"
 			for ((i=0; i<60; i++)); do
 				spinner
 				if scan_and_maybe_mount; then
@@ -743,25 +775,25 @@ done
 URL="https://flasher.meshcore.dev${URL_PATH}"
 
 
-download_and_verify "$URL"
+download_and_verify "$URL" "$DOWNLOADED_FILE_FILE" 1
 
 
 choose_serial
 
 
 # Stop the service.
-lockedService=$(get_locked_service)
-if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
-	echo "Stopping service $lockedService..."
-	sudo systemctl stop "$lockedService"
-fi
-echo "lockedService: $lockedService"
+#lockedService=$(get_locked_service)
+#if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
+#	echo "Stopping service $lockedService..."
+#	sudo systemctl stop "$lockedService"
+#fi
+#echo "lockedService: $lockedService"
 
 
 [[ -f "$ARCHITECTURE_FILE"    ]] && ARCHITECTURE="$(<"$ARCHITECTURE_FILE")"
 [[ -f "$DEVICE_PORT_FILE"     ]] && DEVICE_PORT="$(<"$DEVICE_PORT_FILE")"
-[[ -f "$DOWNLOADED_FILE_FILE"     ]] && DOWNLOADED_FILE="$(<"$DOWNLOADED_FILE_FILE")"
-[[ -f "$SELECTED_DEVICE_FILE"  ]] && DEVICE="$(<"$SELECTED_DEVICE_FILE")"
+[[ -f "$DOWNLOADED_FILE_FILE" ]] && DOWNLOADED_FILE="$(<"$DOWNLOADED_FILE_FILE")"
+[[ -f "$SELECTED_DEVICE_FILE" ]] && DEVICE="$(<"$SELECTED_DEVICE_FILE")"
 
 if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 	get_espcmd
@@ -791,13 +823,15 @@ else
 	list_usb_block_devs
 	
 	if ! scan_and_maybe_mount; then
-		echo "No USB mass-storage device found, sending 1200-baud reset…"
-		sudo bash -c 'exec 3<> "${DEVICE_PORT}"; stty -F "${DEVICE_PORT}" 1200; sleep 1.5'
+		echo "No USB mass-storage device found, sending 1200-baud reset..."
+		sudo bash -c "exec 3<> \"$DEVICE_PORT\"; stty -F \"$DEVICE_PORT\" 1200; sleep 1.5"
 	fi
-	echo "Device not in DFU mode. Connect via the app and set into DFU or unplug/re-plug quickly 2x."
-	echo "Waiting for DFU"
+	
+	sleep 8
 	
 	if ! scan_and_maybe_mount; then
+		echo "Device not in DFU mode. Connect via the app and set into DFU or unplug/re-plug quickly 2x."
+		echo "Waiting for DFU"
 		for ((i=0; i<60; i++)); do
 			spinner
 			if scan_and_maybe_mount; then
@@ -810,16 +844,43 @@ else
 	echo
 	echo "Device detected:"
 	grep -m1 -aoP '\.pio/libdeps/\K[^/]{0,100}' "$MOUNT_FOLDER/CURRENT.UF2"
-	
-	read -r -p "Press Enter to update the ${DEVICE} firmware on port ${DEVICE_PORT}"
-	#sudo cp -v "$DOWNLOADED_FILE" "$MOUNT_FOLDER/"
-	echo ""
-	echo "Firmware for nrf52 device ${DEVICE} completed on port ${DEVICE_PORT}."
+
+	while true; do
+		echo "Choose firmware action for ${DEVICE} on ${DEVICE_PORT}:"
+		echo "  1) flash-update       (write only)"
+		echo "  2) flash-wipe + flash (erase, then write)"
+		read -r -p "Selection [1/2]: " choice < /dev/tty
+
+		case "$choice" in
+			1) ACTION="flash-update"; break ;;
+			2) ACTION="flash-wipe";   break ;;
+			0) echo "Skipped."; exit 0 ;;
+			*) echo "Invalid choice."; continue ;;
+		esac
+	done
+
+	echo "Running ${ACTION}..."
+
+	if [[ $ACTION == "flash-wipe" ]]; then
+		echo "Erasing UF2 area..."
+		[[ -f "$ERASE_URL_FILE" ]] && ERASE_URL="$(<"$ERASE_URL_FILE")"
+		download_and_verify "$ERASE_URL" "$ERASE_FILE_FILE" 0
+		[[ -f "$ERASE_FILE_FILE" ]] && ERASE_FILE="$(<"$ERASE_FILE_FILE")"
+		
+		#sudo cp -v "$ERASE_FILE" "$MOUNT_FOLDER/"
+		#echo "Erase done."
+		#sleep 8
+	fi
+
+	echo "Copying firmware file $DOWNLOADED_FILE..."
+	sudo cp -v "$DOWNLOADED_FILE" "$MOUNT_FOLDER/"
+
 	echo
+	echo "Firmware ${ACTION} completed for ${DEVICE} on ${DEVICE_PORT}."
 fi
 
 # Restart the stopped service.
-if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
-	echo "Starting service $lockedService..."
-	sudo systemctl start "$lockedService"
-fi
+#if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
+#	echo "Starting service $lockedService..."
+#	sudo systemctl start "$lockedService"
+#fi
