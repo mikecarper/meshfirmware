@@ -939,7 +939,7 @@ autodetect_device() {
 	if timeout 5s $ESPTOOL_CMD --port "$DEVICE_PORT" --after "$NORESET" --baud 1200 "$READMAC" 2>&1 | perl -pe 's/\e\[[0-9;]*[A-Za-z]//g' | sed '/^Warning: Deprecated/d' | grep -qi -m1 'MAC'; then
 		echo "ESP chip responded; getting existing firmware"
 		sleep 1
-		$ESPTOOL_CMD --port "$DEVICE_PORT" --after "$NORESET" --baud 921600 "$READFLASH" 0 0x70000 "$DOWNLOAD_DIR/CURRENT.BAK" 2>&1 | perl -pe 's/\e\[[0-9;]*[A-Za-z]//g' | sed '/^Warning: Deprecated/d'
+		$ESPTOOL_CMD --port "$DEVICE_PORT" --after "$NORESET" --baud 921600 "$READFLASH" 0x10000 0x70000 "$DOWNLOAD_DIR/CURRENT.BAK" 2>&1 | perl -pe 's/\e\[[0-9;]*[A-Za-z]//g' | sed '/^Warning: Deprecated/d'
 
 		AUTODETECT_DEVICE=$( detect_device_from_fw "$DOWNLOAD_DIR/CURRENT.BAK" )
 	
@@ -1075,8 +1075,8 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 	echo
 	echo "ESP chip responded; getting existing firmware"
 	sleep 0.5
-	echo "$ESPTOOL_CMD --port $DEVICE_PORT --baud 921600 read_flash 0 0x70000 $DOWNLOAD_DIR/CURRENT.BAK"
-	$ESPTOOL_CMD --port "$DEVICE_PORT" --after "$NORESET" --baud 921600 "$READFLASH" 0 0x70000 "$DOWNLOAD_DIR/CURRENT.BAK"
+	echo "$ESPTOOL_CMD --port $DEVICE_PORT --baud 921600 $READFLASH 0x10000 0x70000 $DOWNLOAD_DIR/CURRENT.BAK"
+	$ESPTOOL_CMD --port "$DEVICE_PORT" --after "$NORESET" --baud 921600 "$READFLASH" 0x10000 0x70000 "$DOWNLOAD_DIR/CURRENT.BAK"
 	echo
 	print_fw_line "    Device firmware:" "$DOWNLOAD_DIR/CURRENT.BAK"
 	print_fw_line "Downloaded firmware:" "$DOWNLOADED_FILE"
