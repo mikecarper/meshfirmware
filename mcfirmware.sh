@@ -65,6 +65,7 @@ READFLASH="read-flash"
 WRITEFLASH="write-flash"
 ERASEFLASH="erase-flash"
 HARDRESET="hard-reset"
+LOCKEDSERVICE=""
 
 # Settings for the repo
         GITHUB_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases"
@@ -917,13 +918,6 @@ autodetect_device() {
 	local DEVICE_PORT=""
 	[[ -f "$DEVICE_PORT_FILE"     ]] && DEVICE_PORT="$(<"$DEVICE_PORT_FILE")"
 	
-	# Stop the service.
-	#lockedService=$(get_locked_service)
-	#if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
-	#	echo "Stopping service $lockedService..."
-	#	sudo systemctl stop "$lockedService"
-	#fi
-
 	# Probe for ESP32
 	local ESPTOOL_CMD=""
 	get_espcmd
@@ -931,10 +925,10 @@ autodetect_device() {
 	if ! timeout 5s $ESPTOOL_CMD --port "${DEVICE_PORT}" --after "$NORESET" --baud 1200 "$READMAC" 2>/dev/null; then
 		echo "esptool failed, checking if a service has the port locked"
 		# Stop the service.
-		lockedService=$(get_locked_service)
-		if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
-			echo "Stopping service $lockedService..."
-			sudo systemctl stop "$lockedService"
+		LOCKEDSERVICE=$(get_locked_service)
+		if [ -n "$LOCKEDSERVICE" ] && [ "$LOCKEDSERVICE" != "None" ]; then
+			echo "Stopping service $LOCKEDSERVICE..."
+			sudo systemctl stop "$LOCKEDSERVICE"
 			sleep 3
 			timeout 5s $ESPTOOL_CMD --port "${DEVICE_PORT}" --after "$NORESET" --baud 1200 "$READMAC" 2>/dev/null || true
 		fi
@@ -947,7 +941,7 @@ autodetect_device() {
 		sleep 1
 		$ESPTOOL_CMD --port "$DEVICE_PORT" --after "$NORESET" --baud 921600 "$READFLASH" 0 0x70000 "$DOWNLOAD_DIR/CURRENT.BAK" 2>&1 | perl -pe 's/\e\[[0-9;]*[A-Za-z]//g' | sed '/^Warning: Deprecated/d'
 
-		AUTODETECT_DEVICE=$( grep -m1 -aoP '\.pio/libdeps/\K[^/]{0,100}' "$DOWNLOAD_DIR/CURRENT.BAK" )
+		AUTODETECT_DEVICE=$( detect_device_from_fw "$DOWNLOAD_DIR/CURRENT.BAK" )
 	
 	else
 		# ---- Y: timed-out or grep found no match -------------------------
@@ -973,7 +967,7 @@ autodetect_device() {
 				sleep 1
 			done
 		fi
-		AUTODETECT_DEVICE=$( grep -m1 -aoP '\.pio/libdeps/\K[^/]{0,100}' "$MOUNT_FOLDER/CURRENT.UF2" )
+		AUTODETECT_DEVICE=$( detect_device_from_fw "$MOUNT_FOLDER/CURRENT.UF2" )
 		
 	fi
 	echo
@@ -981,6 +975,35 @@ autodetect_device() {
 	echo "$AUTODETECT_DEVICE"
 	echo "$AUTODETECT_DEVICE" > "$AUTODETECT_DEVICE_FILE"
 	read -r -p "Press Enter to continue..."
+}
+
+extract_name_from_firmware() {
+  local f="$1"
+  LC_ALL=C perl -0777 -ne '
+    if (/(?<![A-Za-z0-9])
+          ([A-Z][A-Za-z0-9]*(?:[ _-][A-Za-z0-9]+){0,3})
+          (?=[^A-Za-z0-9_]*Espressif[^A-Za-z0-9_]*Systems)/six) {
+      print "$1\n"; exit
+    }
+  ' "$f" 2>/dev/null
+}
+
+# prints one line with fallback to .pio/libdeps/… segment
+print_fw_line() {
+  local label="$1" file="$2" val
+  val="$(extract_name_from_firmware "$file")"
+  if [[ -z "$val" ]]; then
+    val="$(LC_ALL=C grep -aom1 -P '\.pio/libdeps/\K[^/\n]{1,100}' "$file" 2>/dev/null || true)"
+  fi
+  printf '    %s %s\n' "$label" "${val:-unknown}"
+}
+
+# wrapper that returns just the detected name (same logic as print_fw_line)
+detect_device_from_fw() {
+  local f="$1" v
+  v="$(extract_name_from_firmware "$f")"
+  [[ -z "$v" ]] && v="$(LC_ALL=C grep -aom1 -P '\.pio/libdeps/\K[^/\n]{1,100}' "$f" 2>/dev/null || true)"
+  printf '%s\n' "${v:-unknown}"
 }
 
 # --------------------------------------------------
@@ -1039,10 +1062,10 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 	if ! $ESPTOOL_CMD --port "${DEVICE_PORT}" --after "$NORESET" --baud 1200 "$READMAC" 2>/dev/null; then
 		echo "esptool failed, checking if a service has the port locked"
 		# Stop the service.
-		lockedService=$(get_locked_service)
-		if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
-			echo "Stopping service $lockedService..."
-			sudo systemctl stop "$lockedService"
+		LOCKEDSERVICE=$(get_locked_service)
+		if [ -n "$LOCKEDSERVICE" ] && [ "$LOCKEDSERVICE" != "None" ]; then
+			echo "Stopping service $LOCKEDSERVICE..."
+			sudo systemctl stop "$LOCKEDSERVICE"
 			sleep 3
 			$ESPTOOL_CMD --port "${DEVICE_PORT}" --after "$NORESET" --baud 1200 "$READMAC" 2>/dev/null || true
 		fi
@@ -1055,10 +1078,8 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 	echo "$ESPTOOL_CMD --port $DEVICE_PORT --baud 921600 read_flash 0 0x70000 $DOWNLOAD_DIR/CURRENT.BAK"
 	$ESPTOOL_CMD --port "$DEVICE_PORT" --after "$NORESET" --baud 921600 "$READFLASH" 0 0x70000 "$DOWNLOAD_DIR/CURRENT.BAK"
 	echo
-	echo -n "    Device firmware: "
-	grep -m1 -aoP '\.pio/libdeps/\K[^/]{0,100}' "$DOWNLOAD_DIR/CURRENT.BAK"
-	echo -n "Downloaded firmware: "
-	grep -m1 -aoP '\.pio/libdeps/\K[^/]{0,100}' "$DOWNLOADED_FILE"
+	print_fw_line "    Device firmware:" "$DOWNLOAD_DIR/CURRENT.BAK"
+	print_fw_line "Downloaded firmware:" "$DOWNLOADED_FILE"
 	
 	[[ -f "$SELECTED_TYPE_FILE"    ]] && TYPE="$(<"$SELECTED_TYPE_FILE")"
 	echo
@@ -1067,12 +1088,12 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 	if [[ "$TYPE" == "flash-wipe" ]]; then
 
 		echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $NORESET --baud 115200 $ERASEFLASH"
-		echo "$ESPTOOL_CMD --port ${DEVICE_PORT}  --after $HARDRESET --baud 115200 $WRITEFLASH 0x10000 \"${DOWNLOADED_FILE}\""
-		read -r -p "Press Enter to wipe and install the ${DEVICE} firmware on port ${DEVICE_PORT}"
+		echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $HARDRESET --baud 115200 $WRITEFLASH 0x10000 \"${DOWNLOADED_FILE}\""
+		read -r -p "Press Enter to ERASE and INSTALL the ${DEVICE} firmware on port ${DEVICE_PORT}"
 		$ESPTOOL_CMD --port "${DEVICE_PORT}" --after "$NORESET" --baud 115200 "$ERASEFLASH"
 	else
 		echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $HARDRESET --baud 115200 $WRITEFLASH 0x10000 \"${DOWNLOADED_FILE}\""
-		read -r -p "Press Enter to update the ${DEVICE} firmware on port ${DEVICE_PORT}"
+		read -r -p "Press Enter to UPDATE the ${DEVICE} firmware on port ${DEVICE_PORT}"
 	fi
 	
 	$ESPTOOL_CMD --port "${DEVICE_PORT}" --after "$HARDRESET" --baud 115200 "$WRITEFLASH" 0x10000 "${DOWNLOADED_FILE}"
@@ -1100,8 +1121,8 @@ else
 		done
 	fi
 	echo
-	echo "Device detected:"
-	grep -m1 -aoP '\.pio/libdeps/\K[^/]{0,100}' "$MOUNT_FOLDER/CURRENT.UF2"
+	print_fw_line "    Device firmware:" "$MOUNT_FOLDER/CURRENT.UF2"
+	print_fw_line "Downloaded firmware:" "$DOWNLOADED_FILE"
 
 	while true; do
 		echo "Choose firmware action for ${DEVICE} on ${DEVICE_PORT}:"
@@ -1138,7 +1159,7 @@ else
 fi
 
 # Restart the stopped service.
-#if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
-#	echo "Starting service $lockedService..."
-#	sudo systemctl start "$lockedService"
-#fi
+if [ -n "$LOCKEDSERVICE" ] && [ "$LOCKEDSERVICE" != "None" ]; then
+	echo "Starting service $LOCKEDSERVICE..."
+	sudo systemctl start "$LOCKEDSERVICE"
+fi
