@@ -58,6 +58,13 @@ REPO_OWNER="meshcore-dev"
 REPO_NAME="MeshCore"
 RELEASE_INFO1_URL="https://flasher.meshcore.dev/config.json"
 RELEASE_INFO2_URL="https://flasher.meshcore.dev/releases"
+VENDORLIST="elecrow|heltec|lilygo|seeed|seed|studio|rak|wireless|wisblock|wismesh|raspberry|pi|pico|waveshare|promicro|uniteng|sensecap|wio|xiao"
+NORESET="no-reset"
+READMAC="read-mac"
+READFLASH="read-flash"
+WRITEFLASH="write-flash"
+ERASEFLASH="erase-flash"
+HARDRESET="hard-reset"
 
 # Settings for the repo
         GITHUB_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases"
@@ -76,8 +83,10 @@ RELEASE_INFO2_URL="https://flasher.meshcore.dev/releases"
      SELECTED_URL_FILE="${FIRMWARE_ROOT}/07selected_url.txt"
   DOWNLOADED_FILE_FILE="${FIRMWARE_ROOT}/08downloaded_file.txt"
       DEVICE_PORT_FILE="${FIRMWARE_ROOT}/09device_port_file.txt"
-          ESPTOOL_FILE="${FIRMWARE_ROOT}/10esptool_file.txt"
-       ERASE_FILE_FILE="${FIRMWARE_ROOT}/11erase_file.txt"
+ DEVICE_PORT_NAME_FILE="${FIRMWARE_ROOT}/10device_port_name_file.txt"
+AUTODETECT_DEVICE_FILE="${FIRMWARE_ROOT}/11autodetect_device_file.txt"
+          ESPTOOL_FILE="${FIRMWARE_ROOT}/12esptool_file.txt"
+       ERASE_FILE_FILE="${FIRMWARE_ROOT}/13erase_file.txt"
 
 
 
@@ -166,12 +175,100 @@ _cached_json() {
     fi
 }
 
+normalize_id() {
+  # 1) drop parentheses content, 2) lower, 3) non-alnum -> _, 4) squeeze _.
+  local s="$1"
+  s="${s//\(/ }"; s="${s//\)/ }"
+  s="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')"
+  s="$(printf '%s' "$s" | sed 's/[^a-z0-9]+/_/g; s/[^a-z0-9]/_/g; s/___*/_/g; s/^_//; s/_$//')"
+  printf '%s' "$s"
+}
+
+strip_vendor_tokens() {
+  # remove frequent vendor words so tails focus on model
+  local s="$1"
+  s=" $s "
+  for w in elecrow heltec heltec_heltec lilygo seed seeed studio rak wireless wisblock wismesh raspberry pi pico waveshare promicro faketec uniteng sensecap wio xiao; do
+    s="${s// $w / }"
+  done
+  s="$(printf '%s' "$s" | sed 's/^ *//; s/ *$//; s/  */ /g; s/ /_/g')"
+  printf '%s' "$s"
+}
+
+contains_word() {
+  local hay="$1" needle="$2"
+  [[ "$hay" =~ (^|_)${needle}(_|$) ]]
+}
+
+is_good_tail() {
+  local t="$1"
+  # reject empty, short (<3), all digits/underscores, or mostly numeric like "1_6"
+  [[ -n "$t" ]] || return 1
+  (( ${#t} >= 3 )) || return 1
+  [[ "$t" =~ [a-z] ]] || return 1
+  return 0
+}
+
+_log() { 
+	[[ ${DEBUG:-0} -ne 0 ]] && printf '[mc] %s\n' "$*" >&2; 
+}
+
+filter_last_two_branches() {
+  local -n _IN="$1" _OUT="$2"
+  local dbg="${3:-${FILTER_DEBUG:-${DEBUG:-0}}}"
+
+  _OUT=()
+  ((dbg)) && printf '[filter] bash=%s  set_e=%s  pipefail=%s\n' "$BASH_VERSION" \
+    "$(set -o | awk '/errexit/{print $2}')" "$(set -o | awk '/pipefail/{print $2}')" >&2
+  ((dbg)) && printf '[filter] input(%d): %s\n' "${#_IN[@]}" "${_IN[*]}" >&2
+  ((${#_IN[@]}==0)) && { ((dbg)) && echo '[filter] input empty' >&2; return 0; }
+
+  # Clean input safely
+  local -a _CLEAN=()
+  mapfile -t _CLEAN < <(
+    printf '%s\n' "${_IN[@]}" \
+      | tr -d '\r' \
+      | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' \
+      | awk 'NF' || true
+  )
+  ((dbg)) && printf '[filter] clean(%d): %s\n' "${#_CLEAN[@]}" "${_CLEAN[*]}" >&2
+  ((${#_CLEAN[@]}==0)) && { ((dbg)) && echo '[filter] nothing after clean' >&2; return 0; }
+
+  # Extract unique branches X.Y sorted desc
+  local -a _BRANCHES=()
+  mapfile -t _BRANCHES < <(
+    printf '%s\n' "${_CLEAN[@]}" \
+      | sed -E 's/^[[:space:]]*[Vv]//' \
+      | awk -F'[.-]' '{ if ($1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/) print $1"."$2 }' \
+      | sort -t. -k1,1nr -k2,2nr \
+      | awk '!seen[$0]++' || true
+  )
+  ((dbg)) && printf '[filter] branches(%d): %s\n' "${#_BRANCHES[@]}" "${_BRANCHES[*]}" >&2
+
+  local -a choose=("${_BRANCHES[@]:0:2}")
+  ((dbg)) && printf '[filter] chosen(%d): %s\n' "${#choose[@]}" "${choose[*]}" >&2
+  ((${#choose[@]}==0)) && { ((dbg)) && echo '[filter] no branches parsed' >&2; return 0; }
+
+  local re
+  re="$(printf '%s\n' "${choose[@]}" | sed -E 's/\./\\./g' | paste -sd'|' -)"
+  ((dbg)) && printf '[filter] regex: ^[Vv]?(%s)(\\.|$)\n' "$re" >&2
+
+  mapfile -t _OUT < <(
+    printf '%s\n' "${_CLEAN[@]}" \
+      | grep -E "^[[:space:]]*[Vv]?(${re})(\.|$)" 2>/dev/null \
+      | sort -V -r \
+      | awk '!seen[$0]++' || true
+  )
+  ((dbg)) && printf '[filter] output(%d): %s\n' "${#_OUT[@]}" "${_OUT[*]}" >&2
+  return 0
+}
+
 choose_version_from_releases() {
 	local DEVICE="$1"
-	local ARCHITECTURE="$1"
-	local DEVICE="$1"
 	local ROLE="$2"
-	
+	local ARCHITECTURE="$3"
+	local ERASE_URL="$4"
+
 	# ---- fetch / reuse cache ---------------------------------------------
     _cached_json "$RELEASE_INFO2_URL" "$CACHE_FILE"
 
@@ -193,10 +290,14 @@ choose_version_from_releases() {
 			VERSION="${VERSIONS[0]}"
 			echo "Auto-selected version from fallback: $VERSION"
 		else
+			# Keep only newest two branches (X.Y)
+			local -a VERSIONS_SHOW=()
+			filter_last_two_branches VERSIONS VERSIONS_SHOW
+		
 			while [[ -z $VERSION ]]; do
 				sleep 0.1
 				echo; echo "[3] Select version:"
-				select VERSION in "${VERSIONS[@]}"; do [[ -n $VERSION ]] && break; done < /dev/tty
+				select VERSION in "${VERSIONS_SHOW[@]}"; do [[ -n $VERSION ]] && break; done < /dev/tty
 			done
 		fi
 	fi
@@ -234,12 +335,58 @@ choose_version_from_releases() {
 	CHOSEN_FILE=$( _jq2 --arg reg "$REGEX" --arg ver "$VERSION" --arg t "$TYPE" --arg d "$DEVICE" --arg r "$ROLE_ALT" ".[] | select(.version==\$ver and .type==\$r) | .files[] | select(.name|test(\$reg)) | .url " )
 
 	echo "$DEVICE" > "$SELECTED_DEVICE_FILE"
+	echo "$ROLE" > "$SELECTED_ROLE_FILE"
 	echo "$ARCHITECTURE" > "$ARCHITECTURE_FILE"
 	echo "$ERASE_URL" > "$ERASE_URL_FILE"
-	echo "$ROLE" > "$SELECTED_ROLE_FILE"
+
 	echo "$VERSION" > "$SELECTED_VERSION_FILE"
-	echo "$TYPE" >"$SELECTED_TYPE_FILE"
-    echo "$CHOSEN_FILE" >"$SELECTED_URL_FILE"
+	echo "$TYPE" > "$SELECTED_TYPE_FILE"
+    echo "$CHOSEN_FILE" > "$SELECTED_URL_FILE"
+}
+
+pick_matching_device() {
+	local usb_string="$1"
+	local -n _DEVICES="$2"   # bash 4.3+ nameref to the array
+
+	local usb_slug base core n cand1 cand2 cand3 name
+	MATCH=""
+	MATCH_IDX=-1
+
+	usb_slug="$(normalize_id "$usb_string")"
+
+	for i in "${!_DEVICES[@]}"; do
+		name="${_DEVICES[$i]}"
+		base="$(normalize_id "$name")"
+
+		# strip common vendor tokens; keep tail model words
+		core="$base"
+		core=$( printf '%s' "$core" | sed -E "s/\b($VENDORLIST)\b_?//g; s/__+/_/g; s/^_+//; s/_+$//")
+		[[ -z "$core" ]] && core="$base"
+
+		IFS='_' read -r -a toks <<< "$core"
+		n=${#toks[@]}
+		cand3=""; cand2=""; cand1=""
+		(( n>=3 )) && cand3="${toks[n-3]}_${toks[n-2]}_${toks[n-1]}"
+		(( n>=2 )) && cand2="${toks[n-2]}_${toks[n-1]}"
+		(( n>=1 )) && cand1="${toks[n-1]}"
+
+		if is_good_tail "$cand3" && contains_word "$usb_slug" "$cand3"; then
+			MATCH="${_DEVICES[$i]}"; MATCH_IDX=$((i+1)); return 0
+		elif is_good_tail "$cand2" && contains_word "$usb_slug" "$cand2"; then
+			MATCH="${_DEVICES[$i]}"; MATCH_IDX=$((i+1)); return 0
+		elif is_good_tail "$cand1" && contains_word "$usb_slug" "$cand1"; then
+			MATCH="${_DEVICES[$i]}"; MATCH_IDX=$((i+1)); return 0
+		elif contains_word "$usb_slug" "$base"; then
+			MATCH="${_DEVICES[$i]}"; MATCH_IDX=$((i+1)); return 0
+		fi
+	done
+
+	# optional aliases
+	case "$usb_slug" in
+		*station_g2*) MATCH="UnitEng Station G2"; MATCH_IDX=31; return 0 ;;
+	esac
+
+	return 1
 }
 
 #############################################################################
@@ -294,11 +441,27 @@ choose_meshcore_firmware() {
 			return 1
 		fi
 
+
 		if ((${#DEVICES[@]} == 1)); then
 			DEVICE="${DEVICES[0]}"
 			echo "Auto-selected device: $DEVICE"
 		else
 			local choice=''
+			
+			[[ -f "$DEVICE_PORT_NAME_FILE" ]] && device_port_name="$(<"$DEVICE_PORT_NAME_FILE")"
+			[[ -f "$DEVICE_PORT_FILE" ]] && device_name="$(<"$DEVICE_PORT_FILE")"
+			
+			match=""
+			match_idx=-1
+			
+			if pick_matching_device "$device_port_name" DEVICES; then
+				match="$MATCH"
+				match_idx="$MATCH_IDX"
+			else
+				match=""
+				match_idx=-1
+			fi
+			
 			while [[ -z "$DEVICE" ]]; do
 				echo
 				echo "[1] Select device (0 = Auto-detect):"
@@ -306,13 +469,35 @@ choose_meshcore_firmware() {
 				for i in "${!DEVICES[@]}"; do
 					printf '  %d) %s\n' $((i+1)) "${DEVICES[$i]}"
 				done
-				read -r -p 'Choice: ' choice </dev/tty
+				echo ""
+
+
+				if [[ -n "$match" ]]; then
+					read -r -p "Choice (Detected $match on $device_name, Enter will pick $match_idx): " choice </dev/tty
+				else
+					echo "$device_port_name -> $device_name"
+					read -r -p 'Choice: ' choice </dev/tty
+				fi
+				
 
 				if [[ "$choice" == 0 ]]; then
 					echo "Auto-detection requested."
 					autodetect_device
+					
+					[[ -f "$AUTODETECT_DEVICE_FILE" ]] && device_port_name="$(<"$AUTODETECT_DEVICE_FILE")"
+					if pick_matching_device "$device_port_name" DEVICES; then
+						match="$MATCH"
+						match_idx="$MATCH_IDX"
+					else
+						match=""
+						match_idx=-1
+					fi
+					
 					[[ -f "$SELECTED_DEVICE_FILE"  ]] && DEVICE="$(<"$SELECTED_DEVICE_FILE")"
 				elif [[ "$choice" =~ ^[1-9][0-9]*$ ]] && (( choice >= 1 && choice <= ${#DEVICES[@]} )); then
+					DEVICE="${DEVICES[$((choice-1))]}"
+				elif [[ -z "$choice" && -n "$match" ]]; then
+					choice="$match_idx"
 					DEVICE="${DEVICES[$((choice-1))]}"
 				else
 					echo "Invalid selection."
@@ -340,7 +525,8 @@ choose_meshcore_firmware() {
 		else
 			while [[ -z $ROLE ]]; do
 				sleep 0.1
-				echo; echo "[2] Select role:"
+				echo
+				echo "[2] Select role for $DEVICE:"
 				select ROLE in "${ROLES[@]}"; do [[ -n ${ROLE:-} ]] && break; done < /dev/tty
 			done
 		fi
@@ -350,18 +536,22 @@ choose_meshcore_firmware() {
 	local -a VERSIONS=()
 	mapfile -t VERSIONS < <( _jq1 --arg d "$DEVICE" --arg r "$ROLE" ".device[] | select(.name==\$d) | .firmware[] | select(.role==\$r) | .version | keys[]" | sort -ru )
 	if ((${#VERSIONS[@]} == 0)); then
-		choose_version_from_releases "$DEVICE" "$ROLE";
+		choose_version_from_releases "$DEVICE" "$ROLE" "$ARCHITECTURE" "$ERASE_URL" ;
 		return
 	fi
 	if ((${#VERSIONS[@]} == 1)); then
 		VERSION="${VERSIONS[0]}"
 		echo "Auto-selected version: $VERSION"
 	else
+		# Keep only newest two branches (X.Y)
+		local -a VERSIONS_SHOW=()
+		filter_last_two_branches VERSIONS VERSIONS_SHOW
+	
 		if [[ -z "$VERSION" ]]; then
 			while [[ -z $VERSION ]]; do
 				sleep 0.1
 				echo; echo "[3] Select version:"
-				select VERSION in "${VERSIONS[@]}"; do [[ -n ${VERSION:-} ]] && break; done < /dev/tty
+				select VERSION in "${VERSIONS_SHOW[@]}"; do [[ -n ${VERSION:-} ]] && break; done < /dev/tty
 			done
 		fi
 	fi
@@ -496,8 +686,9 @@ choose_serial() {
         # ────────────────────────── single device ──────────────────────────
         if ((${#devs[@]} == 1)); then
 			detected_dev="${devs[0]}"
-            echo "Only one device detected – selecting it automatically: $detected_dev - ${labels[0]}"
+            #echo "Only one device detected – selecting it automatically: $detected_dev - ${labels[0]}"
 			echo "$detected_dev" > "$DEVICE_PORT_FILE"
+			echo "${labels[0]}" > "$DEVICE_PORT_NAME_FILE"
 			return
         fi
 
@@ -515,6 +706,7 @@ choose_serial() {
 				detected_dev="${devs[choice-1]}"
 				echo "$detected_dev"
 				echo "$detected_dev" > "$DEVICE_PORT_FILE"
+				echo "${labels[choice-1]}" > "$DEVICE_PORT_NAME_FILE"
 				return
             fi
         fi
@@ -522,35 +714,36 @@ choose_serial() {
     done
 }
 
-check_tty_lock () {
-    local dev=$1
-    [[ -e $dev ]] || { return 2; }
+check_tty_lock() {
+    local dev="$1"
+    local lock="/var/lock/$(basename "$dev").lock"
 
-    # Open the device on fd 3 read-write (<>). Most distros let "dialout"
-    # members do this without sudo.
-	if ! sudo bash -c "exec 3<> \"$dev\" 2>/dev/null"; then
-		return 2
-	fi
-
-    # Try to grab an exclusive, *non-blocking* lock on fd 3.
-    if flock -n 3; then         # got the lock. device is FREE
-        #echo "FREE"
-        flock -u 3              # immediately unlock
-        exec 3>&-               # close fd
+    # open FD 3 on the lock file for the lifetime of this shell
+    exec 3>"$lock" || return 1
+    # try to acquire non-blocking lock
+    if ! flock -n 3; then
+        # still locked by someone else
         return 0
-    else                        # lock failed. someone else holds it
-        #echo "BUSY"
-        exec 3>&-
-        return 1
     fi
+    # we own the lock; release immediately and close FD
+    flock -u 3
+    exec 3>&-
+    # not locked by others
+    return 1
 }
 
 get_locked_service() {
-	[[ -f "$DEVICE_PORT_FILE" ]] && device_name="$(<"$DEVICE_PORT_FILE")"
-	
-	if check_tty_lock "$device_name"; then
-		return 0
-	fi
+    local device_name=""
+    [[ -f "$DEVICE_PORT_FILE" ]] && device_name="$(<"$DEVICE_PORT_FILE")"
+
+    if [[ -z "$device_name" ]]; then
+        # nothing to check yet
+        return 0
+    fi
+
+    if check_tty_lock "$device_name"; then
+        return 0
+    fi
 
 	# Get all users locking the device (skip the header line)
 	echo "Finding the service that has $device_name locked" > /dev/tty
@@ -560,7 +753,7 @@ get_locked_service() {
 	fi
 	users=$(sudo lsof "$device_name" 2>/dev/null | awk 'NR>1 {print $3}' | sort -u)
 	if [ -z "$users" ]; then
-		#echo "No process found locking ${device_name}."
+		echo "No process found locking ${device_name}."  > /dev/tty
 		return 0
 	fi
 	#echo "User(s): $users"
@@ -568,12 +761,11 @@ get_locked_service() {
 	# For each user, get all their PIDs.
 	local pids
 	pids=$(ps -u "$users" -o pid= | tr -s ' ' | tr '\n' ' ')
-	#echo "PIDs: $pids"
 
 	local found_service=""
 	#local last_pid=""
 	for pid in $pids; do
-		#echo "PID: $pid"
+		echo "PID: $pid" > /dev/tty
 
 		# Get the full command line for the process.
 		local cmd
@@ -592,7 +784,7 @@ get_locked_service() {
 		else
 			service="None"
 		fi
-		#echo "Service: $service"
+		echo "Service: $service"  > /dev/tty
 
 		# If a service file was found, store it.
 		if [ "$service" != "None" ]; then
@@ -611,7 +803,35 @@ get_locked_service() {
 	echo "$found_service" | awk '{$1=$1};1'
 }
 
+
+esptool_set_variables() {
+
+	echo "Checking the esptool version"
+	ver="$( pipx run esptool version | grep -m1 -Eo '[0-9]+(\.[0-9]+)+' )"
+	major="${ver%%.*}"
+	
+	if [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 5 )); then
+	  # X: esptool >= 5
+	  NORESET="no-reset"
+	  READMAC="read-mac"
+	  READFLASH="read-flash"
+	  WRITEFLASH="write-flash"
+	  ERASEFLASH="erase-flash"
+	  HARDRESET="hard-reset"
+	else
+	  NORESET="no_reset"
+	  READMAC="read_mac"
+	  READFLASH="read_flash"
+	  WRITEFLASH="write_flash"
+	  ERASEFLASH="erase_flash"
+	  HARDRESET="hard_reset"
+	fi
+
+}
+
 get_espcmd() {
+	[[ -f "$ESPTOOL_FILE"     ]] && ESPTOOL_CMD="$(<"$ESPTOOL_FILE")"
+
 	# Locate a Python interpreter.
 	PYTHON=""
 	for candidate in python3 python; do
@@ -635,19 +855,22 @@ get_espcmd() {
 		sudo apt update && sudo apt -y install pipx pip
 	fi
 
-	if "$PYTHON" -m esptool version >/dev/null 2>&1; then
-		ESPTOOL_CMD="$PYTHON -m esptool"
-	elif command -v esptool >/dev/null 2>&1; then
-		ESPTOOL_CMD="esptool"
-	elif command -v esptool.py >/dev/null 2>&1; then
-		ESPTOOL_CMD="esptool.py"
-	else
-		pipx install esptool
-		ESPTOOL_CMD="esptool.py"
-		pipx ensurepath
-		# shellcheck disable=SC1091
-		source "$HOME/.bashrc"
-	fi
+	esptool_set_variables
+	ESPTOOL_CMD="pipx run esptool"
+
+	#if sudo "$PYTHON" -m esptool version >/dev/null 2>&1; then
+	#	ESPTOOL_CMD="$PYTHON -m esptool"
+	#elif sudo env "PATH=$HOME/.local/bin:$PATH" command -v esptool >/dev/null 2>&1; then
+	#	ESPTOOL_CMD="esptool"
+	#elif sudo env "PATH=$HOME/.local/bin:$PATH" command -v esptool.py >/dev/null 2>&1; then
+	#	ESPTOOL_CMD="esptool.py"
+	#else
+	#	pipx install esptool
+	#	ESPTOOL_CMD="esptool.py"
+	#	pipx ensurepath
+	#	# shellcheck disable=SC1091
+	#	source "$HOME/.bashrc"
+	#fi
 
 	echo "$ESPTOOL_CMD" > "$ESPTOOL_FILE"
 }
@@ -685,6 +908,7 @@ scan_and_maybe_mount() {
     return 2                     # USB present but no UF2
 }
 
+
 autodetect_device() {
 	local -a DEVICES=()
 	mapfile -t DEVICES < <(_jq1 '.device[].name' 2>/dev/null | sort -u)
@@ -703,18 +927,28 @@ autodetect_device() {
 	# Probe for ESP32
 	local ESPTOOL_CMD=""
 	get_espcmd
-	[[ -f "$ESPTOOL_FILE"     ]] && ESPTOOL_CMD="$(<"$ESPTOOL_FILE")"
 
-	if timeout 2s "$ESPTOOL_CMD" --port "$DEVICE_PORT" --baud 1200 read_mac 2>/dev/null | grep -qi -m1 'MAC'; then
+	if ! timeout 5s $ESPTOOL_CMD --port "${DEVICE_PORT}" --after "$NORESET" --baud 1200 "$READMAC" 2>/dev/null; then
+		echo "esptool failed, checking if a service has the port locked"
+		# Stop the service.
+		lockedService=$(get_locked_service)
+		if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
+			echo "Stopping service $lockedService..."
+			sudo systemctl stop "$lockedService"
+			sleep 3
+			timeout 5s $ESPTOOL_CMD --port "${DEVICE_PORT}" --after "$NORESET" --baud 1200 "$READMAC" 2>/dev/null || true
+		fi
+	fi
+
+	[[ -f "$DEVICE_PORT_FILE"     ]] && DEVICE_PORT="$(<"$DEVICE_PORT_FILE")"
+
+	if timeout 5s $ESPTOOL_CMD --port "$DEVICE_PORT" --after "$NORESET" --baud 1200 "$READMAC" 2>&1 | perl -pe 's/\e\[[0-9;]*[A-Za-z]//g' | sed '/^Warning: Deprecated/d' | grep -qi -m1 'MAC'; then
 		echo "ESP chip responded; getting existing firmware"
-		"$ESPTOOL_CMD" --port "$DEVICE_PORT" --baud 921600 read_flash 0 0x70000 "$DOWNLOAD_DIR/CURRENT.BAK" | 
-		while IFS= read -r line; do 
-			printf '\r%-80s' "$line" 
-		done 
-		printf '\n'    
-		echo
-		echo "Device detected:"
-		grep -m1 -aoP '\.pio/libdeps/\K[^/]{0,100}' "$DOWNLOAD_DIR/CURRENT.BAK"
+		sleep 1
+		$ESPTOOL_CMD --port "$DEVICE_PORT" --after "$NORESET" --baud 921600 "$READFLASH" 0 0x70000 "$DOWNLOAD_DIR/CURRENT.BAK" 2>&1 | perl -pe 's/\e\[[0-9;]*[A-Za-z]//g' | sed '/^Warning: Deprecated/d'
+
+		AUTODETECT_DEVICE=$( grep -m1 -aoP '\.pio/libdeps/\K[^/]{0,100}' "$DOWNLOAD_DIR/CURRENT.BAK" )
+	
 	else
 		# ---- Y: timed-out or grep found no match -------------------------
 		echo "nrf52 device"
@@ -739,10 +973,13 @@ autodetect_device() {
 				sleep 1
 			done
 		fi
-		echo
-		echo "Device detected:"
-		grep -m1 -aoP '\.pio/libdeps/\K[^/]{0,100}' "$MOUNT_FOLDER/CURRENT.UF2"
+		AUTODETECT_DEVICE=$( grep -m1 -aoP '\.pio/libdeps/\K[^/]{0,100}' "$MOUNT_FOLDER/CURRENT.UF2" )
+		
 	fi
+	echo
+	echo "Device detected:"
+	echo "$AUTODETECT_DEVICE"
+	echo "$AUTODETECT_DEVICE" > "$AUTODETECT_DEVICE_FILE"
 	read -r -p "Press Enter to continue..."
 }
 
@@ -751,16 +988,23 @@ autodetect_device() {
 # --------------------------------------------------
 
 rm -f  \
-  "$SELECTED_DEVICE_FILE"  \
-  "$ARCHITECTURE_FILE"     \
-  "$ERASE_URL_FILE"        \
-  "$SELECTED_ROLE_FILE"    \
-  "$SELECTED_VERSION_FILE" \
-  "$SELECTED_TYPE_FILE"    \
-  "$SELECTED_URL_FILE"     \
-  "$DOWNLOADED_FILE_FILE"  \
+  "$SELECTED_DEVICE_FILE"   \
+  "$ARCHITECTURE_FILE"      \
+  "$ERASE_URL_FILE"         \
+  "$SELECTED_ROLE_FILE"     \
+  "$SELECTED_VERSION_FILE"  \
+  "$SELECTED_TYPE_FILE"     \
+  "$SELECTED_URL_FILE"      \
+  "$DOWNLOADED_FILE_FILE"   \
+  "$ERASE_FILE_FILE"        \
+  "$DEVICE_PORT_NAME_FILE"  \
+  "$ESPTOOL_FILE"           \
+  "$AUTODETECT_DEVICE_FILE" \
   "$DEVICE_PORT_FILE"
+  
 URL_PATH=''
+choose_serial
+
 while [[ -z $URL_PATH ]]; do
 	choose_meshcore_firmware
 
@@ -778,16 +1022,6 @@ URL="https://flasher.meshcore.dev${URL_PATH}"
 download_and_verify "$URL" "$DOWNLOADED_FILE_FILE" 1
 
 
-choose_serial
-
-
-# Stop the service.
-#lockedService=$(get_locked_service)
-#if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
-#	echo "Stopping service $lockedService..."
-#	sudo systemctl stop "$lockedService"
-#fi
-#echo "lockedService: $lockedService"
 
 
 [[ -f "$ARCHITECTURE_FILE"    ]] && ARCHITECTURE="$(<"$ARCHITECTURE_FILE")"
@@ -795,29 +1029,53 @@ choose_serial
 [[ -f "$DOWNLOADED_FILE_FILE" ]] && DOWNLOADED_FILE="$(<"$DOWNLOADED_FILE_FILE")"
 [[ -f "$SELECTED_DEVICE_FILE" ]] && DEVICE="$(<"$SELECTED_DEVICE_FILE")"
 
+echo "Architecture: $ARCHITECTURE"
 if [[ "$ARCHITECTURE" =~ esp32 ]]; then
+
 	get_espcmd
 	[[ -f "$ESPTOOL_FILE"     ]] && ESPTOOL_CMD="$(<"$ESPTOOL_FILE")"
 	export ESPTOOL_PORT=$DEVICE_PORT
-	echo "Setting device into bootloader mode via baud 1200"
-	$ESPTOOL_CMD --port "${DEVICE_PORT}" --baud 1200 read_mac || true
+	echo "Setting device ${DEVICE} on ${DEVICE_PORT} into bootloader mode via baud 1200"
+	if ! $ESPTOOL_CMD --port "${DEVICE_PORT}" --after "$NORESET" --baud 1200 "$READMAC" 2>/dev/null; then
+		echo "esptool failed, checking if a service has the port locked"
+		# Stop the service.
+		lockedService=$(get_locked_service)
+		if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
+			echo "Stopping service $lockedService..."
+			sudo systemctl stop "$lockedService"
+			sleep 3
+			$ESPTOOL_CMD --port "${DEVICE_PORT}" --after "$NORESET" --baud 1200 "$READMAC" 2>/dev/null || true
+		fi
+	fi
 	
-	sleep 8
-	
-	echo "ESP chip responded; getting existing firmware"
-	"$ESPTOOL_CMD" --port "$DEVICE_PORT" --baud 921600 read_flash 0 0x70000 "$DOWNLOAD_DIR/CURRENT.BAK" | 
-	while IFS= read -r line; do 
-		printf '\r%-80s' "$line" 
-	done 
-	printf '\n'    
 	echo
-	echo "Device detected:"
+	echo
+	echo "ESP chip responded; getting existing firmware"
+	sleep 0.5
+	echo "$ESPTOOL_CMD --port $DEVICE_PORT --baud 921600 read_flash 0 0x70000 $DOWNLOAD_DIR/CURRENT.BAK"
+	$ESPTOOL_CMD --port "$DEVICE_PORT" --after "$NORESET" --baud 921600 "$READFLASH" 0 0x70000 "$DOWNLOAD_DIR/CURRENT.BAK"
+	echo
+	echo -n "    Device firmware: "
 	grep -m1 -aoP '\.pio/libdeps/\K[^/]{0,100}' "$DOWNLOAD_DIR/CURRENT.BAK"
+	echo -n "Downloaded firmware: "
+	grep -m1 -aoP '\.pio/libdeps/\K[^/]{0,100}' "$DOWNLOADED_FILE"
 	
-	sleep 8
+	[[ -f "$SELECTED_TYPE_FILE"    ]] && TYPE="$(<"$SELECTED_TYPE_FILE")"
+	echo
+	echo "Commands that will be ran."
 	
-	read -r -p "Press Enter to update the ${DEVICE} firmware on port ${DEVICE_PORT}"
-	$ESPTOOL_CMD --port "${DEVICE_PORT}" --baud 115200 write_flash 0x10000 "${DOWNLOADED_FILE}"
+	if [[ "$TYPE" == "flash-wipe" ]]; then
+
+		echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $NORESET --baud 115200 $ERASEFLASH"
+		echo "$ESPTOOL_CMD --port ${DEVICE_PORT}  --after $HARDRESET --baud 115200 $WRITEFLASH 0x10000 \"${DOWNLOADED_FILE}\""
+		read -r -p "Press Enter to wipe and install the ${DEVICE} firmware on port ${DEVICE_PORT}"
+		$ESPTOOL_CMD --port "${DEVICE_PORT}" --after "$NORESET" --baud 115200 "$ERASEFLASH"
+	else
+		echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $HARDRESET --baud 115200 $WRITEFLASH 0x10000 \"${DOWNLOADED_FILE}\""
+		read -r -p "Press Enter to update the ${DEVICE} firmware on port ${DEVICE_PORT}"
+	fi
+	
+	$ESPTOOL_CMD --port "${DEVICE_PORT}" --after "$HARDRESET" --baud 115200 "$WRITEFLASH" 0x10000 "${DOWNLOADED_FILE}"
 else
 	echo "nrf52 device"
 	list_usb_block_devs
