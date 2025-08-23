@@ -59,6 +59,7 @@ REPO_NAME="MeshCore"
 RELEASE_INFO1_URL="https://flasher.meshcore.dev/config.json"
 RELEASE_INFO2_URL="https://flasher.meshcore.dev/releases"
 VENDORLIST="elecrow|heltec|lilygo|seeed|seed|studio|rak|wireless|wisblock|wismesh|raspberry|pi|pico|waveshare|promicro|uniteng|sensecap|wio|xiao"
+RADIOLIST="sx1262|sx126x|sx1276|sx127x"
 NORESET="no-reset"
 READMAC="read-mac"
 READFLASH="read-flash"
@@ -362,6 +363,10 @@ pick_matching_device() {
 		# strip common vendor tokens; keep tail model words
 		core="$base"
 		core=$( printf '%s' "$core" | sed -E "s/\b($VENDORLIST)\b_?//g; s/__+/_/g; s/^_+//; s/_+$//")
+		core=$( printf '%s' "$core" | sed -E "s/(^|_)($RADIOLIST)(_|$)/\1\3/g" )
+		core=$( printf '%s' "$core" | sed -E 's/__+/_/g; s/^_+//; s/_+$//' ) # tidy underscores
+		#echo "$core"
+
 		[[ -z "$core" ]] && core="$base"
 
 		IFS='_' read -r -a toks <<< "$core"
@@ -1076,7 +1081,7 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 	echo "ESP chip responded; getting existing firmware"
 	sleep 0.5
 	echo "$ESPTOOL_CMD --port $DEVICE_PORT --baud 921600 $READFLASH 0x10000 0x70000 $DOWNLOAD_DIR/CURRENT.BAK"
-	$ESPTOOL_CMD --port "$DEVICE_PORT" --after "$NORESET" --baud 921600 "$READFLASH" 0x10000 0x70000 "$DOWNLOAD_DIR/CURRENT.BAK"
+	$ESPTOOL_CMD --port "$DEVICE_PORT" --after "$NORESET" --baud 921600 "$READFLASH" 0x10000 0x70000 "$DOWNLOAD_DIR/CURRENT.BAK" 2>/dev/null || true
 	echo
 	print_fw_line "    Device firmware:" "$DOWNLOAD_DIR/CURRENT.BAK"
 	print_fw_line "Downloaded firmware:" "$DOWNLOADED_FILE"
@@ -1091,6 +1096,7 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 		echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $HARDRESET --baud 115200 $WRITEFLASH 0x0000 \"${DOWNLOADED_FILE}\""
 		read -r -p "Press Enter to ERASE and INSTALL the ${DEVICE} firmware on port ${DEVICE_PORT}"
 		$ESPTOOL_CMD --port "${DEVICE_PORT}" --after "$NORESET" --baud 115200 "$ERASEFLASH"
+		sleep 1
 		$ESPTOOL_CMD --port "${DEVICE_PORT}" --after "$HARDRESET" --baud 115200 "$WRITEFLASH" 0x0000 "${DOWNLOADED_FILE}"
 	else
 		echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $HARDRESET --baud 115200 $WRITEFLASH 0x10000 \"${DOWNLOADED_FILE}\""
