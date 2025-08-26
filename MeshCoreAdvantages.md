@@ -72,3 +72,9 @@ https://meshtastic.org/docs/configuration/module/telemetry/
 By looking at MQTT we've discovered that over 50% of the data is automated telemetry packets. This eats up channel usage and because the network is always busy; it makes it more unreliable as you add in more nodes once you hit a tipping point. 
 
 MeshCore uses a pull model where you can pull data from a remote node by request. Usually a human is required to have packets go over the network. 
+
+## Security
+https://meshtastic.org/blog/that-one-time-at-defcon/  
+https://github.com/meshtastic/firmware/pull/7596/commits/b5ee783904329fb3de865ced303fc62983e667c7  
+
+The node info is still not self signed. Version 3 would be required to fix this. This commit helps the issue but it's not 100% fixed. 
