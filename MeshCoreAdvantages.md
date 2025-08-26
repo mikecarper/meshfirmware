@@ -41,7 +41,7 @@ MeshCore recommended settings use 62.5khz as the bandwidth
 https://meshtastic.org/docs/configuration/radio/lora/#coding-rate  
 This is a black box;. not a lot of information is given. All we can see is that for the slower long presets this gets changed to 4/8.
 
-With MeshCore it's recommended to keep this at 4/5; but if you have a portable node like the t1000e you can change this to 4/8 and it's 100% compatible with the 4/5 network; they will be able to talk to each other with different coding rates. 
+With MeshCore it's recommended to keep this at 4/5; but if you have a portable node like the t1000e you can change this to 4/8 and it's 100% compatible with the 4/5 network; they will be able to talk to each other with different coding rates. A larger coding rate give you better error correction for marginal links at the cost of taking more tx time. 
 
 ## Routers/Repeaters & Hops
 https://meshtastic.org/blog/choosing-the-right-device-role/#router-and-repeater  
