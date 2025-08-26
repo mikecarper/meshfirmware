@@ -26,6 +26,8 @@ function SLOT_FROM_PRESET(name, numChannels){
 ```
 LongFast is slot 20 (906.8750) because of the name and the bandwidth. It was not planned out. 
 
+MeshCore frequencies are hand picked to make sure they do not overlap with noise in the given environment. 
+
 ## Bandwidth Selection & Spreading Factor
 https://meshtastic.org/docs/overview/radio-settings/#presets  
 This is picking the widest bandwidth possible for the presets. The wider the bandwidth the easier it is to encounter noise. In North America there are peaks every 200khz, so almost every preset will have noise. 
