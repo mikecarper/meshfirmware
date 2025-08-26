@@ -55,6 +55,6 @@ MeshCore takes a different approach, the max hop count is 64 and putting repeate
 
 ## Telemetry
 https://meshtastic.org/docs/configuration/module/telemetry/  
-By looking at MQTT we've discovered that over 50% of the data is automated telemetry packets. This eats up channel usage and because the network is always busy it makes it more unreliable as you add in more nodes once you hit a tipping point. 
+By looking at MQTT we've discovered that over 50% of the data is automated telemetry packets. This eats up channel usage and because the network is always busy; it makes it more unreliable as you add in more nodes once you hit a tipping point. 
 
 MeshCore uses a pull model where you can pull data from a remote node by request. Usually a human is required to have packets go over the network. 
