@@ -89,3 +89,7 @@ IoT netowrk.
 
 ## Helium (decentralized LoRaWAN network)
 IoT netowrk. Cryptocurrency Helium Network Token HNT is used to make the network work. 
+
+### Bandwidth Selection & Spreading Factor
+https://docs.helium.com/iot/lorawan-frequency-plans#us915  
+A more narrow BW would most likely preform better but 125 will sometimes fit inbetween the noise. 
