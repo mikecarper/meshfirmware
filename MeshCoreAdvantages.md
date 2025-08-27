@@ -85,7 +85,7 @@ The node info is still not self signed. Version 3 would be required to fix this.
 Each node needs a computer.
 
 ### Bandwidth Selection & Spreading Factor
-https://markqvist.github.io/Reticulum/manual/interfaces.html#rnode-lora-interface
+https://markqvist.github.io/Reticulum/manual/interfaces.html#rnode-lora-interface  
 User Defined but it uses 125khz in this example. 125khz will sometimes fit in between the noise. 
 
 ## LoRaWan
