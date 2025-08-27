@@ -84,6 +84,10 @@ The node info is still not self signed. Version 3 would be required to fix this.
 ## Reticulum / RNode
 Each node needs a computer.
 
+### Bandwidth Selection & Spreading Factor
+https://markqvist.github.io/Reticulum/manual/interfaces.html#rnode-lora-interface
+User Defined but it uses 125khz in this example. 125khz will sometimes fit in between the noise. 
+
 ## LoRaWan
 IoT netowrk.
 
@@ -92,4 +96,4 @@ IoT netowrk. Cryptocurrency Helium Network Token HNT is used to make the network
 
 ### Bandwidth Selection & Spreading Factor
 https://docs.helium.com/iot/lorawan-frequency-plans#us915  
-A more narrow BW would most likely preform better but 125 will sometimes fit inbetween the noise. 
+A more narrow BW would most likely preform better but 125khz will sometimes fit in between the noise. 
