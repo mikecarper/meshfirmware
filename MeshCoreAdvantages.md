@@ -74,7 +74,7 @@ MeshCore takes a different approach, putting repeaters on your rooftop is encour
 https://meshtastic.org/docs/configuration/radio/lora/#max-hops  
 7 is the maximum number of hops you can get. 3 is recommended and people get mad if you go above this value. It's not designed for a city wide network; it's too noisy.
 
-Once again MeshCore takes a different approach. Everyone can use up to 64 hops. When there is no limit the entire network is one big chat; this makes message delivery extremely reliable. Tropospheric Ducting ("skip") can happen where MeshCore messages go over 150 miles in one hop.
+Once again MeshCore takes a different approach. Everyone can use up to 64 hops. When there is no limit the entire network is one big chat; this makes message delivery extremely reliable. Tropospheric Ducting ("skip") can happen where MeshCore messages go over 150 miles in one hop because the repeater is in the correct spot to take advantage of it.
 
 ### Telemetry
 https://meshtastic.org/docs/configuration/module/telemetry/  
