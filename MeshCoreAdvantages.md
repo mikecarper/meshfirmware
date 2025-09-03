@@ -1,6 +1,7 @@
 
 
 
+
 # Technical overview on why MeshCore works better than the other LoRa networks in North America.
 
 ## Meshtastic
@@ -57,9 +58,9 @@ Better T1000-E settings in North America using the larger coding rate:
 - 7 Spreading Factor  
 - 8 Coding Rate  
 
-A CR of 8 will allow the T1000-E to reach futher when transmitting and still be on the network. 
+A CR of 8 will allow the T1000-E to reach further when transmitting and still be on the network. 
 
-### Routers/Repeaters & Hops
+### Routers/Repeaters
 https://meshtastic.org/blog/choosing-the-right-device-role/#router-and-repeater  
 The network is not designed to handle a dense network of routers/repeaters. It only works with a small number of routers/repeaters. https://www.youtube.com/watch?v=htjwtnjQkkE&pp  
 
@@ -67,7 +68,13 @@ Having lots of routers/repeaters will cause issues with your 3 hops disappearing
 https://meshtastic.org/docs/configuration/tips/#hop-count  
 https://meshtastic.org/docs/software/meshtasticator/#simulation-insights  
 
-MeshCore takes a different approach, the max hop count is 64 and putting repeaters on your rooftop is encouraged. You can manually change the tx delay factor if issues arise with too many repeaters in an area. 
+MeshCore takes a different approach, putting repeaters on your rooftop is encouraged. You can manually change the tx delay factor if issues arise with too many repeaters in an area. 
+
+### Hops
+https://meshtastic.org/docs/configuration/radio/lora/#max-hops  
+7 is the maximum number of hops you can get. 3 is recommended and people get mad if you go above this value. It's not designed for a city wide network; it's too noisy.
+
+Once again MeshCore takes a different approach. Everyone can use up to 64 hops. When there is no limit the entire network is one big chat; this makes message delivery extremely reliable. Tropospheric Ducting ("skip") can happen where MeshCore messages go over 150 miles in one hop.
 
 ### Telemetry
 https://meshtastic.org/docs/configuration/module/telemetry/  
