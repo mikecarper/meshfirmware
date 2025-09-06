@@ -854,6 +854,10 @@ detect_device() {
 			if [[ -n "$detected_dev" ]]; then 
 				seen_dev["$detected_dev"]=1
 			fi
+			
+			if [[ -z ${detected_dev} ]]; then
+				detected_dev=$( pick_serial_port ${device_info} )
+			fi
 
 			detected_devs[idx]="$detected_dev"
 			# If we found a detected_dev, try to get its firmware version.
@@ -882,6 +886,8 @@ detect_device() {
 			else
 				version="unknown"
 			fi
+
+			
 			menu_options[idx]="${device_info} -> ${detected_dev} (${version})"
 		done
 		# Print the menu with version information.
@@ -907,6 +913,69 @@ detect_device() {
 	
 	echo "$detected_line -> $detected_dev" >"${DEVICE_INFO_FILE}"
 	normalize "$detected_raw" >"${DETECTED_PRODUCT_FILE}"
+}
+
+pick_serial_port() {
+  local -a ports labels
+  local p idlabel i choice auto
+
+  # Gather candidates (prefer ACM before USB)
+  while IFS= read -r p; do ports+=("$p"); done < <(
+    for g in /dev/ttyACM* /dev/ttyUSB*; do
+      [[ -e "$g" ]] && printf '%s\n' "$g"
+    done | sort -V
+  )
+
+  if ((${#ports[@]}==0)); then
+    echo "No /dev/ttyACM* or /dev/ttyUSB* devices found." >&2
+    return 1
+  fi
+
+  # Single hit? Just return it.
+  if ((${#ports[@]}==1)); then
+    printf '%s\n' "${ports[0]}"
+    return 0
+  fi
+
+  echo "Pick the port for $1"
+
+  # Build nice labels using /dev/serial/by-id if present
+  for p in "${ports[@]}"; do
+    idlabel=""
+    if [[ -d /dev/serial/by-id ]]; then
+      # find symlink pointing to this device
+      while IFS= read -r link; do
+        [[ -L "$link" && "$(readlink -f "$link")" == "$p" ]] || continue
+        idlabel=" ($(basename "$link"))"
+        break
+      done < <(ls -1 /dev/serial/by-id 2>/dev/null | sed 's|^|/dev/serial/by-id/|')
+    fi
+    labels+=("$p$idlabel")
+  done
+
+  # Auto: prefer first ACM, else first USB
+  for i in "${!ports[@]}"; do
+    [[ "${ports[$i]}" =~ /dev/ttyACM[0-9]+$ ]] && auto=$((i+1)) && break
+  done
+  [[ -z "$auto" ]] && auto=1
+
+  echo "Select serial port (0 = Auto):"
+  printf '  0) Auto -> %s\n' "${labels[$((auto-1))]}"
+  for i in "${!labels[@]}"; do
+    printf '  %2d) %s\n' "$((i+1))" "${labels[$i]}"
+  done
+
+  read -rp "Choice [0-${#ports[@]}]: " choice
+  [[ -z "$choice" ]] && choice=0
+
+  if [[ "$choice" == 0 ]]; then
+    printf '%s\n' "${ports[$((auto-1))]}"
+  elif [[ "$choice" =~ ^[0-9]+$ ]] && (( choice>=1 && choice<=${#ports[@]} )); then
+    printf '%s\n' "${ports[$((choice-1))]}"
+  else
+    echo "Invalid choice." >&2
+    return 1
+  fi
 }
 
 # Match the firmware files against the detected device.
@@ -1149,78 +1218,6 @@ prepare_script() {
 		abs_selected="$(cd "$(dirname "$selected_file")" && pwd)/$(basename "$selected_file")"
 	fi
 
-	# Adjust baud rate for ESP32 firmware.
-	if echo "$architecture" | grep -qi "esp32"; then
-		if [ -f "$script_to_run" ]; then
-			# Changes for update
-			if [[ "$script_to_run" == *update* ]]; then
-				# Ensure the baud rate is set correctly
-				sed -i 's/--baud 115200/--baud 1200/g' "$script_to_run"
-
-				# Remove any existing --port argument
-				sed -i 's/--port [^ ]* //g' "$script_to_run"
-
-				# Add the new --port argument before --baud 1200, using a different delimiter (|)
-				sed -i "s|--baud 1200|--port ${device_port_name} --baud 1200 |g" "$script_to_run"
-			else
-				# Changes for install
-				if ! grep -q '^.*sleep 5$' "$script_to_run"; then
-				
-					# Create a temporary diff file.
-					diff_file=$(mktemp)
-
-					cat << 'EOF' > "$diff_file"
-index bacf48f..c75bcd9 100755
---- a/device-install.sh
-+++ b/device-install.sh
-@@ -56,6 +56,7 @@ else
-        echo "Error: esptool not found"
-        exit 1
- fi
-+ESPTOOL_CMD="$ESPTOOL_CMD --baud 1200"
-
- set -e
- 
- # Usage info
-@@ -190,13 +191,21 @@ if [ -f "${FILENAME}" ] && [ -n "${FILENAME##*"update"*}" ]; then
-                exit 1
-        fi
-
--       echo "Trying to flash ${FILENAME}, but first erasing and writing system information"
-+       echo ""
-+       echo "First erasing the flash"
-        $ESPTOOL_CMD erase_flash
-+       sleep 5
-+       echo ""
-+       echo "Trying to flash ${FILENAME} at offset 0x00"
-        $ESPTOOL_CMD write_flash 0x00 "${FILENAME}"
-+       sleep 7
-+       echo ""
-        echo "Trying to flash ${OTAFILE} at offset ${OTA_OFFSET}"
--       $ESPTOOL_CMD write_flash $OTA_OFFSET "${OTAFILE}"
-+       $ESPTOOL_CMD write_flash ${OTA_OFFSET} "${OTAFILE}"
-+       sleep 9
-+       echo ""
-        echo "Trying to flash ${SPIFFSFILE}, at offset ${OFFSET}"
--       $ESPTOOL_CMD write_flash $OFFSET "${SPIFFSFILE}"
-+       $ESPTOOL_CMD write_flash ${OFFSET} "${SPIFFSFILE}"
-
- else
-        show_help
-EOF
-					# Apply the diff to $script_to_run
-					patch --fuzz=3 --ignore-whitespace "$script_to_run" < "$diff_file"
-
-					# Remove the temporary diff file.
-					rm -f "$diff_file"
-				fi
-			fi
-
-		else
-			echo "No $(basename "$script_to_run") found. Skipping baud rate change."
-		fi
-	fi
-
 	abs_script=""
 	if [ "$script_to_run" ]; then
 		if [ ! -x "$script_to_run" ]; then
@@ -1457,19 +1454,7 @@ run_update_script() {
 
 	# Determine the esptool command.
 	if echo "$architecture" | grep -qi "esp32"; then
-		if "$PYTHON" -m esptool version >/dev/null 2>&1; then
-			ESPTOOL_CMD="$PYTHON -m esptool"
-		elif command -v esptool >/dev/null 2>&1; then
-			ESPTOOL_CMD="esptool"
-		elif command -v esptool.py >/dev/null 2>&1; then
-			ESPTOOL_CMD="esptool.py"
-		else
-			pipx install esptool
-			ESPTOOL_CMD="esptool.py"
-			pipx ensurepath
-			# shellcheck disable=SC1091
-			source "$HOME/.bashrc"
-		fi
+		ESPTOOL_CMD="pipx run esptool"
 	fi
 
 	# Check if any services are locking up the device
@@ -1506,13 +1491,19 @@ run_update_script() {
 	if echo "$architecture" | grep -qi "esp32"; then
 		export ESPTOOL_PORT=$device_port_name
 		echo "Setting device into bootloader mode via baud 1200"
-		$ESPTOOL_CMD --port "${device_port_name}" --baud 1200 chip_id || true
-		sleep 8
+		$ESPTOOL_CMD --port "${device_port_name}" --baud 1200 --after no_reset read_mac  || true
+		sleep 1
 		# Change directory to the script's folder.
 		pushd "$(dirname "$abs_selected")" > /dev/null || { echo "Failed to change directory"; exit 1; }
 		
-		echo "Running: \"$abs_script\"  -p \"${device_port_name}\" -f \"$basename_selected\""
-		"$abs_script" -p "${device_port_name}" -f "$basename_selected"
+		if [ "$operation" = "update" ]; then
+			echo "Running: $ESPTOOL_CMD --baud 115200 write-flash 0x10000 \"$basename_selected\""
+			$ESPTOOL_CMD --baud 115200 write-flash 0x10000 "$basename_selected"
+		elif [ "$operation" = "install" ]; then
+			echo "Running: \"$abs_script\"  -p \"${device_port_name}\" -f \"$basename_selected\""
+			"$abs_script" -p "${device_port_name}" -f "$basename_selected"
+		fi
+
 		echo ""
 		echo "If you see no errors above then"
 		echo "Firmware $operation for ESP32 device ${device_name} completed on port ${device_port_name}."
