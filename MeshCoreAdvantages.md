@@ -82,6 +82,9 @@ By looking at MQTT we've discovered that over 50% of the data is automated telem
 
 MeshCore uses a pull model where you can pull data from a remote node by request. Usually a human is required to have packets go over the network. 
 
+### Noise Floor
+One nice feature of MeshCore is that the repeaters will tell you the noise floor. no guessing if a filter it needed. If the floor is below -100 it would benefit from a filter, most likely.  
+
 ### Security
 https://meshtastic.org/blog/that-one-time-at-defcon/  
 https://github.com/meshtastic/firmware/pull/7596/commits/b5ee783904329fb3de865ced303fc62983e667c7  
