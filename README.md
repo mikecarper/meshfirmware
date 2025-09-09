@@ -1,10 +1,10 @@
-# 3rd party firmware selector for the Meshtastic project
-The CMD and Bash script automates the process of selecting, downloading, and applying firmware updates from the [meshtastic/firmware](https://github.com/meshtastic/firmware) GitHub repository via the USB port.
+# Alt CLI firmware selector for MeshCore & Meshtastic projects
+Scripts that automates the process of selecting, downloading, and applying firmware updates from the [meshcore-dev/MeshCore](https://github.com/meshcore-dev/MeshCore) & [meshtastic/firmware](https://github.com/meshtastic/firmware) GitHub repository via the USB port.  
 
 # Windows Quick start
 [Download mtfirmware.cmd (right click save)](https://github.com/mikecarper/meshfirmware/blob/main/mtfirmware.cmd?raw=true)  
 Make sure file is named mtfirmware.cmd and not mtfirmware.cmd.txt  
-double click and run the file mtfirmware.cmd
+double click and run the file mtfirmware.cmd  
 
 Windows Video
 -----
