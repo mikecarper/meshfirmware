@@ -74,13 +74,16 @@ MeshCore takes a different approach, putting repeaters on your rooftop is encour
 https://meshtastic.org/docs/configuration/radio/lora/#max-hops  
 7 is the maximum number of hops you can get. 3 is recommended and people get mad if you go above this value. It's not designed for a city wide network; it's too noisy.
 
-Once again MeshCore takes a different approach. Everyone can use up to 64 hops. When there is no limit the entire network is one big chat; this makes message delivery extremely reliable. Tropospheric Ducting ("skip") can happen where MeshCore messages go over 150 miles in one hop because the repeater is in the correct spot to take advantage of it.
+Once again MeshCore takes a different approach. Everyone can use up to 64 hops. When there is no limit the entire network is one big chat; this makes message delivery extremely reliable. [Tropospheric Ducting](https://www.dxinfocentre.com/tropo_wam.html) "skip" can happen where MeshCore messages go over 150 miles in one hop because the repeater is in the correct spot to take advantage of it.
 
 ### Telemetry
 https://meshtastic.org/docs/configuration/module/telemetry/  
 By looking at MQTT we've discovered that over 50% of the data is automated telemetry packets. This eats up channel usage and because the network is always busy; it makes it more unreliable as you add in more nodes once you hit a tipping point. 
 
 MeshCore uses a pull model where you can pull data from a remote node by request. Usually a human is required to have packets go over the network. 
+
+### Trace Routes
+In MeshCore every packet has a trace attached to it. No more guessing on how a signal got out. This helps with planning out locations for future repeaters and for knowing which direction to point a yagi.
 
 ### Noise Floor
 One nice feature of MeshCore is that the repeaters will tell you the noise floor. no guessing if a filter it needed. If the floor is below -100 it would benefit from a filter, most likely.  
