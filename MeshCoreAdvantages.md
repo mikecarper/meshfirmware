@@ -29,7 +29,10 @@ function SLOT_FROM_PRESET(name, numChannels){
 ```
 LongFast is slot 20 (906.8750) because of the name and the bandwidth. It was not planned out. 
 
-MeshCore frequencies are hand picked to make sure they do not overlap with noise in the given environment. 
+MeshCore frequencies are hand picked to make sure they do not overlap with noise in the given environment.  
+<img width="1133" height="816" alt="image" src="https://github.com/user-attachments/assets/a7ccee76-cc45-48b3-969f-5fb42fb4ac98" />  
+You can see the frequency here is in between a lot of of the noise. The chirps on the waterfall are from a mesh core node transmitting.
+
 
 ### Bandwidth Selection & Spreading Factor
 https://meshtastic.org/docs/overview/radio-settings/#presets  
