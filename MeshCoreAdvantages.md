@@ -7,6 +7,8 @@
 ## Meshtastic
 
 ### Center Frequency Selection
+<img width="1008" height="827" alt="image" src="https://github.com/user-attachments/assets/ae941f54-5e9f-472a-a54e-b4b4906b35c5" />  
+
 https://github.com/meshtastic/firmware/blob/master/src/DisplayFormatters.cpp The hash of this gets you the frequency slot
 
 How the slot will be picked; take a hash of the name, mod operation on that number, given the number of channels the that are available given the operating frequency range.
