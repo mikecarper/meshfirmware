@@ -2,6 +2,7 @@
 
 
 
+
 # Technical overview on why MeshCore works better than the other LoRa networks in North America.
 
 ## Meshtastic
@@ -81,6 +82,12 @@ https://meshtastic.org/docs/configuration/radio/lora/#max-hops
 
 Once again MeshCore takes a different approach. Everyone can use up to 64 hops. When there is no limit the entire network is one big chat; this makes message delivery extremely reliable. [Tropospheric Ducting](https://www.dxinfocentre.com/tropo_wam.html) "skip" can happen where MeshCore messages go over 150 miles in one hop because the repeater is in the correct spot to take advantage of it.
 
+## Bots
+Something interesting that I've noticed is that with MeshCore you usually only need 1 bot for the network. These are the bots in the Seattle area running on Meshtastic  
+<img width="1065" height="769" alt="image" src="https://github.com/user-attachments/assets/99d605e9-f850-48f0-87a3-f4938581c001" />  
+And here is the one bot running in the Seattle area running on MeshCore  
+<img width="1013" height="421" alt="image" src="https://github.com/user-attachments/assets/b272db44-5400-4aa8-8d61-915d2fe8e314" />  
+
 ### Telemetry
 https://meshtastic.org/docs/configuration/module/telemetry/  
 By looking at MQTT we've discovered that over 50% of the data is automated telemetry packets. This eats up channel usage and because the network is always busy; it makes it more unreliable as you add in more nodes once you hit a tipping point. 
@@ -107,10 +114,10 @@ https://markqvist.github.io/Reticulum/manual/interfaces.html#rnode-lora-interfac
 User Defined but it uses 125khz in this example. 125khz will sometimes fit in between the noise. 
 
 ## LoRaWan
-IoT netowrk.
+IoT network.
 
 ## Helium (decentralized LoRaWAN network)
-IoT netowrk. Cryptocurrency Helium Network Token HNT is used to make the network work. 
+IoT network. Cryptocurrency Helium Network Token HNT is used to make the network work. 
 
 ### Bandwidth Selection & Spreading Factor
 https://docs.helium.com/iot/lorawan-frequency-plans#us915  
