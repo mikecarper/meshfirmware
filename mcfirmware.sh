@@ -1138,14 +1138,14 @@ else
 		
 		echo "Erasing UF2 area using $ERASE_FILE"
 		sleep 1
-		adafruit-nrfutil dfu serial --package "$ERASE_FILE" --touch 1200 -p ${DEVICE_PORT} -b 115200
+		pipx run adafruit-nrfutil dfu serial --package "$ERASE_FILE" --touch 1200 -p ${DEVICE_PORT} -b 115200
 		echo "Erase done."
 		echo
 	fi
 
 	echo "Flashing firmware file $DOWNLOADED_FILE..."
 	sleep 1
-	adafruit-nrfutil dfu serial --package "$DOWNLOADED_FILE" --touch 1200 -p ${DEVICE_PORT} -b 115200
+	pipx run adafruit-nrfutil dfu serial --package "$DOWNLOADED_FILE" --touch 1200 -p ${DEVICE_PORT} -b 115200
 	echo
 	echo "Firmware ${ACTION} completed for ${DEVICE} on ${DEVICE_PORT}."
 fi
