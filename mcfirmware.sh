@@ -313,8 +313,8 @@ choose_version_from_releases() {
 			TYPE="${TYPES[0]}"
 			echo "Auto-selected type: $TYPE"
 		elif ((${#TYPES[@]} == 2)) && [[ " ${TYPES[*]} " == *" flash "* ]] && [[ " ${TYPES[*]} " == *" download "* ]]; then
-			TYPE="download"
-			echo "Auto-selected type: download"
+			TYPE="flash"
+			echo "Auto-selected type: flash"
 		else
 			while [[ -z $TYPE ]]; do
 				sleep 0.1
@@ -641,24 +641,24 @@ download_and_verify() {
 	# --------------------------------------------------
     # If the download is a ZIP, extract only the largest file
     # --------------------------------------------------
-    if file "$dest" | grep -q 'Zip archive data'; then
-        echo "Archive detected; extracting largest file …"
-        local largest
-        largest=$(
-            unzip -l "$dest" |
-            awk 'NF>=4 && $1~/^[0-9]+$/ {size=$1; $1=$2=$3=""; sub(/^   */,""); print size "|" $0}' |
-            sort -t'|' -k1,1n | tail -n1 | cut -d'|' -f2-
-        )
+    #if file "$dest" | grep -q 'Zip archive data'; then
+    #    echo "Archive detected; extracting largest file …"
+    #    local largest
+    #    largest=$(
+    #        unzip -l "$dest" |
+    #        awk 'NF>=4 && $1~/^[0-9]+$/ {size=$1; $1=$2=$3=""; sub(/^   */,""); print size "|" $0}' |
+    #        sort -t'|' -k1,1n | tail -n1 | cut -d'|' -f2-
+    #    )
 
-        if [[ -z "$largest" ]]; then
-            echo "ERROR: no entries in ZIP archive." >&2
-            return 1
-        fi
+    #    if [[ -z "$largest" ]]; then
+    #        echo "ERROR: no entries in ZIP archive." >&2
+    #        return 1
+    #    fi
 
-        unzip -oq "$dest" "$largest" -d "${DOWNLOAD_DIR}/${VERSION}/"
-        dest="${DOWNLOAD_DIR}/${VERSION}/${largest}"   # point to extracted file
-        echo "Extracted $largest"
-    fi
+    #    unzip -oq "$dest" "$largest" -d "${DOWNLOAD_DIR}/${VERSION}/"
+    #    dest="${DOWNLOAD_DIR}/${VERSION}/${largest}"   # point to extracted file
+    #    echo "Extracted $largest"
+    #fi
 
     echo "$dest" > "$dest_file"
 }
@@ -1015,6 +1015,8 @@ detect_device_from_fw() {
 # MAIN
 # --------------------------------------------------
 
+mkdir -p "$FIRMWARE_ROOT"
+
 rm -f  \
   "$SELECTED_DEVICE_FILE"   \
   "$ARCHITECTURE_FILE"      \
@@ -1039,8 +1041,9 @@ while [[ -z $URL_PATH ]]; do
 	URL_PATH=$(cat "$SELECTED_URL_FILE")
 	if [[ -z "$URL_PATH" ]]; then
 		ROLE=$(cat "$SELECTED_ROLE_FILE")
-		echo "$ROLE is not supported"
+		echo "$ROLE is not supported with that version"
 		rm -f "$SELECTED_ROLE_FILE"
+		rm -f "$SELECTED_VERSION_FILE"
 	fi
 done
 [[ $URL_PATH != /* ]] && URL_PATH="/$URL_PATH"
@@ -1106,30 +1109,7 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 	
 else
 	echo "nrf52 device"
-	list_usb_block_devs
-	
-	if ! scan_and_maybe_mount; then
-		echo "No USB mass-storage device found, sending 1200-baud reset..."
-		sudo bash -c "exec 3<> \"$DEVICE_PORT\"; stty -F \"$DEVICE_PORT\" 1200; sleep 1.5"
-	fi
-	
-	sleep 8
-	
-	if ! scan_and_maybe_mount; then
-		echo "Device not in DFU mode. Connect via the app and set into DFU or unplug/re-plug quickly 2x."
-		echo "Waiting for DFU"
-		for ((i=0; i<60; i++)); do
-			spinner
-			if scan_and_maybe_mount; then
-				echo
-				break
-			fi
-			sleep 1
-		done
-	fi
-	echo
-	print_fw_line "    Device firmware:" "$MOUNT_FOLDER/CURRENT.UF2"
-	print_fw_line "Downloaded firmware:" "$DOWNLOADED_FILE"
+	echo "Downloaded firmware: $DOWNLOADED_FILE"
 
 	while true; do
 		echo "Choose firmware action for ${DEVICE} on ${DEVICE_PORT}:"
@@ -1144,23 +1124,28 @@ else
 			*) echo "Invalid choice."; continue ;;
 		esac
 	done
+	
+	echo "Getting the latest version of adafruit-nrfutil"
+	pipx run adafruit-nrfutil version
 
 	echo "Running ${ACTION}..."
 
 	if [[ $ACTION == "flash-wipe" ]]; then
-		echo "Erasing UF2 area..."
+
 		[[ -f "$ERASE_URL_FILE" ]] && ERASE_URL="$(<"$ERASE_URL_FILE")"
 		download_and_verify "$ERASE_URL" "$ERASE_FILE_FILE" 0
 		[[ -f "$ERASE_FILE_FILE" ]] && ERASE_FILE="$(<"$ERASE_FILE_FILE")"
 		
-		#sudo cp -v "$ERASE_FILE" "$MOUNT_FOLDER/"
-		#echo "Erase done."
-		#sleep 8
+		echo "Erasing UF2 area using $ERASE_FILE"
+		sleep 1
+		adafruit-nrfutil dfu serial --package "$ERASE_FILE" --touch 1200 -p ${DEVICE_PORT} -b 115200
+		echo "Erase done."
+		echo
 	fi
 
-	echo "Copying firmware file $DOWNLOADED_FILE..."
-	sudo cp -v "$DOWNLOADED_FILE" "$MOUNT_FOLDER/"
-
+	echo "Flashing firmware file $DOWNLOADED_FILE..."
+	sleep 1
+	adafruit-nrfutil dfu serial --package "$DOWNLOADED_FILE" --touch 1200 -p ${DEVICE_PORT} -b 115200
 	echo
 	echo "Firmware ${ACTION} completed for ${DEVICE} on ${DEVICE_PORT}."
 fi
