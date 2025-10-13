@@ -792,15 +792,7 @@ detect_device() {
 			echo "Installing pipx"
 			sudo apt -y install pipx
 		fi
-		if ! command -v meshtastic &>/dev/null; then
-			pipx install "meshtastic[cli]"
-			newpath=1
-		fi
-		if [ $newpath -eq 1 ]; then
-			pipx ensurepath
-			# shellcheck disable=SC1091
-			source "$HOME/.bashrc"
-		fi
+
 
 		
 		declare -a detected_devs menu_options
@@ -872,7 +864,7 @@ detect_device() {
 				# Run meshtastic --device-metadata and extract the firmware_version.
 				# Redirect stderr to hide extra log messages.
 				# Attempt to get the firmware version with a 10 second timeout.
-				version=$(timeout 12 meshtastic --port "$detected_dev" --device-metadata 2>/dev/null | awk -F': ' '/^firmware_version:/ {print $2; exit}' || true)
+				version=$(timeout 12 pipx run meshtastic --port "$detected_dev" --device-metadata 2>/dev/null | awk -F': ' '/^firmware_version:/ {print $2; exit}' || true)
 				if [ -z "$version" ]; then
 					version="unknown version"
 				fi
@@ -1428,12 +1420,6 @@ run_update_script() {
 		echo "Installing pipx"
 		sudo apt -y install pipx
 	fi
-	if ! command -v meshtastic &>/dev/null; then
-		pipx install "meshtastic[cli]"
-		pipx ensurepath
-		# shellcheck disable=SC1091
-		source "$HOME/.bashrc"
-	fi
 
 	# Locate a Python interpreter.
 	PYTHON=""
@@ -1472,7 +1458,7 @@ run_update_script() {
 	backup_config_name="config_backup.${architecture}.${device_name}.${basename_device_port_name}.$(date +%s).yaml"
 	backup_config_name_sanitized=$(echo "$backup_config_name" | tr '/' '_' | tr ' ' '_')
 	while true; do
-		if meshtastic --port "${device_port_name}" --export-config > "${backup_config_name_sanitized}"; then
+		if  pipx run meshtastic --port "${device_port_name}" --export-config > "${backup_config_name_sanitized}"; then
 			echo "Backup configuration created: ${backup_config_name_sanitized}"
 			break
 		else
@@ -1510,7 +1496,7 @@ run_update_script() {
 		popd > /dev/null
 		if [ -f "${backup_config_name_sanitized}" ]; then
 			echo "Configuration can be restored using this if it was wiped out"
-			echo "meshtastic --configure \"${backup_config_name_sanitized}\""
+			echo "pipx run meshtastic --configure \"${backup_config_name_sanitized}\""
 		fi
 
 	else
@@ -1519,10 +1505,10 @@ run_update_script() {
 		device_id=""
 
 		while [ $attempt -lt $max_attempts ]; do
-			echo "Setting device into bootloader mode via meshtastic --enter-dfu --port ${device_port_name}"
+			echo "Setting device into bootloader mode via pipx run meshtastic --enter-dfu --port ${device_port_name}"
 			old_output=$(list_block_devs)
 
-			meshtastic --enter-dfu --port "${device_port_name}" || true
+			pipx run meshtastic --enter-dfu --port "${device_port_name}" || true
 			sleep 5
 
 			new_output=$(list_block_devs)
@@ -1563,7 +1549,7 @@ run_update_script() {
 		echo "Firmware $operation for ESP32 device ${device_name} completed on port ${device_port_name}."
 		if [ -f "${backup_config_name_sanitized}" ]; then
 			echo "Configuration can be restored using this if it was wiped out"
-			echo "meshtastic --configure \"${backup_config_name_sanitized}\""
+			echo "pipx run meshtastic --configure \"${backup_config_name_sanitized}\""
 		fi
 
 	fi
