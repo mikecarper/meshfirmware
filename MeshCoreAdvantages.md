@@ -44,7 +44,8 @@ You can see the frequency here is in between a lot of of the noise. The chirps o
 ### Bandwidth Selection & Spreading Factor
 https://meshtastic.org/docs/overview/radio-settings/#presets  
 This is picking the widest bandwidth possible for the presets. The wider the bandwidth the easier it is to encounter noise. In North America there are peaks every 200khz, so almost every preset will have noise. 
-![sdr](https://github.com/user-attachments/assets/a916f9fe-f783-45e6-ae25-7670e844592c)
+<img width="1653" height="753" alt="image" src="https://github.com/user-attachments/assets/9d9832c6-5fff-427b-8c49-c657861e4820" />
+
 
 Picking a narrow bandwidth and adjusting the spreading factor to get desired the kbps is the better way forward. Smaller bandwidths like 62.5khz means you can fit in between the noise. 
 <img width="1100" height="668" alt="image" src="https://github.com/user-attachments/assets/3b32cb25-2475-46b6-8486-f117d964b461" />
