@@ -103,7 +103,7 @@ MeshCore uses a pull model where you can pull data from a remote node by request
 In MeshCore every packet has a trace attached to it. No more guessing on how a signal got out. This helps with planning out locations for future repeaters and for knowing which direction to point a yagi.
 
 ### Noise Floor
-One nice feature of MeshCore is that the repeaters will tell you the noise floor. no guessing if a filter it needed. If the floor is below -100 it would benefit from a filter, most likely.  
+One nice feature of MeshCore is that the repeaters will tell you the noise floor. no guessing if a filter it needed. If the floor is above -100 (like -90) it would benefit from a filter.  
 
 ### Security
 https://meshtastic.org/blog/that-one-time-at-defcon/  
