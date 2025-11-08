@@ -278,6 +278,7 @@ choose_version_from_releases() {
     local TYPE=''
 	[[ -f "$SELECTED_VERSION_FILE" ]] && VERSION="$(<"$SELECTED_VERSION_FILE")"
 	[[ -f "$SELECTED_TYPE_FILE"    ]] && TYPE="$(<"$SELECTED_TYPE_FILE")"
+	local CHOSEN_FILE=''
 
     # ---------------- step 3 – version ------------------------------------
 	if [[ -z "$VERSION" ]]; then
@@ -295,14 +296,108 @@ choose_version_from_releases() {
 			# Keep only newest two branches (X.Y)
 			local -a VERSIONS_SHOW=()
 			filter_last_two_branches VERSIONS VERSIONS_SHOW
+			CHOICE=""
+			local -a MENU_OPTIONS=("${VERSIONS_SHOW[@]}" "Custom")
 		
 			while [[ -z $VERSION ]]; do
 				sleep 0.1
-				echo; echo "[3] Select version:"
-				select VERSION in "${VERSIONS_SHOW[@]}"; do [[ -n $VERSION ]] && break; done < /dev/tty
+				echo
+				echo "[3] Select version:"
+				select CHOICE in "${MENU_OPTIONS[@]}"; do
+					# Determine required extension rule
+					arch_lc=${ARCHITECTURE,,}
+					extra=""
+					if [[ "$arch_lc" == "esp32" ]]; then
+						required_ext=".bin"
+						extra="The merged files will do a full erase"
+					else
+						required_ext=".zip"
+					fi
+
+
+					# If user pasted a URL/filename instead of choosing a number, handle it
+					if [[ -z "$CHOICE" ]]; then
+						if [[ "$REPLY" =~ ^[0-9]+$ ]]; then
+							echo "Invalid selection."
+							continue
+						fi
+
+						input="$REPLY"
+						check="${input%%[\?#]*}"
+						check_lc=${check,,}
+						if [[ "$check_lc" != *"$required_ext" ]]; then
+							echo "ERROR: Selection must end with ${required_ext}"
+							continue
+						fi
+						CHOSEN_FILE="$input"
+						VERSION="custom"
+						break
+					fi
+
+					case "$CHOICE" in
+						"Custom")
+							echo "Rule: ARCHITECTURE='$ARCHITECTURE' requires files ending with ${required_ext} ${extra}"
+
+							# Helpful base URL by role
+							role_lc=${ROLE,,}
+							case "$role_lc" in
+							  companion*) echo "https://files.brazio.org/meshcore/nightly/companion/" ;;
+							  repeater*)  echo "https://files.brazio.org/meshcore/nightly/repeater/"  ;;
+							esac
+						
+							while :; do
+								read -rp "Enter full filename or url: " input < /dev/tty
+								[[ -z "$input" ]] && { echo "Empty input. Try again."; continue; }
+								check="${input%%[\?#]*}"
+								check_lc=${check,,}
+								if [[ "$check_lc" != *"$required_ext" ]]; then
+									echo "ERROR: Selection must end with ${required_ext}"
+									continue
+								fi
+								CHOSEN_FILE="$input"
+								VERSION="custom"
+								break
+							done
+							break
+							;;
+						*)
+							VERSION="$CHOICE"
+							break
+							;;
+					esac
+				done < /dev/tty
 			done
 		fi
 	fi
+
+	# Pre-select TYPE based on chosen file (supports URL or path).
+	# Uses CHOSEN_FILE if set; otherwise falls back to VERSION.
+	{
+		local _candidate="${CHOSEN_FILE:-$VERSION}"
+		if [[ -n "$_candidate" ]]; then
+			# Strip query/fragment, keep last path segment
+			local _clean="${_candidate%%[\?#]*}"
+			local _name="${_clean##*/}"
+
+			# Case-insensitive match for extensions
+			shopt -s nocasematch
+			case "$_name" in
+				*merged.bin)
+					TYPE="flash-wipe"
+					echo "Auto-selected type: flash-wipe"
+					;;
+				*.bin)
+					TYPE="flash-update"
+					echo "Auto-selected type: flash-update"
+					;;
+				*.zip)
+					# Do not set TYPE for .zip (leave selection logic to run)
+					unset TYPE
+					;;
+			esac
+			shopt -u nocasematch
+		fi
+	}
 
     # ---------------- step 4 – type ---------------------------------------
 	if [[ -z "$TYPE" ]]; then
@@ -325,17 +420,19 @@ choose_version_from_releases() {
 	fi
 
     # ---------------- step 5 – filename -----------------------------------
-	local REGEX=''
-	REGEX=$( _jq1 --arg type "$TYPE" --arg d "$DEVICE" --arg r "$ROLE" ".device[] | select(.name==\$d) | .firmware[] | select(.role==\$r) | .github | .files | .[\$type]" | sort -u )
-    
-	ROLE_ALT="$ROLE"
-	if [[ "$ROLE" == "companionBle" || "$ROLE" == "companionUsb" ]]; then
-		ROLE_ALT="companion"
+	if [[ -z "$CHOSEN_FILE" ]]; then
+		local REGEX=''
+		REGEX=$( _jq1 --arg type "$TYPE" --arg d "$DEVICE" --arg r "$ROLE" ".device[] | select(.name==\$d) | .firmware[] | select(.role==\$r) | .github | .files | .[\$type]" | sort -u )
+		
+		ROLE_ALT="$ROLE"
+		if [[ "$ROLE" == "companionBle" || "$ROLE" == "companionUsb" ]]; then
+			ROLE_ALT="companion"
+		fi
+		
+
+		CHOSEN_FILE=$( _jq2 --arg reg "$REGEX" --arg ver "$VERSION" --arg t "$TYPE" --arg d "$DEVICE" --arg r "$ROLE_ALT" ".[] | select(.version==\$ver and .type==\$r) | .files[] | select(.name|test(\$reg)) | .url " )
 	fi
 	
-	local CHOSEN_FILE=''
-	CHOSEN_FILE=$( _jq2 --arg reg "$REGEX" --arg ver "$VERSION" --arg t "$TYPE" --arg d "$DEVICE" --arg r "$ROLE_ALT" ".[] | select(.version==\$ver and .type==\$r) | .files[] | select(.name|test(\$reg)) | .url " )
-
 	echo "$DEVICE" > "$SELECTED_DEVICE_FILE"
 	echo "$ROLE" > "$SELECTED_ROLE_FILE"
 	echo "$ARCHITECTURE" > "$ARCHITECTURE_FILE"
@@ -637,28 +734,6 @@ download_and_verify() {
 		bytes=$(stat -c%s "$dest" 2>/dev/null);
 		echo "Already downloaded $dest – $bytes bytes OK"
 	fi
-	
-	# --------------------------------------------------
-    # If the download is a ZIP, extract only the largest file
-    # --------------------------------------------------
-    #if file "$dest" | grep -q 'Zip archive data'; then
-    #    echo "Archive detected; extracting largest file …"
-    #    local largest
-    #    largest=$(
-    #        unzip -l "$dest" |
-    #        awk 'NF>=4 && $1~/^[0-9]+$/ {size=$1; $1=$2=$3=""; sub(/^   */,""); print size "|" $0}' |
-    #        sort -t'|' -k1,1n | tail -n1 | cut -d'|' -f2-
-    #    )
-
-    #    if [[ -z "$largest" ]]; then
-    #        echo "ERROR: no entries in ZIP archive." >&2
-    #        return 1
-    #    fi
-
-    #    unzip -oq "$dest" "$largest" -d "${DOWNLOAD_DIR}/${VERSION}/"
-    #    dest="${DOWNLOAD_DIR}/${VERSION}/${largest}"   # point to extracted file
-    #    echo "Extracted $largest"
-    #fi
 
     echo "$dest" > "$dest_file"
 }
@@ -722,7 +797,8 @@ choose_serial() {
 
 check_tty_lock() {
     local dev="$1"
-    local lock="/var/lock/$(basename "$dev").lock"
+	local lock=""
+	lock="/var/lock/$(basename "$dev").lock"
 
     # open FD 3 on the lock file for the lifetime of this shell
     exec 3>"$lock" || return 1
@@ -1046,11 +1122,17 @@ while [[ -z $URL_PATH ]]; do
 		rm -f "$SELECTED_VERSION_FILE"
 	fi
 done
-[[ $URL_PATH != /* ]] && URL_PATH="/$URL_PATH"
-URL="https://flasher.meshcore.dev${URL_PATH}"
-
-
-download_and_verify "$URL" "$DOWNLOADED_FILE_FILE" 1
+if [[ "$URL_PATH" =~ ^https?:// ]]; then
+    URL="$URL_PATH"
+	download_and_verify "$URL" "$DOWNLOADED_FILE_FILE" 1
+else
+    if [[ "$URL_PATH" == /* && -f "$URL_PATH" ]]; then
+        echo "$URL_PATH " > "$DOWNLOADED_FILE_FILE"
+    fi
+    [[ "$URL_PATH" != /* ]] && URL_PATH="/$URL_PATH"
+    URL="https://flasher.meshcore.dev${URL_PATH}"
+	download_and_verify "$URL" "$DOWNLOADED_FILE_FILE" 1
+fi
 
 
 
@@ -1138,14 +1220,14 @@ else
 		
 		echo "Erasing UF2 area using $ERASE_FILE"
 		sleep 1
-		pipx run adafruit-nrfutil dfu serial --package "$ERASE_FILE" --touch 1200 -p ${DEVICE_PORT} -b 115200
+		pipx run adafruit-nrfutil dfu serial --package "$ERASE_FILE" --touch 1200 -p "${DEVICE_PORT}" -b 115200
 		echo "Erase done."
 		echo
 	fi
 
 	echo "Flashing firmware file $DOWNLOADED_FILE..."
 	sleep 1
-	pipx run adafruit-nrfutil dfu serial --package "$DOWNLOADED_FILE" --touch 1200 -p ${DEVICE_PORT} -b 115200
+	pipx run adafruit-nrfutil dfu serial --package "$DOWNLOADED_FILE" --touch 1200 -p "${DEVICE_PORT}" -b 115200
 	echo
 	echo "Firmware ${ACTION} completed for ${DEVICE} on ${DEVICE_PORT}."
 fi
