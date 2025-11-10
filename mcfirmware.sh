@@ -215,6 +215,20 @@ _log() {
 	[[ ${DEBUG:-0} -ne 0 ]] && printf '[mc] %s\n' "$*" >&2; 
 }
 
+serial_cmd() {
+	local DEVICE_NAME="$1"
+	shift                       
+	local line="$*"
+	printf "%b" "${line}\r\n" \
+	| socat - "$DEVICE_NAME,raw,echo=0,b${BAUD:-115200}" 2>/dev/null \
+	| tr -d '\r' \
+	| awk 'NF{last=$0} END{print last}' \
+	| sed -E $'s/\x1B\\[[0-9;]*[A-Za-z]//g' \
+	| sed -E 's/^[[:space:][:cntrl:]]*(->|>)+[[:space:]]*//' \
+	| sed -E 's/^[[:space:][:cntrl:]]+//; s/[[:space:]]+$//' \
+	| sed -E 's/^[^0-9A-Za-z+\-]+//'    # fallback: drop anything weird before data
+}
+
 filter_last_two_branches() {
   local -n _IN="$1" _OUT="$2"
   local dbg="${3:-${FILTER_DEBUG:-${DEBUG:-0}}}"
@@ -767,7 +781,8 @@ choose_serial() {
         # ────────────────────────── single device ──────────────────────────
         if ((${#devs[@]} == 1)); then
 			detected_dev="${devs[0]}"
-            #echo "Only one device detected – selecting it automatically: $detected_dev - ${labels[0]}"
+			version=$( serial_cmd "${detected_dev}" "version" )
+            echo "Only one device detected – selecting it automatically: $detected_dev - ${labels[0]} ${version}"
 			echo "$detected_dev" > "$DEVICE_PORT_FILE"
 			echo "${labels[0]}" > "$DEVICE_PORT_NAME_FILE"
 			return
@@ -776,7 +791,9 @@ choose_serial() {
         # ────────────────────────── menu ──────────────────────────
         echo "Select a serial device:"
         for i in "${!devs[@]}"; do
-            printf " %2d) %s  (%s)\n" $((i+1)) "${devs[$i]}" "${labels[$i]}"
+			board=$( serial_cmd "${devs[$i]}" "board" )
+			version=$( serial_cmd "${devs[$i]}" "version" )
+            printf " %2d) %s  (%s)\n" $((i+1)) "${devs[$i]}" "${labels[$i]} ${board} ${version}"
         done
         echo "  0)  Scan again"
 
