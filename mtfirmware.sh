@@ -1205,7 +1205,42 @@ prepare_script() {
 		if [ "$operation" = "update" ]; then
 			script_to_run="$(dirname "$selected_file")/device-update.sh"
 		elif [ "$operation" = "install" ]; then
+			pipx install esptool
 			script_to_run="$(dirname "$selected_file")/device-install.sh"
+			tmpfile="$(mktemp)"
+			awk '
+			{
+			  lines[NR] = $0
+			}
+
+			# Collect indices of lines that start with $ESPTOOL_CMD and do not already have --after
+			/^[[:space:]]*\$ESPTOOL_CMD/ {
+			  if ($0 !~ /--after/) {
+				esp_idx[++esp_count] = NR
+			  }
+			}
+
+			END {
+			  if (esp_count > 0) {
+				for (k = 1; k <= esp_count; k++) {
+				  i = esp_idx[k]
+				  if (k < esp_count) {
+					# all but last: add --after no-reset
+					sub(/^[[:space:]]*\$ESPTOOL_CMD/, "& --after no-reset", lines[i])
+				  } else {
+					# last: add --after hard-reset
+					sub(/^[[:space:]]*\$ESPTOOL_CMD/, "& --after hard-reset", lines[i])
+				  }
+				}
+			  }
+
+			  for (i = 1; i <= NR; i++) {
+				print lines[i]
+			  }
+			}
+			' "$script_to_run" > "$tmpfile"
+
+			mv "$tmpfile" "$script_to_run"
 		fi
 		abs_selected="$(cd "$(dirname "$selected_file")" && pwd)/$(basename "$selected_file")"
 	fi
@@ -1457,21 +1492,30 @@ run_update_script() {
 	basename_device_port_name="$(basename "$device_port_name")"
 	backup_config_name="config_backup.${architecture}.${device_name}.${basename_device_port_name}.$(date +%s).yaml"
 	backup_config_name_sanitized=$(echo "$backup_config_name" | tr '/' '_' | tr ' ' '_')
-	while true; do
-		if  pipx run meshtastic --port "${device_port_name}" --export-config > "${backup_config_name_sanitized}"; then
-			echo "Backup configuration created: ${backup_config_name_sanitized}"
-			break
-		else
-			echo "Warning: Timed out waiting for connection completion. Config backup not done." >&2
-			read -rp "Press Enter to try again or type 'skip' to skip the creation: " response
-			if [ "$response" = "skip" ]; then
-				echo "Skipping config backup."
-				rm -f "${backup_config_name_sanitized}"
+	read -rp "Create a backup configuration before flashing? [y/N]: " do_backup
+	case "$do_backup" in
+	  [Yy])
+		echo "Attempting to create backup..."
+		while true; do
+			if timeout 30s pipx run meshtastic --port "${device_port_name}" --export-config > "${backup_config_name_sanitized}"; then
+				echo "Backup configuration created: ${backup_config_name_sanitized}"
 				break
+			else
+				echo "Warning: Timed out waiting for connection completion. Config backup not done." >&2
+				read -rp "Press Enter to try again or type 'skip' to skip the creation: " response
+				if [ "$response" = "skip" ]; then
+					echo "Skipping config backup."
+					rm -f "${backup_config_name_sanitized}"
+					break
+				fi
+				sleep 1
 			fi
-			sleep 1
-		fi
-	done
+		done
+		;;
+	  *)
+		echo "Skipping config backup."
+		;;
+	esac
 
 	# Execute update for ESP32 or non-ESP32 devices.
 	if echo "$architecture" | grep -qi "esp32"; then
