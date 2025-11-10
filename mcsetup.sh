@@ -254,13 +254,14 @@ select_suggested_radio_setting() {
   ensure_meshcore_config
 
   # Colors
-  local GREEN="\033[0;32m"
+  local GRAY="\033[90m"
   local RED="\033[0;31m"
   local RESET="\033[0m"
 
-  # Read titles and descriptions
+  # Read titles, descriptions, and bandwidths
   mapfile -t _RADIO_TITLES < <(jq -r '.config.suggested_radio_settings.entries[].title' "$RADIO_CONFIG_FILE")
   mapfile -t _RADIO_DESCS  < <(jq -r '.config.suggested_radio_settings.entries[].description' "$RADIO_CONFIG_FILE")
+  mapfile -t _RADIO_BWS    < <(jq -r '.config.suggested_radio_settings.entries[].bandwidth' "$RADIO_CONFIG_FILE")
 
   if [ "${#_RADIO_TITLES[@]}" -eq 0 ]; then
     echo "No suggested_radio_settings entries found."
@@ -285,21 +286,31 @@ select_suggested_radio_setting() {
   echo "Select a suggested radio setting:"
   echo " 0) Custom (manual freq / SF / BW / CR)"
 
-  # Second pass: print with colors for duplicates
-  local idx title t_lower color mark
+  # Second pass: print with colors for duplicates and BW
+  local idx title t_lower color mark bw
   for i in "${!_RADIO_TITLES[@]}"; do
     idx=$(( i + 1 ))
     title="${_RADIO_TITLES[i]}"
     base="${title%% (*}"
     t_lower="${title,,}"
+    bw="${_RADIO_BWS[i]}"
 
+    # default color
     color="$RESET"
+
+    # If there are duplicate base names, mark non-narrow/non-recommended as red
     if [ "${base_counts["$base"]}" -gt 1 ]; then
       if [[ "$t_lower" == *"narrow"* || "$t_lower" == *"recommended"* ]]; then
-        color="$GREEN"
+        # preferred variant: normal color
+        color="$RESET"
       else
         color="$RED"
       fi
+    fi
+
+    # If bandwidth is not 62.5, override to gray
+    if [ "$bw" != "62.5" ]; then
+      color="$GRAY"
     fi
 
     mark=""
@@ -541,8 +552,7 @@ done
 radio_raw="$(serial_cmd 'get radio' | trim)"
 # remove spaces around commas just in case
 radio_raw="$(echo "$radio_raw" | sed -E 's/[[:space:]]*,[[:space:]]*/,/g')"
-IFS=',' read -r setting_radio_freq setting_radio_bw setting_radio_sf setting_radio_cr <<< "$radio_raw"
-
+IFS=',' read -r RADIO_FREQ RADIO_BW RADIO_SF RADIO_CR <<< "$radio_raw"
 
 edit_repeater_settings_menu() {
   while :; do
@@ -562,7 +572,7 @@ edit_repeater_settings_menu() {
     echo "12) lat                = $setting_lat"
     echo "13) lon                = $setting_lon"
     echo "14) txdelay            = $setting_txdelay"
-    echo "15) radio              = freq=$setting_radio_freq bw=$setting_radio_bw sf=$setting_radio_sf cr=$setting_radio_cr"
+    echo "15) radio              = freq=$RADIO_FREQ bw=$RADIO_BW sf=$RADIO_SF cr=$RADIO_CR"
     echo
     echo "Choose a setting to edit, or q to finish."
     read -rp "Choice: " choice
