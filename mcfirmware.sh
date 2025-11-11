@@ -219,6 +219,13 @@ serial_cmd() {
 	local DEVICE_NAME="$1"
 	shift                       
 	local line="$*"
+	
+	# Ensure socat is installed.
+	if ! command -v socat &>/dev/null; then
+		echo "Installing socat"
+		sudo apt update && sudo apt -y install socat
+	fi
+		
 	printf "%b" "${line}\r\n" \
 	| socat - "$DEVICE_NAME,raw,echo=0,b${BAUD:-115200}" 2>/dev/null \
 	| tr -d '\r' \
