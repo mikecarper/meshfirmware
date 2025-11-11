@@ -38,10 +38,15 @@ else
 fi
 USB_AUTOSUSPEND=$(cat /sys/module/usbcore/parameters/autosuspend)
 
+if ! command -v chronyc &>/dev/null; then
+	echo "Installing chrony"
+	sudo apt update && sudo apt -y install chrony
+	sudo systemctl enable chrony
+	sudo systemctl restart chrony
+fi
 
 # Sync Time
-sudo timedatectl set-ntp true
-sudo systemctl restart systemd-timesyncd
+chronyc tracking
 
 # Ensure socat is installed.
 if ! command -v socat &>/dev/null; then
@@ -490,12 +495,12 @@ echo "Device time (Local): $(date -d "@$device_epoch" '+%Y-%m-%d %H:%M %Z')"
 echo "Host   time (Local): $(date -d "@$host_epoch" '+%Y-%m-%d %H:%M %Z')"
 
 
-# Verdict: only act if more than 2 days off (86400 s)
+# Verdict: only act if more than 2 days off (86400 sec * 2)
 if [ "$adiff" -gt 172800 ]; then
-  echo "Clock off by more than 1 day; syncing time now. Sending: time $host_epoch"
+  echo "Clock off by more than 2 days; syncing time now. Sending: time $host_epoch"
   serial_cmd "time $host_epoch"
 else
-  echo "Clock within 5 minutes"
+  echo "Clock within 2 days"
 fi
 
 board=$(serial_cmd "board" )
