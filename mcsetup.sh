@@ -475,94 +475,66 @@ serial_cmd() {
   | sed -E 's/^[^0-9A-Za-z+\-]+//'    # fallback: drop anything weird before data
 }
 
-# Read clock from device
-device_epoch="$(
-  serial_cmd clock \
-  | sed -En 's/.*([0-9]{1,2}):([0-9]{2}) *- *([0-9]{1,2})\/([0-9]{1,2})\/([0-9]{4}) *UTC.*/\5-\4-\3 \1:\2:00/p' \
-  | xargs -I{} date -u -d "{}" +%s
-)"
+trim() { 
+	sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+}
 
-# Current host UNIX time (seconds since epoch)
-host_epoch=$(date +%s)
+load_repeater_settings() {
+  echo "reading all radio settings"
 
-diff=$(( device_epoch - host_epoch ))
-adiff=${diff#-}
+  # keys to fetch (radio handled separately)
+  local k v
+  local keys=(
+    tx
+    repeat
+    allow.read.only
+    agc.reset.interval
+    advert.interval
+    flood.advert.interval
+    guest.password
+    password
+    prv.key
+    public.key
+    name
+    lat
+    lon
+    txdelay
+  )
 
+  # fetch generic keys
+  for k in "${keys[@]}"; do
+    v="$(serial_cmd "get $k" | trim)"
+    case "$k" in
+      tx)                     setting_tx="$v" ;;
+      repeat)                 setting_repeat="$v" ;;
+      allow.read.only)        setting_allow_read_only="$v" ;;
+      agc.reset.interval)     setting_agc_reset_interval="$v" ;;
+      advert.interval)        setting_advert_interval="$v" ;;
+      flood.advert.interval)  setting_flood_advert_interval="$v" ;;
+      guest.password)         setting_guest_password="$v" ;;
+      password)               setting_password="$v" ;;
+      prv.key)                setting_private_key="$v" ;;
+      public.key)             setting_public_key="$v" ;;
+      name)                   setting_name="$v" ;;
+      lat)                    setting_lat="$v" ;;
+      lon)                    setting_lon="$v" ;;
+      txdelay)                setting_txdelay="$v" ;;
+    esac
+  done
 
-echo "device_epoch: $device_epoch"
-echo "host_epoch  : $host_epoch"
-echo "Device time (Local): $(date -d "@$device_epoch" '+%Y-%m-%d %H:%M %Z')"
-echo "Host   time (Local): $(date -d "@$host_epoch" '+%Y-%m-%d %H:%M %Z')"
-
-
-# Verdict: only act if more than 2 days off (86400 sec * 2)
-if [ "$adiff" -gt 172800 ]; then
-  echo "Clock off by more than 2 days; syncing time now. Sending: time $host_epoch"
-  serial_cmd "time $host_epoch"
-else
-  echo "Clock within 2 days"
-fi
-
-board=$(serial_cmd "board" )
-ver=$(serial_cmd "ver" )
-
-echo "$board - $ver"
-
-
-echo "reading all radio settings"
-# assumes serial_cmd "<cmd>" prints the last, cleaned line (no "->", ">")
-# if your serial_cmd may leave leading/trailing spaces, trim once here:
-trim() { sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'; }
-
-# keys to fetch (radio handled specially below)
-keys=(
-  tx
-  repeat
-  allow.read.only
-  agc.reset.interval
-  advert.interval
-  flood.advert.interval
-  guest.password
-  password
-  prv.key
-  public.key
-  name
-  lat
-  lon
-  txdelay
-)
-
-# fetch generic keys
-for k in "${keys[@]}"; do
-  v="$(serial_cmd "get $k" | trim)"
-  case "$k" in
-    tx)                     setting_tx="$v" ;;
-    repeat)                 setting_repeat="$v" ;;
-    allow.read.only)        setting_allow_read_only="$v" ;;
-    agc.reset.interval)     setting_agc_reset_interval="$v" ;;
-    advert.interval)        setting_advert_interval="$v" ;;
-    flood.advert.interval)  setting_flood_advert_interval="$v" ;;
-    guest.password)         setting_guest_password="$v" ;;
-    password)         		setting_password="$v" ;;
-    prv.key)         		setting_private_key="$v" ;;
-    public.key)	         	setting_public_key="$v" ;;
-    name)                   setting_name="$v" ;;
-    lat)                    setting_lat="$v" ;;
-    lon)                    setting_lon="$v" ;;
-    txdelay)                setting_txdelay="$v" ;;
-  esac
-done
-
-# radio needs CSV parsing: {freq},{bw},{sf},{cr}
-radio_raw="$(serial_cmd 'get radio' | trim)"
-# remove spaces around commas just in case
-radio_raw="$(echo "$radio_raw" | sed -E 's/[[:space:]]*,[[:space:]]*/,/g')"
-IFS=',' read -r RADIO_FREQ RADIO_BW RADIO_SF RADIO_CR <<< "$radio_raw"
+  # radio needs CSV parsing: {freq},{bw},{sf},{cr}
+  local radio_raw
+  radio_raw="$(serial_cmd 'get radio' | trim)"
+  # remove spaces around commas just in case
+  radio_raw="$(echo "$radio_raw" | sed -E 's/[[:space:]]*,[[:space:]]*/,/g')"
+  IFS=',' read -r RADIO_FREQ RADIO_BW RADIO_SF RADIO_CR <<< "$radio_raw"
+}
 
 edit_repeater_settings_menu() {
   while :; do
     echo
     echo "Current settings:"
+	echo " r) Refresh this list"
     echo " 1) tx                 = $setting_tx"
     echo " 2) repeat             = $setting_repeat"
     echo " 3) allow.read.only    = $setting_allow_read_only"
@@ -572,7 +544,7 @@ edit_repeater_settings_menu() {
     echo " 7) guest.password     = $setting_guest_password"
     echo " 8) password           = $setting_password"
     echo " 9) private key        = $setting_private_key"
-    echo "10) public key         = $setting_public_key   (read-only)"
+    echo "10) public key         = ${setting_public_key:0:16}...${setting_public_key:48:16} (read-only)"
     echo "11) name               = $setting_name"
     echo "12) lat                = $setting_lat"
     echo "13) lon                = $setting_lon"
@@ -583,10 +555,15 @@ edit_repeater_settings_menu() {
     read -rp "Choice: " choice
 
     case "$choice" in
-      q|Q)
-        echo "Done editing settings."
-        break
-        ;;
+	  q|Q)
+		echo "Done editing settings."
+		break
+		;;
+		
+	  r|R)
+		load_repeater_settings
+		;;
+
 
 	  1)
 		read -rp "tx (current: $setting_tx): " v
@@ -659,9 +636,19 @@ edit_repeater_settings_menu() {
 		;;
 
 	  9)
+		echo "Go here ton find a free prefix"
+		echo "https://analyzer.letsme.sh/nodes/prefix-utilization"
+		echo ""
+		echo "Go here to make one"
+		echo "https://gessaman.com/mc-keygen/"
+		echo
 		read -rp "private key (current shortened): ${setting_private_key:0:16}...  New value (blank to keep): " v
-		[ -n "$v" ] && setting_private_key="$v"
-		serial_cmd "set prv.key setting_private_key"
+		if [ -n "$v" ]; then
+		  setting_private_key="$v"
+		  serial_cmd "set prv.key $setting_private_key"
+		else
+		  echo "Private key unchanged."
+		fi
 		;;
 
 	  10)
@@ -686,43 +673,43 @@ edit_repeater_settings_menu() {
 		serial_cmd "set lon $setting_lon"
 		;;
 
-	14)
-	  while :; do
-		read -rp "txdelay (0.0–2.0, current: $setting_txdelay): " v
-		# Keep current if empty
-		if [ -z "$v" ]; then
-		  v="$setting_txdelay"
-		  break
-		fi
-		# Check numeric (integer or decimal)
-		if [[ "$v" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
-		  # Ensure it's within 0.0–2.0
-		  if (( $(echo "$v >= 0.0 && $v <= 2.0" | bc -l) )); then
-			break
-		  else
-			echo "Value must be between 0.0 and 2.0"
-		  fi
-		else
-		  echo "Please enter a valid number (e.g. 0.5, 1, 2.0)"
-		fi
-	  done
-	  setting_txdelay="$v"
-	  serial_cmd "set txdelay $setting_txdelay"
-	  ;;
+		14)
+		  while :; do
+			read -rp "txdelay (0.0–2.0, current: $setting_txdelay): " v
+			# Keep current if empty
+			if [ -z "$v" ]; then
+			  v="$setting_txdelay"
+			  break
+			fi
+			# Check numeric (integer or decimal)
+			if [[ "$v" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+			  # Ensure it's within 0.0–2.0
+			  if (( $(echo "$v >= 0.0 && $v <= 2.0" | bc -l) )); then
+				break
+			  else
+				echo "Value must be between 0.0 and 2.0"
+			  fi
+			else
+			  echo "Please enter a valid number (e.g. 0.5, 1, 2.0)"
+			fi
+		  done
+		  setting_txdelay="$v"
+		  serial_cmd "set txdelay $setting_txdelay"
+		  ;;
 
-      15)
-		if select_suggested_radio_setting; then
-		  echo
-		  echo "You selected: $RADIO_TITLE $RADIO_DESC"
-		  echo "Setting the radio to these settings"
-		  sleep 0.5
-		  serial_cmd "set radio ${RADIO_FREQ},${RADIO_BW},${RADIO_SF},${RADIO_CR}"
-		fi
-        ;;
+		  15)
+			if select_suggested_radio_setting; then
+			  echo
+			  echo "You selected: $RADIO_TITLE $RADIO_DESC"
+			  echo "Setting the radio to these settings"
+			  sleep 0.5
+			  serial_cmd "set radio ${RADIO_FREQ},${RADIO_BW},${RADIO_SF},${RADIO_CR}"
+			fi
+			;;
 
-      *)
-        echo "Invalid choice."
-        ;;
+		  *)
+			echo "Invalid choice."
+			;;
     esac
   done
 }
@@ -738,6 +725,43 @@ confirm_restart_radio() {
     esac
   done
 }
+
+
+
+# Read clock from device
+device_epoch="$(
+  serial_cmd clock \
+  | sed -En 's/.*([0-9]{1,2}):([0-9]{2}) *- *([0-9]{1,2})\/([0-9]{1,2})\/([0-9]{4}) *UTC.*/\5-\4-\3 \1:\2:00/p' \
+  | xargs -I{} date -u -d "{}" +%s
+)"
+
+# Current host UNIX time (seconds since epoch)
+host_epoch=$(date +%s)
+
+diff=$(( device_epoch - host_epoch ))
+adiff=${diff#-}
+
+
+echo "device_epoch: $device_epoch"
+echo "host_epoch  : $host_epoch"
+echo "Device time (Local): $(date -d "@$device_epoch" '+%Y-%m-%d %H:%M %Z')"
+echo "Host   time (Local): $(date -d "@$host_epoch" '+%Y-%m-%d %H:%M %Z')"
+
+
+# Verdict: only act if more than 2 days off (86400 sec * 2)
+if [ "$adiff" -gt 172800 ]; then
+  echo "Clock off by more than 2 days; syncing time now. Sending: time $host_epoch"
+  serial_cmd "time $host_epoch"
+else
+  echo "Clock within 2 days"
+fi
+
+board=$(serial_cmd "board" )
+ver=$(serial_cmd "ver" )
+
+echo "$board - $ver"
+
+load_repeater_settings
 
 edit_repeater_settings_menu
 
