@@ -613,6 +613,7 @@ set_if_changed() {
 load_repeater_settings() {
   echo "reading all radio settings"
 
+  # https://github.com/meshcore-dev/MeshCore/blob/main/src/helpers/CommonCLI.cpp#L131
   # keys to fetch (radio handled separately)
   local k v
   local keys=(
