@@ -489,18 +489,125 @@ fi
 # Helper to send a command and capture reply
 serial_cmd() {
   local line="$*"
-  printf "%b" "${line}\r\n" \
-  | socat - "$device_name,raw,echo=0,b${BAUD:-115200}" 2>/dev/null \
-  | tr -d '\r' \
-  | awk 'NF{last=$0} END{print last}' \
-  | sed -E $'s/\x1B\\[[0-9;]*[A-Za-z]//g' \
-  | sed -E 's/^[[:space:][:cntrl:]]*(->|>)+[[:space:]]*//' \
-  | sed -E 's/^[[:space:][:cntrl:]]+//; s/[[:space:]]+$//' \
-  | sed -E 's/^[^0-9A-Za-z+\-]+//'    # fallback: drop anything weird before data
+  local max_retries=5
+  local delay_between=0.08
+  local out
+  local rx_pat='^[0-9]{2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]*U:'
+
+  for ((attempt=1; attempt<=max_retries; attempt++)); do
+    sleep 0.01
+    out="$(
+      printf "%b" "${line}\r\n" \
+      | socat - "$device_name,raw,echo=0,b${BAUD:-57600}" 2>/dev/null \
+      | tr -d '\r' \
+      | sed -E $'s/\x1B\\[[0-9;]*[A-Za-z]//g' \
+      | sed -E 's/^[[:space:][:cntrl:]]*(->|>)+[[:space:]]*//' \
+      | sed -E 's/^[[:space:][:cntrl:]]+//; s/[[:space:]]+$//' \
+      | sed -E 's/^[^0-9A-Za-z+\-]+//' \
+      | awk -v cmd="$line" '
+          BEGIN {
+            # RX-log line pattern: HH:MM[:SS] - D/M/YYYY U:
+            rx = "^[0-9]{2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]*U:"
+          }
+          NF {
+            # Skip RX logs and command echoes
+            if ($0 ~ rx) next
+            if ($0 == cmd) next
+            keep[++n] = $0
+          }
+          END {
+            if (n) print keep[n];
+          }'
+    )"
+
+    # Retry if we got nothing or still caught a log line somehow
+    if [[ -z "$out" || "$out" =~ $rx_pat || "$out" == "$line" ]]; then
+      sleep "$delay_between"
+      continue
+    fi
+
+    printf "%s\n" "$out"
+    return 0
+  done
+
+  # Last resort: print whatever we have (may be empty)
+  printf "%s\n" "$out"
 }
 
-trim() { 
-	sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+trim() {
+  if [ $# -gt 0 ]; then
+    # Trim the argument(s)
+    printf '%s' "$*" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+  else
+    # Trim data from stdin
+    sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+  fi
+}
+
+# Compare numbers safely (ints/floats); returns 0 if equal
+_num_equal() {
+  # uses bc; treat empty as not equal
+  [ -z "$1" ] || [ -z "$2" ] && return 1
+  awk -v a="$1" -v b="$2" 'BEGIN{
+    if (a==b) exit 0
+    # numeric compare with tolerance
+    aa=a+0; bb=b+0; diff=aa-bb; if (diff<0) diff=-diff
+    exit (diff<=1e-9)?0:1
+  }'
+}
+
+prompt_onoff() {
+  # $1 = label, $2 = current, sets REPLY_ONOFF to on/off or keeps current if blank
+  local lbl="$1" cur="$2" v
+  while :; do
+    read -rp "${lbl} (on/off, current: ${cur}): " v
+    [ -z "$v" ] && { REPLY_ONOFF="$cur"; return 0; }
+    case "$v" in
+      on|off) REPLY_ONOFF="$v"; return 0;;
+      *) echo "Please enter on or off.";;
+    esac
+  done
+}
+
+prompt_number() {
+  # $1 = label, $2 = current; accepts int/float; sets REPLY_NUM
+  local lbl="$1" cur="$2" v
+  while :; do
+    read -rp "${lbl} (current: ${cur}): " v
+    [ -z "$v" ] && { REPLY_NUM="$cur"; return 0; }
+    if [[ "$v" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
+      REPLY_NUM="$v"; return 0
+    else
+      echo "Enter a number (e.g. 0.5, 1, 2.0)"
+    fi
+  done
+}
+
+set_if_changed() {
+  local key="$1" cur="$2" new="$3" mode="${4:-str}"
+  new="$( trim "$new")"
+  cur="$( trim "$cur")"
+  [ -z "$new" ] && { echo "No change: $key left as '$cur'"; return 0; }
+
+  if [ "$mode" = "num" ]; then
+    if _num_equal "$cur" "$new"; then
+      echo "No change: $key remains $cur"
+      return 0
+    fi
+  else
+    # case-insensitive for on/off
+    if [[ "$new" =~ ^(on|off)$ && "$cur" =~ ^(on|off)$ ]]; then
+      if [ "${cur,,}" = "${new,,}" ]; then
+        echo "No change: $key remains $cur"
+        return 0
+      fi
+    else
+      [ "$cur" = "$new" ] && { echo "No change: $key remains $cur"; return 0; }
+    fi
+  fi
+
+  echo "Updating: $key -> $new"
+  serial_cmd "set $key $new"
 }
 
 load_repeater_settings() {
@@ -509,41 +616,55 @@ load_repeater_settings() {
   # keys to fetch (radio handled separately)
   local k v
   local keys=(
-    tx
-    repeat
-    allow.read.only
-    agc.reset.interval
-    advert.interval
-    flood.advert.interval
-    guest.password
-    password
-    prv.key
-    public.key
-    name
-    lat
-    lon
-    txdelay
+	  tx
+	  repeat
+	  role
+	  allow.read.only
+	  txdelay
+	  rxdelay
+	  direct.txdelay
+	  agc.reset.interval
+	  int.thresh
+	  af
+	  multi.acks
+	  advert.interval
+	  flood.advert.interval
+	  flood.max
+	  guest.password
+	  password
+	  name
+	  prv.key
+	  public.key
+	  lat
+	  lon
   )
 
   # fetch generic keys
   for k in "${keys[@]}"; do
     v="$(serial_cmd "get $k" | trim)"
-	sleep 0.05
     case "$k" in
-      tx)                     setting_tx="$v" ;;
-      repeat)                 setting_repeat="$v" ;;
-      allow.read.only)        setting_allow_read_only="$v" ;;
+	  af)             		  setting_af="$v" ;;
+	  int.thresh)             setting_int_thresh="$v" ;;
       agc.reset.interval)     setting_agc_reset_interval="$v" ;;
+	  multi.acks)             setting_multi_acks="$v" ;;
+	  allow.read.only)        setting_allow_read_only="$v" ;;
+	  flood.advert.interval)  setting_flood_advert_interval="$v" ;;
       advert.interval)        setting_advert_interval="$v" ;;
-      flood.advert.interval)  setting_flood_advert_interval="$v" ;;
       guest.password)         setting_guest_password="$v" ;;
       password)               setting_password="$v" ;;
+	  name)                   setting_name="$v" ;;
+	  repeat)                 setting_repeat="$v" ;;
+	  lat)                    setting_lat="$v" ;;
+      lon)                    setting_lon="$v" ;;
       prv.key)                setting_private_key="$v" ;;
       public.key)             setting_public_key="$v" ;;
-      name)                   setting_name="$v" ;;
-      lat)                    setting_lat="$v" ;;
-      lon)                    setting_lon="$v" ;;
+      rxdelay)                setting_rxdelay="$v" ;;
       txdelay)                setting_txdelay="$v" ;;
+      direct.txdelay)         setting_direct_txdelay="$v" ;;
+      flood.max)              setting_flood_max="$v" ;;
+	  tx)                     setting_tx="$v" ;;
+	  role)                   setting_role="$v" ;;
+
     esac
   done
 
@@ -559,186 +680,229 @@ edit_repeater_settings_menu() {
   while :; do
     echo
     echo "Current settings:"
-	echo " r) Refresh this list"
-    echo " 1) tx                 = $setting_tx"
-    echo " 2) repeat             = $setting_repeat"
-    echo " 3) allow.read.only    = $setting_allow_read_only"
-    echo " 4) agc.reset.interval = $setting_agc_reset_interval"
-    echo " 5) advert.interval    = $setting_advert_interval"
-    echo " 6) flood.advert.intvl = $setting_flood_advert_interval"
-    echo " 7) guest.password     = $setting_guest_password"
-    echo " 8) password           = $setting_password"
-    echo " 9) private key        = ${setting_private_key:0:8}..."
-    echo "10) public key         = ${setting_public_key:0:16}...${setting_public_key:48:16} (read-only)"
-    echo "11) name               = $setting_name"
-    echo "12) lat                = $setting_lat"
-    echo "13) lon                = $setting_lon"
-    echo "14) txdelay            = $setting_txdelay"
-    echo "15) radio              = freq=$RADIO_FREQ bw=$RADIO_BW sf=$RADIO_SF cr=$RADIO_CR"
+    echo " 1) tx                    = $setting_tx"
+    echo " 2) repeat                = $setting_repeat"
+    echo " 3) allow.read.only       = $setting_allow_read_only"
+    echo " 4) agc.reset.interval    = $setting_agc_reset_interval"
+    echo " 5) advert.interval       = $setting_advert_interval"
+    echo " 6) flood.advert.interval = $setting_flood_advert_interval"
+    echo " 7) flood.max             = $setting_flood_max"
+    echo " 8) guest.password        = $setting_guest_password"
+    echo " 9) password              = $setting_password"
+    echo "10) private key           = ${setting_private_key:0:8}..."
+    echo "11) public key            = ${setting_public_key:0:16}...${setting_public_key:48:16} (read-only)"
+    echo "12) name                  = $setting_name"
+    echo "13) lat                   = $setting_lat"
+    echo "14) lon                   = $setting_lon"
+    echo "15) role                  = $setting_role"
+    echo "16) txdelay               = $setting_txdelay"
+    echo "17) rxdelay               = $setting_rxdelay"
+    echo "18) direct.txdelay        = $setting_direct_txdelay"
+    echo "19) int.thresh            = $setting_int_thresh"
+    echo "20) af                    = $setting_af"
+    echo "21) multi.acks            = $setting_multi_acks"
+    echo "22) radio                 = freq=$RADIO_FREQ bw=$RADIO_BW sf=$RADIO_SF cr=$RADIO_CR"
+	echo " R) Refresh above settings from device"
+    echo " A) Send advert now"
+    echo " L) Logs: start/stop/erase"
+    echo " C) Clear stats"
+	echo " Q) Quit"
     echo
-    echo "Choose a setting to edit, or q to finish."
+    echo "Choose an item to edit, an action (A/L/C), or q to finish."
     read -rp "Choice: " choice
 
     case "$choice" in
-	  q|Q)
-		echo "Done editing settings."
-		break
-		;;
-		
-	  r|R)
-		load_repeater_settings
-		;;
+      q|Q) echo "Done."; break ;;
 
+      r|R)
+        echo "Reloading settings from device..."
+        load_repeater_settings
+        ;;
 
-	  1)
-		read -rp "tx (current: $setting_tx): " v
-		[ -n "$v" ] && setting_tx="$v"
-		serial_cmd "set tx $setting_tx"
-		;;
-
-	  2)
-		while :; do
-		  read -rp "repeat (on/off, current: $setting_repeat): " v
-		  [ -z "$v" ] && break
-		  case "$v" in
-			on|off)
-			  setting_repeat="$v"
-			  break
-			  ;;
-			*)
-			  echo "Please enter on or off."
-			  ;;
-		  esac
-		done
-		serial_cmd "set repeat $setting_repeat"
-		;;
-
-	  3)
-		while :; do
-		  read -rp "allow.read.only (on/off, current: $setting_allow_read_only): " v
-		  [ -z "$v" ] && break
-		  case "$v" in
-			on|off)
-			  setting_allow_read_only="$v"
-			  break
-			  ;;
-			*)
-			  echo "Please enter on or off."
-			  ;;
-		  esac
-		done
-		serial_cmd "set allow.read.only $setting_allow_read_only"
-		;;
-
-	  4)
-		read -rp "agc.reset.interval (current: $setting_agc_reset_interval): " v
-		[ -n "$v" ] && setting_agc_reset_interval="$v"
-		serial_cmd "set agc.reset.interval $setting_agc_reset_interval"
-		;;
-
-	  5)
-		read -rp "advert.interval (current: $setting_advert_interval): " v
-		[ -n "$v" ] && setting_advert_interval="$v"
-		serial_cmd "set advert.interval $setting_advert_interval"
-		;;
-
-	  6)
-		read -rp "flood.advert.interval (current: $setting_flood_advert_interval): " v
-		[ -n "$v" ] && setting_flood_advert_interval="$v"
-		serial_cmd "set flood.advert.interval $setting_flood_advert_interval"
-		;;
-
-	  7)
-		read -rp "guest.password (current: $setting_guest_password): " v
-		[ -n "$v" ] && setting_guest_password="$v"
-		serial_cmd "set guest.password $setting_guest_password"
-		;;
-
-	  8)
-		read -rp "password (current: $setting_password): " v
-		[ -n "$v" ] && setting_password="$v"
-		serial_cmd "set password $setting_password"
-		;;
-
-	  9)
-		echo
-		echo "Go here ton find a free prefix"
-		echo "https://analyzer.letsme.sh/nodes/prefix-utilization"
-		echo ""
-		echo "Go here to make one"
-		echo "https://gessaman.com/mc-keygen/"
-		echo
-		echo "Existing key"
-		echo "${setting_private_key}"
-		echo
-		read -rp "private key (blank to keep): " v
-		if [ -n "$v" ]; then
-		  setting_private_key="$v"
-		  serial_cmd "set prv.key $setting_private_key"
-		else
-		  echo "Private key unchanged."
-		fi
-		;;
-
-	  10)
-		echo "public key is derived from private key and cannot be edited here."
-		;;
-
-	  11)
-		read -rp "name (current: $setting_name): " v
-		[ -n "$v" ] && setting_name="$v"
-		serial_cmd "set name setting_name"
-		;;
-
-	  12)
-		read -rp "lat (current: $setting_lat): " v
-		[ -n "$v" ] && setting_lat="$v"
-		serial_cmd "set lat $setting_lat"
-		;;
-
-	  13)
-		read -rp "lon (current: $setting_lon): " v
-		[ -n "$v" ] && setting_lon="$v"
-		serial_cmd "set lon $setting_lon"
-		;;
-
-		14)
-		  while :; do
-			read -rp "txdelay (0.0–2.0, current: $setting_txdelay): " v
-			# Keep current if empty
-			if [ -z "$v" ]; then
-			  v="$setting_txdelay"
-			  break
-			fi
-			# Check numeric (integer or decimal)
-			if [[ "$v" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
-			  # Ensure it's within 0.0–2.0
-			  if (( $(echo "$v >= 0.0 && $v <= 2.0" | bc -l) )); then
-				break
-			  else
-				echo "Value must be between 0.0 and 2.0"
-			  fi
-			else
-			  echo "Please enter a valid number (e.g. 0.5, 1, 2.0)"
-			fi
-		  done
-		  setting_txdelay="$v"
-		  serial_cmd "set txdelay $setting_txdelay"
+		1)
+		  prompt_number "tx" "$setting_tx"
+		  set_if_changed "tx" "$setting_tx" "$REPLY_NUM" num
+		  [ -n "$REPLY_NUM" ] && setting_tx="$REPLY_NUM"
 		  ;;
 
-		  15)
-			if select_suggested_radio_setting; then
-			  echo
-			  echo "You selected: $RADIO_TITLE $RADIO_DESC"
-			  echo "Setting the radio to these settings"
-			  sleep 0.5
-			  serial_cmd "set radio ${RADIO_FREQ},${RADIO_BW},${RADIO_SF},${RADIO_CR}"
-			fi
-			;;
+		2)
+		  prompt_onoff "repeat" "$setting_repeat"
+		  set_if_changed "repeat" "$setting_repeat" "$REPLY_ONOFF"
+		  [ -n "$REPLY_ONOFF" ] && setting_repeat="$REPLY_ONOFF"
+		  ;;
 
-		  *)
-			echo "Invalid choice."
-			;;
+		3)
+		  prompt_onoff "allow.read.only" "$setting_allow_read_only"
+		  set_if_changed "allow.read.only" "$setting_allow_read_only" "$REPLY_ONOFF"
+		  [ -n "$REPLY_ONOFF" ] && setting_allow_read_only="$REPLY_ONOFF"
+		  ;;
+
+		4)
+		  prompt_number "agc.reset.interval" "$setting_agc_reset_interval"
+		  set_if_changed "agc.reset.interval" "$setting_agc_reset_interval" "$REPLY_NUM" num
+		  [ -n "$REPLY_NUM" ] && setting_agc_reset_interval="$REPLY_NUM"
+		  ;;
+
+		5)
+		  prompt_number "advert.interval" "$setting_advert_interval"
+		  set_if_changed "advert.interval" "$setting_advert_interval" "$REPLY_NUM" num
+		  [ -n "$REPLY_NUM" ] && setting_advert_interval="$REPLY_NUM"
+		  ;;
+
+		6)
+		  prompt_number "flood.advert.interval" "$setting_flood_advert_interval"
+		  set_if_changed "flood.advert.interval" "$setting_flood_advert_interval" "$REPLY_NUM" num
+		  [ -n "$REPLY_NUM" ] && setting_flood_advert_interval="$REPLY_NUM"
+		  ;;
+
+		7)
+		  prompt_number "flood.max" "$setting_flood_max"
+		  set_if_changed "flood.max" "$setting_flood_max" "$REPLY_NUM" num
+		  [ -n "$REPLY_NUM" ] && setting_flood_max="$REPLY_NUM"
+		  ;;
+
+		8)
+		  read -rp "guest.password (current: ${setting_guest_password:-<empty>}): " v
+		  # Allow clearing by explicit "-"
+		  if [ "$v" = "-" ]; then v=""; fi
+		  # Only set if non-empty and changed; empty means do nothing
+		  if [ -n "$v" ] && [ "$v" != "$setting_guest_password" ]; then
+			echo "Updating guest.password"
+			serial_cmd "set guest.password $v"
+			setting_guest_password="$v"
+		  else
+			echo "No change to guest.password"
+		  fi
+		  ;;
+
+		9)
+		  read -rp "password (current: ${setting_password:-<empty>}): " v
+		  if [ -n "$v" ] && [ "$v" != "$setting_password" ]; then
+			echo "Updating password"
+			serial_cmd "set password $v"
+			setting_password="$v"
+		  else
+			echo "No change to password"
+		  fi
+		  ;;
+
+		10)
+		  echo "Existing key: ${setting_private_key}"
+		  read -rp "private key (blank to keep): " v
+		  if [ -n "$v" ] && [ "$v" != "$setting_private_key" ]; then
+			echo "Updating private key"
+			serial_cmd "set prv.key $v"
+			setting_private_key="$v"
+		  else
+			echo "Private key unchanged."
+		  fi
+		  ;;
+
+		12)
+		  read -rp "name (current: $setting_name): " v
+		  if [ -n "$v" ] && [ "$v" != "$setting_name" ]; then
+			serial_cmd "set name $v"
+			setting_name="$v"
+		  else
+			echo "No change to name"
+		  fi
+		  ;;
+
+		13)
+		  prompt_number "lat" "$setting_lat"
+		  set_if_changed "lat" "$setting_lat" "$REPLY_NUM" num
+		  [ -n "$REPLY_NUM" ] && setting_lat="$REPLY_NUM"
+		  ;;
+
+		14)
+		  prompt_number "lon" "$setting_lon"
+		  set_if_changed "lon" "$setting_lon" "$REPLY_NUM" num
+		  [ -n "$REPLY_NUM" ] && setting_lon="$REPLY_NUM"
+		  ;;
+
+		15)
+		  read -rp "role (current: $setting_role): " v
+		  if [ -n "$v" ] && [ "$v" != "$setting_role" ]; then
+			serial_cmd "set role $v"
+			setting_role="$v"
+		  else
+			echo "No change to role"
+		  fi
+		  ;;
+
+		16)
+		  # keep your 0.0–2.0 check that sets v
+		  setting_txdelay="$v"
+		  set_if_changed "txdelay" "$setting_txdelay" "$v" num
+		  ;;
+
+		17)
+		  prompt_number "rxdelay" "$setting_rxdelay"
+		  set_if_changed "rxdelay" "$setting_rxdelay" "$REPLY_NUM" num
+		  [ -n "$REPLY_NUM" ] && setting_rxdelay="$REPLY_NUM"
+		  ;;
+
+		18)
+		  prompt_number "direct.txdelay" "$setting_direct_txdelay"
+		  set_if_changed "direct.txdelay" "$setting_direct_txdelay" "$REPLY_NUM" num
+		  [ -n "$REPLY_NUM" ] && setting_direct_txdelay="$REPLY_NUM"
+		  ;;
+
+		19)
+		  prompt_number "int.thresh" "$setting_int_thresh"
+		  set_if_changed "int.thresh" "$setting_int_thresh" "$REPLY_NUM" num
+		  [ -n "$REPLY_NUM" ] && setting_int_thresh="$REPLY_NUM"
+		  ;;
+
+		20)
+		  prompt_onoff "af" "$setting_af"
+		  set_if_changed "af" "$setting_af" "$REPLY_ONOFF"
+		  [ -n "$REPLY_ONOFF" ] && setting_af="$REPLY_ONOFF"
+		  ;;
+
+		21)
+		  prompt_onoff "multi.acks" "$setting_multi_acks"
+		  set_if_changed "multi.acks" "$setting_multi_acks" "$REPLY_ONOFF"
+		  [ -n "$REPLY_ONOFF" ] && setting_multi_acks="$REPLY_ONOFF"
+		  ;;
+
+		22)
+		  if select_suggested_radio_setting; then
+			# Only send if any component changed
+			if [ "$RADIO_FREQ" != "$RADIO_FREQ_OLD" ] || [ "$RADIO_BW" != "$RADIO_BW_OLD" ] \
+			   || [ "$RADIO_SF" != "$RADIO_SF_OLD" ] || [ "$RADIO_CR" != "$RADIO_CR_OLD" ]; then
+			  echo "Setting radio: ${RADIO_FREQ},${RADIO_BW},${RADIO_SF},${RADIO_CR}"
+			  serial_cmd "set radio ${RADIO_FREQ},${RADIO_BW},${RADIO_SF},${RADIO_CR}"
+			else
+			  echo "Radio unchanged."
+			fi
+		  fi
+		  ;;
+
+      a|A)
+        echo "Sending advert..."
+        serial_cmd "advert"
+        ;;
+
+      l|L)
+        echo "Logs: (s)tart, s(t)op, (e)rase"
+        read -rp "Choice [s/t/e]: " v
+        case "$v" in
+          s|S) serial_cmd "log start" ;;
+          t|T) serial_cmd "log stop" ;;
+          e|E) serial_cmd "log erase" ;;
+          *) echo "Unknown choice." ;;
+        esac
+        ;;
+
+      c|C)
+        echo "Clearing stats..."
+        serial_cmd "stats clear"
+        ;;
+
+      *)
+        echo "Invalid choice."
+        ;;
     esac
   done
 }
@@ -760,6 +924,7 @@ confirm_restart_radio() {
 chronyc tracking | grep -E '^(Ref(erence)? time|System time)'
 
 # Read clock from device
+
 device_epoch="$(
   serial_cmd clock \
   | sed -En 's/.*([0-9]{1,2}):([0-9]{2}) *- *([0-9]{1,2})\/([0-9]{1,2})\/([0-9]{4}) *UTC.*/\5-\4-\3 \1:\2:00/p' \
@@ -786,6 +951,7 @@ if [ "$adiff" -gt 172800 ]; then
 else
   echo "Clock within 2 days"
 fi
+
 
 board=$(serial_cmd "board" )
 ver=$(serial_cmd "ver" )
