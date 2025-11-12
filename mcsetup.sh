@@ -38,22 +38,6 @@ else
 fi
 USB_AUTOSUSPEND=$(cat /sys/module/usbcore/parameters/autosuspend)
 
-if ! command -v chronyc &>/dev/null; then
-	echo "Installing chrony"
-	sudo apt update && sudo apt -y install chrony
-	sudo systemctl enable chrony
-	sudo systemctl restart chrony
-fi
-
-# Sync Time
-chronyc tracking
-
-# Ensure socat is installed.
-if ! command -v socat &>/dev/null; then
-	echo "Installing socat"
-	sudo apt update && sudo apt -y install socat
-fi
-
 REPO_OWNER="meshcore-dev"
 REPO_NAME="MeshCore"
 CONFIG_URL="https://api.meshcore.nz/api/v1/config"
@@ -69,8 +53,38 @@ BAUD="${3:-115200}"
 TIMEOUT="${4:-4}"
 
 
-mkdir -p "$(dirname "$DEVICE_PORT_FILE")"
-mkdir -p "$(dirname "$DEVICE_PORT_NAME_FILE")"
+# Resolve base user/group
+BASE_USER="${SUDO_USER:-$USER}"
+BASE_GROUP="$(id -gn "$BASE_USER")"
+
+# Create a directory owned by the base user, working with/without sudo
+make_user_dir() {
+  local dir="$1"
+  if [ -n "${SUDO_USER:-}" ]; then
+    # running under sudo: make as base user and ensure ownership
+    sudo -u "$BASE_USER" mkdir -p "$dir"
+    sudo chown "$BASE_USER:$BASE_GROUP" "$dir"
+  else
+    # not under sudo: normal create (already owned by us)
+    mkdir -p "$dir"
+  fi
+}
+
+# Write a file as the base user, robust under -euo pipefail
+write_user_file() {
+  local path="$1"; shift
+  local content="$*"
+  if [ -n "${SUDO_USER:-}" ]; then
+    printf '%s\n' "$content" | sudo -u "$BASE_USER" tee "$path" >/dev/null
+    sudo chown "$BASE_USER:$BASE_GROUP" "$path"
+  else
+    printf '%s\n' "$content" >"$path"
+  fi
+}
+
+# Use it
+make_user_dir "$(dirname "$DEVICE_PORT_FILE")"
+make_user_dir "$(dirname "$DEVICE_PORT_NAME_FILE")"
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "Installing jq..."
@@ -87,6 +101,16 @@ fi
 if ! command -v bc >/dev/null 2>&1; then
   echo "Installing bc..."
   sudo apt update && sudo apt -y install bc
+fi
+if ! command -v socat &>/dev/null; then
+	echo "Installing socat"
+	sudo apt update && sudo apt -y install socat
+fi
+if ! command -v chronyc &>/dev/null; then
+	echo "Installing chrony"
+	sudo apt update && sudo apt -y install chrony
+	sudo systemctl enable chrony
+	sudo systemctl restart chrony
 fi
 
 ensure_meshcore_config() {
@@ -504,6 +528,7 @@ load_repeater_settings() {
   # fetch generic keys
   for k in "${keys[@]}"; do
     v="$(serial_cmd "get $k" | trim)"
+	sleep 0.05
     case "$k" in
       tx)                     setting_tx="$v" ;;
       repeat)                 setting_repeat="$v" ;;
@@ -543,7 +568,7 @@ edit_repeater_settings_menu() {
     echo " 6) flood.advert.intvl = $setting_flood_advert_interval"
     echo " 7) guest.password     = $setting_guest_password"
     echo " 8) password           = $setting_password"
-    echo " 9) private key        = $setting_private_key"
+    echo " 9) private key        = ${setting_private_key:0:8}..."
     echo "10) public key         = ${setting_public_key:0:16}...${setting_public_key:48:16} (read-only)"
     echo "11) name               = $setting_name"
     echo "12) lat                = $setting_lat"
@@ -636,13 +661,17 @@ edit_repeater_settings_menu() {
 		;;
 
 	  9)
+		echo
 		echo "Go here ton find a free prefix"
 		echo "https://analyzer.letsme.sh/nodes/prefix-utilization"
 		echo ""
 		echo "Go here to make one"
 		echo "https://gessaman.com/mc-keygen/"
 		echo
-		read -rp "private key (current shortened): ${setting_private_key:0:16}...  New value (blank to keep): " v
+		echo "Existing key"
+		echo "${setting_private_key}"
+		echo
+		read -rp "private key (blank to keep): " v
 		if [ -n "$v" ]; then
 		  setting_private_key="$v"
 		  serial_cmd "set prv.key $setting_private_key"
@@ -727,6 +756,8 @@ confirm_restart_radio() {
 }
 
 
+# Sync Time
+chronyc tracking | grep -E '^(Ref(erence)? time|System time)'
 
 # Read clock from device
 device_epoch="$(
