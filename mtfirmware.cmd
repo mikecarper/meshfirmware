@@ -112,7 +112,7 @@ function GetPortablePython {
 
 	# pick the newest 64-bit portable ZIP (e.g. Winpython64-3.13.3.0dot.zip)
 	$asset  = $rel.assets |
-			  Where-Object  { $_.name -match 'Winpython64-.*dot\.zip$' } |
+			  Where-Object  { $_.name -match '(?i)^winpython(?:32|64)?[ _.-]?.*?dot(?:[a-z]*\d*)?\.zip$' } |
 			  Sort-Object   -Property name -Descending |
 			  Select-Object -First 1
 
