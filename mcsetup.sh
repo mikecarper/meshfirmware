@@ -217,6 +217,13 @@ guess_radio_title_from_timezone() {
   esac
 }
 
+snapshot_radio_baseline() {
+  RADIO_FREQ_OLD="$RADIO_FREQ"
+  RADIO_BW_OLD="$RADIO_BW"
+  RADIO_SF_OLD="$RADIO_SF"
+  RADIO_CR_OLD="$RADIO_CR"
+}
+
 # Custom radio setting helper
 # Sets: RADIO_TITLE, RADIO_DESC, RADIO_FREQ, RADIO_SF, RADIO_BW, RADIO_CR
 select_custom_radio_setting() {
@@ -236,28 +243,40 @@ select_custom_radio_setting() {
   done
 
   # Spreading factor
-  echo "Spreading factor options: 7, 8, 9, 10, 11, 12"
+  echo "Spreading factor options: 5, 6, 7, 8, 9, 10, 11, 12"
   while :; do
-    read -rp "SF (7-12): " sf
-    if [[ "$sf" =~ ^[0-9]+$ ]] && [ "$sf" -ge 7 ] && [ "$sf" -le 12 ]; then
+    read -rp "SF (5-12): " sf
+    if [[ "$sf" =~ ^[0-9]+$ ]] && [ "$sf" -ge 5 ] && [ "$sf" -le 12 ]; then
       break
     fi
-    echo "Please enter 7, 8, 9, 10, 11, or 12."
+    echo "Please enter 5, 6, 7, 8, 9, 10, 11, or 12."
   done
 
-  # Bandwidth
-  echo "Bandwidth options (kHz): 62.5, 125, 250, 500"
-  while :; do
-    read -rp "BW (62.5, 125, 250, 500): " bw
-    case "$bw" in
-      62.5|125|250|500)
-        break
-        ;;
-      *)
-        echo "Please enter one of: 62.5, 125, 250, 500."
-        ;;
-    esac
-  done
+	# Bandwidth (kHz)
+	BW_ALLOWED=(7.81 10.42 15.63 20.83 31.25 41.67 62.5 125 250 500)
+
+	is_in_list() {
+	  local x="$1"; shift
+	  for v in "$@"; do
+		# numeric compare via bc to handle floats precisely
+		if echo "$x == $v" | bc -l >/dev/null 2>&1 && [ "$(echo "$x == $v" | bc -l)" = "1" ]; then
+		  return 0
+		fi
+	  done
+	  return 1
+	}
+
+	echo "Bandwidth options (kHz): ${BW_ALLOWED[*]}"
+	while :; do
+	  read -rp "BW (${BW_ALLOWED[*]}): " bw
+	  # must be numeric
+	  if [[ "$bw" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
+		if is_in_list "$bw" "${BW_ALLOWED[@]}"; then
+		  break
+		fi
+	  fi
+	  echo "Please enter one of: ${BW_ALLOWED[*]}."
+	done
 
   # Coding rate
   echo "Coding rate options: CR5, CR6, CR7, CR8"
@@ -583,6 +602,22 @@ prompt_number() {
   done
 }
 
+# Prompt for a number within [min,max]. Blank keeps current.
+# Sets REPLY_NUM on success.
+prompt_number_bounded() {
+  local lbl="$1" cur="$2" min="$3" max="$4" v
+  while :; do
+    read -rp "${lbl} (${min}-${max}, current: ${cur}): " v
+    [ -z "$v" ] && { REPLY_NUM="$cur"; return 0; }
+    if [[ "$v" =~ ^-?[0-9]+(\.[0-9]+)?$ ]] \
+       && (( $(echo "$v >= $min && $v <= $max" | bc -l) )); then
+      REPLY_NUM="$v"
+      return 0
+    fi
+    echo "Enter a number between ${min} and ${max}"
+  done
+}
+
 set_if_changed() {
   local key="$1" cur="$2" new="$3" mode="${4:-str}"
   new="$( trim "$new")"
@@ -695,7 +730,7 @@ edit_repeater_settings_menu() {
     echo "12) name                  = $setting_name"
     echo "13) lat                   = $setting_lat"
     echo "14) lon                   = $setting_lon"
-    echo "15) role                  = $setting_role"
+    echo "15) role                  = $setting_role (read-only)"
     echo "16) txdelay               = $setting_txdelay"
     echo "17) rxdelay               = $setting_rxdelay"
     echo "18) direct.txdelay        = $setting_direct_txdelay"
@@ -718,6 +753,7 @@ edit_repeater_settings_menu() {
       r|R)
         echo "Reloading settings from device..."
         load_repeater_settings
+		snapshot_radio_baseline
         ;;
 
 		1)
@@ -810,31 +846,24 @@ edit_repeater_settings_menu() {
 		  ;;
 
 		13)
-		  prompt_number "lat" "$setting_lat"
+		  # Latitude must be within [-90, 90]
+		  prompt_number_bounded "lat" "$setting_lat" -90.0 90.0
 		  set_if_changed "lat" "$setting_lat" "$REPLY_NUM" num
 		  [ -n "$REPLY_NUM" ] && setting_lat="$REPLY_NUM"
 		  ;;
 
 		14)
-		  prompt_number "lon" "$setting_lon"
+		  # Longitude must be within [-180, 180]
+		  prompt_number_bounded "lon" "$setting_lon" -180.0 180.0
 		  set_if_changed "lon" "$setting_lon" "$REPLY_NUM" num
 		  [ -n "$REPLY_NUM" ] && setting_lon="$REPLY_NUM"
 		  ;;
 
-		15)
-		  read -rp "role (current: $setting_role): " v
-		  if [ -n "$v" ] && [ "$v" != "$setting_role" ]; then
-			serial_cmd "set role $v"
-			setting_role="$v"
-		  else
-			echo "No change to role"
-		  fi
-		  ;;
 
 		16)
-		  # keep your 0.0–2.0 check that sets v
-		  setting_txdelay="$v"
-		  set_if_changed "txdelay" "$setting_txdelay" "$v" num
+		  prompt_number_bounded "txdelay" "$setting_txdelay" 0.0 2.0
+		  set_if_changed "txdelay" "$setting_txdelay" "$REPLY_NUM" num
+		  [ -n "$REPLY_NUM" ] && setting_txdelay="$REPLY_NUM"
 		  ;;
 
 		17)
@@ -844,7 +873,7 @@ edit_repeater_settings_menu() {
 		  ;;
 
 		18)
-		  prompt_number "direct.txdelay" "$setting_direct_txdelay"
+		  prompt_number_bounded "direct.txdelay" "$setting_direct_txdelay" 0.0 2.0
 		  set_if_changed "direct.txdelay" "$setting_direct_txdelay" "$REPLY_NUM" num
 		  [ -n "$REPLY_NUM" ] && setting_direct_txdelay="$REPLY_NUM"
 		  ;;
@@ -856,15 +885,15 @@ edit_repeater_settings_menu() {
 		  ;;
 
 		20)
-		  prompt_onoff "af" "$setting_af"
-		  set_if_changed "af" "$setting_af" "$REPLY_ONOFF"
-		  [ -n "$REPLY_ONOFF" ] && setting_af="$REPLY_ONOFF"
+		  prompt_number_bounded "af" "$setting_af" 0.0 1.0
+		  set_if_changed "af" "$setting_af" "$REPLY_NUM" num
+		  [ -n "$REPLY_NUM" ] && setting_af="$REPLY_NUM"
 		  ;;
 
 		21)
-		  prompt_onoff "multi.acks" "$setting_multi_acks"
-		  set_if_changed "multi.acks" "$setting_multi_acks" "$REPLY_ONOFF"
-		  [ -n "$REPLY_ONOFF" ] && setting_multi_acks="$REPLY_ONOFF"
+		  prompt_number_bounded "multi.acks" "$setting_multi_acks" 0 1
+		  set_if_changed "multi.acks" "$setting_multi_acks" "$REPLY_NUM" num
+		  [ -n "$REPLY_NUM" ] && setting_multi_acks="$REPLY_NUM"
 		  ;;
 
 		22)
@@ -960,6 +989,7 @@ ver=$(serial_cmd "ver" )
 echo "$board - $ver"
 
 load_repeater_settings
+snapshot_radio_baseline
 
 edit_repeater_settings_menu
 
