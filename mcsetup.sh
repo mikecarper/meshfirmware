@@ -57,35 +57,6 @@ TIMEOUT="${4:-4}"
 BASE_USER="${SUDO_USER:-$USER}"
 BASE_GROUP="$(id -gn "$BASE_USER")"
 
-# Create a directory owned by the base user, working with/without sudo
-make_user_dir() {
-  local dir="$1"
-  if [ -n "${SUDO_USER:-}" ]; then
-    # running under sudo: make as base user and ensure ownership
-    sudo -u "$BASE_USER" mkdir -p "$dir"
-    sudo chown "$BASE_USER:$BASE_GROUP" "$dir"
-  else
-    # not under sudo: normal create (already owned by us)
-    mkdir -p "$dir"
-  fi
-}
-
-# Write a file as the base user, robust under -euo pipefail
-write_user_file() {
-  local path="$1"; shift
-  local content="$*"
-  if [ -n "${SUDO_USER:-}" ]; then
-    printf '%s\n' "$content" | sudo -u "$BASE_USER" tee "$path" >/dev/null
-    sudo chown "$BASE_USER:$BASE_GROUP" "$path"
-  else
-    printf '%s\n' "$content" >"$path"
-  fi
-}
-
-# Use it
-make_user_dir "$(dirname "$DEVICE_PORT_FILE")"
-make_user_dir "$(dirname "$DEVICE_PORT_NAME_FILE")"
-
 if ! command -v jq >/dev/null 2>&1; then
   echo "Installing jq..."
   sudo apt update && sudo apt -y install jq
@@ -112,6 +83,58 @@ if ! command -v chronyc &>/dev/null; then
 	sudo systemctl enable chrony
 	sudo systemctl restart chrony
 fi
+
+# Create a directory owned by the base user, working with/without sudo
+make_user_dir() {
+  local dir="$1"
+  if [ -n "${SUDO_USER:-}" ]; then
+    # running under sudo: make as base user and ensure ownership
+    sudo -u "$BASE_USER" mkdir -p "$dir"
+    sudo chown "$BASE_USER:$BASE_GROUP" "$dir"
+  else
+    # not under sudo: normal create (already owned by us)
+    mkdir -p "$dir"
+  fi
+}
+
+# Write a file as the base user, robust under -euo pipefail
+write_user_file() {
+  local path="$1"; shift
+  local content="$*"
+  if [ -n "${SUDO_USER:-}" ]; then
+    printf '%s\n' "$content" | sudo -u "$BASE_USER" tee "$path" >/dev/null
+    sudo chown "$BASE_USER:$BASE_GROUP" "$path"
+  else
+    printf '%s\n' "$content" >"$path"
+  fi
+}
+
+fix_and_pretty_json() {
+  local raw="$1"
+
+  # Trim whitespace
+  raw="$(echo "$raw" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+
+  # If empty, just bail
+  [ -z "$raw" ] && return 0
+
+  # Ensure it starts with '{'
+  if [[ "$raw" != \{* ]]; then
+    raw="{${raw}"
+  fi
+
+  # Fix missing opening quote on first key:
+  # {noise_floor":...}  ->  {"noise_floor":...}
+  raw="$(echo "$raw" | sed -E 's/^\{([^"]+)":/{"\1":/')"
+
+  # Ensure ending '}'
+  if [[ "$raw" != *\} ]]; then
+    raw="${raw}}"
+  fi
+
+  # Pretty-print if possible
+  echo "$raw" | jq . 2>/dev/null || echo "$raw"
+}
 
 ensure_meshcore_config() {
   # Ensure jq and curl exist
@@ -494,16 +517,6 @@ choose_serial() {
         echo "Invalid selection – please try again."
     done
 }
-choose_serial
-device_name=""
-[[ -f "$DEVICE_PORT_FILE" ]] && device_name="$(<"$DEVICE_PORT_FILE")"
-
-
-# Make sure device exists
-if [ ! -e "$device_name" ]; then
-  echo "Error: device $device_name not found" >&2
-  exit 1
-fi
 
 # Helper to send a command and capture reply
 serial_cmd() {
@@ -950,11 +963,24 @@ confirm_restart_radio() {
 }
 
 
+# Make sure we're setup
+make_user_dir "$(dirname "$DEVICE_PORT_FILE")"
+make_user_dir "$(dirname "$DEVICE_PORT_NAME_FILE")"
+
+# Get serial device
+choose_serial
+device_name=""
+[[ -f "$DEVICE_PORT_FILE" ]] && device_name="$(<"$DEVICE_PORT_FILE")"
+# Make sure device exists
+if [ ! -e "$device_name" ]; then
+  echo "Error: device $device_name not found" >&2
+  exit 1
+fi
+
 # Sync Time
 chronyc tracking | grep -E '^(Ref(erence)? time|System time)'
 
 # Read clock from device
-
 device_epoch="$(
   serial_cmd clock \
   | sed -En 's/.*([0-9]{1,2}):([0-9]{2}) *- *([0-9]{1,2})\/([0-9]{1,2})\/([0-9]{4}) *UTC.*/\5-\4-\3 \1:\2:00/p' \
@@ -972,8 +998,6 @@ echo "device_epoch: $device_epoch"
 echo "host_epoch  : $host_epoch"
 echo "Device time (Local): $(date -d "@$device_epoch" '+%Y-%m-%d %H:%M %Z')"
 echo "Host   time (Local): $(date -d "@$host_epoch" '+%Y-%m-%d %H:%M %Z')"
-
-
 # Verdict: only act if more than 2 days off (86400 sec * 2)
 if [ "$adiff" -gt 172800 ]; then
   echo "Clock off by more than 2 days; syncing time now. Sending: time $host_epoch"
@@ -982,10 +1006,16 @@ else
   echo "Clock within 2 days"
 fi
 
+StatsRadio=$( serial_cmd stats-radio )
+fix_and_pretty_json "$StatsRadio"
+StatsPackets=$( serial_cmd stats-packets )
+fix_and_pretty_json "$StatsPackets"
+StatsCore=$( serial_cmd stats-core )
+fix_and_pretty_json "$StatsCore"
+
 
 board=$(serial_cmd "board" )
 ver=$(serial_cmd "ver" )
-
 echo "$board - $ver"
 
 load_repeater_settings
