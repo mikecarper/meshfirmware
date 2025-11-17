@@ -67,6 +67,7 @@ WRITEFLASH="write-flash"
 ERASEFLASH="erase-flash"
 HARDRESET="hard-reset"
 LOCKEDSERVICE=""
+CHOSEN_FILE=""
 
 # Settings for the repo
         GITHUB_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases"
@@ -227,13 +228,52 @@ serial_cmd() {
 	fi
 		
 	printf "%b" "${line}\r\n" \
-	| socat - "$DEVICE_NAME,raw,echo=0,b${BAUD:-115200}" 2>/dev/null \
+	| timeout 2s socat - "$DEVICE_NAME,raw,echo=0,b${BAUD:-115200}" 2>/dev/null \
 	| tr -d '\r' \
 	| awk 'NF{last=$0} END{print last}' \
 	| sed -E $'s/\x1B\\[[0-9;]*[A-Za-z]//g' \
 	| sed -E 's/^[[:space:][:cntrl:]]*(->|>)+[[:space:]]*//' \
 	| sed -E 's/^[[:space:][:cntrl:]]+//; s/[[:space:]]+$//' \
 	| sed -E 's/^[^0-9A-Za-z+\-]+//'    # fallback: drop anything weird before data
+}
+
+choose_custom_firmware_file() {
+  local arch_lc required_ext extra input check check_lc role_lc
+
+  arch_lc=${ARCHITECTURE,,}
+  extra=""
+  if [[ "$arch_lc" == "esp32" ]]; then
+    required_ext=".bin"
+    extra="The merged files will do a full erase"
+  else
+    required_ext=".zip"
+  fi
+
+  echo "Rule: ARCHITECTURE='$ARCHITECTURE' requires files ending with ${required_ext} ${extra}"
+
+  # Helpful base URL by role
+  role_lc=${ROLE,,}
+  case "$role_lc" in
+    companion*) echo "https://files.brazio.org/meshcore/nightly/companion/" ;;
+    repeater*)  echo "https://files.brazio.org/meshcore/nightly/repeater/"  ;;
+  esac
+
+  while :; do
+    read -rp "Enter full filename or url: " input < /dev/tty
+    [[ -z "$input" ]] && { echo "Empty input. Try again."; continue; }
+
+    # Strip query/fragment for extension test
+    check="${input%%[\?#]*}"
+    check_lc=${check,,}
+    if [[ "$check_lc" != *"$required_ext" ]]; then
+      echo "ERROR: Selection must end with ${required_ext}"
+      continue
+    fi
+
+    CHOSEN_FILE="$input"
+    VERSION="custom"
+    return 0
+  done
 }
 
 filter_last_two_branches() {
@@ -356,34 +396,20 @@ choose_version_from_releases() {
 					fi
 
 					case "$CHOICE" in
-						"Custom")
-							echo "Rule: ARCHITECTURE='$ARCHITECTURE' requires files ending with ${required_ext} ${extra}"
-
-							# Helpful base URL by role
-							role_lc=${ROLE,,}
-							case "$role_lc" in
-							  companion*) echo "https://files.brazio.org/meshcore/nightly/companion/" ;;
-							  repeater*)  echo "https://files.brazio.org/meshcore/nightly/repeater/"  ;;
-							esac
-						
-							while :; do
-								read -rp "Enter full filename or url: " input < /dev/tty
-								[[ -z "$input" ]] && { echo "Empty input. Try again."; continue; }
-								check="${input%%[\?#]*}"
-								check_lc=${check,,}
-								if [[ "$check_lc" != *"$required_ext" ]]; then
-									echo "ERROR: Selection must end with ${required_ext}"
-									continue
-								fi
-								CHOSEN_FILE="$input"
-								VERSION="custom"
+							"Custom")
+							  if choose_custom_firmware_file; then
 								break
-							done
-							break
-							;;
+							  else
+								echo "Custom selection failed; please choose again."
+								continue
+							  fi
+							  
+							  ;;
 						*)
 							VERSION="$CHOICE"
 							break
+							
+							
 							;;
 					esac
 				done < /dev/tty
@@ -593,6 +619,9 @@ choose_meshcore_firmware() {
 				for i in "${!DEVICES[@]}"; do
 					printf '  %d) %s\n' $((i+1)) "${DEVICES[$i]}"
 				done
+				# Custom option should be N+1
+				custom_index=$(( ${#DEVICES[@]} + 1 ))
+				printf '  %d) Custom\n' "$custom_index"
 				echo ""
 
 
@@ -623,12 +652,56 @@ choose_meshcore_firmware() {
 				elif [[ -z "$choice" && -n "$match" ]]; then
 					choice="$match_idx"
 					DEVICE="${DEVICES[$((choice-1))]}"
+				elif [[ "$choice" == "${custom_index}" ]]; then
+					echo "Custom."
+					DEVICE="CustomFirmware"
 				else
 					echo "Invalid selection."
 					choice=''
 				fi
 			done
 		fi
+	fi
+	
+	
+	if [[ "$DEVICE" == "CustomFirmware" ]]; then
+		echo "Custom firmware selected."
+		echo "Is this an ESP32 or NRF52 device?"
+		echo "  1) esp32"
+		echo "  2) nrf52"
+
+		while :; do
+			read -rp "Choice (1/2): " ans
+			case "$ans" in
+				1)
+					ARCHITECTURE="esp32"
+					break
+					;;
+				2)
+					ARCHITECTURE="nrf52"
+					break
+					;;
+				*)
+					echo "Please enter 1 or 2."
+					;;
+			esac
+		done
+
+		echo "You selected: $ARCHITECTURE"
+		
+		while [[ -z $CHOSEN_FILE ]]; do
+			sleep 0.1
+			if choose_custom_firmware_file; then
+				echo ""
+				ROLE="custom"
+				VERSION="custom"
+				TYPE="custom"
+				break
+			else
+				echo "Custom selection failed; please choose again."
+				continue
+			fi
+		done
 	fi
 	
 	# ---------------- step 2 – architecture & erase -----------------------
@@ -657,26 +730,28 @@ choose_meshcore_firmware() {
 	fi
 
     # ---------------- step 3 – version ------------------------------------
-	local -a VERSIONS=()
-	mapfile -t VERSIONS < <( _jq1 --arg d "$DEVICE" --arg r "$ROLE" ".device[] | select(.name==\$d) | .firmware[] | select(.role==\$r) | .version | keys[]" | sort -ru )
-	if ((${#VERSIONS[@]} == 0)); then
-		choose_version_from_releases "$DEVICE" "$ROLE" "$ARCHITECTURE" "$ERASE_URL" ;
-		return
-	fi
-	if ((${#VERSIONS[@]} == 1)); then
-		VERSION="${VERSIONS[0]}"
-		echo "Auto-selected version: $VERSION"
-	else
-		# Keep only newest two branches (X.Y)
-		local -a VERSIONS_SHOW=()
-		filter_last_two_branches VERSIONS VERSIONS_SHOW
-	
-		if [[ -z "$VERSION" ]]; then
-			while [[ -z $VERSION ]]; do
-				sleep 0.1
-				echo; echo "[3] Select version:"
-				select VERSION in "${VERSIONS_SHOW[@]}"; do [[ -n ${VERSION:-} ]] && break; done < /dev/tty
-			done
+	if [[ -z "$VERSION" ]]; then
+		local -a VERSIONS=()
+		mapfile -t VERSIONS < <( _jq1 --arg d "$DEVICE" --arg r "$ROLE" ".device[] | select(.name==\$d) | .firmware[] | select(.role==\$r) | .version | keys[]" | sort -ru )
+		if ((${#VERSIONS[@]} == 0)); then
+			choose_version_from_releases "$DEVICE" "$ROLE" "$ARCHITECTURE" "$ERASE_URL" ;
+			return
+		fi
+		if ((${#VERSIONS[@]} == 1)); then
+			VERSION="${VERSIONS[0]}"
+			echo "Auto-selected version: $VERSION"
+		else
+			# Keep only newest two branches (X.Y)
+			local -a VERSIONS_SHOW=()
+			filter_last_two_branches VERSIONS VERSIONS_SHOW
+		
+			if [[ -z "$VERSION" ]]; then
+				while [[ -z $VERSION ]]; do
+					sleep 0.1
+					echo; echo "[3] Select version:"
+					select VERSION in "${VERSIONS_SHOW[@]}"; do [[ -n ${VERSION:-} ]] && break; done < /dev/tty
+				done
+			fi
 		fi
 	fi
 
@@ -702,8 +777,12 @@ choose_meshcore_firmware() {
 
 
     # ---------------- step 5 – filename -----------------------------------
-    local CHOSEN_FILE=''
-    CHOSEN_FILE=$(_jq1 --arg d "$DEVICE" --arg r "$ROLE" --arg v "$VERSION" --arg t "$TYPE" ".device[]|select(.name==\$d) | .firmware[] | select(.role==\$r) | .version.[\$v] |.files[]|select(.type==\$t)|.name")
+	if [[ -z "$CHOSEN_FILE" ]]; then
+		CHOSEN_FILE=$(_jq1 --arg d "$DEVICE" --arg r "$ROLE" --arg v "$VERSION" --arg t "$TYPE" ".device[]|select(.name==\$d) | .firmware[] | select(.role==\$r) | .version.[\$v] |.files[]|select(.type==\$t)|.name")
+		echo "firmware/$CHOSEN_FILE" > "$SELECTED_URL_FILE"
+	else
+		echo "$CHOSEN_FILE" > "$SELECTED_URL_FILE"
+	fi
 
 	echo "$DEVICE" > "$SELECTED_DEVICE_FILE"
 	echo "$ARCHITECTURE" > "$ARCHITECTURE_FILE"
@@ -711,7 +790,6 @@ choose_meshcore_firmware() {
 	echo "$ROLE" > "$SELECTED_ROLE_FILE"
 	echo "$VERSION" > "$SELECTED_VERSION_FILE"
 	echo "$TYPE" > "$SELECTED_TYPE_FILE"
-	echo "firmware/$CHOSEN_FILE" > "$SELECTED_URL_FILE"
 }
 
 download_and_verify() {
@@ -740,7 +818,7 @@ download_and_verify() {
 	fi
 
 	if [[ ! -f "$dest" ]]; then
-		echo "Downloading firmware to $dest"
+		echo "Downloading $url to $dest"
 		wget -q --retry-connrefused --waitretry=1 -O "$dest" "$url" || return 1
 
 		bytes=$(stat -c%s "$dest" 2>/dev/null);
