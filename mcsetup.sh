@@ -45,7 +45,7 @@ CONFIG_URL="https://api.meshcore.nz/api/v1/config"
          FIRMWARE_ROOT="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}"
       DEVICE_PORT_FILE="${FIRMWARE_ROOT}/09device_port_file.txt"
  DEVICE_PORT_NAME_FILE="${FIRMWARE_ROOT}/10device_port_name_file.txt"
-     RADIO_CONFIG_FILE="${FIRMWARE_ROOT}/meshcore_config.json"
+     RADIO_CONFIG_FILE="${FIRMWARE_ROOT}/meshcore_config.json}"
  
 
 BOOT_WAIT="${BOOT_WAIT:-2}" 
@@ -833,6 +833,7 @@ edit_repeater_settings_menu() {
 		  ;;
 
 		10)
+		  echo "https://analyzer.letsme.sh/nodes/prefix-utilization"
 		  echo "Existing key: ${setting_private_key}"
 		  read -rp "private key (blank to keep): " v
 		  if [ -n "$v" ] && [ "$v" != "$setting_private_key" ]; then
@@ -974,9 +975,12 @@ if [ ! -e "$device_name" ]; then
 fi
 
 # Sync Time
+echo "Time sync via chronyc tracking"
 chronyc tracking | grep -E '^(Ref(erence)? time|System time)'
 
 # Read clock from device
+echo "Reading clock from $device_name"
+echo "printf 'clock\r\n' | socat - $device_name,raw,echo=0,b57600"
 device_epoch="$(
   serial_cmd clock \
   | sed -En 's/.*([0-9]{1,2}):([0-9]{2}) *- *([0-9]{1,2})\/([0-9]{1,2})\/([0-9]{4}) *UTC.*/\5-\4-\3 \1:\2:00/p' \
