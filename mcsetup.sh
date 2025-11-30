@@ -73,10 +73,6 @@ if ! command -v bc >/dev/null 2>&1; then
   echo "Installing bc..."
   sudo apt update && sudo apt -y install bc
 fi
-if ! command -v socat &>/dev/null; then
-	echo "Installing socat"
-	sudo apt update && sudo apt -y install socat
-fi
 if ! command -v chronyc &>/dev/null; then
 	echo "Installing chrony"
 	sudo apt update && sudo apt -y install chrony
@@ -530,7 +526,7 @@ serial_cmd() {
     sleep 0.01
     out="$(
       printf "%b" "${line}\r\n" \
-      | socat - "$device_name,raw,echo=0,b${BAUD:-57600}" 2>/dev/null \
+      | timeout 2s socat - "$device_name,raw,echo=0,b${BAUD:-57600}" 2>/dev/null \
       | tr -d '\r' \
       | sed -E $'s/\x1B\\[[0-9;]*[A-Za-z]//g' \
       | sed -E 's/^[[:space:][:cntrl:]]*(->|>)+[[:space:]]*//' \
