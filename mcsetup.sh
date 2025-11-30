@@ -45,7 +45,7 @@ CONFIG_URL="https://api.meshcore.nz/api/v1/config"
          FIRMWARE_ROOT="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}"
       DEVICE_PORT_FILE="${FIRMWARE_ROOT}/09device_port_file.txt"
  DEVICE_PORT_NAME_FILE="${FIRMWARE_ROOT}/10device_port_name_file.txt"
-     RADIO_CONFIG_FILE="${FIRMWARE_ROOT}/meshcore_config.json}"
+     RADIO_CONFIG_FILE="${FIRMWARE_ROOT}/meshcore_config.json"
  
 
 BOOT_WAIT="${BOOT_WAIT:-2}" 
