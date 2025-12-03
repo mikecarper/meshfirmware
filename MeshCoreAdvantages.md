@@ -96,9 +96,9 @@ And here is the one bot running in the Seattle area running on MeshCore
 
 ### Telemetry
 https://meshtastic.org/docs/configuration/module/telemetry/  
-By looking at MQTT we've discovered that over 50% of the data is automated telemetry packets. This eats up channel usage and because the network is always busy; it makes it more unreliable as you add in more nodes once you hit a tipping point. 
+By looking at MQTT we've discovered that over 75% of the data is not human interaction (Text messages, some traces, etc) ([example 1](https://meshview.bayme.sh/firehose), [example 2](https://malla.nyme.sh/packets)). This eats up channel usage and because the network is always busy; it makes it more unreliable as you add in more nodes once you hit a tipping point where each node is using all the bandwidth just letting the network know it's on the network. 
 
-MeshCore uses a pull model where you can pull data from a remote node by request. Usually a human is required to have packets go over the network. 
+MeshCore uses a pull model where you can pull data from a remote node by request. Usually a human is required to have packets go over the network. See https://analyzer.letsme.sh/packets to watch all MeshCore mqtt data.
 
 ### Trace Routes
 In MeshCore every packet has a trace attached to it. No more guessing on how a signal got out. This helps with planning out locations for future repeaters and for knowing which direction to point a yagi.
