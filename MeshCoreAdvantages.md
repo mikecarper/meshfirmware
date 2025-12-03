@@ -1,4 +1,5 @@
 
+
 # Technical overview on why MeshCore works better than the other LoRa networks in North America.
 
 ## Meshtastic
@@ -102,6 +103,9 @@ MeshCore uses a pull model where you can pull data from a remote node by request
 ### Trace Routes
 In MeshCore every packet has a trace attached to it. No more guessing on how a signal got out. This helps with planning out locations for future repeaters and for knowing which direction to point a yagi.
 
+### How do I know it's working?
+In MeshCore there is a rx log in the app. This makes it really easy to tell if you're picking up any traffic in that location fairly easily. 
+
 ### Noise Floor
 One nice feature of MeshCore is that the repeaters will tell you the noise floor. no guessing if a filter it needed. If the floor is above -100 (like -90) it would benefit from a filter.  
 
@@ -110,6 +114,12 @@ https://meshtastic.org/blog/that-one-time-at-defcon/
 https://github.com/meshtastic/firmware/pull/7596/commits/b5ee783904329fb3de865ced303fc62983e667c7  
 
 The node info is still not self signed. Version 3 would be required to fix this. This commit helps the issue but it's not 100% fixed. 
+
+### Network Coordination & Node Roles
+https://meshtastic.org/blog/choosing-the-right-device-role/
+With a lot of active maintenance you can get a functional network (see https://bayme.sh/docs/getting-started/recommended-settings/ as an example) but this requires active monitoring from an admin group that tells people what to do.
+
+With MeshCore you can be a repeater or a room (bbs) or a companion. It's fairly easy to know what role to pick. This leads to a more stable network in comparison to Meshtastic, because if you need a client to make that last hop to you, that client might be the every day carry for the owner and it's not there for 8+ hours. MeshCore doesn't require any kind of coordination to have a successful mesh.
 
 ## Reticulum / RNode
 Each node needs a computer.
