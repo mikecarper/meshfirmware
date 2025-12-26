@@ -10,7 +10,7 @@ Meshtastic Clients will repeat based on the signal to noise ratio. The worse the
 <img width="976" height="721" alt="image" src="https://github.com/user-attachments/assets/5ddc1b76-39a2-4b34-bd0b-57091dcbbe20" />  
 4 will never hear 0, if 2 is a Router. And depending on the SNR of 0 or 1 when hearing 2 retransmit, 3 to 4 will have an inconsistent link.
 
-MeshCore trusts the user; if you took the time to put a node on your roof as a repeater, MeshCore assumes that it will help with the network and is needed. MeshCore does Flood Routing as a result; every repeater will rebroadcast the message if it hasn't done so yet. It does this because messages from users is the top priority. There is only Client Mute and Router in MeshCore.
+MeshCore trusts the user; if you took the time to put a node on your roof as a repeater, MeshCore assumes that it will help with the network and is needed. MeshCore does Flood Routing as a result; every repeater will rebroadcast the message if it hasn't done so yet. It does this because messages from users is the top priority. There is only Client Mute and Router_Late in MeshCore.
 
 ### Center Frequency Selection
 <img width="1008" height="827" alt="image" src="https://github.com/user-attachments/assets/ae941f54-5e9f-472a-a54e-b4b4906b35c5" />  
