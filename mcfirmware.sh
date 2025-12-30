@@ -53,7 +53,7 @@ if [[ "$USB_AUTOSUSPEND" -ne -1 ]]; then
 	echo -1 | sudo tee /sys/module/usbcore/parameters/autosuspend >/dev/null
 fi
 
-MIN_BYTES=$((250 * 1024))   # 250 KB in bytes
+MIN_BYTES=$((50 * 1024))   # 50 KB in bytes
 REPO_OWNER="meshcore-dev"
 REPO_NAME="MeshCore"
 RELEASE_INFO1_URL="https://flasher.meshcore.dev/config.json"
@@ -331,6 +331,7 @@ choose_version_from_releases() {
 	local ROLE="$2"
 	local ARCHITECTURE="$3"
 	local ERASE_URL="$4"
+	local TITLE="$5"
 
 	# ---- fetch / reuse cache ---------------------------------------------
     _cached_json "$RELEASE_INFO2_URL" "$CACHE_FILE"
@@ -439,7 +440,7 @@ choose_version_from_releases() {
 					;;
 				*.zip)
 					# Do not set TYPE for .zip (leave selection logic to run)
-					unset TYPE
+					TYPE=""
 					;;
 			esac
 			shopt -u nocasematch
@@ -469,8 +470,14 @@ choose_version_from_releases() {
     # ---------------- step 5 – filename -----------------------------------
 	if [[ -z "$CHOSEN_FILE" ]]; then
 		local REGEX=''
-		REGEX=$( _jq1 --arg type "$TYPE" --arg d "$DEVICE" --arg r "$ROLE" ".device[] | select(.name==\$d) | .firmware[] | select(.role==\$r) | .github | .files | .[\$type]" | sort -u )
-		
+		if [[ -n "$TITLE" ]]; then
+			REGEX=$( _jq1 --arg type "$TYPE" --arg d "$DEVICE" --arg r "$ROLE" --arg title "$TITLE" ".device[] | select(.name==\$d) | .firmware[] | select(.role==\$r) | select(.title==\$title) | .github | .files | .[\$type]" | sort -u )
+		fi
+		if [[ -z "$REGEX" ]]; then
+			REGEX=$( _jq1 --arg type "$TYPE" --arg d "$DEVICE" --arg r "$ROLE" ".device[] | select(.name==\$d) | .firmware[] | select(.role==\$r) | .github | .files | .[\$type]" | sort -u )
+		fi
+		#echo ">$TITLE<"
+		#echo ">$REGEX<"
 		ROLE_ALT="$ROLE"
 		if [[ "$ROLE" == "companionBle" || "$ROLE" == "companionUsb" ]]; then
 			ROLE_ALT="companion"
@@ -572,6 +579,7 @@ choose_meshcore_firmware() {
 	local ROLE=''
 	local VERSION=''
     local TYPE=''
+	local TITLE=''
 	[[ -f "$SELECTED_DEVICE_FILE"  ]] && DEVICE="$(<"$SELECTED_DEVICE_FILE")"
 	[[ -f "$ARCHITECTURE_FILE"     ]] && ARCHITECTURE="$(<"$ARCHITECTURE_FILE")"
 	[[ -f "$ERASE_URL_FILE"        ]] && ERASE_URL="$(<"$ERASE_URL_FILE")"
@@ -713,28 +721,102 @@ choose_meshcore_firmware() {
 
     # ---------------- step 2 – role ---------------------------------------
 	if [[ -z "$ROLE" ]]; then
+
+		# ROLES[i], TITLES[i], LABELS[i] belong together
 		local -a ROLES=()
-		mapfile -t ROLES < <(_jq1 --arg d "$DEVICE" ".device[]|select(.name==\$d)|.firmware[].role" | sort -u)
+		local -a TITLES=()
+		local -a LABELS=()
+
+		# Read "role<TAB>title" from jq; title may be empty
+		while IFS=$'\t' read -r role title; do
+			[[ -z "$role" ]] && continue
+
+			# Normalize missing or "null" title
+			if [[ -z "$title" || "$title" == "null" ]]; then
+				case "$role" in
+					companionBle|companionUsb)
+						title="Companion radio"
+						;;
+					repeater)
+						title="Repeater"
+						;;
+					roomServer)
+						title="Room Server"
+						;;
+					*)
+						# Fallback: use role name as-is
+						title="$role"
+						;;
+				esac
+			fi
+
+			ROLES+=("$role")
+			TITLES+=("$title")
+		done < <(
+			_jq1 --arg d "$DEVICE" '.device[] | select(.name == $d) | .firmware[] | "\(.role)\t\(.title // "")"' | sort -u
+		)
+
+		if ((${#ROLES[@]} == 0)); then
+			echo "ERROR: no firmware roles found for device $DEVICE" >&2
+			return 1
+		fi
+
+		# Build menu labels that include BLE/USB info (and optional hints)
+		local i suffix
+		for i in "${!ROLES[@]}"; do
+			suffix=""
+			case "${ROLES[i]}" in
+				companionBle)
+					# Show BLE and typical usage
+					suffix=" (BLE) Phone"
+					;;
+				companionUsb)
+					# Show USB and typical usage
+					suffix=" (USB) Computer"
+					;;
+				# repeater / roomServer do not need extra suffix
+			esac
+			LABELS[i]="${TITLES[i]}${suffix}"
+		done
 
 		if ((${#ROLES[@]} == 1)); then
 			ROLE="${ROLES[0]}"
-			echo "Auto-selected role: $ROLE"
+			TITLE="${TITLES[0]}"
+			echo "Auto-selected role: $ROLE (${LABELS[0]})"
 		else
 			while [[ -z $ROLE ]]; do
 				sleep 0.1
 				echo
 				echo "[2] Select role for $DEVICE:"
-				select ROLE in "${ROLES[@]}"; do [[ -n ${ROLE:-} ]] && break; done < /dev/tty
+
+				# Show LABELS (title + BLE/USB), map back to ROLES/TITLES
+				local COLUMNS=1
+				select choice in "${LABELS[@]}"; do
+					[[ -n ${choice:-} ]] || { echo "Invalid selection"; continue; }
+					ROLE="${ROLES[REPLY-1]}"
+					TITLE="${TITLES[REPLY-1]}"
+					echo "Selected role: $ROLE ($choice)"
+					break
+				done < /dev/tty
 			done
 		fi
-	fi
 
-    # ---------------- step 3 – version ------------------------------------
+		# Optional: simple transport flag
+		case "$ROLE" in
+			companionBle) TRANSPORT="ble" ;;
+			companionUsb) TRANSPORT="usb" ;;
+			*)            TRANSPORT=""    ;;
+		esac
+	fi
+	
+	# ---------------- step 3 – version ------------------------------------
 	if [[ -z "$VERSION" ]]; then
 		local -a VERSIONS=()
-		mapfile -t VERSIONS < <( _jq1 --arg d "$DEVICE" --arg r "$ROLE" ".device[] | select(.name==\$d) | .firmware[] | select(.role==\$r) | .version | keys[]" | sort -ru )
+		mapfile -t VERSIONS < <(
+			_jq1 --arg d "$DEVICE" --arg r "$ROLE" '.device[] | select(.name == $d) | .firmware[] | select(.role == $r) | .version | keys[]' | sort -ru
+		)
 		if ((${#VERSIONS[@]} == 0)); then
-			choose_version_from_releases "$DEVICE" "$ROLE" "$ARCHITECTURE" "$ERASE_URL" ;
+			choose_version_from_releases "$DEVICE" "$ROLE" "$ARCHITECTURE" "$ERASE_URL" "$TITLE"
 			return
 		fi
 		if ((${#VERSIONS[@]} == 1)); then
@@ -744,52 +826,76 @@ choose_meshcore_firmware() {
 			# Keep only newest two branches (X.Y)
 			local -a VERSIONS_SHOW=()
 			filter_last_two_branches VERSIONS VERSIONS_SHOW
-		
+
 			if [[ -z "$VERSION" ]]; then
 				while [[ -z $VERSION ]]; do
 					sleep 0.1
-					echo; echo "[3] Select version:"
-					select VERSION in "${VERSIONS_SHOW[@]}"; do [[ -n ${VERSION:-} ]] && break; done < /dev/tty
+					echo
+					echo "[3] Select version:"
+					local COLUMNS=1
+					select VERSION in "${VERSIONS_SHOW[@]}"; do
+						[[ -n ${VERSION:-} ]] && break
+					done < /dev/tty
 				done
 			fi
 		fi
 	fi
 
+
     # ---------------- step 4 – type ---------------------------------------
-	if [[ -z "$TYPE" ]]; then
-		local -a TYPES=()
-		mapfile -t TYPES < <(_jq1 --arg d "$DEVICE" --arg r "$ROLE" --arg v "$VERSION" ".device[]|select(.name==\$d) | .firmware[] | select(.role==\$r) | .version.[\$v] |.files[].type" | sort -u)
+	_jq1 --arg d "$DEVICE" --arg r "$ROLE" --arg title "$TITLE" --arg v "$VERSION" '.device[] | select(.name == $d) | .firmware[] | select(.role == $r) | select(.title == $title) | .version[$v].files[]'
+	
+    if [[ -z "$TYPE" ]]; then
+        local -a TYPES=()
+        mapfile -t TYPES < <(
+            _jq1 --arg d "$DEVICE" --arg r "$ROLE" --arg title "$TITLE" --arg v "$VERSION" '.device[] | select(.name == $d) | .firmware[] | select(.role == $r) | select(.title == $title) | .version[$v].files[] | .type' | sort -u
+        )
 
-		if ((${#TYPES[@]} == 1)); then
-			TYPE="${TYPES[0]}"
-			echo "Auto-selected type: $TYPE"
-		elif ((${#TYPES[@]} == 2)) && [[ " ${TYPES[*]} " == *" flash "* ]] && [[ " ${TYPES[*]} " == *" download "* ]]; then
-			TYPE="flash"
-			echo "Auto-selected type: flash"
-		else
-			while [[ -z $TYPE ]]; do
-				sleep 0.1
-				echo; echo "[4] Select type:"
-				select TYPE in "${TYPES[@]}"; do [[ -n ${TYPE:-} ]] && break; done < /dev/tty
-			done
-		fi
-	fi
+        if ((${#TYPES[@]} == 0)); then
+            echo "ERROR: no file types found for $DEVICE / $ROLE / $VERSION" >&2
+            return 1
+        fi
 
+        if ((${#TYPES[@]} == 1)); then
+            TYPE="${TYPES[0]}"
+            echo "Auto-selected type: $TYPE"
+        elif ((${#TYPES[@]} == 2)) \
+             && [[ " ${TYPES[*]} " == *" flash "* ]] \
+             && [[ " ${TYPES[*]} " == *" download "* ]]; then
+            TYPE="flash"
+            echo "Auto-selected type: flash"
+        else
+            while [[ -z $TYPE ]]; do
+                sleep 0.1
+                echo
+                echo "[4] Select type:"
+                local COLUMNS=1
+                select TYPE in "${TYPES[@]}"; do
+                    [[ -n ${TYPE:-} ]] && break
+                done < /dev/tty
+            done
+        fi
+    fi
 
     # ---------------- step 5 – filename -----------------------------------
-	if [[ -z "$CHOSEN_FILE" ]]; then
-		CHOSEN_FILE=$(_jq1 --arg d "$DEVICE" --arg r "$ROLE" --arg v "$VERSION" --arg t "$TYPE" ".device[]|select(.name==\$d) | .firmware[] | select(.role==\$r) | .version.[\$v] |.files[]|select(.type==\$t)|.name")
-		echo "firmware/$CHOSEN_FILE" > "$SELECTED_URL_FILE"
-	else
-		echo "$CHOSEN_FILE" > "$SELECTED_URL_FILE"
-	fi
+    if [[ -z "$CHOSEN_FILE" ]]; then
+        CHOSEN_FILE=$(
+            _jq1 --arg d "$DEVICE" --arg r "$ROLE" --arg title "$TITLE" --arg v "$VERSION" --arg t "$TYPE" '.device[] | select(.name == $d) | .firmware[] | select(.role == $r) | select(.title == $title) | .version[$v].files[] | select(.type == $t) | .name '
+        )
+        echo "firmware/$CHOSEN_FILE" > "$SELECTED_URL_FILE"
+    else
+        echo "$CHOSEN_FILE" > "$SELECTED_URL_FILE"
+    fi
 
-	echo "$DEVICE" > "$SELECTED_DEVICE_FILE"
-	echo "$ARCHITECTURE" > "$ARCHITECTURE_FILE"
-	echo "$ERASE_URL_FILE" > "$ERASE_URL_FILE"
-	echo "$ROLE" > "$SELECTED_ROLE_FILE"
-	echo "$VERSION" > "$SELECTED_VERSION_FILE"
-	echo "$TYPE" > "$SELECTED_TYPE_FILE"
+    echo "$DEVICE"        > "$SELECTED_DEVICE_FILE"
+    echo "$ARCHITECTURE"  > "$ARCHITECTURE_FILE"
+    echo "$ERASE_URL"     > "$ERASE_URL_FILE"
+    echo "$ROLE"          > "$SELECTED_ROLE_FILE"
+    echo "$VERSION"       > "$SELECTED_VERSION_FILE"
+    echo "$TYPE"          > "$SELECTED_TYPE_FILE"
+	echo ">>>"
+	echo "firmware/$CHOSEN_FILE"
+	echo "<<<"
 }
 
 download_and_verify() {
