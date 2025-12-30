@@ -51,34 +51,13 @@ CONFIG_URL="https://api.meshcore.nz/api/v1/config"
 BOOT_WAIT="${BOOT_WAIT:-2}" 
 BAUD="${3:-115200}"
 TIMEOUT="${4:-4}"
-
+DEFAULT_BAUDS=(57600 115200 38400 9600 19200 2400)
+BAUD_CANDIDATES=()
+SERIAL_BAUD_CACHE=57600
 
 # Resolve base user/group
 BASE_USER="${SUDO_USER:-$USER}"
 BASE_GROUP="$(id -gn "$BASE_USER")"
-
-if ! command -v jq >/dev/null 2>&1; then
-  echo "Installing jq..."
-  sudo apt update && sudo apt -y install jq
-fi
-if ! command -v curl >/dev/null 2>&1; then
-  echo "Installing curl..."
-  sudo apt update && sudo apt -y install curl
-fi
-if ! command -v socat >/dev/null 2>&1; then
-  echo "Installing socat..."
-  sudo apt update && sudo apt -y install socat
-fi
-if ! command -v bc >/dev/null 2>&1; then
-  echo "Installing bc..."
-  sudo apt update && sudo apt -y install bc
-fi
-if ! command -v chronyc &>/dev/null; then
-	echo "Installing chrony"
-	sudo apt update && sudo apt -y install chrony
-	sudo systemctl enable chrony
-	sudo systemctl restart chrony
-fi
 
 # Create a directory owned by the base user, working with/without sudo
 make_user_dir() {
@@ -105,32 +84,36 @@ write_user_file() {
   fi
 }
 
-fix_and_pretty_json() {
-  local raw="$1"
+# Use it
+make_user_dir "$(dirname "$DEVICE_PORT_FILE")"
+make_user_dir "$(dirname "$DEVICE_PORT_NAME_FILE")"
 
-  # Trim whitespace
-  raw="$(echo "$raw" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
-
-  # If empty, just bail
-  [ -z "$raw" ] && return 0
-
-  # Ensure it starts with '{'
-  if [[ "$raw" != \{* ]]; then
-    raw="{${raw}"
-  fi
-
-  # Fix missing opening quote on first key:
-  # {noise_floor":...}  ->  {"noise_floor":...}
-  raw="$(echo "$raw" | sed -E 's/^\{([^"]+)":/{"\1":/')"
-
-  # Ensure ending '}'
-  if [[ "$raw" != *\} ]]; then
-    raw="${raw}}"
-  fi
-
-  # Pretty-print if possible
-  echo "$raw" | jq . 2>/dev/null || echo "$raw"
-}
+if ! command -v jq >/dev/null 2>&1; then
+  echo "Installing jq..."
+  sudo apt update && sudo apt -y install jq
+fi
+if ! command -v curl >/dev/null 2>&1; then
+  echo "Installing curl..."
+  sudo apt update && sudo apt -y install curl
+fi
+if ! command -v socat >/dev/null 2>&1; then
+  echo "Installing socat..."
+  sudo apt update && sudo apt -y install socat
+fi
+if ! command -v bc >/dev/null 2>&1; then
+  echo "Installing bc..."
+  sudo apt update && sudo apt -y install bc
+fi
+if ! command -v socat &>/dev/null; then
+	echo "Installing socat"
+	sudo apt update && sudo apt -y install socat
+fi
+if ! command -v chronyc &>/dev/null; then
+	echo "Installing chrony"
+	sudo apt update && sudo apt -y install chrony
+	sudo systemctl enable chrony
+	sudo systemctl restart chrony
+fi
 
 ensure_meshcore_config() {
   # Ensure jq and curl exist
@@ -513,8 +496,20 @@ choose_serial() {
         echo "Invalid selection – please try again."
     done
 }
+choose_serial
+device_name=""
+[[ -f "$DEVICE_PORT_FILE" ]] && device_name="$(<"$DEVICE_PORT_FILE")"
+
+
+# Make sure device exists
+if [ ! -e "$device_name" ]; then
+  echo "Error: device $device_name not found" >&2
+  exit 1
+fi
 
 # Helper to send a command and capture reply
+# Global cache for last known-good baud
+# You can also pre-seed this in your script: SERIAL_BAUD_CACHE=57600
 serial_cmd() {
   local line="$*"
   local max_retries=5
@@ -522,43 +517,81 @@ serial_cmd() {
   local out
   local rx_pat='^[0-9]{2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]*U:'
 
-  for ((attempt=1; attempt<=max_retries; attempt++)); do
-    sleep 0.01
-    out="$(
-      printf "%b" "${line}\r\n" \
-      | timeout 2s socat - "$device_name,raw,echo=0,b${BAUD:-57600}" 2>/dev/null \
-      | tr -d '\r' \
-      | sed -E $'s/\x1B\\[[0-9;]*[A-Za-z]//g' \
-      | sed -E 's/^[[:space:][:cntrl:]]*(->|>)+[[:space:]]*//' \
-      | sed -E 's/^[[:space:][:cntrl:]]+//; s/[[:space:]]+$//' \
-      | sed -E 's/^[^0-9A-Za-z+\-]+//' \
-      | awk -v cmd="$line" '
-          BEGIN {
-            # RX-log line pattern: HH:MM[:SS] - D/M/YYYY U:
-            rx = "^[0-9]{2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]*U:"
-          }
-          NF {
-            # Skip RX logs and command echoes
-            if ($0 ~ rx) next
-            if ($0 == cmd) next
-            keep[++n] = $0
-          }
-          END {
-            if (n) print keep[n];
-          }'
-    )"
+  # Build candidate baud list:
+  # 1) previously working baud (SERIAL_BAUD_CACHE)
+  # 2) BAUD env (if set and different)
+  # 3) a fallback list
 
-    # Retry if we got nothing or still caught a log line somehow
-    if [[ -z "$out" || "$out" =~ $rx_pat || "$out" == "$line" ]]; then
-      sleep "$delay_between"
-      continue
+  if [[ -n "$SERIAL_BAUD_CACHE" ]]; then
+    BAUD_CANDIDATES+=("$SERIAL_BAUD_CACHE")
+  fi
+
+  if [[ -n "$BAUD" && "$BAUD" != "$SERIAL_BAUD_CACHE" ]]; then
+    BAUD_CANDIDATES+=("$BAUD")
+  fi
+
+  # Add defaults, skipping any already in the list
+  for b in "${DEFAULT_BAUDS[@]}"; do
+    local seen=false
+    for c in "${BAUD_CANDIDATES[@]}"; do
+      if [[ "$b" == "$c" ]]; then
+        seen=true
+        break
+      fi
+    done
+    if ! $seen; then
+      BAUD_CANDIDATES+=("$b")
     fi
-
-    printf "%s\n" "$out"
-    return 0
   done
 
-  # Last resort: print whatever we have (may be empty)
+  # Try each baud in order
+  local baud
+  for baud in "${BAUD_CANDIDATES[@]}"; do
+    #printf "DEBUG: trying baud $baud\r" >/dev/tty
+
+    for ((attempt=1; attempt<=max_retries; attempt++)); do
+      sleep 0.01
+      out="$(
+        printf "%b" "${line}\r\n" \
+        | socat - "$device_name,raw,echo=0,b${baud}" 2>/dev/null \
+        | tr -d '\r' \
+        | sed -E $'s/\x1B\\[[0-9;]*[A-Za-z]//g' \
+        | sed -E 's/^[[:space:][:cntrl:]]*(->|>)+[[:space:]]*//' \
+        | sed -E 's/^[[:space:][:cntrl:]]+//; s/[[:space:]]+$//' \
+        | sed -E 's/^[^0-9A-Za-z+\-]+//' \
+        | awk -v cmd="$line" '
+            BEGIN {
+              # RX-log line pattern: HH:MM[:SS] - D/M/YYYY U:
+              rx = "^[0-9]{2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]*U:"
+            }
+            NF {
+              # Skip RX logs and command echoes
+              if ($0 ~ rx) next
+              if ($0 == cmd) next
+              keep[++n] = $0
+            }
+            END {
+              if (n) print keep[n];
+            }'
+      )"
+
+      # Retry if we got nothing or still caught a log line somehow
+      if [[ -z "$out" || "$out" =~ $rx_pat || "$out" == "$line" ]]; then
+        sleep "$delay_between"
+        continue
+      fi
+
+      # Success at this baud: cache it and return
+      SERIAL_BAUD_CACHE="$baud"
+      BAUD="$baud"          # optional: also keep BAUD in sync
+      printf "%s\n" "$out"
+      return 0
+    done
+
+    # This baud failed for all retries, try next baud in list
+  done
+
+  # Total failure at all bauds: last resort, print whatever we last saw (may be empty)
   printf "%s\n" "$out"
 }
 
@@ -833,7 +866,6 @@ edit_repeater_settings_menu() {
 		  ;;
 
 		10)
-		  echo "https://analyzer.letsme.sh/nodes/prefix-utilization"
 		  echo "Existing key: ${setting_private_key}"
 		  read -rp "private key (blank to keep): " v
 		  if [ -n "$v" ] && [ "$v" != "$setting_private_key" ]; then
@@ -960,27 +992,11 @@ confirm_restart_radio() {
 }
 
 
-# Make sure we're setup
-make_user_dir "$(dirname "$DEVICE_PORT_FILE")"
-make_user_dir "$(dirname "$DEVICE_PORT_NAME_FILE")"
-
-# Get serial device
-choose_serial
-device_name=""
-[[ -f "$DEVICE_PORT_FILE" ]] && device_name="$(<"$DEVICE_PORT_FILE")"
-# Make sure device exists
-if [ ! -e "$device_name" ]; then
-  echo "Error: device $device_name not found" >&2
-  exit 1
-fi
-
 # Sync Time
-echo "Time sync via chronyc tracking"
 chronyc tracking | grep -E '^(Ref(erence)? time|System time)'
 
 # Read clock from device
-echo "Reading clock from $device_name"
-echo "printf 'clock\r\n' | socat - $device_name,raw,echo=0,b57600"
+
 device_epoch="$(
   serial_cmd clock \
   | sed -En 's/.*([0-9]{1,2}):([0-9]{2}) *- *([0-9]{1,2})\/([0-9]{1,2})\/([0-9]{4}) *UTC.*/\5-\4-\3 \1:\2:00/p' \
@@ -998,6 +1014,8 @@ echo "device_epoch: $device_epoch"
 echo "host_epoch  : $host_epoch"
 echo "Device time (Local): $(date -d "@$device_epoch" '+%Y-%m-%d %H:%M %Z')"
 echo "Host   time (Local): $(date -d "@$host_epoch" '+%Y-%m-%d %H:%M %Z')"
+
+
 # Verdict: only act if more than 2 days off (86400 sec * 2)
 if [ "$adiff" -gt 172800 ]; then
   echo "Clock off by more than 2 days; syncing time now. Sending: time $host_epoch"
@@ -1006,16 +1024,10 @@ else
   echo "Clock within 2 days"
 fi
 
-StatsRadio=$( serial_cmd stats-radio )
-fix_and_pretty_json "$StatsRadio"
-StatsPackets=$( serial_cmd stats-packets )
-fix_and_pretty_json "$StatsPackets"
-StatsCore=$( serial_cmd stats-core )
-fix_and_pretty_json "$StatsCore"
-
 
 board=$(serial_cmd "board" )
 ver=$(serial_cmd "ver" )
+
 echo "$board - $ver"
 
 load_repeater_settings
