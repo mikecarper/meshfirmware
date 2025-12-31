@@ -254,8 +254,9 @@ choose_custom_firmware_file() {
   # Helpful base URL by role
   role_lc=${ROLE,,}
   case "$role_lc" in
-    companion*) echo "https://files.brazio.org/meshcore/nightly/companion/" ;;
-    repeater*)  echo "https://files.brazio.org/meshcore/nightly/repeater/"  ;;
+    companion*) printf " https://files.brazio.org/meshcore/nightly/companion/ \n https://analyzer.letsmesh.net/observer/onboard?type=companion" ;;
+    repeater*)  printf " https://files.brazio.org/meshcore/nightly/repeater/ \n https://analyzer.letsmesh.net/observer/onboard?type=repeater"  ;;
+    room*)      printf " https://files.brazio.org/meshcore/nightly/room-server/ \n https://analyzer.letsmesh.net/observer/onboard?type=room"  ;;
   esac
 
   while :; do
