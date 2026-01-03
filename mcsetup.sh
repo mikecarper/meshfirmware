@@ -661,12 +661,12 @@ prompt_number_bounded() {
 }
 
 set_if_changed() {
-  local key="$1" cur="$2" new="$3" mode="${4:-str}"
+  local key="$1" cur="$2" new="$3" mode="${4:-str}" noprefix="${5}"
   new="$( trim "$new")"
   cur="$( trim "$cur")"
   [ -z "$new" ] && { echo "No change: $key left as '$cur'"; return 0; }
 
-  if [ "$mode" = "num" ]; then
+  if [[ "$mode" == "num" ]]; then
     if _num_equal "$cur" "$new"; then
       echo "No change: $key remains $cur"
       return 0
@@ -684,7 +684,11 @@ set_if_changed() {
   fi
 
   echo "Updating: $key -> $new"
-  serial_cmd "set $key $new"
+  if [[ -z "$noprefix" ]]; then
+	serial_cmd "set $key $new"
+  else
+	serial_cmd "$key $new"
+  fi
 }
 
 load_repeater_settings() {
@@ -745,6 +749,8 @@ load_repeater_settings() {
 
     esac
   done
+  
+  setting_powersaving="$(serial_cmd 'powersaving' | trim)"
 
   # radio needs CSV parsing: {freq},{bw},{sf},{cr}
   local radio_raw
@@ -780,6 +786,7 @@ edit_repeater_settings_menu() {
     echo "20) af                    = $setting_af"
     echo "21) multi.acks            = $setting_multi_acks"
     echo "22) radio                 = freq=$RADIO_FREQ bw=$RADIO_BW sf=$RADIO_SF cr=$RADIO_CR"
+    echo "23) powersaving           = $setting_powersaving"
 	echo " R) Refresh above settings from device"
     echo " A) Send advert now"
     echo " L) Logs: start/stop/erase"
@@ -950,7 +957,13 @@ edit_repeater_settings_menu() {
 			fi
 		  fi
 		  ;;
-
+		  
+		23)
+		  echo "Turning this ON will kill the USB connection right away"
+		  prompt_onoff "powersaving" "$setting_powersaving"
+		  set_if_changed "powersaving" "$setting_powersaving" "$REPLY_ONOFF" "" "1"
+		  [ -n "$REPLY_ONOFF" ] && setting_powersaving="$REPLY_ONOFF"
+		  ;;
       a|A)
         echo "Sending advert..."
         serial_cmd "advert"
