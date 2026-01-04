@@ -903,6 +903,14 @@ download_and_verify() {
     local url=$1
 	local dest_file=$2
 	local verify=$3
+	local dl_type=$4
+	
+	if [[ -z "$url" ]]; then
+		echo "ERROR: empty $dl_type URL passed to download_and_verify. Try again after running" >&2
+		echo "rm -rf $DOWNLOAD_DIR" >&2
+		return 1
+	fi
+	
 	local VERSION
 	[[ -f "$SELECTED_VERSION_FILE" ]] && VERSION="$(<"$SELECTED_VERSION_FILE")"
 	local bytes
@@ -1333,14 +1341,14 @@ while [[ -z $URL_PATH ]]; do
 done
 if [[ "$URL_PATH" =~ ^https?:// ]]; then
     URL="$URL_PATH"
-	download_and_verify "$URL" "$DOWNLOADED_FILE_FILE" 1
+	download_and_verify "$URL" "$DOWNLOADED_FILE_FILE" 1 "Firmware"
 else
     if [[ "$URL_PATH" == /* && -f "$URL_PATH" ]]; then
         echo "$URL_PATH " > "$DOWNLOADED_FILE_FILE"
     fi
     [[ "$URL_PATH" != /* ]] && URL_PATH="/$URL_PATH"
     URL="https://flasher.meshcore.dev${URL_PATH}"
-	download_and_verify "$URL" "$DOWNLOADED_FILE_FILE" 1
+	download_and_verify "$URL" "$DOWNLOADED_FILE_FILE" 1 "Firmware"
 fi
 
 
@@ -1424,7 +1432,7 @@ else
 	if [[ $ACTION == "flash-wipe" ]]; then
 
 		[[ -f "$ERASE_URL_FILE" ]] && ERASE_URL="$(<"$ERASE_URL_FILE")"
-		download_and_verify "$ERASE_URL" "$ERASE_FILE_FILE" 0
+		download_and_verify "$ERASE_URL" "$ERASE_FILE_FILE" 0 "Erase"
 		[[ -f "$ERASE_FILE_FILE" ]] && ERASE_FILE="$(<"$ERASE_FILE_FILE")"
 		
 		echo "Erasing UF2 area using $ERASE_FILE"
