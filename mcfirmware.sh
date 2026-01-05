@@ -716,11 +716,12 @@ choose_meshcore_firmware() {
 	# ---------------- step 2 – architecture & erase -----------------------
 	if [[ -z "$ARCHITECTURE" ]]; then
 		ARCHITECTURE=$( _jq1 --arg d "$DEVICE" ".device[]|select(.name==\$d)|.type" )
-		ERASE_URL=$( _jq1 --arg d "$DEVICE" ".device[]|select(.name==\$d)|.erase // empty" )
-		[[ -n $ERASE_URL ]] && ERASE_URL="https://flasher.meshcore.dev/firmware/$ERASE_URL"
 	fi
+	_cached_json "$RELEASE_INFO2_URL" "$CACHE_FILE"
+	ERASE_URL=$( _jq1 --arg d "$DEVICE" ".device[]|select(.name==\$d)|.erase // empty" )
+	[[ -n $ERASE_URL ]] && ERASE_URL="https://flasher.meshcore.dev/firmware/$ERASE_URL"
 
-    # ---------------- step 2 – role ---------------------------------------
+    # ---------------- step 3 – role ---------------------------------------
 	if [[ -z "$ROLE" ]]; then
 
 		# ROLES[i], TITLES[i], LABELS[i] belong together
@@ -810,7 +811,7 @@ choose_meshcore_firmware() {
 		esac
 	fi
 	
-	# ---------------- step 3 – version ------------------------------------
+	# ---------------- step 4 – version ------------------------------------
 	if [[ -z "$VERSION" ]]; then
 		local -a VERSIONS=()
 		mapfile -t VERSIONS < <(
@@ -843,7 +844,7 @@ choose_meshcore_firmware() {
 	fi
 
 
-    # ---------------- step 4 – type ---------------------------------------
+    # ---------------- step 5 – type ---------------------------------------
 	_jq1 --arg d "$DEVICE" --arg r "$ROLE" --arg title "$TITLE" --arg v "$VERSION" '.device[] | select(.name == $d) | .firmware[] | select(.role == $r) | select(.title == $title) | .version[$v].files[]'
 	
     if [[ -z "$TYPE" ]]; then
@@ -878,7 +879,7 @@ choose_meshcore_firmware() {
         fi
     fi
 
-    # ---------------- step 5 – filename -----------------------------------
+    # ---------------- step 6 – filename -----------------------------------
     if [[ -z "$CHOSEN_FILE" ]]; then
         CHOSEN_FILE=$(
             _jq1 --arg d "$DEVICE" --arg r "$ROLE" --arg title "$TITLE" --arg v "$VERSION" --arg t "$TYPE" '.device[] | select(.name == $d) | .firmware[] | select(.role == $r) | select(.title == $title) | .version[$v].files[] | select(.type == $t) | .name '
@@ -950,6 +951,48 @@ download_and_verify() {
 	fi
 
     echo "$dest" > "$dest_file"
+}
+
+choose_erase_zip() {
+  local tty="/dev/tty"
+
+  declare -A seen=()
+  local -a dev=() erase=()
+  local dn ez key
+
+  while IFS=$'\t' read -r dn ez; do
+    [[ -n "$dn" && -n "$ez" ]] || continue
+    key="$dn"$'\t'"$ez"
+    [[ -n "${seen[$key]+x}" ]] && continue
+    seen[$key]=1
+    dev+=("$dn")
+    erase+=("$ez")
+  done < <(_jq1 '.device[] | select(.erase? and .erase != "") | [.name, .erase] | @tsv')
+
+  local n=${#dev[@]}
+  (( n > 0 )) || { echo "No devices with .erase found" >&2; return 1; }
+
+  {
+    echo "Select erase package:"
+    local i
+    for i in "${!dev[@]}"; do
+      printf '%3d) %-40s %s\n' "$((i+1))" "${dev[$i]}" "${erase[$i]}"
+    done
+  } >"$tty"
+
+  local choice
+  while true; do
+    printf "Enter number (or q): " >"$tty"
+    IFS= read -r choice <"$tty" || return 1
+
+    [[ "$choice" == "q" || "$choice" == "Q" ]] && return 1
+    [[ "$choice" =~ ^[0-9]+$ ]] || { echo "Not a number." >"$tty"; continue; }
+    (( choice >= 1 && choice <= n )) || { echo "Out of range (1-$n)." >"$tty"; continue; }
+
+    # ONLY the selected value goes to stdout:
+    printf '%s\n' "${erase[$((choice-1))]}"
+    return 0
+  done
 }
 
 choose_serial() {
@@ -1430,8 +1473,13 @@ else
 	echo "Running ${ACTION}..."
 
 	if [[ $ACTION == "flash-wipe" ]]; then
-
+		
 		[[ -f "$ERASE_URL_FILE" ]] && ERASE_URL="$(<"$ERASE_URL_FILE")"
+		#echo "$ERASE_URL"
+		if [[ -z "$ERASE_URL" ]]; then
+			ERASE_ZIP="$(choose_erase_zip)" || exit 1
+			ERASE_URL="https://flasher.meshcore.dev/firmware/$ERASE_ZIP"
+		fi
 		download_and_verify "$ERASE_URL" "$ERASE_FILE_FILE" 0 "Erase"
 		[[ -f "$ERASE_FILE_FILE" ]] && ERASE_FILE="$(<"$ERASE_FILE_FILE")"
 		
