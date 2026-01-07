@@ -254,7 +254,7 @@ choose_custom_firmware_file() {
   # Helpful base URL by role
   role_lc=${ROLE,,}
   case "$role_lc" in
-    companion*) printf " https://files.brazio.org/meshcore/nightly/companion/ \n https://analyzer.letsmesh.net/observer/onboard?type=companion \n " ;;
+    companion*) printf " https://files.brazio.org/meshcore/nightly/companion/ \n https://analyzer.letsmesh.net/observer/onboard?type=companion \n https://cloud.weyhmueller.org/s/meshcore-stuff?dir=/WiFi+Companion+Patcher \n " ;;
     repeater*)  printf " https://files.brazio.org/meshcore/nightly/repeater/ \n https://analyzer.letsmesh.net/observer/onboard?type=repeater \n https://github.com/IoTThinks/EasySkyMesh/releases/tag/PowerSaving10 \n "  ;;
     room*)      printf " https://files.brazio.org/meshcore/nightly/room-server/ \n https://analyzer.letsmesh.net/observer/onboard?type=room \n "  ;;
   esac
