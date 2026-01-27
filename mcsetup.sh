@@ -661,7 +661,12 @@ prompt_number_bounded() {
 }
 
 set_if_changed() {
-  local key="$1" cur="$2" new="$3" mode="${4:-str}" noprefix="${5}"
+  local key="${1:?missing key}"
+  local cur="${2-}"
+  local new="${3-}"
+  local mode="${4:-str}"
+  local noprefix="${5-}"
+  
   new="$( trim "$new")"
   cur="$( trim "$cur")"
   [ -z "$new" ] && { echo "No change: $key left as '$cur'"; return 0; }
