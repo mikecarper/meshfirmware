@@ -217,24 +217,36 @@ _log() {
 }
 
 serial_cmd() {
-	local DEVICE_NAME="$1"
-	shift                       
-	local line="$*"
-	
-	# Ensure socat is installed.
-	if ! command -v socat &>/dev/null; then
-		echo "Installing socat"
-		sudo apt update && sudo apt -y install socat
-	fi
-		
-	printf "%b" "${line}\r\n" \
-	| timeout 2s socat - "$DEVICE_NAME,raw,echo=0,b${BAUD:-115200}" 2>/dev/null \
-	| tr -d '\r' \
-	| awk 'NF{last=$0} END{print last}' \
-	| sed -E $'s/\x1B\\[[0-9;]*[A-Za-z]//g' \
-	| sed -E 's/^[[:space:][:cntrl:]]*(->|>)+[[:space:]]*//' \
-	| sed -E 's/^[[:space:][:cntrl:]]+//; s/[[:space:]]+$//' \
-	| sed -E 's/^[^0-9A-Za-z+\-]+//'    # fallback: drop anything weird before data
+  local DEVICE_NAME="$1"
+  shift
+  local line="$*"
+
+  local baud="${BAUD:-115200}"
+  local total_timeout="${SERIAL_TOTAL_TIMEOUT:-1.5s}"  # hard cap
+  local idle_timeout="${SERIAL_IDLE_TIMEOUT:-0.25}"    # socat exits after this idle time
+
+  # Ensure socat is installed.
+  if ! command -v socat >/dev/null 2>&1; then
+    echo "Installing socat" >&2
+    sudo apt update && sudo apt -y install socat
+  fi
+
+  # Never let this helper kill the script under -e/pipefail.
+  # If anything goes wrong, return empty and success.
+  local out=""
+  out="$(
+    printf '%b' "${line}\r\n" \
+      | timeout --foreground -k 0.2s "${total_timeout}" \
+          socat -T "${idle_timeout}" - "OPEN:${DEVICE_NAME},raw,echo=0,b${baud}" 2>/dev/null \
+      | tr -d '\r' \
+      | sed -E $'s/\x1B\\[[0-9;]*[A-Za-z]//g' \
+      | sed -E 's/^[[:space:][:cntrl:]]*(->|>)+[[:space:]]*//' \
+      | sed -E 's/^[[:space:][:cntrl:]]+//; s/[[:space:]]+$//' \
+      | sed -E 's/^[^0-9A-Za-z+\-]+//' \
+      | awk 'NF{last=$0} END{print last}'
+  )" || true
+
+  printf '%s' "$out"
 }
 
 choose_custom_firmware_file() {
@@ -1024,6 +1036,7 @@ choose_serial() {
         # ────────────────────────── single device ──────────────────────────
         if ((${#devs[@]} == 1)); then
 			detected_dev="${devs[0]}"
+			echo "Trying to get meshcore info from the node"
 			version=$( serial_cmd "${detected_dev}" "version" )
             echo "Only one device detected – selecting it automatically: $detected_dev - ${labels[0]} ${version}"
 			echo "$detected_dev" > "$DEVICE_PORT_FILE"
@@ -1369,6 +1382,7 @@ rm -f  \
   "$DEVICE_PORT_FILE"
   
 URL_PATH=''
+echo "Looking for a node"
 choose_serial
 
 while [[ -z $URL_PATH ]]; do
