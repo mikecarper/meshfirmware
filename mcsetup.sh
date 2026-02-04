@@ -72,6 +72,16 @@ make_user_dir() {
   fi
 }
 
+trim() {
+  local s="$1"
+  # strip leading whitespace
+  s="${s#"${s%%[!$' \t\r\n']*}"}"
+  # strip trailing whitespace
+  s="${s%"${s##*[!$' \t\r\n']}"}"
+  printf '%s' "$s"
+}
+
+
 # Write a file as the base user, robust under -euo pipefail
 write_user_file() {
   local path="$1"; shift
@@ -793,7 +803,8 @@ edit_repeater_settings_menu() {
     echo "22) radio                 = freq=$RADIO_FREQ bw=$RADIO_BW sf=$RADIO_SF cr=$RADIO_CR"
     echo "23) powersaving           = $setting_powersaving"
 	echo " R) Refresh above settings from device"
-    echo " A) Send advert now"
+	#echo " a) Send 0 hop advert now"
+    echo " A) Send flood advert now"
     echo " L) Logs: start/stop/erase"
     echo " C) Clear stats"
 	echo " Q) Quit"
@@ -880,8 +891,10 @@ edit_repeater_settings_menu() {
 		10)
 		  echo "Existing key: ${setting_private_key}"
 		  read -rp "private key (blank to keep): " v
+		  v="$(trim "$v")"
 		  if [ -n "$v" ] && [ "$v" != "$setting_private_key" ]; then
-			echo "Updating private key"
+			echo "Updating private key to"
+			echo "$v"
 			serial_cmd "set prv.key $v"
 			setting_private_key="$v"
 		  else
@@ -969,8 +982,14 @@ edit_repeater_settings_menu() {
 		  set_if_changed "powersaving" "$setting_powersaving" "$REPLY_ONOFF" "" "1"
 		  [ -n "$REPLY_ONOFF" ] && setting_powersaving="$REPLY_ONOFF"
 		  ;;
-      a|A)
-        echo "Sending advert..."
+		  
+      #a)
+      #  echo "Sending zero hop advert..."
+      #  serial_cmd "advert"
+      #  ;;
+	  
+	  A)
+        echo "Sending flood advert..."
         serial_cmd "advert"
         ;;
 
