@@ -68,6 +68,13 @@ ERASEFLASH="erase-flash"
 HARDRESET="hard-reset"
 LOCKEDSERVICE=""
 CHOSEN_FILE=""
+BAUD="${3:-115200}"
+TIMEOUT="${4:-4}"
+DEFAULT_BAUDS=(57600 115200 38400 9600 19200 2400)
+SERIAL_BAUD_CACHE=57600
+SERIAL_IDLE_TIMEOUT=0.15 
+SERIAL_TOTAL_TIMEOUT=0.8
+
 
 # Settings for the repo
         GITHUB_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases"
@@ -221,9 +228,15 @@ serial_cmd() {
   shift
   local line="$*"
 
-  local baud="${BAUD:-115200}"
+  local max_retries="${SERIAL_RETRIES:-5}"
+  local delay_between="${SERIAL_RETRY_DELAY:-0.08}"
+
+  # Fast read/exit behavior
   local total_timeout="${SERIAL_TOTAL_TIMEOUT:-1.5s}"  # hard cap
-  local idle_timeout="${SERIAL_IDLE_TIMEOUT:-0.25}"    # socat exits after this idle time
+  local idle_timeout="${SERIAL_IDLE_TIMEOUT:-0.25}"    # socat exits after idle
+
+  # RX-log line pattern (skip)
+  local rx_pat='^[0-9]{2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]*U:'
 
   # Ensure socat is installed.
   if ! command -v socat >/dev/null 2>&1; then
@@ -231,22 +244,68 @@ serial_cmd() {
     sudo apt update && sudo apt -y install socat
   fi
 
-  # Never let this helper kill the script under -e/pipefail.
-  # If anything goes wrong, return empty and success.
-  local out=""
-  out="$(
-    printf '%b' "${line}\r\n" \
-      | timeout --foreground -k 0.2s "${total_timeout}" \
-          socat -T "${idle_timeout}" - "OPEN:${DEVICE_NAME},raw,echo=0,b${baud}" 2>/dev/null \
-      | tr -d '\r' \
-      | sed -E $'s/\x1B\\[[0-9;]*[A-Za-z]//g' \
-      | sed -E 's/^[[:space:][:cntrl:]]*(->|>)+[[:space:]]*//' \
-      | sed -E 's/^[[:space:][:cntrl:]]+//; s/[[:space:]]+$//' \
-      | sed -E 's/^[^0-9A-Za-z+\-]+//' \
-      | awk 'NF{last=$0} END{print last}'
-  )" || true
+  # Build local candidate list (unique, in priority order)
+  local -a candidates=()
+  _add_unique() {
+    local v="$1"
+    local x
+    [[ -z "$v" ]] && return 0
+    for x in "${candidates[@]}"; do
+      [[ "$x" == "$v" ]] && return 0
+    done
+    candidates+=("$v")
+  }
 
-  printf '%s' "$out"
+  _add_unique "${SERIAL_BAUD_CACHE-}"
+  _add_unique "${BAUD-}"
+  local b
+  for b in "${DEFAULT_BAUDS[@]}"; do
+    _add_unique "$b"
+  done
+
+  local baud attempt out last_out
+  last_out=""
+
+  for baud in "${candidates[@]}"; do
+    for ((attempt=1; attempt<=max_retries; attempt++)); do
+      out="$(
+        printf '%b' "${line}\r\n" \
+          | timeout --foreground -k 0.2s "${total_timeout}" \
+              socat -T "${idle_timeout}" - "OPEN:${DEVICE_NAME},raw,echo=0,b${baud}" 2>/dev/null \
+          | tr -d '\r' \
+          | sed -E $'s/\x1B\\[[0-9;]*[A-Za-z]//g' \
+          | sed -E 's/^[[:space:][:cntrl:]]*(->|>)+[[:space:]]*//' \
+          | sed -E 's/^[[:space:][:cntrl:]]+//; s/[[:space:]]+$//' \
+          | sed -E 's/^[^0-9A-Za-z+\-]+//' \
+          | awk -v cmd="$line" -v rx="$rx_pat" '
+              NF {
+                if ($0 ~ rx) next
+                if ($0 == cmd) next
+                keep = $0
+              }
+              END { print keep }
+            '
+      )" || true
+
+      last_out="$out"
+
+      # Empty, echo, or log line -> retry
+      if [[ -z "$out" || "$out" == "$line" || "$out" =~ $rx_pat ]]; then
+        sleep "$delay_between"
+        continue
+      fi
+
+      # Success: cache and return
+      SERIAL_BAUD_CACHE="$baud"
+      BAUD="$baud"  # optional
+      printf '%s' "$out"
+      return 0
+    done
+  done
+
+  # Total failure: return empty (or whatever last_out was), but success exit code
+  printf '%s' "$last_out"
+  return 0
 }
 
 choose_custom_firmware_file() {
