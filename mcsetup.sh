@@ -52,8 +52,9 @@ BOOT_WAIT="${BOOT_WAIT:-2}"
 BAUD="${3:-115200}"
 TIMEOUT="${4:-4}"
 DEFAULT_BAUDS=(57600 115200 38400 9600 19200 2400)
-BAUD_CANDIDATES=()
 SERIAL_BAUD_CACHE=57600
+SERIAL_IDLE_TIMEOUT=0.15 
+SERIAL_TOTAL_TIMEOUT=0.8
 
 # Resolve base user/group
 BASE_USER="${SUDO_USER:-$USER}"
@@ -507,102 +508,104 @@ choose_serial() {
     done
 }
 choose_serial
-device_name=""
-[[ -f "$DEVICE_PORT_FILE" ]] && device_name="$(<"$DEVICE_PORT_FILE")"
+DEVICE_NAME=""
+[[ -f "$DEVICE_PORT_FILE" ]] && DEVICE_NAME="$(<"$DEVICE_PORT_FILE")"
 
 
 # Make sure device exists
-if [ ! -e "$device_name" ]; then
-  echo "Error: device $device_name not found" >&2
+if [ ! -e "$DEVICE_NAME" ]; then
+  echo "Error: device $DEVICE_NAME not found" >&2
   exit 1
 fi
 
+serial_cmd_echo() {
+	local line="$*"
+	echo "printf '${line}\r\n' | socat - \"OPEN:${DEVICE_NAME},raw,echo=0,b115200\" "
+}
+
 # Helper to send a command and capture reply
 # Global cache for last known-good baud
-# You can also pre-seed this in your script: SERIAL_BAUD_CACHE=57600
 serial_cmd() {
   local line="$*"
-  local max_retries=5
-  local delay_between=0.08
-  local out
+
+  local max_retries="${SERIAL_RETRIES:-5}"
+  local delay_between="${SERIAL_RETRY_DELAY:-0.08}"
+
+  # Fast read/exit behavior
+  local total_timeout="${SERIAL_TOTAL_TIMEOUT:-1.5s}"  # hard cap
+  local idle_timeout="${SERIAL_IDLE_TIMEOUT:-0.25}"    # socat exits after idle
+
+  # RX-log line pattern (skip)
   local rx_pat='^[0-9]{2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]*U:'
 
-  # Build candidate baud list:
-  # 1) previously working baud (SERIAL_BAUD_CACHE)
-  # 2) BAUD env (if set and different)
-  # 3) a fallback list
-
-  if [[ -n "$SERIAL_BAUD_CACHE" ]]; then
-    BAUD_CANDIDATES+=("$SERIAL_BAUD_CACHE")
+  # Ensure socat is installed.
+  if ! command -v socat >/dev/null 2>&1; then
+    echo "Installing socat" >&2
+    sudo apt update && sudo apt -y install socat
   fi
 
-  if [[ -n "$BAUD" && "$BAUD" != "$SERIAL_BAUD_CACHE" ]]; then
-    BAUD_CANDIDATES+=("$BAUD")
-  fi
-
-  # Add defaults, skipping any already in the list
-  for b in "${DEFAULT_BAUDS[@]}"; do
-    local seen=false
-    for c in "${BAUD_CANDIDATES[@]}"; do
-      if [[ "$b" == "$c" ]]; then
-        seen=true
-        break
-      fi
+  # Build local candidate list (unique, in priority order)
+  local -a candidates=()
+  _add_unique() {
+    local v="$1"
+    local x
+    [[ -z "$v" ]] && return 0
+    for x in "${candidates[@]}"; do
+      [[ "$x" == "$v" ]] && return 0
     done
-    if ! $seen; then
-      BAUD_CANDIDATES+=("$b")
-    fi
+    candidates+=("$v")
+  }
+
+  _add_unique "${SERIAL_BAUD_CACHE-}"
+  _add_unique "${BAUD-}"
+  local b
+  for b in "${DEFAULT_BAUDS[@]}"; do
+    _add_unique "$b"
   done
 
-  # Try each baud in order
-  local baud
-  for baud in "${BAUD_CANDIDATES[@]}"; do
-    #printf "DEBUG: trying baud $baud\r" >/dev/tty
+  local baud attempt out last_out
+  last_out=""
 
+  for baud in "${candidates[@]}"; do
     for ((attempt=1; attempt<=max_retries; attempt++)); do
-      sleep 0.01
       out="$(
-        printf "%b" "${line}\r\n" \
-        | socat - "$device_name,raw,echo=0,b${baud}" 2>/dev/null \
-        | tr -d '\r' \
-        | sed -E $'s/\x1B\\[[0-9;]*[A-Za-z]//g' \
-        | sed -E 's/^[[:space:][:cntrl:]]*(->|>)+[[:space:]]*//' \
-        | sed -E 's/^[[:space:][:cntrl:]]+//; s/[[:space:]]+$//' \
-        | sed -E 's/^[^0-9A-Za-z+\-]+//' \
-        | awk -v cmd="$line" '
-            BEGIN {
-              # RX-log line pattern: HH:MM[:SS] - D/M/YYYY U:
-              rx = "^[0-9]{2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]*U:"
-            }
-            NF {
-              # Skip RX logs and command echoes
-              if ($0 ~ rx) next
-              if ($0 == cmd) next
-              keep[++n] = $0
-            }
-            END {
-              if (n) print keep[n];
-            }'
-      )"
+        printf '%b' "${line}\r\n" \
+          | timeout --foreground -k 0.2s "${total_timeout}" \
+              socat -T "${idle_timeout}" - "OPEN:${DEVICE_NAME},raw,echo=0,b${baud}" 2>/dev/null \
+          | tr -d '\r' \
+          | sed -E $'s/\x1B\\[[0-9;]*[A-Za-z]//g' \
+          | sed -E 's/^[[:space:][:cntrl:]]*(->|>)+[[:space:]]*//' \
+          | sed -E 's/^[[:space:][:cntrl:]]+//; s/[[:space:]]+$//' \
+          | sed -E 's/^[^0-9A-Za-z+\-]+//' \
+          | awk -v cmd="$line" -v rx="$rx_pat" '
+              NF {
+                if ($0 ~ rx) next
+                if ($0 == cmd) next
+                keep = $0
+              }
+              END { print keep }
+            '
+      )" || true
 
-      # Retry if we got nothing or still caught a log line somehow
-      if [[ -z "$out" || "$out" =~ $rx_pat || "$out" == "$line" ]]; then
+      last_out="$out"
+
+      # Empty, echo, or log line -> retry
+      if [[ -z "$out" || "$out" == "$line" || "$out" =~ $rx_pat ]]; then
         sleep "$delay_between"
         continue
       fi
 
-      # Success at this baud: cache it and return
+      # Success: cache and return
       SERIAL_BAUD_CACHE="$baud"
-      BAUD="$baud"          # optional: also keep BAUD in sync
-      printf "%s\n" "$out"
+      BAUD="$baud"  # optional
+      printf '%s' "$out"
       return 0
     done
-
-    # This baud failed for all retries, try next baud in list
   done
 
-  # Total failure at all bauds: last resort, print whatever we last saw (may be empty)
-  printf "%s\n" "$out"
+  # Total failure: return empty (or whatever last_out was), but success exit code
+  printf '%s' "$last_out"
+  return 0
 }
 
 trim() {
@@ -700,10 +703,53 @@ set_if_changed() {
 
   echo "Updating: $key -> $new"
   if [[ -z "$noprefix" ]]; then
-	serial_cmd "set $key $new"
+	if [[ -n "${device_epoch:-}" ]]; then
+		serial_cmd "set $key $new"
+	else
+		serial_cmd_echo "set $key $new"
+	fi
   else
-	serial_cmd "$key $new"
+	if [[ -n "${device_epoch:-}" ]]; then
+		serial_cmd "$key $new"
+	else
+		serial_cmd_echo "$key $new"
+	fi
   fi
+}
+
+set_empty_settings() {
+	setting_af="" ;
+	setting_int_thresh="" 
+	setting_agc_reset_interval=""
+	setting_multi_acks=""
+	setting_allow_read_only=""
+	setting_flood_advert_interval=""
+	setting_advert_interval=""
+	setting_guest_password=""
+	setting_password=""
+	setting_name=""
+	setting_repeat=""
+	setting_lat=""
+	setting_lon=""
+	setting_private_key=""
+	setting_public_key=""
+	setting_rxdelay=""
+	setting_txdelay=""
+	setting_direct_txdelay=""
+	setting_flood_max=""
+	setting_tx=""
+	setting_role=""
+	setting_powersaving=""
+	
+	radio_raw=""
+	RADIO_FREQ_OLD=""
+	RADIO_BW_OLD=""
+	RADIO_SF_OLD=""
+	RADIO_CR_OLD=""
+	RADIO_FREQ=""
+	RADIO_BW=""
+	RADIO_SF=""
+	RADIO_CR=""
 }
 
 load_repeater_settings() {
@@ -779,6 +825,7 @@ edit_repeater_settings_menu() {
   while :; do
     echo
     echo "Current settings:"
+	echo " 0) Send Raw Command"
     echo " 1) tx                    = $setting_tx"
     echo " 2) repeat                = $setting_repeat"
     echo " 3) allow.read.only       = $setting_allow_read_only"
@@ -787,7 +834,7 @@ edit_repeater_settings_menu() {
     echo " 6) flood.advert.interval = $setting_flood_advert_interval"
     echo " 7) flood.max             = $setting_flood_max"
     echo " 8) guest.password        = $setting_guest_password"
-    echo " 9) password              = $setting_password"
+    echo " 9) password              = $setting_password (Reading is broken)"
     echo "10) private key           = ${setting_private_key:0:8}..."
     echo "11) public key            = ${setting_public_key:0:16}...${setting_public_key:48:16} (read-only)"
     echo "12) name                  = $setting_name"
@@ -820,6 +867,21 @@ edit_repeater_settings_menu() {
         load_repeater_settings
 		snapshot_radio_baseline
         ;;
+
+		0)
+		  read -rp "Command to run: " v
+		  if [ -n "$v" ] && [ "$v" != "$setting_name" ]; then
+			echo "Running: $v"
+			if [[ -n "${device_epoch:-}" ]]; then
+				serial_cmd "$v"
+			else
+				serial_cmd_echo "$v"
+			fi
+			setting_name="$v"
+		  else
+			echo "No change to name"
+		  fi
+		  ;;
 
 		1)
 		  prompt_number "tx" "$setting_tx"
@@ -870,7 +932,11 @@ edit_repeater_settings_menu() {
 		  # Only set if non-empty and changed; empty means do nothing
 		  if [ -n "$v" ] && [ "$v" != "$setting_guest_password" ]; then
 			echo "Updating guest.password"
-			serial_cmd "set guest.password $v"
+			if [[ -n "${device_epoch:-}" ]]; then
+				serial_cmd "set guest.password $v"
+			else
+				serial_cmd_echo "set guest.password $v"
+			fi
 			setting_guest_password="$v"
 		  else
 			echo "No change to guest.password"
@@ -881,7 +947,13 @@ edit_repeater_settings_menu() {
 		  read -rp "password (current: ${setting_password:-<empty>}): " v
 		  if [ -n "$v" ] && [ "$v" != "$setting_password" ]; then
 			echo "Updating password"
-			serial_cmd "set password $v"
+			echo "password $v"
+			if [[ -n "${device_epoch:-}" ]]; then
+				serial_cmd "password $v"
+			else
+				serial_cmd_echo "password $v"
+			fi
+
 			setting_password="$v"
 		  else
 			echo "No change to password"
@@ -895,7 +967,12 @@ edit_repeater_settings_menu() {
 		  if [ -n "$v" ] && [ "$v" != "$setting_private_key" ]; then
 			echo "Updating private key to"
 			echo "$v"
-			serial_cmd "set prv.key $v"
+			if [[ -n "${device_epoch:-}" ]]; then
+				serial_cmd "set prv.key $v"
+			else
+				serial_cmd_echo "set prv.key $v"
+			fi
+			
 			setting_private_key="$v"
 		  else
 			echo "Private key unchanged."
@@ -905,7 +982,12 @@ edit_repeater_settings_menu() {
 		12)
 		  read -rp "name (current: $setting_name): " v
 		  if [ -n "$v" ] && [ "$v" != "$setting_name" ]; then
-			serial_cmd "set name $v"
+			if [[ -n "${device_epoch:-}" ]]; then
+				serial_cmd "set name $v"
+			else
+				serial_cmd_echo "set name $v"
+			fi
+			
 			setting_name="$v"
 		  else
 			echo "No change to name"
@@ -969,7 +1051,13 @@ edit_repeater_settings_menu() {
 			if [ "$RADIO_FREQ" != "$RADIO_FREQ_OLD" ] || [ "$RADIO_BW" != "$RADIO_BW_OLD" ] \
 			   || [ "$RADIO_SF" != "$RADIO_SF_OLD" ] || [ "$RADIO_CR" != "$RADIO_CR_OLD" ]; then
 			  echo "Setting radio: ${RADIO_FREQ},${RADIO_BW},${RADIO_SF},${RADIO_CR}"
-			  serial_cmd "set radio ${RADIO_FREQ},${RADIO_BW},${RADIO_SF},${RADIO_CR}"
+			  
+				if [[ -n "${device_epoch:-}" ]]; then
+					serial_cmd "set radio ${RADIO_FREQ},${RADIO_BW},${RADIO_SF},${RADIO_CR}"
+				else
+					serial_cmd_echo "set radio ${RADIO_FREQ},${RADIO_BW},${RADIO_SF},${RADIO_CR}"
+				fi
+			  
 			else
 			  echo "Radio unchanged."
 			fi
@@ -1057,25 +1145,31 @@ echo "Host   time (Local): $(date -d "@$host_epoch" '+%Y-%m-%d %H:%M %Z')"
 if [ "$adiff" -gt 172800 ]; then
   echo "Clock off by more than 2 days; syncing time now. Sending: time $host_epoch"
   serial_cmd "time $host_epoch"
+  echo
 else
   echo "Clock within 2 days"
 fi
 
+if [[ -n "${device_epoch:-}" ]]; then
 
-board=$(serial_cmd "board" )
-ver=$(serial_cmd "ver" )
+	board=$(serial_cmd "board" )
+	ver=$(serial_cmd "ver" )
 
-echo "$board - $ver"
+	echo "$board - $ver"
 
-load_repeater_settings
-snapshot_radio_baseline
+	load_repeater_settings
+	snapshot_radio_baseline
+else
+	echo "Serial Commands seem to be broken"
+	echo "Changes here may not work"
+	set_empty_settings
+fi
 
 edit_repeater_settings_menu
 
 if confirm_restart_radio; then
   echo "Restarting radio..."
-  # put your restart command here, e.g.:
-  # serial_cmd "restart"
+  serial_cmd "restart"
 else
   echo "Radio restart skipped."
 fi
