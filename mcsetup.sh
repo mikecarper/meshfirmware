@@ -1169,9 +1169,9 @@ edit_repeater_settings_menu
 
 if confirm_restart_radio; then
   echo "Restarting radio..."
-  serial_cmd "restart"
+  serial_cmd "reboot"
 else
-  echo "Radio restart skipped."
+  echo "Radio reboot skipped."
 fi
 
 exit
