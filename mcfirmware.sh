@@ -677,7 +677,8 @@ choose_meshcore_firmware() {
 			echo "Auto-selected device: $DEVICE"
 		else
 			local choice=''
-			
+			local device_port_name=''
+			local device_name=''
 			[[ -f "$DEVICE_PORT_NAME_FILE" ]] && device_port_name="$(<"$DEVICE_PORT_NAME_FILE")"
 			[[ -f "$DEVICE_PORT_FILE" ]] && device_name="$(<"$DEVICE_PORT_FILE")"
 			
@@ -1442,7 +1443,9 @@ rm -f  \
   
 URL_PATH=''
 echo "Looking for a node"
-choose_serial
+choose_serial || true
+DEVICE_NAME=""
+[[ -f "$DEVICE_PORT_FILE" ]] && DEVICE_NAME="$(<"$DEVICE_PORT_FILE")"
 
 while [[ -z $URL_PATH ]]; do
 	choose_meshcore_firmware
@@ -1467,13 +1470,18 @@ else
 	download_and_verify "$URL" "$DOWNLOADED_FILE_FILE" 1 "Firmware"
 fi
 
-
-
-
+DEVICE_PORT=''
 [[ -f "$ARCHITECTURE_FILE"    ]] && ARCHITECTURE="$(<"$ARCHITECTURE_FILE")"
 [[ -f "$DEVICE_PORT_FILE"     ]] && DEVICE_PORT="$(<"$DEVICE_PORT_FILE")"
 [[ -f "$DOWNLOADED_FILE_FILE" ]] && DOWNLOADED_FILE="$(<"$DOWNLOADED_FILE_FILE")"
 [[ -f "$SELECTED_DEVICE_FILE" ]] && DEVICE="$(<"$SELECTED_DEVICE_FILE")"
+if [[ -z $DEVICE_PORT ]]; then
+	choose_serial
+	[[ -f "$ARCHITECTURE_FILE"    ]] && ARCHITECTURE="$(<"$ARCHITECTURE_FILE")"
+	[[ -f "$DEVICE_PORT_FILE"     ]] && DEVICE_PORT="$(<"$DEVICE_PORT_FILE")"
+	[[ -f "$DOWNLOADED_FILE_FILE" ]] && DOWNLOADED_FILE="$(<"$DOWNLOADED_FILE_FILE")"
+	[[ -f "$SELECTED_DEVICE_FILE" ]] && DEVICE="$(<"$SELECTED_DEVICE_FILE")"
+fi
 
 echo "Architecture: $ARCHITECTURE"
 if [[ "$ARCHITECTURE" =~ esp32 ]]; then
