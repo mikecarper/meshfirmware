@@ -507,16 +507,9 @@ choose_serial() {
         echo "Invalid selection – please try again."
     done
 }
-choose_serial
+choose_serial || true
 DEVICE_NAME=""
 [[ -f "$DEVICE_PORT_FILE" ]] && DEVICE_NAME="$(<"$DEVICE_PORT_FILE")"
-
-
-# Make sure device exists
-if [ ! -e "$DEVICE_NAME" ]; then
-  echo "Error: device $DEVICE_NAME not found" >&2
-  exit 1
-fi
 
 serial_cmd_echo() {
 	local line="$*"
@@ -534,6 +527,10 @@ serial_cmd() {
   # Fast read/exit behavior
   local total_timeout="${SERIAL_TOTAL_TIMEOUT:-1.5s}"  # hard cap
   local idle_timeout="${SERIAL_IDLE_TIMEOUT:-0.25}"    # socat exits after idle
+  local device_name_now="${DEVICE_NAME}"
+  if [[ -z "${device_name_now}" ]]; then
+	device_name_now="/dev/ttyACM0"
+  fi
 
   # RX-log line pattern (skip)
   local rx_pat='^[0-9]{2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]*U:'
@@ -571,7 +568,7 @@ serial_cmd() {
       out="$(
         printf '%b' "${line}\r\n" \
           | timeout --foreground -k 0.2s "${total_timeout}" \
-              socat -T "${idle_timeout}" - "OPEN:${DEVICE_NAME},raw,echo=0,b${baud}" 2>/dev/null \
+              socat -T "${idle_timeout}" - "OPEN:${device_name_now},raw,echo=0,b${baud}" 2>/dev/null \
           | tr -d '\r' \
           | sed -E $'s/\x1B\\[[0-9;]*[A-Za-z]//g' \
           | sed -E 's/^[[:space:][:cntrl:]]*(->|>)+[[:space:]]*//' \
