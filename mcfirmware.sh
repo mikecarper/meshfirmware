@@ -228,11 +228,11 @@ serial_cmd() {
   shift
   local line="$*"
 
-  local max_retries="${SERIAL_RETRIES:-5}"
+  local max_retries="${SERIAL_RETRIES:-3}"
   local delay_between="${SERIAL_RETRY_DELAY:-0.08}"
 
   # Fast read/exit behavior
-  local total_timeout="${SERIAL_TOTAL_TIMEOUT:-1.5s}"  # hard cap
+  local total_timeout="${SERIAL_TOTAL_TIMEOUT:-0.9s}"  # hard cap
   local idle_timeout="${SERIAL_IDLE_TIMEOUT:-0.25}"    # socat exits after idle
 
   # RX-log line pattern (skip)
@@ -268,24 +268,38 @@ serial_cmd() {
 
   for baud in "${candidates[@]}"; do
     for ((attempt=1; attempt<=max_retries; attempt++)); do
-      out="$(
-        printf '%b' "${line}\r\n" \
-          | timeout --foreground -k 0.2s "${total_timeout}" \
-              socat -T "${idle_timeout}" - "OPEN:${DEVICE_NAME},raw,echo=0,b${baud}" 2>/dev/null \
-          | tr -d '\r' \
-          | sed -E $'s/\x1B\\[[0-9;]*[A-Za-z]//g' \
-          | sed -E 's/^[[:space:][:cntrl:]]*(->|>)+[[:space:]]*//' \
-          | sed -E 's/^[[:space:][:cntrl:]]+//; s/[[:space:]]+$//' \
-          | sed -E 's/^[^0-9A-Za-z+\-]+//' \
-          | awk -v cmd="$line" -v rx="$rx_pat" '
-              NF {
-                if ($0 ~ rx) next
-                if ($0 == cmd) next
-                keep = $0
-              }
-              END { print keep }
-            '
-      )" || true
+		out="$(
+		  timeout -s KILL "${total_timeout}" \
+			bash -o pipefail -c '
+			  device="$1"
+			  baud="$2"
+			  line="$3"
+			  idle="$4"
+			  rx_pat="$5"
+
+			  printf "%b" "${line}\r\n" \
+				| socat -u -T "${idle}" - "OPEN:${device},raw,echo=0,b${baud}" 2>/dev/null \
+				| tr -d "\r" \
+				| sed -E $'"'"'s/\x1B\\[[0-9;]*[A-Za-z]//g'"'"' \
+				| sed -E "s/^[[:space:][:cntrl:]]*(->|>)+[[:space:]]*//" \
+				| sed -E "s/^[[:space:][:cntrl:]]+//; s/[[:space:]]+$//" \
+				| sed -E "s/^[^0-9A-Za-z+\\-]+//" \
+				| awk -v cmd="$line" -v rx="$rx_pat" '"'"'
+					NF {
+					  if ($0 ~ rx) next
+					  if ($0 == cmd) next
+					  keep = $0
+					}
+					END { print keep }
+				  '"'"'
+			' _ "${DEVICE_NAME}" "${baud}" "${line}" "${idle_timeout}" "${rx_pat}"
+		)"
+		rc=$?
+
+		# Timeout (KILL) or other error -> retry
+		if (( rc != 0 )); then
+		  out=""
+		fi
 
       last_out="$out"
 
