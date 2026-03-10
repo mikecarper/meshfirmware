@@ -88,6 +88,21 @@ fi
         OPERATION_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/10operation.txt"
      ARCHITECTURE_FILE="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/11architecture.txt"
 
+for f in \
+  "$VERSIONS_TAGS_FILE" \
+  "$VERSIONS_LABELS_FILE" \
+  "$CHOSEN_TAG_FILE" \
+  "$DOWNLOAD_PATTERN_FILE" \
+  "$DEVICE_INFO_FILE" \
+  "$DETECTED_PRODUCT_FILE" \
+  "$MATCHING_FILES_FILE" \
+  "$CMD_FILE" \
+  "$SELECTED_FILE_FILE" \
+  "$OPERATION_FILE" \
+  "$ARCHITECTURE_FILE"
+do
+  rm -f -- "$f"
+done
 
 #########################
 # Function Definitions
@@ -726,185 +741,9 @@ unzip_assets() {
 # Detect the connected USB device.
 detect_device() {
 	# /dev/ttyACM0
-	local lsusb_output filtered_device_lines detected_raw detected_line detected_dev fallback newpath search_full
-	lsusb_output=$(lsusb)
-	mapfile -t all_device_lines < <(echo "$lsusb_output" | sed -n 's/.*ID [0-9a-fA-F]\{4\}:[0-9a-fA-F]\{4\} //p')
-	filtered_device_lines=()
-	for line in "${all_device_lines[@]}"; do
-		if ! echo "$line" | grep -qiE "hub|ethernet|mouse|keyboard"; then
-			filtered_device_lines+=("$line")
-		fi
-	done
-
-    echo ""
-	if [ "${#filtered_device_lines[@]}" -eq 0 ]; then
-		# Prompt user to either re-scan or quit.
-        echo "USB devices found:"
-		echo "$lsusb_output" | sed -n 's/.*ID [0-9a-fA-F]\{4\}:[0-9a-fA-F]\{4\} //p'
-		read -rp "Press Enter to look again or q to quit: " choice < /dev/tty
-		if [[ "$choice" =~ ^[Qq]$ ]]; then
-			echo "Exiting."
-			exit 0
-		else
-			detect_device  # Call itself again.
-			return
-		fi
-	fi
-	if [ "${#filtered_device_lines[@]}" -eq 1 ]; then
-		detected_raw="${filtered_device_lines[0]}"
-		# Determine detected_dev for the single device:
-		search_full=$(echo "$detected_raw" | tr ' ' '_' | tr '(' '_' | tr ')' '_' | tr ',' '_')
-		#echo "$search_full" > /dev/tty
-		detected_dev=""
-		for link in /dev/serial/by-id/*; do
-			if [[ $(basename "$link") == *"$search_full"* ]]; then
-				detected_dev=$(readlink -f "$link")
-				break
-			fi
-		done
-		
-		if [ -z "$detected_dev" ]; then
-			fallback=$(echo "$detected_raw" | cut -d' ' -f2- | tr ' ' '_' | tr '(' '_' | tr ')' '_' | tr ',' '_') 
-			#echo "$fallback" > /dev/tty
-			for link in /dev/serial/by-id/*; do
-				if [[ $(basename "$link") == *"$fallback"* ]]; then
-					detected_dev=$(readlink -f "$link")
-					break
-				fi
-			done
-		fi
-		
-		if [ -z "$detected_dev" ]; then
-			third_fallback=$(echo "$detected_raw" | tr ' ' '_' | tr '(' '_' | tr ')' '_' | tr '/' '_' | tr ',' '_' | sed 's/^/usb-/')
-			#echo "$third_fallback" > /dev/tty
-			for link in /dev/serial/by-id/*; do
-				if [[ $(basename "$link") == *"$third_fallback"* ]]; then
-					detected_dev=$(readlink -f "$link")
-					break
-				fi
-			done
-		fi
-	else
-		# Multiple devices detected; ensure meshtastic is available.
-		newpath=0
-		source "$HOME/.bashrc"
-		if ! command -v pipx &>/dev/null; then
-			echo "Installing pipx"
-			sudo apt -y install pipx
-		fi
-
-
-		
-		declare -a detected_devs menu_options
-		declare -gA seen_dev=()
-		echo "Multiple USB devices detected:"
-		for idx in "${!filtered_device_lines[@]}"; do
-			local device_info search_full detected_dev version
-			device_info="${filtered_device_lines[$idx]}"
-			# Determine detected_dev for this device:
-			search_full=$(echo "$device_info" | tr ' ' '_')
-			detected_dev="" 
-
-			for link in /dev/serial/by-id/*; do
-				if [[ $(basename "$link") == *"$search_full"* ]]; then
-					detected_dev=$(readlink -f "$link")
-					if [[ -z ${seen_dev[$detected_dev]+_} ]]; then
-						break
-					fi
-					detected_dev=""
-				fi
-			done
-			
-
-			if [ -z "$detected_dev" ]; then
-				fallback=$(echo "$device_info" | cut -d' ' -f2- | tr ' ' '_')
-				for link in /dev/serial/by-id/*; do
-					if [[ $(basename "$link") == *"$fallback"* ]]; then
-						detected_dev=$(readlink -f "$link")
-						if [[ -z ${seen_dev[$detected_dev]+_} ]]; then
-							break
-						fi
-						detected_dev=""
-					fi
-				done
-			fi
-			
-			if [ -z "$detected_dev" ]; then
-				third_fallback=$(echo "$device_info" | tr ' ' '_' | tr '/' '_' | sed 's/^/usb-/')
-				for link in /dev/serial/by-id/*; do
-					if [[ $(basename "$link") == *"$third_fallback"* ]]; then
-						detected_dev=$(readlink -f "$link")
-						if [[ -z ${seen_dev[$detected_dev]+_} ]]; then
-							break
-						fi
-						detected_dev=""
-					fi
-				done
-			fi
-			
-			# mark as taken so later iterations won’t reuse it
-			if [[ -n "$detected_dev" ]]; then 
-				seen_dev["$detected_dev"]=1
-			fi
-			
-			if [[ -z ${detected_dev} ]]; then
-				detected_dev=$( pick_serial_port ${device_info} )
-			fi
-
-			detected_devs[idx]="$detected_dev"
-			# If we found a detected_dev, try to get its firmware version.
-			if [ -n "$detected_dev" ]; then
-				lockedService=$(get_locked_service "$detected_dev")
-				if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
-					spinner
-					#echo "Stopping $lockedService"
-					sudo systemctl stop "$lockedService"
-				fi
-				spinner
-				# Run meshtastic --device-metadata and extract the firmware_version.
-				# Redirect stderr to hide extra log messages.
-				# Attempt to get the firmware version with a 10 second timeout.
-				version=$(timeout 12 pipx run meshtastic --port "$detected_dev" --device-metadata 2>/dev/null | awk -F': ' '/^firmware_version:/ {print $2; exit}' || true)
-				if [ -z "$version" ]; then
-					version="unknown version"
-				fi
-
-				if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
-					spinner
-					#echo "Starting $lockedService"
-					sudo systemctl start "$lockedService"
-				fi
-				spinner
-			else
-				version="unknown"
-			fi
-
-			
-			menu_options[idx]="${device_info} -> ${detected_dev} (${version})"
-		done
-		# Print the menu with version information.
-		printf "\r"
-		for idx in "${!menu_options[@]}"; do
-			printf "%d) %s\n" $((idx + 1)) "${menu_options[$idx]}"
-		done
-		# Prompt user selection.
-		while true; do
-			read -r -p "Please select a device [1-${#menu_options[@]}]: " selection </dev/tty
-			if [[ "$selection" =~ ^[1-9][0-9]*$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le "${#menu_options[@]}" ]; then
-				detected_raw="${filtered_device_lines[$((selection - 1))]}"
-				detected_dev="${detected_devs[$((selection - 1))]}"
-				break
-			else
-				echo "Invalid selection. Try again."
-			fi
-		done
-	fi
-
-
-	detected_line=$(echo "$lsusb_output" | grep -i "$detected_raw" | head -n1)
-	
-	echo "$detected_line -> $detected_dev" >"${DEVICE_INFO_FILE}"
-	normalize "$detected_raw" >"${DETECTED_PRODUCT_FILE}"
+	detected_dev=$( pick_serial_port )
+	echo "$detected_dev" >"${DEVICE_INFO_FILE}"
+	normalize "$detected_dev" >"${DETECTED_PRODUCT_FILE}"
 }
 
 pick_serial_port() {
@@ -912,62 +751,136 @@ pick_serial_port() {
   local p idlabel i choice auto
 
   # Gather candidates (prefer ACM before USB)
-  while IFS= read -r p; do ports+=("$p"); done < <(
+  while IFS= read -r p; do
+    ports+=("$p")
+  done < <(
     for g in /dev/ttyACM* /dev/ttyUSB*; do
       [[ -e "$g" ]] && printf '%s\n' "$g"
     done | sort -V
   )
 
-  if ((${#ports[@]}==0)); then
+  if ((${#ports[@]} == 0)); then
     echo "No /dev/ttyACM* or /dev/ttyUSB* devices found." >&2
     return 1
   fi
 
   # Single hit? Just return it.
-  if ((${#ports[@]}==1)); then
+  if ((${#ports[@]} == 1)); then
     printf '%s\n' "${ports[0]}"
     return 0
   fi
+  
+  echo "Making sure python meshtastic is ready to go (can take 2 minutes first time)" >&2
+  pipx run meshtastic --version >/dev/null 2>&1;
+	echo "Checking each device" >&2
 
-  echo "Pick the port for $1"
+	# Build nice labels using /dev/serial/by-id if present
+	local oldest_meshtastic_idx=""
+	local oldest_meshtastic_ver=""
+	local version_key current_key
+	local devdevice metadata version role hwModel
 
-  # Build nice labels using /dev/serial/by-id if present
-  for p in "${ports[@]}"; do
-    idlabel=""
-    if [[ -d /dev/serial/by-id ]]; then
-      # find symlink pointing to this device
-      while IFS= read -r link; do
-        [[ -L "$link" && "$(readlink -f "$link")" == "$p" ]] || continue
-        idlabel=" ($(basename "$link"))"
-        break
-      done < <(ls -1 /dev/serial/by-id 2>/dev/null | sed 's|^|/dev/serial/by-id/|')
-    fi
-    labels+=("$p$idlabel")
-  done
+	for i in "${!ports[@]}"; do
+	  spinner
+	  p="${ports[$i]}"
+	  idlabel=""
 
-  # Auto: prefer first ACM, else first USB
-  for i in "${!ports[@]}"; do
-    [[ "${ports[$i]}" =~ /dev/ttyACM[0-9]+$ ]] && auto=$((i+1)) && break
-  done
-  [[ -z "$auto" ]] && auto=1
+	  if [[ -d /dev/serial/by-id ]]; then
+		while IFS= read -r link; do
+		  [[ -L "$link" && "$(readlink -f "$link")" == "$p" ]] || continue
 
-  echo "Select serial port (0 = Auto):"
-  printf '  0) Auto -> %s\n' "${labels[$((auto-1))]}"
+			devdevice="$(readlink -f "$link")"
+			lockedService=$(get_locked_service "$devdevice")
+			spinner
+			if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
+				spinner
+				#echo "Stopping $lockedService"
+				sudo systemctl stop "$lockedService"
+			fi
+			spinner
+			spinner
+			metadata="$(timeout 12 pipx run meshtastic --port "$devdevice" --device-metadata 2>/dev/null || true)"
+			if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
+				spinner
+				#echo "Starting $lockedService"
+				sudo systemctl start "$lockedService"
+			fi
+			spinner
+
+		  version="$(echo "$metadata" | awk -F': ' '/^firmware_version:/ {print $2; exit}')"
+		  role="$(echo "$metadata" | awk -F': ' '/^role:/ {print $2; exit}')"
+		  hwModel="$(echo "$metadata" | awk -F': ' '/^hw_model:/ {print $2; exit}')"
+		  linkbase=$(basename "$link")
+
+		  if [[ -n "$version" ]]; then
+			idlabel="${hwModel} || Meshtastic ${role} ${version}"
+
+			# Normalize version into a sortable key:
+			#   2.6.11 -> 000002000006000011
+			# Handles optional leading "v"
+			version_key="$(
+			  echo "$version" \
+				| sed 's/^[^0-9]*//' \
+				| awk -F. '{
+					a=($1==""?0:$1)
+					b=($2==""?0:$2)
+					c=($3==""?0:$3)
+					printf "%06d%06d%06d\n", a, b, c
+				  }'
+			)"
+
+			if [[ -z "$oldest_meshtastic_idx" ]]; then
+			  oldest_meshtastic_idx="$i"
+			  oldest_meshtastic_ver="$version_key"
+			elif [[ "$version_key" < "$oldest_meshtastic_ver" ]]; then
+			  oldest_meshtastic_idx="$i"
+			  oldest_meshtastic_ver="$version_key"
+			fi
+		  else
+			idlabel="$linkbase"
+		  fi
+
+		  break
+		done < <(find /dev/serial/by-id -mindepth 1 -maxdepth 1 -type l 2>/dev/null)
+	  fi
+
+	  labels+=("$idlabel -> $p")
+	done
+	printf "\r" >&2
+
+	# Auto selection:
+	# 1) oldest Meshtastic version if any were detected
+	# 2) otherwise prefer first ACM
+	# 3) otherwise first USB
+	if [[ -n "$oldest_meshtastic_idx" ]]; then
+	  auto=$((oldest_meshtastic_idx + 1))
+	else
+	  for i in "${!ports[@]}"; do
+		if [[ "${ports[$i]}" =~ ^/dev/ttyACM[0-9]+$ ]]; then
+		  auto=$((i + 1))
+		  break
+		fi
+	  done
+	  [[ -z "$auto" ]] && auto=1
+	fi
+
+  echo "Select serial port (0 = Auto):" >&2
+  printf '  0) Auto -> %s\n' "${labels[$((auto - 1))]}" >&2
   for i in "${!labels[@]}"; do
-    printf '  %2d) %s\n' "$((i+1))" "${labels[$i]}"
+    printf '  %2d) %s\n' "$((i + 1))" "${labels[$i]}" >&2
   done
 
   read -rp "Choice [0-${#ports[@]}]: " choice
   [[ -z "$choice" ]] && choice=0
 
-  if [[ "$choice" == 0 ]]; then
-    printf '%s\n' "${ports[$((auto-1))]}"
-  elif [[ "$choice" =~ ^[0-9]+$ ]] && (( choice>=1 && choice<=${#ports[@]} )); then
-    printf '%s\n' "${ports[$((choice-1))]}"
-  else
-    echo "Invalid choice." >&2
-    return 1
-  fi
+	if [[ "$choice" == 0 ]]; then
+	  printf '%s\n' "${labels[$((auto - 1))]}"
+	elif [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#ports[@]} )); then
+	  printf '%s\n' "${labels[$((choice - 1))]}"
+	else
+	  echo "Invalid choice." >&2
+	  return 1
+	fi
 }
 
 # Match the firmware files against the detected device.
@@ -979,20 +892,38 @@ match_firmware_files() {
 	detected_info_file=$(cat "${DEVICE_INFO_FILE}")
 	device_name=$(echo "$detected_info_file" | awk -F'-> ' '{print $1}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 	device_port_name=$(echo "$detected_info_file" | awk -F'-> ' '{print $2}')
-	# Remove everything up to (and including) "ID "
-	temp="${device_name#*ID }"
-	# Remove the first word from the remainder (the device ID) plus the following space.
-	result="${temp#* }"
-	echo "$result -> $device_port_name"
+	echo "$device_port_name"
 	
-	USBproduct=$(lsusb -v 2>/dev/null |
-		grep -A 20 "${device_name}" |
-		grep "iProduct" |
-		grep -vi "Controller" |
-		sed -n 's/.*2[[:space:]]\+\([^[:space:]]\+\).*/\1/p' |
-		head -n 1 |
-		tr '[:upper:]' '[:lower:]')
-	
+	USBproducts=$( lsusb -v 2>/dev/null | 
+		grep "iProduct" | 
+		grep -vi "Controller" | 
+		grep -vi " LAN" | 
+		grep -vi " Hub" | 
+		sed -n 's/.*2[[:space:]]\+\([^[:space:]]\+\).*/\1/p' | 
+		tr '[:upper:]' '[:lower:]' )
+
+	found=0
+	#echo "0>$USBproducts<"
+	while IFS= read -r usb; do
+	  #echo "1>$usb<"
+	  [[ -z "$usb" ]] && continue
+	  usb_norm="$(normalize "$usb")"
+	  #echo "2>$usb_norm<"
+
+	  while IFS= read -r line; do
+		[[ -z "$line" ]] && continue
+		detected_norm="$(normalize "$line")"
+		#echo "3>$detected_norm<"
+
+		if [[ "$detected_norm" == *"$usb_norm"* ]] || [[ "$usb_norm" == *"$detected_norm"* ]]; then
+		  #printf 'USB match: %s -> %s\n' "$usb" "$line"
+		  found=1
+		  USBproduct="$usb_norm"
+		fi
+	  done <<< "$detected_info_file"
+
+	done <<< "$USBproducts"
+		
 	declare -A product_files
 	declare -A product_files_full
 
@@ -1117,76 +1048,108 @@ select_firmware_file() {
 	count=${#matching_files[@]}
 
 	if [ "$count" -eq 0 ]; then
-		echo "No matching firmware files found."
-		exit 1
-	fi
-
-	# If only one file, no choice needed:
-	if [ "$count" -eq 1 ]; then
+		selected_file="$(prompt_for_firmware)"
+	elif [ "$count" -eq 1 ]; then
 		selected_file="${matching_files[0]}"
 	else
-
 		for f in "${matching_files[@]}"; do
 			if [[ "$(basename "$f")" =~ \.(bin|uf2)$ ]]; then
 				firmware_candidates+=("$f")
 			fi
 		done
+
 		# Sort the firmware_candidates array.
-		readarray -t firmware_candidates < <(printf '%s\n' "${firmware_candidates[@]}" | sort)
+		if [ ${#firmware_candidates[@]} -gt 0 ]; then
+			readarray -t firmware_candidates < <(printf '%s\n' "${firmware_candidates[@]}" | sort)
+		fi
 
 		# If exactly one firmware candidate, auto-select it.
 		if [ ${#firmware_candidates[@]} -eq 1 ]; then
 			echo "Auto-selecting firmware candidate: $(basename "${firmware_candidates[0]}")"
 			selected_file="${firmware_candidates[0]}"
+
 		elif [ ${#firmware_candidates[@]} -gt 1 ]; then
-			echo "Multiple matching firmware candidates files found:"
-			# Figure out how many lines we'll print.
+			echo "Multiple matching firmware candidate files found:"
+			echo "  0. Pick from all matching files"
+
 			count_candidates=${#firmware_candidates[@]}
-			# The number of digits in that count — e.g., 2 if 10..99, 3 if 100..999
 			idx_width=${#count_candidates}
 
 			for i in "${!firmware_candidates[@]}"; do
-				# Print each line so that indices are right-aligned to idx_width.
-				printf "%${idx_width}d. %s\n" \
+				printf " %${idx_width}d. %s\n" \
 					$((i + 1)) \
 					"$(basename "${firmware_candidates[$i]}")"
 			done
-			read -r -p "Select which firmware file to use [1-${#firmware_candidates[@]}]: " file_choice </dev/tty
+
+			detected_info_file="$(cat "${DEVICE_INFO_FILE}")"
+			device_port_name="$(echo "$detected_info_file" | awk -F'-> ' '{print $2}')"
+			echo "Current Device Info: $device_port_name"
+
+			read -r -p "Select which firmware file to use [0-${#firmware_candidates[@]}]: " file_choice </dev/tty
 			if ! [[ "$file_choice" =~ ^[0-9]+$ ]] ||
-				[ "$file_choice" -lt 1 ] ||
+				[ "$file_choice" -lt 0 ] ||
 				[ "$file_choice" -gt "${#firmware_candidates[@]}" ]; then
 				echo "Invalid selection. Exiting."
 				exit 1
 			fi
-			selected_file="${firmware_candidates[$((file_choice - 1))]}"
+
+			if [ "$file_choice" -eq 0 ]; then
+				selected_file="$(prompt_for_firmware)"
+			else
+				selected_file="${firmware_candidates[$((file_choice - 1))]}"
+			fi
 		else
-			# No .bin was found, so we prompt the user for all matching files.
+			# No .bin/.uf2 candidates were found, so prompt the user for all matching files.
 			selected_file="$(prompt_for_firmware)"
 		fi
-
 	fi
 
 	echo "$selected_file" >"${SELECTED_FILE_FILE}"
 }
 
 # prompt_for_firmware:
-#   Prompts the user to select from all matching_files in interactive mode.
+#   Prompts the user to select from all files in the chosen tag directory.
 prompt_for_firmware() {
-	local file_list=("${matching_files[@]}")
-	local count_choice
-	echo "Multiple matching firmware files found:"
+	local chosen_tag count_choice i
+	local -a file_list
+
+	chosen_tag="$(cat "${CHOSEN_TAG_FILE}")"
+
+	# Load all files under the chosen tag directory into an array
+	if [[ ! -d "$FIRMWARE_ROOT/$chosen_tag" ]]; then
+		echo "Firmware directory not found: $FIRMWARE_ROOT/$chosen_tag" >&2
+		exit 1
+	fi
+
+	readarray -t file_list < <(
+		find "$FIRMWARE_ROOT/$chosen_tag" -type f | sort
+	)
+
+	if [ "${#file_list[@]}" -eq 0 ]; then
+		echo "No firmware files found in: $FIRMWARE_ROOT/$chosen_tag" >&2
+		exit 1
+	fi
+
+	if [ "${#file_list[@]}" -eq 1 ]; then
+		printf '%s\n' "${file_list[0]}"
+		return 0
+	fi
+
+	echo "Multiple matching firmware files found:" >&2
 	for i in "${!file_list[@]}"; do
-		echo "$((i + 1)). $(basename "${file_list[$i]}")"
+		printf '  %d) %s\n' "$((i + 1))" "$(basename "${file_list[$i]}")" >&2
 	done
+
 	read -r -p "Select which firmware file to use [1-${#file_list[@]}]: " count_choice </dev/tty
 	if ! [[ "$count_choice" =~ ^[0-9]+$ ]] ||
 		[ "$count_choice" -lt 1 ] ||
 		[ "$count_choice" -gt "${#file_list[@]}" ]; then
-		echo "Invalid selection. Exiting."
+		echo "Invalid selection. Exiting." >&2
 		exit 1
 	fi
-	# Return the selected file path
-	echo "${file_list[$((count_choice - 1))]}"
+
+	# Return the selected full file path
+	printf '%s\n' "${file_list[$((count_choice - 1))]}"
 }
 
 # Prepare the update/install script and adjust parameters if necessary.
