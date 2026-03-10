@@ -1574,9 +1574,10 @@ run_update_script() {
 parse_args "$@"
 update_releases
 
+detect_device        # ${DEVICE_INFO_FILE} ${DETECTED_PRODUCT_FILE}
+
 # Build the release menu and allow selection.
 release_json=$(get_release_data)
-
 build_release_menu "$release_json" # ${VERSIONS_TAGS_FILE} ${VERSIONS_LABELS_FILE}
 select_release                     # ${CHOSEN_TAG_FILE}
 
@@ -1589,7 +1590,7 @@ else
     download_assets   # ${DOWNLOAD_PATTERN_FILE}
     unzip_assets
 fi
-detect_device        # ${DEVICE_INFO_FILE} ${DETECTED_PRODUCT_FILE}
+
 match_firmware_files # ${MATCHING_FILES_FILE}
 select_firmware_file # ${SELECTED_FILE_FILE}
 detect_esp			 # ${ARCHITECTURE_FILE}
