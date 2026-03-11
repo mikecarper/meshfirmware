@@ -1031,8 +1031,10 @@ choose_operation() {
 		if echo "$architecture" | grep -qi "esp32"; then
 			if [[ "$selected_file" == *"-update"* ]]; then
 				operation="update"
-			else
+			elif [[ "$selected_file" == *".factory"* ]]; then 
 				operation="install"
+			else
+				operation="update"
 			fi
 		fi
 	fi
