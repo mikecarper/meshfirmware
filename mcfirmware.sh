@@ -520,6 +520,14 @@ choose_version_from_releases() {
 					TYPE="flash-wipe"
 					echo "Auto-selected type: flash-wipe"
 					;;
+				*cleanInstall.bin)
+					TYPE="flash-wipe"
+					echo "Auto-selected type: flash-wipe"
+					;;
+				*factory.bin)
+					TYPE="flash-wipe"
+					echo "Auto-selected type: flash-wipe"
+					;;
 				*.bin)
 					TYPE="flash-update"
 					echo "Auto-selected type: flash-update"
