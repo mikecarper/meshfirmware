@@ -72,8 +72,8 @@ BAUD="${3:-115200}"
 TIMEOUT="${4:-4}"
 DEFAULT_BAUDS=(57600 115200 38400 9600 19200 2400)
 SERIAL_BAUD_CACHE=57600
-SERIAL_IDLE_TIMEOUT=0.15 
-SERIAL_TOTAL_TIMEOUT=0.8
+SERIAL_IDLE_TIMEOUT=2.5 
+SERIAL_TOTAL_TIMEOUT=7.5
 
 
 # Settings for the repo
@@ -232,8 +232,12 @@ serial_cmd() {
   local delay_between="${SERIAL_RETRY_DELAY:-0.08}"
 
   # Fast read/exit behavior
-  local total_timeout="${SERIAL_TOTAL_TIMEOUT:-0.9s}"  # hard cap
-  local idle_timeout="${SERIAL_IDLE_TIMEOUT:-0.25}"    # socat exits after idle
+  local total_timeout="${SERIAL_TOTAL_TIMEOUT:-7.5s}"  # hard cap
+  local idle_timeout="${SERIAL_IDLE_TIMEOUT:-2.5}"    # socat exits after idle
+  local device_name_now="${DEVICE_NAME}"
+  if [[ -z "${device_name_now}" ]]; then
+	device_name_now="/dev/ttyACM0"
+  fi
 
   # RX-log line pattern (skip)
   local rx_pat='^[0-9]{2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]*U:'
@@ -278,7 +282,7 @@ serial_cmd() {
 			  rx_pat="$5"
 
 			  printf "%b" "${line}\r\n" \
-				| socat -u -T "${idle}" - "OPEN:${device},raw,echo=0,b${baud}" 2>/dev/null \
+				| socat -T "${idle}" - "OPEN:${device},raw,echo=0,b${baud}" 2>/dev/null \
 				| tr -d "\r" \
 				| sed -E $'"'"'s/\x1B\\[[0-9;]*[A-Za-z]//g'"'"' \
 				| sed -E "s/^[[:space:][:cntrl:]]*(->|>)+[[:space:]]*//" \
@@ -292,7 +296,7 @@ serial_cmd() {
 					}
 					END { print keep }
 				  '"'"'
-			' _ "${DEVICE_NAME}" "${baud}" "${line}" "${idle_timeout}" "${rx_pat}"
+			' _ "${device_name_now}" "${baud}" "${line}" "${idle_timeout}" "${rx_pat}"
 		)"
 		rc=$?
 
