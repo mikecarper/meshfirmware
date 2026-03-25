@@ -121,6 +121,13 @@ With a lot of active maintenance you can get a functional network (see https://b
 
 With MeshCore you can be a repeater or a room (bbs) or a companion. It's fairly easy to know what role to pick. This leads to a more stable network in comparison to Meshtastic, because if you need a client to make that last hop to you, that client might be the every day carry for the owner and it's not there for 8+ hours. MeshCore doesn't require any kind of coordination to have a successful mesh.
 
+### Powersaving
+esp32 28dbm 0.080w idle Heltec V4  
+nrf52 22dmb 0.044w idle Seeed Xiao  
+nrf52 22dbm 0.044w idle Rak4631  
+nrf52 30dbm 0.080w idle Rak3401 1w  
+nrf52 33dbm ___ e22 900m33s + Xiao  
+
 ## Reticulum / RNode
 Each node needs a computer.
 
