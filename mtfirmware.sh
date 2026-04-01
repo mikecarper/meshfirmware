@@ -747,7 +747,8 @@ detect_device() {
 }
 
 pick_serial_port() {
-  local -a ports labels
+  local -a ports=()
+  local -a labels=()
   local p idlabel i choice auto
 
   # Gather candidates (prefer ACM before USB)
@@ -761,7 +762,7 @@ pick_serial_port() {
 
   if ((${#ports[@]} == 0)); then
     echo "No /dev/ttyACM* or /dev/ttyUSB* devices found." >&2
-    return 1
+    return 0
   fi
 
   # Single hit? Just return it.
@@ -888,74 +889,82 @@ match_firmware_files() {
 	local chosen_tag download_pattern detected_product
 	chosen_tag=$(cat "${CHOSEN_TAG_FILE}")
 	download_pattern=$(cat "${DOWNLOAD_PATTERN_FILE}")
-	detected_product=$(cat "${DETECTED_PRODUCT_FILE}")
+	detected_product="$(normalize "$(cat "${DETECTED_PRODUCT_FILE}")")"
 	detected_info_file=$(cat "${DEVICE_INFO_FILE}")
 	device_name=$(echo "$detected_info_file" | awk -F'-> ' '{print $1}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 	device_port_name=$(echo "$detected_info_file" | awk -F'-> ' '{print $2}')
 	echo "$device_port_name"
 	
-	USBproducts=$( lsusb -v 2>/dev/null | 
-		grep "iProduct" | 
-		grep -vi "Controller" | 
-		grep -vi " LAN" | 
-		grep -vi " Hub" | 
-		sed -n 's/.*2[[:space:]]\+\([^[:space:]]\+\).*/\1/p' | 
-		tr '[:upper:]' '[:lower:]' )
+	USBproducts="$(
+	  lsusb -v 2>/dev/null | awk '
+		/iProduct/ {
+		  line = $0
+		  if (line ~ /Controller/) next
+		  if (line ~ / LAN/) next
+		  if (line ~ / Hub/) next
+
+		  sub(/.*2[[:space:]]+/, "", line)
+		  sub(/[[:space:]].*/, "", line)
+
+		  print tolower(line)
+		}
+	  ' || true
+	)"
 
 	found=0
-	#echo "0>$USBproducts<"
+	USBproduct=""
+
 	while IFS= read -r usb; do
-	  #echo "1>$usb<"
 	  [[ -z "$usb" ]] && continue
 	  usb_norm="$(normalize "$usb")"
-	  #echo "2>$usb_norm<"
 
 	  while IFS= read -r line; do
 		[[ -z "$line" ]] && continue
 		detected_norm="$(normalize "$line")"
-		#echo "3>$detected_norm<"
 
 		if [[ "$detected_norm" == *"$usb_norm"* ]] || [[ "$usb_norm" == *"$detected_norm"* ]]; then
-		  #printf 'USB match: %s -> %s\n' "$usb" "$line"
 		  found=1
 		  USBproduct="$usb_norm"
+		  break
 		fi
 	  done <<< "$detected_info_file"
 
+	  (( found )) && break
 	done <<< "$USBproducts"
+
 		
 	declare -A product_files
 	declare -A product_files_full
 
 	while IFS= read -r -d '' file; do
-		local fname prod prodNorm
-		fname=$(basename "$file")
-		# Updated regex: group 1 is the prefix, group 2 is the product part.
-		if [[ "$fname" =~ ^(firmware-)(.*)${download_pattern//v/}(-update)?\.(bin|uf2|zip)$ ]]; then
+		local fname prod prodNorm base
+		fname="$(basename "$file")"
+
+		if [[ "$fname" =~ ^(firmware-)(.*)${download_pattern//v/}(-update)?(\.factory)?\.(bin|uf2|zip)$ ]]; then
 			prod="${BASH_REMATCH[2]}"
-			prodNorm=$(normalize "$prod")
-			
-			# strip any tft|inkhud|eink suffix for grouping
+			prodNorm="$(normalize "$prod")"
+
 			if [[ $prodNorm =~ ^(.+?)(tft|inkhud|eink)$ ]]; then
-			  base=${BASH_REMATCH[1]}
+				base="${BASH_REMATCH[1]}"
 			else
-			  base=$prodNorm
+				base="$prodNorm"
 			fi
-			
+
 			product_files["$base"]+="$file"$'\n'
 			product_files_full["$base"]+="$prod"$'\n'
 		fi
 		spinner
-	done < <( find "$FIRMWARE_ROOT/${chosen_tag}" -type f \( -iname "firmware-*" \) -print0 )
+	done < <(find "$FIRMWARE_ROOT/${chosen_tag}" -type f \( -iname "firmware-*" \) -print0)
 
 	matching_keys=()
-	if [ -z "${product_files+x}" ] || [ ${#product_files[@]} -eq 0 ]; then
+	if [[ -n "${detected_product:-}" ]] && ((${#product_files[@]} > 0)); then
 		for prod in "${!product_files[@]}"; do
 			local norm_prod
-			norm_prod=$(normalize "$prod")
+			norm_prod="$(normalize "$prod")"
+
 			if [[ "$norm_prod" == *"$detected_product"* ]] || [[ "$detected_product" == *"$norm_prod"* ]]; then
-				printf "\r"
-				echo "Firmware file match on: $(echo "${product_files_full[$prod]}" | head -n1)"
+				printf '\r'
+				echo "Firmware file match on: $(printf '%s\n' "${product_files_full[$prod]}" | head -n1)"
 				matching_keys+=("$prod")
 			fi
 			spinner
@@ -973,7 +982,7 @@ match_firmware_files() {
 	fi
 
 	printf "\r"
-	if [ ${#matching_files[@]} -eq 0 ]; then
+	if [ ${#matching_files[@]} -eq 0 ] && [ -n "$USBproduct" ]; then
 		echo "Doing a deep search for $USBproduct in $FIRMWARE_ROOT/${chosen_tag}/*"
 		# Capture all matching file paths (each on a new line)
 		found_files=$(grep -aFrin --exclude="*-ota.zip" "$USBproduct" "$FIRMWARE_ROOT/${chosen_tag}" | cut -d: -f1 || true)
@@ -999,20 +1008,49 @@ match_firmware_files() {
 
 	fi
 
-	# If no matches are found for the device, fall back to *all* firmware files in the chosen tag.
-	if [ "${#matching_files[@]}" -eq 0 ]; then
+	# If no matches are found for the device, fall back to all firmware files in the chosen tag.
+	if (( ${#matching_files[@]} == 0 )); then
 		echo "No firmware matched for the detected device: $detected_product"
 		mapfile -t matching_files < <(
-			find "$FIRMWARE_ROOT/${chosen_tag}" -type f \( -iname "firmware-*" \) -print0
-				while IFS= read -r -d '' file; do
-					# Print "basename<tab>full_path"
-					echo -e "$(basename "$file")\t$file"
-				done | sort -f -k1,1 | cut -f2-
+			find "$FIRMWARE_ROOT/${chosen_tag}" -type f \( -iname "firmware-*" \) -print0 |
+			while IFS= read -r -d '' file; do
+				printf '%s\t%s\n' "$(basename "$file")" "$file"
+				spinner >&2
+			done |
+			LC_ALL=C sort -f -V -k1,1 -k2,2 |
+			cut -f2-
 		)
+		printf "\r" >&2
 	fi
-	
-	# Post-process the matching_files array to remove duplicate entries.
-	readarray -t matching_files < <(printf "%s\n" "${matching_files[@]}" | sort -u)
+
+	# Sort and de-dupe whatever branch produced matching_files
+	readarray -t matching_files < <(
+		for file in "${matching_files[@]}"; do
+			[[ -z "$file" ]] && continue
+
+			base="${file##*/}"
+
+			if [[ "$base" =~ ^firmware-(.*)-${download_pattern//v/}(-update)?(\.factory)?\.(bin|uf2|zip)$ ]]; then
+				prod="${BASH_REMATCH[1]}"
+			else
+				prod="$base"
+			fi
+
+			sort_key="$(normalize "$prod")"
+
+			case "$base" in
+				*.factory.bin) rank=2 ;;
+				*.bin)         rank=1 ;;
+				*.uf2)         rank=3 ;;
+				*.zip)         rank=4 ;;
+				*)             rank=9 ;;
+			esac
+
+			printf '%s\t%02d\t%s\n' "$sort_key" "$rank" "$file"
+		done |
+		LC_ALL=C sort -t $'\t' -k1,1 -k2,2n -k3,3f |
+		awk -F'\t' '!seen[$3]++ { print $3 }'
+	)
 
 	printf "%s\n" "${matching_files[@]}" >"${MATCHING_FILES_FILE}"
 }
@@ -1045,68 +1083,74 @@ choose_operation() {
 
 # Let the user select which firmware file to use if multiple are found.
 select_firmware_file() {
-	local matching_files count selected_file file_choice firmware_candidates=()
-	readarray -t matching_files <"${MATCHING_FILES_FILE}"
-	count=${#matching_files[@]}
+    local selected_file file_choice count_candidates idx_width
+    local detected_info_file device_port_name
+    local -a matching_files=()
+    local -a firmware_candidates=()
 
-	if [ "$count" -eq 0 ]; then
-		selected_file="$(prompt_for_firmware)"
-	elif [ "$count" -eq 1 ]; then
-		selected_file="${matching_files[0]}"
-	else
-		for f in "${matching_files[@]}"; do
-			if [[ "$(basename "$f")" =~ \.(bin|uf2)$ ]]; then
-				firmware_candidates+=("$f")
-			fi
-		done
+    readarray -t matching_files < "${MATCHING_FILES_FILE}"
 
-		# Sort the firmware_candidates array.
-		if [ ${#firmware_candidates[@]} -gt 0 ]; then
-			readarray -t firmware_candidates < <(printf '%s\n' "${firmware_candidates[@]}" | sort)
-		fi
+    if (( ${#matching_files[@]} == 0 )); then
+        echo "No matching files found." >&2
+        exit 1
+    fi
 
-		# If exactly one firmware candidate, auto-select it.
-		if [ ${#firmware_candidates[@]} -eq 1 ]; then
-			echo "Auto-selecting firmware candidate: $(basename "${firmware_candidates[0]}")"
-			selected_file="${firmware_candidates[0]}"
+    for f in "${matching_files[@]}"; do
+        [[ -z "$f" ]] && continue
+        if [[ "$(basename "$f")" =~ \.(bin|uf2|hex)$ ]]; then
+            firmware_candidates+=("$f")
+        fi
+    done
 
-		elif [ ${#firmware_candidates[@]} -gt 1 ]; then
-			echo "Multiple matching firmware candidate files found:"
-			echo "  0. Pick from all matching files"
+    if (( ${#firmware_candidates[@]} > 0 )); then
+        readarray -t firmware_candidates < <(
+            for f in "${firmware_candidates[@]}"; do
+                printf '%s\t%s\n' "$(basename "$f")" "$f"
+            done |
+            LC_ALL=C sort -f -V -k1,1 -k2,2 |
+            cut -f2-
+        )
+    fi
 
-			count_candidates=${#firmware_candidates[@]}
-			idx_width=${#count_candidates}
+    if (( ${#firmware_candidates[@]} == 1 )); then
+        echo "Auto-selecting firmware candidate: $(basename "${firmware_candidates[0]}")"
+        selected_file="${firmware_candidates[0]}"
 
-			for i in "${!firmware_candidates[@]}"; do
-				printf " %${idx_width}d. %s\n" \
-					$((i + 1)) \
-					"$(basename "${firmware_candidates[$i]}")"
-			done
+    elif (( ${#firmware_candidates[@]} > 1 )); then
+        echo "Multiple matching firmware candidate files found:"
+        echo "  0. Pick from all matching files"
 
-			detected_info_file="$(cat "${DEVICE_INFO_FILE}")"
-			device_port_name="$(echo "$detected_info_file" | awk -F'-> ' '{print $2}')"
-			echo "Current Device Info: $device_port_name"
+        count_candidates=${#firmware_candidates[@]}
+        idx_width=${#count_candidates}
 
-			read -r -p "Select which firmware file to use [0-${#firmware_candidates[@]}]: " file_choice </dev/tty
-			if ! [[ "$file_choice" =~ ^[0-9]+$ ]] ||
-				[ "$file_choice" -lt 0 ] ||
-				[ "$file_choice" -gt "${#firmware_candidates[@]}" ]; then
-				echo "Invalid selection. Exiting."
-				exit 1
-			fi
+        for i in "${!firmware_candidates[@]}"; do
+            printf " %${idx_width}d. %s\n" \
+                "$((i + 1))" \
+                "$(basename "${firmware_candidates[$i]}")"
+        done
 
-			if [ "$file_choice" -eq 0 ]; then
-				selected_file="$(prompt_for_firmware)"
-			else
-				selected_file="${firmware_candidates[$((file_choice - 1))]}"
-			fi
-		else
-			# No .bin/.uf2 candidates were found, so prompt the user for all matching files.
-			selected_file="$(prompt_for_firmware)"
-		fi
-	fi
+        detected_info_file="$(cat "${DEVICE_INFO_FILE}")"
+        device_port_name="$(echo "$detected_info_file" | awk -F'-> ' '{print $2}')"
+        echo "Current Device Info: $device_port_name"
 
-	echo "$selected_file" >"${SELECTED_FILE_FILE}"
+        read -r -p "Select which firmware file to use [0-${#firmware_candidates[@]}]: " file_choice </dev/tty
+        if ! [[ "$file_choice" =~ ^[0-9]+$ ]] ||
+            (( file_choice < 0 || file_choice > ${#firmware_candidates[@]} )); then
+            echo "Invalid selection. Exiting."
+            exit 1
+        fi
+
+        if (( file_choice == 0 )); then
+            selected_file="$(prompt_from_file_list "Select which matching file to use" "${matching_files[@]}")"
+        else
+            selected_file="${firmware_candidates[$((file_choice - 1))]}"
+        fi
+    else
+        selected_file="$(prompt_from_file_list "Select which matching file to use" "${matching_files[@]}")"
+    fi
+	echo "$selected_file picked"
+
+    echo "$selected_file" > "${SELECTED_FILE_FILE}"
 }
 
 # prompt_for_firmware:
@@ -1152,6 +1196,39 @@ prompt_for_firmware() {
 
 	# Return the selected full file path
 	printf '%s\n' "${file_list[$((count_choice - 1))]}"
+}
+
+# Prompt from a provided file list
+prompt_from_file_list() {
+    local prompt_text="${1:-Select which firmware file to use}"
+    shift
+
+    local count_choice i
+    local -a file_list=("$@")
+
+    if (( ${#file_list[@]} == 0 )); then
+        echo "No files available to choose from." >&2
+        exit 1
+    fi
+
+    if (( ${#file_list[@]} == 1 )); then
+        printf '%s\n' "${file_list[0]}"
+        return 0
+    fi
+
+    echo "Multiple matching firmware files found:" >&2
+    for i in "${!file_list[@]}"; do
+        printf '  %d) %s\n' "$((i + 1))" "$(basename "${file_list[$i]}")" >&2
+    done
+
+    read -r -p "$prompt_text [1-${#file_list[@]}]: " count_choice </dev/tty
+    if ! [[ "$count_choice" =~ ^[0-9]+$ ]] ||
+        (( count_choice < 1 || count_choice > ${#file_list[@]} )); then
+        echo "Invalid selection. Exiting." >&2
+        exit 1
+    fi
+
+    printf '%s\n' "${file_list[$((count_choice - 1))]}"
 }
 
 # Prepare the update/install script and adjust parameters if necessary.
@@ -1394,6 +1471,32 @@ run_update_script() {
 	operation=$(cat "${OPERATION_FILE}")
 	basename_selected="$(basename "$abs_selected")"
 	device_port_name=$(echo "$detected_dev" | awk -F'-> ' '{print $2}')
+	
+	if [[ -z "${device_port_name:-}" ]]; then
+		device_port_name="$(pick_serial_port)"
+		while [[ -z "${device_port_name:-}" ]]; do
+			read -r -p "No serial port selected. Enter to pick, Q to quit, or type a device path: " reply
+
+			case "$reply" in
+				[Qq])
+					echo "Cancelled."
+					return 1
+					;;
+				"")
+					device_port_name="$(pick_serial_port)"
+					;;
+				*)
+					if [[ -c "$reply" ]]; then
+						device_port_name="$reply"
+					elif [[ -e "$reply" ]]; then
+						echo "Path exists but is not a serial device: $reply"
+					else
+						echo "Path does not exist: $reply"
+					fi
+					;;
+			esac
+		done
+	fi
 
 	if echo "$architecture" | grep -qi "esp32"; then
 		update_bleota
