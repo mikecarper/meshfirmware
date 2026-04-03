@@ -1,8 +1,12 @@
 # 10x Heltec v4 build - $81 each  
 https://github.com/IoTThinks/EasySkyMesh/releases/tag/PowerSaving14.1 (5.5mA idle power draw)  
 
+<img width="709" height="945" alt="image" src="https://github.com/user-attachments/assets/421c9198-9da5-49a9-9b3c-89a0187936ff" />
+
+
 You can make this cost $75 by using 1x 18650 instead of x4; but I would pay the extra $6 each for 10ah vs 2.5ah of battery.  
 You can make this cost $90 each by using 8x 18650 instead of x4. 8 cells is the max that will fit in the box.  
+
 
 
 ## rokland
@@ -31,3 +35,6 @@ https://www.amazon.com/hrsyyl-20pcs-Battery-Holder-Single/dp/B0D3M6BYQT/
 #### 40x 18650 Batteries: $82
 https://www.18650batterystore.com/products/eve-26v-18650
 
+## Optional
+#### 10x Optional filter if you want to use fem.rxgain LNA: $250 - Not Required 
+https://zbm2industries.com/products/mesh-ceramic-filter
