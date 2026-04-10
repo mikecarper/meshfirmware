@@ -12,7 +12,7 @@ RAKwireless Solar Panel
 Box  
 Antenna Connector  
 Antenna  
-NUmber of Batteries  
+Number of Batteries  
 
 ---
 
