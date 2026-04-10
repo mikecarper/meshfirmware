@@ -47,6 +47,8 @@ https://www.18650batterystore.com/products/eve-26v-18650
 ## Optional  
 #### 10x Optional filter if you want to use fem.rxgain LNA: $250 - Not Required  
 https://zbm2industries.com/products/mesh-ceramic-filter  
+or
+https://www.amazon.com/JMT-Bandpass-Connector-Anti-Interference-Receiver/dp/B0BPCFHFLK  
 
 ---
 
