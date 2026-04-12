@@ -69,7 +69,6 @@ HARDRESET="hard-reset"
 LOCKEDSERVICE=""
 CHOSEN_FILE=""
 BAUD="${3:-115200}"
-TIMEOUT="${4:-4}"
 DEFAULT_BAUDS=(57600 115200 38400 9600 19200 2400)
 SERIAL_BAUD_CACHE=57600
 SERIAL_IDLE_TIMEOUT=2.5 
@@ -144,6 +143,52 @@ check_internet() {
 	else
 		return 1
 	fi
+}
+
+install_packages() {
+	sudo apt-get update
+	sudo apt-get -y install "$@"
+}
+
+ensure_command() {
+	local command_name=$1
+	shift || true
+
+	if command -v "$command_name" >/dev/null 2>&1; then
+		return 0
+	fi
+
+	echo "Installing ${command_name}" >&2
+	if [ "$#" -gt 0 ]; then
+		install_packages "$@"
+	else
+		install_packages "$command_name"
+	fi
+}
+
+ensure_sudo_session() {
+	if sudo -n true 2>/dev/null; then
+		return 0
+	fi
+
+	echo "sudo access is required for serial port operations on this device."
+	sudo -v
+}
+
+run_nrfutil_dfu_serial() {
+	local package_file=$1
+	shift || true
+
+	if [[ -r "$DEVICE_PORT" && -w "$DEVICE_PORT" ]]; then
+		pipx run adafruit-nrfutil dfu serial --package "$package_file" --touch 1200 -p "${DEVICE_PORT}" -b 115200 "$@"
+		return $?
+	fi
+
+	echo "Serial port $DEVICE_PORT requires elevated access."
+	echo "Current permissions: $(ls -l "$DEVICE_PORT")"
+	echo "Prompting for sudo so flashing can continue..."
+	ensure_sudo_session
+	sudo pipx run adafruit-nrfutil dfu serial --package "$package_file" --touch 1200 -p "${DEVICE_PORT}" -b 115200 "$@"
 }
 
 _jq1() {
@@ -243,10 +288,7 @@ serial_cmd() {
   local rx_pat='^[0-9]{2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]*U:'
 
   # Ensure socat is installed.
-  if ! command -v socat >/dev/null 2>&1; then
-    echo "Installing socat" >&2
-    sudo apt update && sudo apt -y install socat
-  fi
+  ensure_command socat
 
   # Build local candidate list (unique, in priority order)
   local -a candidates=()
@@ -270,11 +312,12 @@ serial_cmd() {
   local baud attempt out last_out
   last_out=""
 
-  for baud in "${candidates[@]}"; do
-    for ((attempt=1; attempt<=max_retries; attempt++)); do
-		out="$(
-		  timeout -s KILL "${total_timeout}" \
-			bash -o pipefail -c '
+	for baud in "${candidates[@]}"; do
+	    for ((attempt=1; attempt<=max_retries; attempt++)); do
+			out="$(
+			  # shellcheck disable=SC2016
+			  timeout -s KILL "${total_timeout}" \
+				bash -o pipefail -c '
 			  device="$1"
 			  baud="$2"
 			  line="$3"
@@ -852,9 +895,10 @@ choose_meshcore_firmware() {
 
 			ROLES+=("$role")
 			TITLES+=("$title")
-		done < <(
-			_jq1 --arg d "$DEVICE" '.device[] | select(.name == $d) | .firmware[] | "\(.role)\t\(.title // "")"' | sort -u
-		)
+			done < <(
+				# shellcheck disable=SC2016
+				_jq1 --arg d "$DEVICE" '.device[] | select(.name == $d) | .firmware[] | "\(.role)\t\(.title // "")"' | sort -u
+			)
 
 		if ((${#ROLES[@]} == 0)); then
 			echo "ERROR: no firmware roles found for device $DEVICE" >&2
@@ -901,20 +945,15 @@ choose_meshcore_firmware() {
 			done
 		fi
 
-		# Optional: simple transport flag
-		case "$ROLE" in
-			companionBle) TRANSPORT="ble" ;;
-			companionUsb) TRANSPORT="usb" ;;
-			*)            TRANSPORT=""    ;;
-		esac
-	fi
+		fi
 	
 	# ---------------- step 4 – version ------------------------------------
 	if [[ -z "$VERSION" ]]; then
-		local -a VERSIONS=()
-		mapfile -t VERSIONS < <(
-			_jq1 --arg d "$DEVICE" --arg r "$ROLE" '.device[] | select(.name == $d) | .firmware[] | select(.role == $r) | .version | keys[]' | sort -ru
-		)
+			local -a VERSIONS=()
+			mapfile -t VERSIONS < <(
+				# shellcheck disable=SC2016
+				_jq1 --arg d "$DEVICE" --arg r "$ROLE" '.device[] | select(.name == $d) | .firmware[] | select(.role == $r) | .version | keys[]' | sort -ru
+			)
 		if ((${#VERSIONS[@]} == 0)); then
 			choose_version_from_releases "$DEVICE" "$ROLE" "$ARCHITECTURE" "$ERASE_URL" "$TITLE"
 			return
@@ -942,14 +981,16 @@ choose_meshcore_firmware() {
 	fi
 
 
-    # ---------------- step 5 – type ---------------------------------------
-	_jq1 --arg d "$DEVICE" --arg r "$ROLE" --arg title "$TITLE" --arg v "$VERSION" '.device[] | select(.name == $d) | .firmware[] | select(.role == $r) | select(.title == $title) | .version[$v].files[]'
+	    # ---------------- step 5 – type ---------------------------------------
+		# shellcheck disable=SC2016
+		_jq1 --arg d "$DEVICE" --arg r "$ROLE" --arg title "$TITLE" --arg v "$VERSION" '.device[] | select(.name == $d) | .firmware[] | select(.role == $r) | select(.title == $title) | .version[$v].files[]'
 	
     if [[ -z "$TYPE" ]]; then
-        local -a TYPES=()
-        mapfile -t TYPES < <(
-            _jq1 --arg d "$DEVICE" --arg r "$ROLE" --arg title "$TITLE" --arg v "$VERSION" '.device[] | select(.name == $d) | .firmware[] | select(.role == $r) | select(.title == $title) | .version[$v].files[] | .type' | sort -u
-        )
+	        local -a TYPES=()
+	        mapfile -t TYPES < <(
+	            # shellcheck disable=SC2016
+	            _jq1 --arg d "$DEVICE" --arg r "$ROLE" --arg title "$TITLE" --arg v "$VERSION" '.device[] | select(.name == $d) | .firmware[] | select(.role == $r) | select(.title == $title) | .version[$v].files[] | .type' | sort -u
+	        )
 
         if ((${#TYPES[@]} == 0)); then
             echo "ERROR: no file types found for $DEVICE / $ROLE / $VERSION" >&2
@@ -978,10 +1019,11 @@ choose_meshcore_firmware() {
     fi
 
     # ---------------- step 6 – filename -----------------------------------
-    if [[ -z "$CHOSEN_FILE" ]]; then
-        CHOSEN_FILE=$(
-            _jq1 --arg d "$DEVICE" --arg r "$ROLE" --arg title "$TITLE" --arg v "$VERSION" --arg t "$TYPE" '.device[] | select(.name == $d) | .firmware[] | select(.role == $r) | select(.title == $title) | .version[$v].files[] | select(.type == $t) | .name '
-        )
+	    if [[ -z "$CHOSEN_FILE" ]]; then
+	        CHOSEN_FILE=$(
+	            # shellcheck disable=SC2016
+	            _jq1 --arg d "$DEVICE" --arg r "$ROLE" --arg title "$TITLE" --arg v "$VERSION" --arg t "$TYPE" '.device[] | select(.name == $d) | .firmware[] | select(.role == $r) | select(.title == $title) | .version[$v].files[] | select(.type == $t) | .name '
+	        )
         echo "firmware/$CHOSEN_FILE" > "$SELECTED_URL_FILE"
     else
         echo "$CHOSEN_FILE" > "$SELECTED_URL_FILE"
@@ -1159,9 +1201,9 @@ choose_serial() {
 }
 
 check_tty_lock() {
-    local dev="$1"
-	local lock=""
-	lock="/var/lock/$(basename "$dev").lock"
+	    local device_path="$1"
+		local lock=""
+		lock="/var/lock/$(basename "$device_path").lock"
 
     # open FD 3 on the lock file for the lifetime of this shell
     exec 3>"$lock" || return 1
@@ -1193,9 +1235,7 @@ get_locked_service() {
 	# Get all users locking the device (skip the header line)
 	echo "Finding the service that has $device_name locked" > /dev/tty
 	local users
-	if ! command -v lsof &>/dev/null; then
-		sudo apt install -y lsof
-	fi
+	ensure_command lsof
 	users=$(sudo lsof "$device_name" 2>/dev/null | awk 'NR>1 {print $3}' | sort -u)
 	if [ -z "$users" ]; then
 		echo "No process found locking ${device_name}."  > /dev/tty
@@ -1287,7 +1327,7 @@ get_espcmd() {
 	done
 	if [ -z "$PYTHON" ]; then
 		echo "No Python interpreter found. Installing python3..."
-		sudo apt update && sudo apt install -y python3 pipx
+		install_packages python3 pipx
 		PYTHON=$(command -v python3) || {
 			echo "Failed to install python3"
 			exit 1
@@ -1295,10 +1335,7 @@ get_espcmd() {
 	fi
 
 	# Ensure pipx & meshcore-cli are installed.
-	if ! command -v pipx &>/dev/null; then
-		echo "Installing pipx"
-		sudo apt update && sudo apt -y install pipx pip
-	fi
+	ensure_command pipx pipx pip
 
 	esptool_set_variables
 	ESPTOOL_CMD="pipx run esptool"
@@ -1592,22 +1629,28 @@ else
 			ERASE_ZIP="$(choose_erase_zip)" || exit 1
 			ERASE_URL="https://flasher.meshcore.dev/firmware/$ERASE_ZIP"
 		fi
-		download_and_verify "$ERASE_URL" "$ERASE_FILE_FILE" 0 "Erase"
-		[[ -f "$ERASE_FILE_FILE" ]] && ERASE_FILE="$(<"$ERASE_FILE_FILE")"
-		
-		echo "Erasing UF2 area using $ERASE_FILE"
-		sleep 1
-		pipx run adafruit-nrfutil dfu serial --package "$ERASE_FILE" --touch 1200 -p "${DEVICE_PORT}" -b 115200
-		echo "Erase done."
-		echo
-	fi
+			download_and_verify "$ERASE_URL" "$ERASE_FILE_FILE" 0 "Erase"
+			[[ -f "$ERASE_FILE_FILE" ]] && ERASE_FILE="$(<"$ERASE_FILE_FILE")"
+			
+			echo "Erasing UF2 area using $ERASE_FILE"
+			sleep 1
+			if ! run_nrfutil_dfu_serial "$ERASE_FILE"; then
+				echo "Failed to erase ${DEVICE} on ${DEVICE_PORT}."
+				exit 1
+			fi
+			echo "Erase done."
+			echo
+		fi
 
-	echo "Flashing firmware file $DOWNLOADED_FILE..."
-	sleep 1
-	pipx run adafruit-nrfutil dfu serial --package "$DOWNLOADED_FILE" --touch 1200 -p "${DEVICE_PORT}" -b 115200
-	echo
-	echo "Firmware ${ACTION} completed for ${DEVICE} on ${DEVICE_PORT}."
-fi
+		echo "Flashing firmware file $DOWNLOADED_FILE..."
+		sleep 1
+		if ! run_nrfutil_dfu_serial "$DOWNLOADED_FILE"; then
+			echo "Firmware ${ACTION} failed for ${DEVICE} on ${DEVICE_PORT}."
+			exit 1
+		fi
+		echo
+		echo "Firmware ${ACTION} completed for ${DEVICE} on ${DEVICE_PORT}."
+	fi
 
 # Restart the stopped service.
 if [ -n "$LOCKEDSERVICE" ] && [ "$LOCKEDSERVICE" != "None" ]; then
