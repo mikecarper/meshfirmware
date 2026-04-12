@@ -370,7 +370,7 @@ serial_cmd() {
 }
 
 choose_custom_firmware_file() {
-  local arch_lc required_ext extra input check check_lc role_lc
+  local arch_lc required_ext extra input check check_lc role_lc local_input
 
   arch_lc=${ARCHITECTURE,,}
   extra=""
@@ -395,15 +395,20 @@ choose_custom_firmware_file() {
     read -rp "Enter full filename or url: " input < /dev/tty
     [[ -z "$input" ]] && { echo "Empty input. Try again."; continue; }
 
+    local_input="$input"
+    if [[ "$local_input" == file:///* ]]; then
+      local_input="${local_input#file://}"
+    fi
+
     # Strip query/fragment for extension test
-    check="${input%%[\?#]*}"
+    check="${local_input%%[\?#]*}"
     check_lc=${check,,}
     if [[ "$check_lc" != *"$required_ext" ]]; then
       echo "ERROR: Selection must end with ${required_ext}"
       continue
     fi
 
-    CHOSEN_FILE="$input"
+    CHOSEN_FILE="$local_input"
     VERSION="custom"
     return 0
   done
@@ -1036,6 +1041,9 @@ choose_meshcore_firmware() {
     echo "$VERSION"       > "$SELECTED_VERSION_FILE"
     echo "$TYPE"          > "$SELECTED_TYPE_FILE"
 	echo ">>>"
+	if [[ "$CHOSEN_FILE" == file:///* ]]; then
+		CHOSEN_FILE="${CHOSEN_FILE#file://}"
+	fi
 	if [[ "$CHOSEN_FILE" == /* && -f "$CHOSEN_FILE" ]]; then
 		printf '%s\n' "$CHOSEN_FILE"
 	else
@@ -1525,6 +1533,9 @@ while [[ -z $URL_PATH ]]; do
 		rm -f "$SELECTED_VERSION_FILE"
 	fi
 done
+if [[ "$URL_PATH" == file:///* ]]; then
+	URL_PATH="${URL_PATH#file://}"
+fi
 if [[ "$URL_PATH" =~ ^https?:// ]]; then
     URL="$URL_PATH"
 	download_and_verify "$URL" "$DOWNLOADED_FILE_FILE" 1 "Firmware"
