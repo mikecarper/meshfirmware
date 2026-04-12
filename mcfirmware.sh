@@ -990,11 +990,15 @@ choose_meshcore_firmware() {
     echo "$DEVICE"        > "$SELECTED_DEVICE_FILE"
     echo "$ARCHITECTURE"  > "$ARCHITECTURE_FILE"
     echo "$ERASE_URL"     > "$ERASE_URL_FILE"
-    echo "$ROLE"          > "$SELECTED_ROLE_FILE"
+	echo "$ROLE"          > "$SELECTED_ROLE_FILE"
     echo "$VERSION"       > "$SELECTED_VERSION_FILE"
     echo "$TYPE"          > "$SELECTED_TYPE_FILE"
 	echo ">>>"
-	echo "firmware/$CHOSEN_FILE"
+	if [[ "$CHOSEN_FILE" == /* && -f "$CHOSEN_FILE" ]]; then
+		printf '%s\n' "$CHOSEN_FILE"
+	else
+		printf 'firmware/%s\n' "$CHOSEN_FILE"
+	fi
 	echo "<<<"
 }
 
@@ -1489,11 +1493,12 @@ if [[ "$URL_PATH" =~ ^https?:// ]]; then
 	download_and_verify "$URL" "$DOWNLOADED_FILE_FILE" 1 "Firmware"
 else
     if [[ "$URL_PATH" == /* && -f "$URL_PATH" ]]; then
-        echo "$URL_PATH " > "$DOWNLOADED_FILE_FILE"
+        printf '%s\n' "$URL_PATH" > "$DOWNLOADED_FILE_FILE"
+    else
+        [[ "$URL_PATH" != /* ]] && URL_PATH="/$URL_PATH"
+        URL="https://flasher.meshcore.dev${URL_PATH}"
+	    download_and_verify "$URL" "$DOWNLOADED_FILE_FILE" 1 "Firmware"
     fi
-    [[ "$URL_PATH" != /* ]] && URL_PATH="/$URL_PATH"
-    URL="https://flasher.meshcore.dev${URL_PATH}"
-	download_and_verify "$URL" "$DOWNLOADED_FILE_FILE" 1 "Firmware"
 fi
 
 DEVICE_PORT=''
