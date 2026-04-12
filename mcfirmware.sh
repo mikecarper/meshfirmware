@@ -185,6 +185,210 @@ spinner() {
 	spinner_index=$(((spinner_index + 1) % ${#spinner_chars[@]}))
 }
 
+classify_bin() {
+	local f="$1"
+
+	hex() {
+		xxd -p -l "$2" -s "$1" "$f" 2>/dev/null | tr -d '\n'
+	}
+
+	byte_at() {
+		hex "$1" 1
+	}
+
+	csv_escape() {
+		local s="${1:-}"
+		s=${s//\"/\"\"}
+		printf '"%s"' "$s"
+	}
+
+	trim() {
+		local s="${1:-}"
+		s="${s#"${s%%[![:space:]]*}"}"
+		s="${s%"${s##*[![:space:]]}"}"
+		printf '%s' "$s"
+	}
+
+	looks_like_esp_image_at() {
+		local off="$1"
+		local magic segs mode
+
+		magic=$(byte_at "$off")
+		[[ "$magic" == "e9" ]] || return 1
+
+		segs=$(byte_at $((off + 1)))
+		mode=$(byte_at $((off + 2)))
+
+		[[ -n "$segs" && -n "$mode" ]] || return 1
+
+		local segs_dec=$((16#$segs))
+		local mode_dec=$((16#$mode))
+
+		(( segs_dec >= 1 && segs_dec <= 16 )) || return 1
+		(( mode_dec >= 0 && mode_dec <= 3 )) || return 1
+
+		return 0
+	}
+
+	parse_esptool_output() {
+		local esptool_out="$1"
+
+		detected_image_type=$(printf '%s\n' "$esptool_out" | sed -n 's/^Detected image type:[[:space:]]*//p' | head -n1)
+		chip_id=$(printf '%s\n' "$esptool_out" | sed -n 's/^Chip ID:[[:space:]]*//p' | head -n1)
+		project_name=$(printf '%s\n' "$esptool_out" | sed -n 's/^Project name:[[:space:]]*//p' | head -n1)
+		app_version=$(printf '%s\n' "$esptool_out" | sed -n 's/^App version:[[:space:]]*//p' | head -n1)
+		compile_time=$(printf '%s\n' "$esptool_out" | sed -n 's/^Compile time:[[:space:]]*//p' | head -n1)
+		esp_idf=$(printf '%s\n' "$esptool_out" | sed -n 's/^ESP-IDF:[[:space:]]*//p' | head -n1)
+		validation_hash=$(printf '%s\n' "$esptool_out" | sed -n 's/^Validation hash:[[:space:]]*//p' | sed 's/[[:space:]]*(valid).*//' | head -n1)
+
+		detected_image_type=$(trim "$detected_image_type")
+		chip_id=$(trim "$chip_id")
+		project_name=$(trim "$project_name")
+		app_version=$(trim "$app_version")
+		compile_time=$(trim "$compile_time")
+		esp_idf=$(trim "$esp_idf")
+		validation_hash=$(trim "$validation_hash")
+	}
+
+	run_esptool_on_file() {
+		local target="$1"
+		pipx run esptool image_info "$target" 2>/dev/null || true
+	}
+
+	run_esptool_on_offset_image() {
+		local off="$1"
+		local tmp
+
+		tmp=$(mktemp)
+		dd if="$f" of="$tmp" bs=1 skip="$off" status=none 2>/dev/null || true
+		pipx run esptool image_info "$tmp" 2>/dev/null || true
+		rm -f "$tmp"
+	}
+
+	local b0 b1000 b8000 b10000 result
+	local img0=0 img1000=0 img10000=0
+	local size_bytes
+	local esptool_out=""
+	local detected_image_type=""
+	local chip_id=""
+	local project_name=""
+	local app_version=""
+	local compile_time=""
+	local esp_idf=""
+	local validation_hash=""
+
+	b0=$(hex 0x0 1)
+	b1000=$(hex 0x1000 1)
+	b8000=$(hex 0x8000 2)
+	b10000=$(hex 0x10000 1)
+	size_bytes=$(stat -c '%s' "$f" 2>/dev/null || wc -c < "$f")
+
+	looks_like_esp_image_at 0x0     && img0=1
+	looks_like_esp_image_at 0x1000  && img1000=1
+	looks_like_esp_image_at 0x10000 && img10000=1
+
+	if [[ "$b8000" == "aa50" && $img10000 -eq 1 ]]; then
+		result="HAS_PARTITION_TABLE_AND_APP"
+	elif [[ $img0 -eq 1 && "$b8000" != "aa50" && $img10000 -eq 1 ]]; then
+		result="MULTI_IMAGE_NO_PARTITION_TABLE"
+	elif [[ $img0 -eq 1 && "$b8000" != "aa50" && $img10000 -eq 0 ]]; then
+		result="LIKELY_SINGLE"
+	elif [[ "$b8000" == "ffff" && $img0 -eq 0 && $img1000 -eq 0 && $img10000 -eq 0 ]]; then
+		result="DATA_IMAGE"
+	elif [[ $img0 -eq 0 && $img1000 -eq 0 && "$b8000" != "aa50" && $img10000 -eq 0 ]]; then
+		result="NON_ESP_OR_UNKNOWN"
+	else
+		result="AMBIGUOUS"
+	fi
+
+	if command -v pipx >/dev/null 2>&1; then
+		case "$result" in
+			LIKELY_SINGLE)
+				if [[ $img0 -eq 1 ]]; then
+					esptool_out=$(run_esptool_on_file "$f")
+				fi
+				;;
+			MULTI_IMAGE_NO_PARTITION_TABLE)
+				if [[ $img0 -eq 1 ]]; then
+					esptool_out=$(run_esptool_on_file "$f")
+				fi
+				;;
+			HAS_PARTITION_TABLE_AND_APP)
+				if [[ $img10000 -eq 1 ]]; then
+					esptool_out=$(run_esptool_on_offset_image 0x10000)
+				fi
+				;;
+		esac
+
+		if [[ -n "$esptool_out" ]]; then
+			parse_esptool_output "$esptool_out"
+		fi
+	fi
+
+	csv_escape "$f"; printf ','
+	csv_escape "${size_bytes:-}"; printf ','
+	csv_escape "${b0:-}"; printf ','
+	csv_escape "${b1000:-}"; printf ','
+	csv_escape "${b8000:-}"; printf ','
+	csv_escape "${b10000:-}"; printf ','
+	csv_escape "$img0"; printf ','
+	csv_escape "$img1000"; printf ','
+	csv_escape "$img10000"; printf ','
+	csv_escape "$result"; printf ','
+	csv_escape "$detected_image_type"; printf ','
+	csv_escape "$chip_id"; printf ','
+	csv_escape "$project_name"; printf ','
+	csv_escape "$app_version"; printf ','
+	csv_escape "$compile_time"; printf ','
+	csv_escape "$esp_idf"; printf ','
+	csv_escape "$validation_hash"
+	printf '\n'
+}
+
+esp_filename_layout_hint() {
+	local file="$1"
+	local name=""
+
+	name="${file##*/}"
+	shopt -s nocasematch
+	case "$name" in
+		*merged.bin|*cleanInstall.bin|*factory.bin)
+			echo "merged"
+			;;
+		*.bin)
+			echo "app-only"
+			;;
+		*)
+			echo "unknown"
+			;;
+	esac
+	shopt -u nocasematch
+}
+
+esp_firmware_layout() {
+	local file="$1" classification="" result=""
+
+	[[ -f "$file" ]] || {
+		echo "unknown"
+		return 1
+	}
+
+	classification="$(classify_bin "$file")"
+	result=$(printf '%s\n' "$classification" | cut -d',' -f10 | sed 's/^"//; s/"$//')
+
+	case "$result" in
+		HAS_PARTITION_TABLE_AND_APP|MULTI_IMAGE_NO_PARTITION_TABLE)
+			echo "merged"
+			;;
+		LIKELY_SINGLE)
+			echo "app-only"
+			;;
+		*)
+			echo "unknown"
+			;;
+	esac
+}
+
 show_help() {
 	echo "Usage: $(basename "$0") [OPTIONS]"
 	echo ""
@@ -357,8 +561,9 @@ serial_cmd() {
   # RX-log line pattern (skip)
   local rx_pat='^[0-9]{2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]*U:'
 
-  # Ensure socat is installed.
+  # Ensure serial and binary-inspection tools are installed.
   ensure_command socat
+  ensure_command xxd xxd vim-common
 
   # Build local candidate list (unique, in priority order)
   local -a candidates=()
@@ -625,43 +830,6 @@ choose_version_from_releases() {
 			done
 		fi
 	fi
-
-	# Pre-select TYPE based on chosen file (supports URL or path).
-	# Uses CHOSEN_FILE if set; otherwise falls back to VERSION.
-	{
-		local _candidate="${CHOSEN_FILE:-$VERSION}"
-		if [[ -n "$_candidate" ]]; then
-			# Strip query/fragment, keep last path segment
-			local _clean="${_candidate%%[\?#]*}"
-			local _name="${_clean##*/}"
-
-			# Case-insensitive match for extensions
-			shopt -s nocasematch
-			case "$_name" in
-				*merged.bin)
-					TYPE="flash-wipe"
-					echo "Auto-selected type: flash-wipe"
-					;;
-				*cleanInstall.bin)
-					TYPE="flash-wipe"
-					echo "Auto-selected type: flash-wipe"
-					;;
-				*factory.bin)
-					TYPE="flash-wipe"
-					echo "Auto-selected type: flash-wipe"
-					;;
-				*.bin)
-					TYPE="flash-update"
-					echo "Auto-selected type: flash-update"
-					;;
-				*.zip)
-					# Do not set TYPE for .zip (leave selection logic to run)
-					TYPE=""
-					;;
-			esac
-			shopt -u nocasematch
-		fi
-	}
 
     # ---------------- step 4 – type ---------------------------------------
 	if [[ -z "$TYPE" ]]; then
@@ -1222,6 +1390,42 @@ choose_serial() {
     local devs labels               # arrays that hold paths and friendly names
     local choice
 
+	clean_node_info_field() {
+		local value="${1:-}"
+		value="$(printf '%s' "$value" | tr '\r' '\n' | sed -n '/./p' | tail -n1)"
+		value="$(printf '%s' "$value" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+		shopt -s nocasematch
+		case "$value" in
+			""|"unknown command"|"error"|"unsupported command")
+				value=""
+				;;
+		esac
+		shopt -u nocasematch
+		printf '%s' "$value"
+	}
+
+	format_node_info_summary() {
+		local label="$1" board="$2" version="$3" summary=""
+		summary="$label"
+		[[ -n "$board" ]] && summary+=" $board"
+		[[ -n "$version" ]] && summary+=" $version"
+		printf '%s' "$summary"
+	}
+
+	read_board_with_retry() {
+		local device="$1"
+		local board=""
+		local attempt
+
+		for attempt in 1 2; do
+			board=$(clean_node_info_field "$(serial_cmd "${device}" "board")")
+			[[ -n "$board" ]] && break
+			sleep 0.1
+		done
+
+		printf '%s' "$board"
+	}
+
     scan() {                        # fill devs[] / labels[]
         devs=()  labels=()
         shopt -s nullglob           # make the glob expand to nothing if empty
@@ -1247,8 +1451,9 @@ choose_serial() {
         if ((${#devs[@]} == 1)); then
 			detected_dev="${devs[0]}"
 			echo "Trying to get meshcore info from the node"
-			version=$( serial_cmd "${detected_dev}" "version" )
-            echo "Only one device detected – selecting it automatically: $detected_dev - ${labels[0]} ${version}"
+			board=$(read_board_with_retry "${detected_dev}")
+			version=$(clean_node_info_field "$(serial_cmd "${detected_dev}" "ver")")
+            echo "Only one device detected – selecting it automatically: $detected_dev - $(format_node_info_summary "${labels[0]}" "$board" "$version")"
 			echo "$detected_dev" > "$DEVICE_PORT_FILE"
 			echo "${labels[0]}" > "$DEVICE_PORT_NAME_FILE"
 			return
@@ -1257,9 +1462,9 @@ choose_serial() {
         # ────────────────────────── menu ──────────────────────────
         echo "Select a serial device:"
         for i in "${!devs[@]}"; do
-			board=$( serial_cmd "${devs[$i]}" "board" )
-			version=$( serial_cmd "${devs[$i]}" "version" )
-            printf " %2d) %s  (%s)\n" $((i+1)) "${devs[$i]}" "${labels[$i]} ${board} ${version}"
+			board=$(read_board_with_retry "${devs[$i]}")
+			version=$(clean_node_info_field "$(serial_cmd "${devs[$i]}" "ver")")
+            printf " %2d) %s  (%s)\n" $((i+1)) "${devs[$i]}" "$(format_node_info_summary "${labels[$i]}" "$board" "$version")"
         done
         echo "  0)  Scan again"
 
@@ -1971,13 +2176,27 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 	export ESPTOOL_PORT=$DEVICE_PORT
 	print_fw_line "Downloaded firmware:" "$DOWNLOADED_FILE"
 	print_file_size_line "Downloaded bytes:" "$DOWNLOADED_FILE"
+	FW_LAYOUT="$(esp_firmware_layout "$DOWNLOADED_FILE")"
+	FW_NAME_HINT="$(esp_filename_layout_hint "$DOWNLOADED_FILE")"
+	if [[ "$FW_LAYOUT" == "merged" ]]; then
+		echo "Firmware layout: merged image detected from file contents"
+	elif [[ "$FW_LAYOUT" == "app-only" ]]; then
+		echo "Firmware layout: app-only image detected from file contents"
+	else
+		echo "Firmware layout: unknown from file contents; falling back to selected type"
+	fi
+	if [[ "$FW_NAME_HINT" == "unknown" ]]; then
+		echo "Notice: filename does not match the usual merged/app-only pattern."
+	elif [[ "$FW_LAYOUT" != "unknown" && "$FW_NAME_HINT" != "$FW_LAYOUT" ]]; then
+		echo "Notice: filename does not match the detected firmware layout."
+	fi
 	
 	[[ -f "$SELECTED_TYPE_FILE"    ]] && TYPE="$(<"$SELECTED_TYPE_FILE")"
 	echo
 	echo "Device firmware backup will be attempted after you confirm flashing."
 	echo "Commands that will be ran."
 	
-	if [[ "$TYPE" == "flash-wipe" ]]; then
+	if [[ "$FW_LAYOUT" == "merged" || ( "$FW_LAYOUT" != "app-only" && "$TYPE" == "flash-wipe" ) ]]; then
 
 		echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $NORESET --baud 115200 $ERASEFLASH"
 		echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $HARDRESET --baud 115200 $WRITEFLASH 0x0000 \"${DOWNLOADED_FILE}\""
