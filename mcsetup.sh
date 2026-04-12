@@ -825,6 +825,7 @@ set_empty_settings() {
 	setting_allow_read_only=""
 	setting_flood_advert_interval=""
 	setting_advert_interval=""
+	setting_dutycycle=""
 	setting_guest_password=""
 	setting_password=""
 	setting_name=""
@@ -833,6 +834,9 @@ set_empty_settings() {
 	setting_lon=""
 	setting_private_key=""
 	setting_public_key=""
+	setting_owner_info=""
+	setting_path_hash_mode=""
+	setting_loop_detect=""
 	setting_rxdelay=""
 	setting_txdelay=""
 	setting_direct_txdelay=""
@@ -859,6 +863,7 @@ load_repeater_settings() {
   # keys to fetch (radio handled separately)
   local k v
   local keys=(
+	  dutycycle
 	  tx
 	  repeat
 	  role
@@ -876,6 +881,9 @@ load_repeater_settings() {
 	  guest.password
 	  password
 	  name
+	  owner.info
+	  path.hash.mode
+	  loop.detect
 	  prv.key
 	  public.key
 	  lat
@@ -886,6 +894,7 @@ load_repeater_settings() {
   for k in "${keys[@]}"; do
     v="$(serial_cmd "get $k" | trim)"
     case "$k" in
+	  dutycycle)             setting_dutycycle="$v" ;;
 	  af)             		  setting_af="$v" ;;
 	  int.thresh)             setting_int_thresh="$v" ;;
       agc.reset.interval)     setting_agc_reset_interval="$v" ;;
@@ -896,6 +905,9 @@ load_repeater_settings() {
       guest.password)         setting_guest_password="$v" ;;
       password)               setting_password="$v" ;;
 	  name)                   setting_name="$v" ;;
+	  owner.info)             setting_owner_info="$v" ;;
+	  path.hash.mode)         setting_path_hash_mode="$v" ;;
+	  loop.detect)            setting_loop_detect="$v" ;;
 	  repeat)                 setting_repeat="$v" ;;
 	  lat)                    setting_lat="$v" ;;
       lon)                    setting_lon="$v" ;;
@@ -949,14 +961,23 @@ edit_repeater_settings_menu() {
     echo "21) multi.acks            = $setting_multi_acks"
     echo "22) radio                 = freq=$RADIO_FREQ bw=$RADIO_BW sf=$RADIO_SF cr=$RADIO_CR"
     echo "23) powersaving           = $setting_powersaving"
+    echo "24) dutycycle             = $setting_dutycycle"
+    echo "25) owner.info            = $setting_owner_info"
+    echo "26) path.hash.mode        = $setting_path_hash_mode"
+    echo "27) loop.detect           = $setting_loop_detect"
 	echo " R) Refresh above settings from device"
-	#echo " a) Send 0 hop advert now"
+    echo " Z) Send zero-hop advert now"
     echo " A) Send flood advert now"
     echo " L) Logs: start/stop/erase"
+    echo " D) Dump log"
+    echo " N) Show neighbors"
+    echo " X) Remove neighbor by pubkey"
+    echo " O) Start OTA"
+    echo " K) Clock-reset reboot"
     echo " C) Clear stats"
 	echo " Q) Quit"
     echo
-    echo "Choose an item to edit, an action (A/L/C), or q to finish."
+    echo "Choose an item to edit, an action, or q to finish."
     read -rp "Choice: " choice
 
     case "$choice" in
@@ -1170,12 +1191,57 @@ edit_repeater_settings_menu() {
 		  set_if_changed "powersaving" "$setting_powersaving" "$REPLY_ONOFF" "" "1"
 		  [ -n "$REPLY_ONOFF" ] && setting_powersaving="$REPLY_ONOFF"
 		  ;;
+
+		24)
+		  prompt_number_bounded "dutycycle" "$setting_dutycycle" 1 100
+		  set_if_changed "dutycycle" "$setting_dutycycle" "$REPLY_NUM" num
+		  [ -n "$REPLY_NUM" ] && setting_dutycycle="$REPLY_NUM"
+		  ;;
+
+		25)
+		  read -rp "owner.info (use | for line breaks, current: ${setting_owner_info:-<empty>}): " v
+		  if [ -n "$v" ] && [ "$v" != "$setting_owner_info" ]; then
+			echo "Updating owner.info"
+			if [[ -n "${device_epoch:-}" ]]; then
+				serial_cmd "set owner.info $v"
+			else
+				serial_cmd_echo "set owner.info $v"
+			fi
+			setting_owner_info="$v"
+		  else
+			echo "No change to owner.info"
+		  fi
+		  ;;
+
+		26)
+		  prompt_number_bounded "path.hash.mode" "$setting_path_hash_mode" 0 2
+		  set_if_changed "path.hash.mode" "$setting_path_hash_mode" "$REPLY_NUM" num
+		  [ -n "$REPLY_NUM" ] && setting_path_hash_mode="$REPLY_NUM"
+		  ;;
+
+		27)
+		  while :; do
+			read -rp "loop.detect (off/minimal/moderate/strict, current: ${setting_loop_detect:-<empty>}): " v
+			v="$(trim "$v")"
+			[ -z "$v" ] && { echo "No change to loop.detect"; break; }
+			case "${v,,}" in
+			  off|minimal|moderate|strict)
+				set_if_changed "loop.detect" "$setting_loop_detect" "${v,,}"
+				setting_loop_detect="${v,,}"
+				break
+				;;
+			  *)
+				echo "Enter one of: off, minimal, moderate, strict"
+				;;
+			esac
+		  done
+		  ;;
 		  
-      #a)
-      #  echo "Sending zero hop advert..."
-      #  serial_cmd "advert"
-      #  ;;
-	  
+	  z|Z)
+        echo "Sending zero-hop advert..."
+        serial_cmd "advert.zerohop"
+        ;;
+
 	  A)
         echo "Sending flood advert..."
         serial_cmd "advert"
@@ -1192,9 +1258,39 @@ edit_repeater_settings_menu() {
         esac
         ;;
 
+	  d|D)
+        echo "Dumping log..."
+        serial_cmd "log"
+        ;;
+
+	  n|N)
+        echo "Neighbors:"
+        serial_cmd "neighbors"
+        ;;
+
+	  x|X)
+        read -rp "Neighbor pubkey to remove: " v
+        v="$(trim "$v")"
+        if [ -n "$v" ]; then
+          serial_cmd "neighbor.remove $v"
+        else
+          echo "No pubkey entered."
+        fi
+        ;;
+
+	  o|O)
+        echo "Starting OTA..."
+        serial_cmd "start ota"
+        ;;
+
+	  k|K)
+        read -rp "Run clkreboot now? This resets the device clock and reboots the node. [y/N]: " v
+        [[ "$v" =~ ^[Yy]$ ]] && serial_cmd "clkreboot" || echo "Clock-reset reboot skipped."
+        ;;
+
       c|C)
         echo "Clearing stats..."
-        serial_cmd "stats clear"
+        serial_cmd "clear stats"
         ;;
 
       *)
