@@ -12,13 +12,19 @@ EOF
 # Trap errors and output file and line number.
 set -euo pipefail
 
+# shellcheck disable=SC2317
 # Ensure we always restore on exit
 cleanup() {
 	USB_AUTOSUSPEND_END=$(cat /sys/module/usbcore/parameters/autosuspend)
 	if [[ "$USB_AUTOSUSPEND_END" != "$USB_AUTOSUSPEND" ]]; then
 		echo "$USB_AUTOSUSPEND" | sudo tee /sys/module/usbcore/parameters/autosuspend >/dev/null
 	fi
+	if [[ -d "$FIRMWARE_ROOT" ]]; then
+		sudo chown -R "$BASE_USER:$BASE_GROUP" "$FIRMWARE_ROOT" >/dev/null 2>&1 || true
+	fi
 }
+
+# shellcheck disable=SC2317
 error_handler() {
   local lineno=$1
   echo "FAILED at ${BASH_SOURCE[0]}:${lineno}" >&2
@@ -43,14 +49,11 @@ REPO_NAME="MeshCore"
 CONFIG_URL="https://api.meshcore.nz/api/v1/config"
 
          FIRMWARE_ROOT="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}"
-      DEVICE_PORT_FILE="${FIRMWARE_ROOT}/09device_port_file.txt"
- DEVICE_PORT_NAME_FILE="${FIRMWARE_ROOT}/10device_port_name_file.txt"
      RADIO_CONFIG_FILE="${FIRMWARE_ROOT}/meshcore_config.json}"
  
 
 BOOT_WAIT="${BOOT_WAIT:-2}" 
 BAUD="${3:-115200}"
-TIMEOUT="${4:-4}"
 DEFAULT_BAUDS=(57600 115200 38400 9600 19200 2400)
 SERIAL_BAUD_CACHE=57600
 SERIAL_IDLE_TIMEOUT=2.5 
@@ -60,83 +63,103 @@ SERIAL_TOTAL_TIMEOUT=7.5
 BASE_USER="${SUDO_USER:-$USER}"
 BASE_GROUP="$(id -gn "$BASE_USER")"
 
-# Create a directory owned by the base user, working with/without sudo
-make_user_dir() {
-  local dir="$1"
-  if [ -n "${SUDO_USER:-}" ]; then
-    # running under sudo: make as base user and ensure ownership
-    sudo -u "$BASE_USER" mkdir -p "$dir"
-    sudo chown "$BASE_USER:$BASE_GROUP" "$dir"
+install_packages() {
+  sudo apt-get update
+  sudo apt-get -y install "$@"
+}
+
+ensure_command() {
+  local command_name=$1
+  shift || true
+
+  if command -v "$command_name" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "Installing ${command_name}..."
+  if [ "$#" -gt 0 ]; then
+    install_packages "$@"
   else
-    # not under sudo: normal create (already owned by us)
-    mkdir -p "$dir"
+    install_packages "$command_name"
   fi
 }
 
-trim() {
-  local s="$1"
-  # strip leading whitespace
-  s="${s#"${s%%[!$' \t\r\n']*}"}"
-  # strip trailing whitespace
-  s="${s%"${s##*[!$' \t\r\n']}"}"
-  printf '%s' "$s"
-}
-
-
-# Write a file as the base user, robust under -euo pipefail
-write_user_file() {
-  local path="$1"; shift
-  local content="$*"
-  if [ -n "${SUDO_USER:-}" ]; then
-    printf '%s\n' "$content" | sudo -u "$BASE_USER" tee "$path" >/dev/null
-    sudo chown "$BASE_USER:$BASE_GROUP" "$path"
-  else
-    printf '%s\n' "$content" >"$path"
+ensure_time_sync_client() {
+  if command -v chronyc >/dev/null 2>&1; then
+    return 0
   fi
+
+  if command -v ntpd >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if command -v ntpdate >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if command -v ntpdig >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if command -v sntp >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if command -v timedatectl >/dev/null 2>&1; then
+    return 0
+  fi
+
+  ensure_command chronyc chrony
+  sudo systemctl enable chrony
+  sudo systemctl restart chrony
 }
 
-# Use it
-make_user_dir "$(dirname "$DEVICE_PORT_FILE")"
-make_user_dir "$(dirname "$DEVICE_PORT_NAME_FILE")"
+force_time_sync() {
+  if command -v chronyc >/dev/null 2>&1; then
+    sudo systemctl enable chrony >/dev/null 2>&1 || true
+    sudo systemctl restart chrony >/dev/null 2>&1 || true
+    sudo chronyc -a makestep >/dev/null 2>&1 || sudo chronyc makestep >/dev/null 2>&1
+    chronyc tracking | grep -E '^(Ref(erence)? time|System time)'
+    return 0
+  fi
 
-if ! command -v jq >/dev/null 2>&1; then
-  echo "Installing jq..."
-  sudo apt update && sudo apt -y install jq
-fi
-if ! command -v curl >/dev/null 2>&1; then
-  echo "Installing curl..."
-  sudo apt update && sudo apt -y install curl
-fi
-if ! command -v socat >/dev/null 2>&1; then
-  echo "Installing socat..."
-  sudo apt update && sudo apt -y install socat
-fi
-if ! command -v bc >/dev/null 2>&1; then
-  echo "Installing bc..."
-  sudo apt update && sudo apt -y install bc
-fi
-if ! command -v socat &>/dev/null; then
-	echo "Installing socat"
-	sudo apt update && sudo apt -y install socat
-fi
-if ! command -v chronyc &>/dev/null; then
-	echo "Installing chrony"
-	sudo apt update && sudo apt -y install chrony
-	sudo systemctl enable chrony
-	sudo systemctl restart chrony
-fi
+  if command -v ntpd >/dev/null 2>&1; then
+    sudo ntpd -gq
+    return 0
+  fi
+
+  if command -v ntpdate >/dev/null 2>&1; then
+    sudo ntpdate -u pool.ntp.org
+    return 0
+  fi
+
+  if command -v ntpdig >/dev/null 2>&1; then
+    sudo ntpdig -S pool.ntp.org >/dev/null
+    return 0
+  fi
+
+  if command -v sntp >/dev/null 2>&1; then
+    sudo sntp -sS pool.ntp.org
+    return 0
+  fi
+
+  sudo timedatectl set-ntp true
+  sudo systemctl restart systemd-timesyncd >/dev/null 2>&1 || true
+  timedatectl timesync-status 2>/dev/null || timedatectl status
+}
+
+DEVICE_NAME=""
+
+ensure_command jq
+ensure_command curl
+ensure_command socat
+ensure_command bc
+ensure_time_sync_client
 
 ensure_meshcore_config() {
   # Ensure jq and curl exist
-  if ! command -v jq >/dev/null 2>&1; then
-    echo "Installing jq..."
-    sudo apt update && sudo apt -y install jq
-  fi
-
-  if ! command -v curl >/dev/null 2>&1; then
-    echo "Installing curl..."
-    sudo apt update && sudo apt -y install curl
-  fi
+  ensure_command jq
+  ensure_command curl
 
   local need_fetch=0
   if [ ! -f "$RADIO_CONFIG_FILE" ]; then
@@ -301,8 +324,6 @@ select_custom_radio_setting() {
     echo "Please enter 5, 6, 7, or 8."
   done
 
-  RADIO_TITLE="Custom"
-  RADIO_DESC="Custom: ${freq}MHz / SF${sf} / BW${bw} / CR${cr}"
   RADIO_FREQ="$freq"
   RADIO_SF="$sf"
   RADIO_BW="$bw"
@@ -440,9 +461,6 @@ select_suggested_radio_setting() {
     esac
   done
 
-  # Exported globals for caller for suggested entry
-  RADIO_TITLE="${_RADIO_TITLES[$sel]}"
-  RADIO_DESC="${_RADIO_DESCS[$sel]}"
   RADIO_FREQ=$(jq -r ".config.suggested_radio_settings.entries[$sel].frequency"        "$RADIO_CONFIG_FILE")
   RADIO_SF=$(jq   -r ".config.suggested_radio_settings.entries[$sel].spreading_factor" "$RADIO_CONFIG_FILE")
   RADIO_BW=$(jq   -r ".config.suggested_radio_settings.entries[$sel].bandwidth"        "$RADIO_CONFIG_FILE")
@@ -478,13 +496,12 @@ choose_serial() {
         fi
 
         # ────────────────────────── single device ──────────────────────────
-        if ((${#devs[@]} == 1)); then
-			detected_dev="${devs[0]}"
-            #echo "Only one device detected – selecting it automatically: $detected_dev - ${labels[0]}"
-			echo "$detected_dev" > "$DEVICE_PORT_FILE"
-			echo "${labels[0]}" > "$DEVICE_PORT_NAME_FILE"
-			return
-        fi
+	        if ((${#devs[@]} == 1)); then
+				detected_dev="${devs[0]}"
+	            #echo "Only one device detected – selecting it automatically: $detected_dev - ${labels[0]}"
+				DEVICE_NAME="$detected_dev"
+				return
+	        fi
 
         # ────────────────────────── menu ──────────────────────────
         echo "Select a serial device:"
@@ -496,24 +513,21 @@ choose_serial() {
         read -rp "Choice: " choice
         if [[ $choice =~ ^[0-9]+$ ]]; then
             if (( choice == 0 ));     then continue          # rescan
-            elif (( choice >= 1 && choice <= ${#devs[@]} )); then
-				detected_dev="${devs[choice-1]}"
-				echo "$detected_dev"
-				echo "$detected_dev" > "$DEVICE_PORT_FILE"
-				echo "${labels[choice-1]}" > "$DEVICE_PORT_NAME_FILE"
-				return
-            fi
+	            elif (( choice >= 1 && choice <= ${#devs[@]} )); then
+					detected_dev="${devs[choice-1]}"
+					echo "$detected_dev"
+					DEVICE_NAME="$detected_dev"
+					return
+	            fi
         fi
         echo "Invalid selection – please try again."
     done
 }
 choose_serial || true
-DEVICE_NAME=""
-[[ -f "$DEVICE_PORT_FILE" ]] && DEVICE_NAME="$(<"$DEVICE_PORT_FILE")"
 
 serial_cmd_echo() {
 	local line="$*"
-	echo "printf '${line}\r\n' | socat - \"OPEN:${DEVICE_NAME},raw,echo=0,b115200\" "
+	printf '%s\n' "printf '%b' '${line}\\r\\n' | socat - \"OPEN:${DEVICE_NAME},raw,echo=0,b115200\" "
 }
 
 # Helper to send a command and capture reply
@@ -536,10 +550,7 @@ serial_cmd() {
   local rx_pat='^[0-9]{2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]*U:'
 
   # Ensure socat is installed.
-  if ! command -v socat >/dev/null 2>&1; then
-    echo "Installing socat" >&2
-    sudo apt update && sudo apt -y install socat
-  fi
+  ensure_command socat >&2
 
   # Build local candidate list (unique, in priority order)
   local -a candidates=()
@@ -563,11 +574,12 @@ serial_cmd() {
   local baud attempt out last_out
   last_out=""
 
-  for baud in "${candidates[@]}"; do
-    for ((attempt=1; attempt<=max_retries; attempt++)); do
-		out="$(
-		  timeout -s KILL "${total_timeout}" \
-			bash -o pipefail -c '
+	for baud in "${candidates[@]}"; do
+	    for ((attempt=1; attempt<=max_retries; attempt++)); do
+			out="$(
+			  # shellcheck disable=SC2016
+			  timeout -s KILL "${total_timeout}" \
+				bash -o pipefail -c '
 			  device="$1"
 			  baud="$2"
 			  line="$3"
@@ -1129,33 +1141,43 @@ confirm_restart_radio() {
 
 
 # Sync Time
-chronyc tracking | grep -E '^(Ref(erence)? time|System time)'
+force_time_sync
 
 # Read clock from device
-
+raw_device_clock="$(serial_cmd clock || true)"
 device_epoch="$(
-  serial_cmd clock \
+  printf '%s\n' "$raw_device_clock" \
   | sed -En 's/.*([0-9]{1,2}):([0-9]{2}) *- *([0-9]{1,2})\/([0-9]{1,2})\/([0-9]{4}) *UTC.*/\5-\4-\3 \1:\2:00/p' \
-  | xargs -I{} date -u -d "{}" +%s
+  | xargs -r -I{} date -u -d "{}" +%s
 )"
 
 # Current host UNIX time (seconds since epoch)
 host_epoch=$(date +%s)
 
-diff=$(( device_epoch - host_epoch ))
-adiff=${diff#-}
-
-
 echo "device_epoch: $device_epoch"
 echo "host_epoch  : $host_epoch"
-echo "Device time (Local): $(date -d "@$device_epoch" '+%Y-%m-%d %H:%M %Z')"
 echo "Host   time (Local): $(date -d "@$host_epoch" '+%Y-%m-%d %H:%M %Z')"
+
+if [[ -n "${device_epoch:-}" ]]; then
+  diff=$(( device_epoch - host_epoch ))
+  adiff=${diff#-}
+  echo "Device time (Local): $(date -d "@$device_epoch" '+%Y-%m-%d %H:%M %Z')"
+else
+  adiff=$((172800 + 1))
+  echo "Device time (Local): unavailable"
+fi
 
 
 # Verdict: only act if more than 2 days off (86400 sec * 2)
 if [ "$adiff" -gt 172800 ]; then
-  echo "Clock off by more than 2 days; syncing time now. Sending: time $host_epoch"
-  serial_cmd "time $host_epoch"
+  if [[ -n "${device_epoch:-}" ]]; then
+    echo "Clock off by more than 2 days; syncing time now. Sending: time $host_epoch"
+  else
+    echo "Device clock unreadable; syncing time now. Sending: time $host_epoch"
+  fi
+  if ! serial_cmd "time $host_epoch" >/dev/null; then
+    echo "Warning: device did not acknowledge the time sync command"
+  fi
   echo
 else
   echo "Clock within 2 days"

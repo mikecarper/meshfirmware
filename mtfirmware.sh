@@ -176,18 +176,45 @@ check_internet() {
 	fi
 }
 
+install_packages() {
+	sudo apt-get update
+	sudo apt-get -y install "$@"
+}
+
+ensure_command() {
+	local command_name=$1
+	shift || true
+
+	if command -v "$command_name" >/dev/null 2>&1; then
+		return 0
+	fi
+
+	echo "$command_name not found - installing..."
+	if [ "$#" -gt 0 ]; then
+		if ! sudo apt-get -y install "$@"; then
+			echo "Package lists may be stale; updating and retrying..."
+			install_packages "$@"
+		fi
+	else
+		if ! sudo apt-get -y install "$command_name"; then
+			echo "Package lists may be stale; updating and retrying..."
+			install_packages "$command_name"
+		fi
+	fi
+}
+
+ensure_commands() {
+	local command_name
+
+	for command_name in "$@"; do
+		ensure_command "$command_name"
+	done
+}
+
 # Update the GitHub release cache if needed.
 update_releases() {
 	if check_internet; then
-		# Ensure jq is present
-		if ! command -v jq >/dev/null 2>&1; then
-		    echo "jq not found – installing…"
-		    if ! sudo apt-get -y install jq; then         # first try: install directly
-		        echo "Package lists may be stale; updating and retrying…"
-		        sudo apt-get update
-		        sudo apt-get -y install jq
-		    fi
-		fi
+		ensure_commands curl jq
 
 		# If we don't have a cache file or it's older than our timeout, attempt an update.
 		if [ ! -f "$RELEASES_FILE" ] || [ "$(date +%s)" -ge "$(($(stat -c %Y "$RELEASES_FILE") + CACHE_TIMEOUT_SECONDS))" ]; then
@@ -253,6 +280,8 @@ update_releases() {
 
 update_bleota() {
 	if check_internet; then
+		ensure_commands curl jq
+
 		# If we don't have a cache file or it's older than our timeout, attempt an update.
 		if [ ! -f "$BLEOTA_FILE" ] || [ "$(date +%s)" -ge "$(($(stat -c %Y "$BLEOTA_FILE") + CACHE_TIMEOUT_SECONDS))" ]; then
 			mkdir -p "$FIRMWARE_ROOT"
@@ -355,6 +384,7 @@ update_bleota() {
 update_hardware_list() {
 	# Check if RESOURCES_FILE exists and is newer than 6 hours; if not, download it.
 	if [ ! -f "$RESOURCES_FILE" ] || [ "$(find "$RESOURCES_FILE" -mmin +360)" ]; then
+		ensure_command curl
 		echo "Downloading resources.ts from GitHub. $RESOURCES_FILE $WEB_HARDWARE_LIST_URL"
 		mkdir -p "$(dirname "$RESOURCES_FILE")"
 		curl -s -L "$WEB_HARDWARE_LIST_URL" -o "$RESOURCES_FILE"
@@ -778,7 +808,7 @@ pick_serial_port() {
 	# Build nice labels using /dev/serial/by-id if present
 	local oldest_meshtastic_idx=""
 	local oldest_meshtastic_ver=""
-	local version_key current_key
+		local version_key
 	local devdevice metadata version role hwModel
 
 	for i in "${!ports[@]}"; do
@@ -1336,11 +1366,9 @@ get_locked_service() {
 	fi
 
 	# Get all users locking the device (skip the header line)
-	echo "Finding the service that has $device_name locked" > /dev/tty
-	local users
-	if ! command -v lsof &>/dev/null; then
-		sudo apt install -y lsof
-	fi
+		echo "Finding the service that has $device_name locked" > /dev/tty
+		local users
+		ensure_command lsof
 	users=$(sudo lsof "$device_name" 2>/dev/null | awk 'NR>1 {print $3}' | sort -u)
 	if [ -z "$users" ]; then
 		#echo "No process found locking ${device_name}."
@@ -1459,7 +1487,7 @@ list_block_devs() {
 
 # Run the firmware update/install script.
 run_update_script() {
-	local cmd user_choice PYTHON ESPTOOL_CMD newpath device_name
+	local cmd user_choice PYTHON ESPTOOL_CMD device_name
 	mapfile -t cmd_array <"$CMD_FILE"
 	abs_script="${cmd_array[0]}"
 	abs_selected="${cmd_array[1]}"
@@ -1519,10 +1547,7 @@ run_update_script() {
 	fi
 	
 		# Ensure pipx & meshtastic are installed.
-	if ! command -v pipx &>/dev/null; then
-		echo "Installing pipx"
-		sudo apt -y install pipx
-	fi
+		ensure_command pipx
 
 	# Locate a Python interpreter.
 	PYTHON=""
@@ -1532,12 +1557,12 @@ run_update_script() {
 			break
 		fi
 	done
-	if [ -z "$PYTHON" ]; then
-		echo "No Python interpreter found. Installing python3..."
-		sudo apt update && sudo apt install -y python3 pipx
-		PYTHON=$(command -v python3) || {
-			echo "Failed to install python3"
-			exit 1
+		if [ -z "$PYTHON" ]; then
+			echo "No Python interpreter found. Installing python3..."
+			install_packages python3 pipx
+			PYTHON=$(command -v python3) || {
+				echo "Failed to install python3"
+				exit 1
 		}
 	fi
 
