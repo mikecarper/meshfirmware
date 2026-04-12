@@ -20,7 +20,11 @@ cleanup() {
 		echo "$USB_AUTOSUSPEND" | sudo tee /sys/module/usbcore/parameters/autosuspend >/dev/null
 	fi
 	if [[ -d "$FIRMWARE_ROOT" ]]; then
+		chmod -R a+rX "$FIRMWARE_ROOT" >/dev/null 2>&1 || true
 		sudo chown -R "$BASE_USER:$BASE_GROUP" "$FIRMWARE_ROOT" >/dev/null 2>&1 || true
+	fi
+	if [[ -n "${SUDO_KEEPALIVE_PID:-}" ]]; then
+		kill "$SUDO_KEEPALIVE_PID" >/dev/null 2>&1 || true
 	fi
 }
 
@@ -62,6 +66,60 @@ SERIAL_TOTAL_TIMEOUT=7.5
 # Resolve base user/group
 BASE_USER="${SUDO_USER:-$USER}"
 BASE_GROUP="$(id -gn "$BASE_USER")"
+SUDO_KEEPALIVE_PID=""
+
+ensure_sudo_session() {
+  if sudo -n true 2>/dev/null; then
+    return 0
+  fi
+
+  echo "sudo access is required for package, USB, and system configuration steps."
+  sudo -v
+}
+
+start_sudo_keepalive() {
+  if [[ -n "${SUDO_KEEPALIVE_PID:-}" ]] && kill -0 "$SUDO_KEEPALIVE_PID" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  (
+    while true; do
+      sleep 50
+      sudo -n true >/dev/null 2>&1 || exit 0
+    done
+  ) &
+  SUDO_KEEPALIVE_PID=$!
+}
+
+ensure_serial_group_access() {
+  local serial_group=""
+
+  if getent group dialout >/dev/null 2>&1; then
+    serial_group="dialout"
+  elif getent group uucp >/dev/null 2>&1; then
+    serial_group="uucp"
+  fi
+
+  if [[ -z "$serial_group" ]]; then
+    return 0
+  fi
+
+  if id -nG "$BASE_USER" | tr ' ' '\n' | grep -qx "$serial_group"; then
+    return 0
+  fi
+
+  echo "Adding ${BASE_USER} to ${serial_group} for persistent serial-port access..."
+  sudo usermod -aG "$serial_group" "$BASE_USER"
+  echo "Group membership updated. Log out and back in for ${serial_group} access to apply."
+}
+
+ensure_sudo_session
+start_sudo_keepalive
+ensure_serial_group_access
+
+if [[ -n "${SUDO_USER:-}" ]]; then
+  umask 022
+fi
 
 install_packages() {
   sudo apt-get update
@@ -525,9 +583,26 @@ choose_serial() {
 }
 choose_serial || true
 
+ensure_serial_access() {
+  local device="${1:-$DEVICE_NAME}"
+
+  [[ -z "$device" ]] && device="/dev/ttyACM0"
+
+  if [[ -r "$device" && -w "$device" ]]; then
+    return 0
+  fi
+
+  ensure_sudo_session
+  sudo chmod a+rw "$device" >/dev/null 2>&1 || true
+}
+
 serial_cmd_echo() {
 	local line="$*"
-	printf '%s\n' "printf '%b' '${line}\\r\\n' | socat - \"OPEN:${DEVICE_NAME},raw,echo=0,b115200\" "
+	local device_name_now="${DEVICE_NAME}"
+	if [[ -z "${device_name_now}" ]]; then
+		device_name_now="/dev/ttyACM0"
+	fi
+	printf '%s\n' "printf '%b' '${line}\\r\\n' | socat - \"OPEN:${device_name_now},raw,echo=0,b115200\" "
 }
 
 # Helper to send a command and capture reply
@@ -545,6 +620,8 @@ serial_cmd() {
   if [[ -z "${device_name_now}" ]]; then
 	device_name_now="/dev/ttyACM0"
   fi
+
+  ensure_serial_access "$device_name_now"
 
   # RX-log line pattern (skip)
   local rx_pat='^[0-9]{2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]*U:'
@@ -593,9 +670,9 @@ serial_cmd() {
 				| sed -E "s/^[[:space:][:cntrl:]]*(->|>)+[[:space:]]*//" \
 				| sed -E "s/^[[:space:][:cntrl:]]+//; s/[[:space:]]+$//" \
 				| sed -E "s/^[^0-9A-Za-z+\\-]+//" \
-				| awk -v cmd="$line" -v rx="$rx_pat" '"'"'
+				| grep -E -v "$rx_pat" \
+				| awk -v cmd="$line" '"'"'
 					NF {
-					  if ($0 ~ rx) next
 					  if ($0 == cmd) next
 					  keep = $0
 					}
@@ -1139,17 +1216,44 @@ confirm_restart_radio() {
   done
 }
 
+read_device_clock_epoch() {
+  local raw_device_clock
+  raw_device_clock="$(serial_cmd clock || true)"
+  printf '%s\n' "$raw_device_clock" \
+    | sed -En 's/.*([0-9]{1,2}):([0-9]{2}) *- *([0-9]{1,2})\/([0-9]{1,2})\/([0-9]{4}) *UTC.*/\5-\4-\3 \1:\2:00/p' \
+    | xargs -r -I{} date -u -d "{}" +%s
+}
+
+prompt_powercycle_and_retry_time_sync() {
+  local host_epoch="$1"
+  local ans
+
+  while :; do
+    read -rp "Power-cycle the node, wait for it to reconnect, then retry clock sync now? [Y/n]: " ans
+    case "$ans" in
+      [Yy]|"")
+        echo "Retrying clock sync. Sending: time $host_epoch"
+        if ! serial_cmd "time $host_epoch" >/dev/null; then
+          echo "Warning: device did not acknowledge the retried time sync command"
+        fi
+        return 0
+        ;;
+      [Nn])
+        return 1
+        ;;
+      *)
+        echo "Please answer y or n."
+        ;;
+    esac
+  done
+}
+
 
 # Sync Time
 force_time_sync
 
 # Read clock from device
-raw_device_clock="$(serial_cmd clock || true)"
-device_epoch="$(
-  printf '%s\n' "$raw_device_clock" \
-  | sed -En 's/.*([0-9]{1,2}):([0-9]{2}) *- *([0-9]{1,2})\/([0-9]{1,2})\/([0-9]{4}) *UTC.*/\5-\4-\3 \1:\2:00/p' \
-  | xargs -r -I{} date -u -d "{}" +%s
-)"
+device_epoch="$(read_device_clock_epoch)"
 
 # Current host UNIX time (seconds since epoch)
 host_epoch=$(date +%s)
@@ -1194,8 +1298,22 @@ if [[ -n "${device_epoch:-}" ]]; then
 	snapshot_radio_baseline
 else
 	echo "Serial Commands seem to be broken"
-	echo "Changes here may not work"
-	set_empty_settings
+	if prompt_powercycle_and_retry_time_sync "$host_epoch"; then
+		sleep 2
+		device_epoch="$(read_device_clock_epoch)"
+	fi
+	if [[ -n "${device_epoch:-}" ]]; then
+		board=$(serial_cmd "board" )
+		ver=$(serial_cmd "ver" )
+
+		echo "$board - $ver"
+
+		load_repeater_settings
+		snapshot_radio_baseline
+	else
+		echo "Changes here may not work"
+		set_empty_settings
+	fi
 fi
 
 edit_repeater_settings_menu

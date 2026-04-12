@@ -18,6 +18,13 @@ cleanup() {
 	if [[ "$USB_AUTOSUSPEND_END" != "$USB_AUTOSUSPEND" ]]; then
 		echo "$USB_AUTOSUSPEND" | sudo tee /sys/module/usbcore/parameters/autosuspend >/dev/null
 	fi
+	restore_port_after_bootloader_probe
+	if [[ -d "$FIRMWARE_ROOT" ]]; then
+		chmod -R a+rX "$FIRMWARE_ROOT" >/dev/null 2>&1 || true
+	fi
+	if [[ -n "${SUDO_KEEPALIVE_PID:-}" ]]; then
+		kill "$SUDO_KEEPALIVE_PID" >/dev/null 2>&1 || true
+	fi
 }
 error_handler() {
   local lineno=$1
@@ -47,6 +54,77 @@ spinner_chars=("-" "\\" "|" "/")
 CACHE_TIMEOUT_SECONDS=$((6 * 3600)) # 6 hours
 MOUNT_FOLDER="/mnt/meshDeviceSD"
 USB_AUTOSUSPEND=$(cat /sys/module/usbcore/parameters/autosuspend)
+BASE_USER="${SUDO_USER:-$USER}"
+BASE_GROUP="$(id -gn "$BASE_USER")"
+SUDO_KEEPALIVE_PID=""
+BOOTLOADER_PROBE_PORT=""
+BOOTLOADER_PROBE_ACTIVE=0
+
+restore_port_after_bootloader_probe() {
+	local port="${BOOTLOADER_PROBE_PORT:-}"
+
+	[[ "${BOOTLOADER_PROBE_ACTIVE:-0}" -eq 1 ]] || return 0
+	[[ -n "$port" ]] || return 0
+
+	echo "Attempting to return ${port} to normal runtime mode..." >/dev/tty
+	timeout 8s pipx run esptool --port "$port" --before no-reset --after hard-reset read-mac >/dev/null 2>&1 || true
+	BOOTLOADER_PROBE_ACTIVE=0
+	BOOTLOADER_PROBE_PORT=""
+}
+
+ensure_sudo_session() {
+	if sudo -n true 2>/dev/null; then
+		return 0
+	fi
+
+	echo "sudo access is required for package, USB, and serial-port operations."
+	sudo -v
+}
+
+start_sudo_keepalive() {
+	if [[ -n "${SUDO_KEEPALIVE_PID:-}" ]] && kill -0 "$SUDO_KEEPALIVE_PID" >/dev/null 2>&1; then
+		return 0
+	fi
+
+	(
+		while true; do
+			sleep 50
+			sudo -n true >/dev/null 2>&1 || exit 0
+		done
+	) &
+	SUDO_KEEPALIVE_PID=$!
+}
+
+ensure_serial_group_access() {
+	local serial_group=""
+
+	if getent group dialout >/dev/null 2>&1; then
+		serial_group="dialout"
+	elif getent group uucp >/dev/null 2>&1; then
+		serial_group="uucp"
+	fi
+
+	if [[ -z "$serial_group" ]]; then
+		return 0
+	fi
+
+	if id -nG "$BASE_USER" | tr ' ' '\n' | grep -qx "$serial_group"; then
+		return 0
+	fi
+
+	echo "Adding ${BASE_USER} to ${serial_group} for persistent serial-port access..."
+	sudo usermod -aG "$serial_group" "$BASE_USER"
+	echo "Group membership updated. Log out and back in for ${serial_group} access to apply."
+}
+
+ensure_sudo_session
+start_sudo_keepalive
+ensure_serial_group_access
+
+if [[ -n "${SUDO_USER:-}" ]]; then
+	umask 022
+fi
+
 if [[ "$USB_AUTOSUSPEND" -ne -1 ]]; then
 	# Only disable (-1) if it isn’t already
 	echo "sudo needed to disable USB autosuspend and keep all USB ports active."
@@ -166,15 +244,6 @@ ensure_command() {
 	fi
 }
 
-ensure_sudo_session() {
-	if sudo -n true 2>/dev/null; then
-		return 0
-	fi
-
-	echo "sudo access is required for serial port operations on this device."
-	sudo -v
-}
-
 run_nrfutil_dfu_serial() {
 	local package_file=$1
 	shift || true
@@ -188,7 +257,8 @@ run_nrfutil_dfu_serial() {
 	echo "Current permissions: $(ls -l "$DEVICE_PORT")"
 	echo "Prompting for sudo so flashing can continue..."
 	ensure_sudo_session
-	sudo pipx run adafruit-nrfutil dfu serial --package "$package_file" --touch 1200 -p "${DEVICE_PORT}" -b 115200 "$@"
+	sudo chmod a+rw "$DEVICE_PORT"
+	pipx run adafruit-nrfutil dfu serial --package "$package_file" --touch 1200 -p "${DEVICE_PORT}" -b 115200 "$@"
 }
 
 _jq1() {
@@ -331,9 +401,9 @@ serial_cmd() {
 				| sed -E "s/^[[:space:][:cntrl:]]*(->|>)+[[:space:]]*//" \
 				| sed -E "s/^[[:space:][:cntrl:]]+//; s/[[:space:]]+$//" \
 				| sed -E "s/^[^0-9A-Za-z+\\-]+//" \
-				| awk -v cmd="$line" -v rx="$rx_pat" '"'"'
+				| grep -E -v "$rx_pat" \
+				| awk -v cmd="$line" '"'"'
 					NF {
-					  if ($0 ~ rx) next
 					  if ($0 == cmd) next
 					  keep = $0
 					}
@@ -1365,6 +1435,326 @@ get_espcmd() {
 	echo "$ESPTOOL_CMD" > "$ESPTOOL_FILE"
 }
 
+print_esptool_recovery_hint() {
+	local output="$1"
+	if grep -qiE 'Failed to connect to Espressif device|Protocol error|No serial data received' <<<"$output"; then
+		echo "Hint: Reboot the node, wait 10 seconds, and try again." >&2
+	fi
+}
+
+esptool_output_needs_reset() {
+	local output="$1"
+	grep -qiE 'Failed to connect to Espressif device|Protocol error|No serial data received' <<<"$output"
+}
+
+auto_reset_serial_port() {
+	local port="$1"
+	[[ -z "$port" ]] && return 1
+
+	echo "Trying automatic serial reset on $port..."
+	sudo chmod a+rw "$port" 2>/dev/null || true
+
+	echo "Trying 1200-baud touch on $port..."
+	sudo bash -lc "exec 3<> \"$port\"; stty -F \"$port\" 1200 hupcl; sleep 1; exec 3>&-; exec 3<&-" || true
+
+	echo "Trying DTR/RTS toggle on $port..."
+	sudo python3 -c '
+import os, sys, fcntl, termios, struct, time
+port = sys.argv[1]
+TIOCM_DTR = getattr(termios, "TIOCM_DTR", 0x002)
+TIOCM_RTS = getattr(termios, "TIOCM_RTS", 0x004)
+TIOCMBIS = getattr(termios, "TIOCMBIS", 0x5416)
+TIOCMBIC = getattr(termios, "TIOCMBIC", 0x5417)
+try:
+    fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+except OSError:
+    sys.exit(1)
+try:
+    for flag in (TIOCM_DTR, TIOCM_RTS):
+        fcntl.ioctl(fd, TIOCMBIC, struct.pack("I", flag))
+    time.sleep(0.1)
+    fcntl.ioctl(fd, TIOCMBIS, struct.pack("I", TIOCM_DTR))
+    fcntl.ioctl(fd, TIOCMBIC, struct.pack("I", TIOCM_RTS))
+    time.sleep(0.1)
+    fcntl.ioctl(fd, TIOCMBIS, struct.pack("I", TIOCM_RTS))
+    time.sleep(0.25)
+except OSError:
+    sys.exit(1)
+finally:
+    os.close(fd)
+' "$port" || true
+
+	echo "Waiting 10 seconds for device to reboot..."
+	sleep 10
+	return 0
+
+	return 1
+}
+
+manual_reboot_choice() {
+	local port="$1" step="$2" choice
+	echo
+	echo "Manual recovery needed for ${step:-this step}."
+	echo "To enter manual bootloader mode on many boards:"
+	echo "  1) press and hold BOOT (sometimes labeled PRG or FLASH)"
+	echo "  2) while holding BOOT, briefly press and release RESET/RST"
+	echo "  3) keep holding BOOT for 1-2 seconds, then release it"
+	echo "If the board has only two buttons, this is usually hold BOOT, tap RESET, release BOOT."
+	echo "Reboot the node connected to ${port:-the serial port}, wait 10 seconds, then choose:"
+	echo "  1) retry this step"
+	echo "  2) move on"
+	while :; do
+		read -r -p "Recovery choice [1/2]: " choice < /dev/tty
+		case "$choice" in
+			1)
+				echo "Retrying ${step:-step} after manual reboot..."
+				sleep 10
+				return 0
+				;;
+			2)
+				echo "Moving on without retrying ${step:-this step}."
+				return 1
+				;;
+			*)
+				echo "Please enter 1 or 2."
+				;;
+		esac
+	done
+}
+
+run_esptool() {
+	local output status retry_output port="" tmpfile=""
+
+	for ((i=1; i<=$#; i++)); do
+		if [[ "${!i}" == "--port" ]] && (( i < $# )); then
+			j=$((i + 1))
+			port="${!j}"
+			break
+		fi
+	done
+
+	if tmpfile=$(mktemp); then
+		if pipx run esptool "$@" 2>&1 | tee "$tmpfile"; then
+			output="$(<"$tmpfile")"
+			status=0
+		else
+			status=${PIPESTATUS[0]}
+			output="$(<"$tmpfile")"
+		fi
+		rm -f "$tmpfile"
+	else
+		output=""
+		status=1
+	fi
+
+	if [[ ${status:-0} -eq 0 ]]; then
+		return 0
+	fi
+
+	if grep -qi "Permission denied" <<<"$output"; then
+		echo "Granting access to ${port:-serial port} and retrying esptool..."
+		if [[ -n "$port" ]]; then
+			sudo chmod a+rw "$port"
+		fi
+		if tmpfile=$(mktemp); then
+			if pipx run esptool "$@" 2>&1 | tee "$tmpfile"; then
+				rm -f "$tmpfile"
+				return 0
+			fi
+			status=${PIPESTATUS[0]}
+			retry_output="$(<"$tmpfile")"
+			rm -f "$tmpfile"
+		else
+			retry_output=""
+			status=1
+		fi
+		if [[ ${status:-0} -eq 0 ]]; then
+			return 0
+		fi
+		printf '%s\n' "$retry_output" >&2
+		print_esptool_recovery_hint "$retry_output"
+		return $status
+	fi
+
+	if [[ -n "$port" ]] && esptool_output_needs_reset "$output"; then
+		if auto_reset_serial_port "$port"; then
+			if tmpfile=$(mktemp); then
+				if pipx run esptool "$@" 2>&1 | tee "$tmpfile"; then
+					rm -f "$tmpfile"
+					return 0
+				fi
+				status=${PIPESTATUS[0]}
+				retry_output="$(<"$tmpfile")"
+				rm -f "$tmpfile"
+			else
+				retry_output=""
+				status=1
+			fi
+			if [[ ${status:-0} -eq 0 ]]; then
+				return 0
+			fi
+			if manual_reboot_choice "$port" "esptool command"; then
+				if tmpfile=$(mktemp); then
+					if pipx run esptool "$@" 2>&1 | tee "$tmpfile"; then
+						rm -f "$tmpfile"
+						return 0
+					fi
+					status=${PIPESTATUS[0]}
+					retry_output="$(<"$tmpfile")"
+					rm -f "$tmpfile"
+				else
+					retry_output=""
+					status=1
+				fi
+				if [[ ${status:-0} -eq 0 ]]; then
+					return 0
+				fi
+			fi
+			printf '%s\n' "$retry_output" >&2
+			print_esptool_recovery_hint "$retry_output"
+			return $status
+		fi
+	fi
+
+	printf '%s\n' "$output" >&2
+	print_esptool_recovery_hint "$output"
+	return $status
+}
+
+prepare_esp32_flash_session() {
+	local port="$1"
+	local device="$2"
+
+	BOOTLOADER_PROBE_PORT="$port"
+	BOOTLOADER_PROBE_ACTIVE=1
+
+	echo "Setting device ${device} on ${port} into bootloader mode via baud 1200"
+	echo "$ESPTOOL_CMD --port ${port} --after $NORESET --baud 1200 $READMAC"
+	if ! probe_esptool --port "${port}" --after "$NORESET" --baud 1200 "$READMAC"; then
+		echo "esptool failed, checking if a service has the port locked"
+		LOCKEDSERVICE=$(get_locked_service)
+		if [ -n "$LOCKEDSERVICE" ] && [ "$LOCKEDSERVICE" != "None" ]; then
+			echo "Stopping service $LOCKEDSERVICE..."
+			sudo systemctl stop "$LOCKEDSERVICE"
+			sleep 3
+			probe_esptool --port "${port}" --after "$NORESET" --baud 1200 "$READMAC" || true
+		fi
+	fi
+
+	echo
+	echo
+	if probe_esptool_mac --port "$port" --after "$NORESET" --baud 1200 "$READMAC"; then
+		echo "ESP chip responded; skipping existing firmware backup."
+		rm -f "$DOWNLOAD_DIR/CURRENT.BAK"
+	else
+		echo "ESP chip did not confirm bootloader mode; skipping firmware backup."
+		rm -f "$DOWNLOAD_DIR/CURRENT.BAK"
+	fi
+	echo
+}
+
+probe_esptool() {
+	local output status port="" retry_output
+
+	for ((i=1; i<=$#; i++)); do
+		if [[ "${!i}" == "--port" ]] && (( i < $# )); then
+			j=$((i + 1))
+			port="${!j}"
+			break
+		fi
+	done
+
+	if output=$(pipx run esptool "$@" 2>&1); then
+		return 0
+	fi
+
+	status=$?
+	if grep -qi "Permission denied" <<<"$output"; then
+		echo "Granting access to ${port:-serial port} and retrying esptool..."
+		if [[ -n "$port" ]]; then
+			sudo chmod a+rw "$port"
+		fi
+		if retry_output=$(pipx run esptool "$@" 2>&1); then
+			return 0
+		fi
+		status=$?
+		print_esptool_recovery_hint "$retry_output"
+		return $status
+	fi
+
+	if [[ -n "$port" ]] && esptool_output_needs_reset "$output"; then
+		if auto_reset_serial_port "$port"; then
+			if retry_output=$(pipx run esptool "$@" 2>&1); then
+				return 0
+			fi
+			if manual_reboot_choice "$port" "bootloader probe"; then
+				if retry_output=$(pipx run esptool "$@" 2>&1); then
+					return 0
+				fi
+				status=$?
+			fi
+			print_esptool_recovery_hint "$retry_output"
+			return $status
+		fi
+	fi
+
+	print_esptool_recovery_hint "$output"
+	return $status
+}
+
+probe_esptool_mac() {
+	local output status port="" retry_output
+
+	for ((i=1; i<=$#; i++)); do
+		if [[ "${!i}" == "--port" ]] && (( i < $# )); then
+			j=$((i + 1))
+			port="${!j}"
+			break
+		fi
+	done
+
+	if output=$(pipx run esptool "$@" 2>&1); then
+		grep -qi -m1 'MAC' <<<"$output"
+		return $?
+	fi
+
+	status=$?
+	if grep -qi "Permission denied" <<<"$output"; then
+		echo "Granting access to ${port:-serial port} and retrying esptool..."
+		if [[ -n "$port" ]]; then
+			sudo chmod a+rw "$port"
+		fi
+		if retry_output=$(pipx run esptool "$@" 2>&1); then
+			grep -qi -m1 'MAC' <<<"$retry_output"
+			return $?
+		fi
+		status=$?
+		print_esptool_recovery_hint "$retry_output"
+		return $status
+	fi
+
+	if [[ -n "$port" ]] && esptool_output_needs_reset "$output"; then
+		if auto_reset_serial_port "$port"; then
+			if retry_output=$(pipx run esptool "$@" 2>&1); then
+				grep -qi -m1 'MAC' <<<"$retry_output"
+				return $?
+			fi
+			if manual_reboot_choice "$port" "ESP32 MAC probe"; then
+				if retry_output=$(pipx run esptool "$@" 2>&1); then
+					grep -qi -m1 'MAC' <<<"$retry_output"
+					return $?
+				fi
+				status=$?
+			fi
+			print_esptool_recovery_hint "$retry_output"
+			return $status
+		fi
+	fi
+
+	print_esptool_recovery_hint "$output"
+	return $status
+}
+
 list_usb_block_devs() {
 	lsblk -rpo NAME,TYPE,TRAN,MOUNTPOINT | awk '$3=="usb" {print $1}' | sort -u; 
 }
@@ -1411,7 +1801,8 @@ autodetect_device() {
 	local ESPTOOL_CMD=""
 	get_espcmd
 
-	if ! timeout 5s $ESPTOOL_CMD --port "${DEVICE_PORT}" --after "$NORESET" --baud 1200 "$READMAC" 2>/dev/null; then
+	echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $NORESET --baud 1200 $READMAC"
+	if ! probe_esptool --port "${DEVICE_PORT}" --after "$NORESET" --baud 1200 "$READMAC"; then
 		echo "esptool failed, checking if a service has the port locked"
 		# Stop the service.
 		LOCKEDSERVICE=$(get_locked_service)
@@ -1419,7 +1810,7 @@ autodetect_device() {
 			echo "Stopping service $LOCKEDSERVICE..."
 			sudo systemctl stop "$LOCKEDSERVICE"
 			sleep 3
-			timeout 5s $ESPTOOL_CMD --port "${DEVICE_PORT}" --after "$NORESET" --baud 1200 "$READMAC" 2>/dev/null || true
+			probe_esptool --port "${DEVICE_PORT}" --after "$NORESET" --baud 1200 "$READMAC" || true
 		fi
 	fi
 
@@ -1484,7 +1875,13 @@ print_fw_line() {
   if [[ -z "$val" ]]; then
     val="$(LC_ALL=C grep -aom1 -P '\.pio/libdeps/\K[^/\n]{1,100}' "$file" 2>/dev/null || true)"
   fi
-  printf '    %s %s\n' "$label" "${val:-unknown}"
+  printf '    %-20s %s\n' "$label" "${val:-unknown}"
+}
+
+print_file_size_line() {
+  local label="$1" file="$2" bytes=""
+  [[ -f "$file" ]] && bytes="$(stat -c%s "$file" 2>/dev/null || true)"
+  printf '    %-20s %s\n' "$label" "${bytes:-missing}"
 }
 
 # wrapper that returns just the detected name (same logic as print_fw_line)
@@ -1549,7 +1946,11 @@ else
     fi
 fi
 
+ARCHITECTURE=''
+DEVICE=''
 DEVICE_PORT=''
+DOWNLOADED_FILE=''
+TYPE=''
 [[ -f "$ARCHITECTURE_FILE"    ]] && ARCHITECTURE="$(<"$ARCHITECTURE_FILE")"
 [[ -f "$DEVICE_PORT_FILE"     ]] && DEVICE_PORT="$(<"$DEVICE_PORT_FILE")"
 [[ -f "$DOWNLOADED_FILE_FILE" ]] && DOWNLOADED_FILE="$(<"$DOWNLOADED_FILE_FILE")"
@@ -1568,31 +1969,12 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 	get_espcmd
 	[[ -f "$ESPTOOL_FILE"     ]] && ESPTOOL_CMD="$(<"$ESPTOOL_FILE")"
 	export ESPTOOL_PORT=$DEVICE_PORT
-	echo "Setting device ${DEVICE} on ${DEVICE_PORT} into bootloader mode via baud 1200"
-	if ! $ESPTOOL_CMD --port "${DEVICE_PORT}" --after "$NORESET" --baud 1200 "$READMAC" 2>/dev/null; then
-		echo "esptool failed, checking if a service has the port locked"
-		# Stop the service.
-		LOCKEDSERVICE=$(get_locked_service)
-		if [ -n "$LOCKEDSERVICE" ] && [ "$LOCKEDSERVICE" != "None" ]; then
-			echo "Stopping service $LOCKEDSERVICE..."
-			sudo systemctl stop "$LOCKEDSERVICE"
-			sleep 3
-			$ESPTOOL_CMD --port "${DEVICE_PORT}" --after "$NORESET" --baud 1200 "$READMAC" 2>/dev/null || true
-		fi
-	fi
-	
-	echo
-	echo
-	echo "ESP chip responded; getting existing firmware"
-	sleep 0.5
-	echo "$ESPTOOL_CMD --port $DEVICE_PORT --baud 921600 $READFLASH 0x10000 0x70000 $DOWNLOAD_DIR/CURRENT.BAK"
-	$ESPTOOL_CMD --port "$DEVICE_PORT" --after "$NORESET" --baud 921600 "$READFLASH" 0x10000 0x70000 "$DOWNLOAD_DIR/CURRENT.BAK" 2>/dev/null || true
-	echo
-	print_fw_line "    Device firmware:" "$DOWNLOAD_DIR/CURRENT.BAK"
 	print_fw_line "Downloaded firmware:" "$DOWNLOADED_FILE"
+	print_file_size_line "Downloaded bytes:" "$DOWNLOADED_FILE"
 	
 	[[ -f "$SELECTED_TYPE_FILE"    ]] && TYPE="$(<"$SELECTED_TYPE_FILE")"
 	echo
+	echo "Device firmware backup will be attempted after you confirm flashing."
 	echo "Commands that will be ran."
 	
 	if [[ "$TYPE" == "flash-wipe" ]]; then
@@ -1600,14 +1982,18 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 		echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $NORESET --baud 115200 $ERASEFLASH"
 		echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $HARDRESET --baud 115200 $WRITEFLASH 0x0000 \"${DOWNLOADED_FILE}\""
 		read -r -p "Press Enter to ERASE and INSTALL the ${DEVICE} firmware on port ${DEVICE_PORT}"
-		$ESPTOOL_CMD --port "${DEVICE_PORT}" --after "$NORESET" --baud 115200 "$ERASEFLASH"
+		prepare_esp32_flash_session "${DEVICE_PORT}" "${DEVICE}"
+		run_esptool --port "${DEVICE_PORT}" --after "$NORESET" --baud 115200 "$ERASEFLASH"
 		sleep 1
-		$ESPTOOL_CMD --port "${DEVICE_PORT}" --after "$HARDRESET" --baud 115200 "$WRITEFLASH" 0x0000 "${DOWNLOADED_FILE}"
+		run_esptool --port "${DEVICE_PORT}" --after "$HARDRESET" --baud 115200 "$WRITEFLASH" 0x0000 "${DOWNLOADED_FILE}"
 	else
 		echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $HARDRESET --baud 115200 $WRITEFLASH 0x10000 \"${DOWNLOADED_FILE}\""
 		read -r -p "Press Enter to UPDATE the ${DEVICE} firmware on port ${DEVICE_PORT}"
-		$ESPTOOL_CMD --port "${DEVICE_PORT}" --after "$HARDRESET" --baud 115200 "$WRITEFLASH" 0x10000 "${DOWNLOADED_FILE}"
+		prepare_esp32_flash_session "${DEVICE_PORT}" "${DEVICE}"
+		run_esptool --port "${DEVICE_PORT}" --after "$HARDRESET" --baud 115200 "$WRITEFLASH" 0x10000 "${DOWNLOADED_FILE}"
 	fi
+	BOOTLOADER_PROBE_ACTIVE=0
+	BOOTLOADER_PROBE_PORT=""
 	
 else
 	echo "nrf52 device"
