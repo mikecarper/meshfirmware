@@ -30,6 +30,8 @@ $script:SerialRetryDelayMs = 80
 $script:DeviceName = $ComPort
 $script:DeviceEpoch = $null
 $script:CanSendCommands = $false
+$script:ActiveSerialPort = $null
+$script:ActiveSerialBaud = 0
 
 $script:Settings = [ordered]@{}
 $script:Radio = [ordered]@{
@@ -183,6 +185,81 @@ function Open-SerialPort {
     $port.Open()
     Start-Sleep -Milliseconds 120
     return $port
+}
+
+function Close-ActiveSerialSession {
+    if ($script:ActiveSerialPort) {
+        try {
+            if ($script:ActiveSerialPort.IsOpen) {
+                $script:ActiveSerialPort.Close()
+            }
+        }
+        catch {
+        }
+        finally {
+            try {
+                $script:ActiveSerialPort.Dispose()
+            }
+            catch {
+            }
+        }
+    }
+
+    $script:ActiveSerialPort = $null
+    $script:ActiveSerialBaud = 0
+}
+
+function Clear-SerialStartupNoise {
+    param(
+        [Parameter(Mandatory)][System.IO.Ports.SerialPort]$Port,
+        [int]$TotalMs = 1500,
+        [int]$IdleMs = 250
+    )
+
+    if (-not $Port.IsOpen) { return }
+
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $idle = [System.Diagnostics.Stopwatch]::StartNew()
+    $sawData = $false
+
+    while ($watch.ElapsedMilliseconds -lt $TotalMs) {
+        try { $chunk = $Port.ReadExisting() } catch { $chunk = '' }
+
+        if ($chunk) {
+            $sawData = $true
+            $idle.Restart()
+        }
+        else {
+            Start-Sleep -Milliseconds 20
+        }
+
+        if ($sawData -and $idle.ElapsedMilliseconds -ge $IdleMs) {
+            break
+        }
+    }
+
+    try { $Port.DiscardInBuffer() } catch { }
+}
+
+function Get-ActiveSerialSession {
+    param(
+        [Parameter(Mandatory)][int]$BaudRate
+    )
+
+    if ($script:ActiveSerialPort -and
+        $script:ActiveSerialPort.IsOpen -and
+        $script:ActiveSerialBaud -eq $BaudRate -and
+        $script:ActiveSerialPort.PortName -eq $script:DeviceName) {
+        return $script:ActiveSerialPort
+    }
+
+    Close-ActiveSerialSession
+
+    $port = Open-SerialPort -ComPort $script:DeviceName -BaudRate $BaudRate -ReadTimeoutMs 800 -WriteTimeoutMs 800 -Dtr $true -Rts $true
+    Clear-SerialStartupNoise -Port $port
+    $script:ActiveSerialPort = $port
+    $script:ActiveSerialBaud = $BaudRate
+    return $script:ActiveSerialPort
 }
 
 function Invoke-SerialCommand {
@@ -345,18 +422,19 @@ function Invoke-MeshCoreSerialCommand {
 
     $lastOutput = ''
 
-    $baudCandidates = if ($UseKnownGoodBaudOnly -and $script:SerialBaudCache) {
-        @([int]$script:SerialBaudCache)
+    $baudCandidates = @()
+    if ($UseKnownGoodBaudOnly -and $script:SerialBaudCache) {
+        $baudCandidates = @([int]$script:SerialBaudCache)
     }
     else {
-        @(Get-CandidateBauds)
+        $baudCandidates = @(Get-CandidateBauds)
     }
 
-    foreach ($baudCandidate in $baudCandidates) {
+    for ($baudIndex = 0; $baudIndex -lt $baudCandidates.Count; $baudIndex++) {
+        $baudCandidate = $baudCandidates[$baudIndex]
         for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
-            $port = $null
             try {
-                $port = Open-SerialPort -ComPort $script:DeviceName -BaudRate $baudCandidate -ReadTimeoutMs 800 -WriteTimeoutMs 800 -Dtr $true -Rts $true
+                $port = Get-ActiveSerialSession -BaudRate $baudCandidate
                 $response = Invoke-SerialCommand -Port $port -Line $Command -TotalMs $TotalMs -IdleMs $script:SerialIdleTimeoutMs -Attempts 1 -RetryDelayMs $script:SerialRetryDelayMs -ExtraReadMs 400 -AllowBlankResponse:$AllowBlankResponse -BlankIdleMs $BlankIdleMs
                 $response = Strip-Prefix $response
                 if (-not [string]::IsNullOrWhiteSpace($response) -and $response -ne 'Unknown command') {
@@ -371,21 +449,16 @@ function Invoke-MeshCoreSerialCommand {
             }
             catch {
                 $lastOutput = ''
-            }
-            finally {
-                if ($port) {
-                    try {
-                        if ($port.IsOpen) { $port.Close() }
-                        $port.Dispose()
-                    }
-                    catch {
-                    }
-                }
+                Close-ActiveSerialSession
             }
 
             if ($attempt -lt $MaxRetries) {
                 Start-Sleep -Milliseconds $script:SerialRetryDelayMs
             }
+        }
+
+        if ($baudIndex -lt ($baudCandidates.Count - 1)) {
+            Close-ActiveSerialSession
         }
     }
 
@@ -435,36 +508,28 @@ function Send-OneWayOrEchoSerialCommand {
         throw 'No COM port has been selected.'
     }
 
-    $baudCandidates = if ($script:SerialBaudCache) {
-        @([int]$script:SerialBaudCache)
+    $baudCandidates = @()
+    if ($script:SerialBaudCache) {
+        $baudCandidates = @([int]$script:SerialBaudCache)
     }
     else {
-        @(Get-CandidateBauds)
+        $baudCandidates = @(Get-CandidateBauds)
     }
 
     foreach ($baudCandidate in $baudCandidates) {
-        $port = $null
         try {
-            $port = Open-SerialPort -ComPort $script:DeviceName -BaudRate $baudCandidate -ReadTimeoutMs 400 -WriteTimeoutMs 400 -Dtr $true -Rts $true
+            $port = Get-ActiveSerialSession -BaudRate $baudCandidate
             try { $port.DiscardInBuffer() } catch { }
             try { $port.DiscardOutBuffer() } catch { }
             $port.WriteLine($Command)
             Start-Sleep -Milliseconds $SettleMs
             $script:SerialBaudCache = $baudCandidate
             $script:PreferredBaud = $baudCandidate
+            Close-ActiveSerialSession
             return
         }
         catch {
-        }
-        finally {
-            if ($port) {
-                try {
-                    if ($port.IsOpen) { $port.Close() }
-                    $port.Dispose()
-                }
-                catch {
-                }
-            }
+            Close-ActiveSerialSession
         }
     }
 
@@ -1010,11 +1075,16 @@ function Load-RepeaterSettings {
             default { 220 }
         }
         $script:Settings[$entry.Local] = Read-MeshCoreSettingValue -Command "get $($entry.Remote)" -TotalMs $readTimeoutMs -AllowBlankResponse:$allowBlankResponse -BlankIdleMs $blankIdleMs
+        $displayValue = Format-ProgressSettingValue -Key $entry.Remote -Value $script:Settings[$entry.Local]
+        Write-Progress -Id $progressId -Activity 'Reading device settings' -Status ("get {0} -> {1}" -f $entry.Remote, $displayValue) -PercentComplete $pct
+        Start-Sleep -Milliseconds 40
     }
 
     $step++
     Write-Progress -Id $progressId -Activity 'Reading device settings' -Status 'powersaving' -PercentComplete ([int](($step * 100) / $total))
     $script:Settings.powersaving = Read-MeshCoreSettingValue -Command 'powersaving' -TotalMs 800
+    Write-Progress -Id $progressId -Activity 'Reading device settings' -Status ("powersaving -> {0}" -f (Format-ProgressSettingValue -Key 'powersaving' -Value $script:Settings.powersaving)) -PercentComplete ([int](($step * 100) / $total))
+    Start-Sleep -Milliseconds 40
 
     $step++
     Write-Progress -Id $progressId -Activity 'Reading device settings' -Status 'get radio' -PercentComplete ([int](($step * 100) / $total))
@@ -1025,6 +1095,12 @@ function Load-RepeaterSettings {
     $script:Radio.Bw = if ($parts.Count -ge 2) { Trim-Text $parts[1] } else { '' }
     $script:Radio.Sf = if ($parts.Count -ge 3) { Trim-Text $parts[2] } else { '' }
     $script:Radio.Cr = if ($parts.Count -ge 4) { Trim-Text $parts[3] } else { '' }
+    $radioDisplay = if ($radioRaw) { $radioRaw } else { '<empty>' }
+    if ($radioDisplay.Length -gt 48) {
+        $radioDisplay = $radioDisplay.Substring(0, 45) + '...'
+    }
+    Write-Progress -Id $progressId -Activity 'Reading device settings' -Status ("get radio -> {0}" -f $radioDisplay) -PercentComplete ([int](($step * 100) / $total))
+    Start-Sleep -Milliseconds 40
 
     Write-Progress -Id $progressId -Activity 'Reading device settings' -Completed
 }
@@ -1036,6 +1112,29 @@ function Format-PreviewText {
     if (-not $text) { return '' }
     if ($text.Length -le 16) { return $text }
     return ('{0}...{1}' -f $text.Substring(0, 8), $text.Substring($text.Length - 8))
+}
+
+function Format-ProgressSettingValue {
+    param(
+        [Parameter(Mandatory)][string]$Key,
+        [AllowNull()][string]$Value
+    )
+
+    $text = Trim-Text $Value
+    if (-not $text) {
+        return '<empty>'
+    }
+
+    switch ($Key) {
+        'guest.password' { return '<hidden>' }
+        'password' { return '<hidden>' }
+        'prv.key' { return Format-PreviewText $text }
+        'public.key' { return Format-PreviewText $text }
+        default {
+            if ($text.Length -le 48) { return $text }
+            return ($text.Substring(0, 45) + '...')
+        }
+    }
 }
 
 function Edit-RepeaterSettingsMenu {
@@ -1538,3 +1637,5 @@ if (Confirm-RestartRadio) {
 else {
     Write-Host 'Radio reboot skipped.'
 }
+
+Close-ActiveSerialSession

@@ -1155,15 +1155,15 @@ function Select-FlashTarget {
     while ($true) {
         Write-Host ""
         Write-Host "What do you want to flash to?"
-        Write-Host "  1) Meshtastic"
-        Write-Host "  2) MeshCore"
+        Write-Host "  1) MeshCore"
+        Write-Host "  2) Meshtastic"
         # Write-Host "  3) Reticulum"
 
         $choice = Read-Host "Enter choice (1-2)"
 
         switch ($choice.Trim()) {
-            "1" { return "Meshtastic" }
-            "2" { return "MeshCore" }
+            "1" { return "MeshCore" }
+            "2" { return "Meshtastic" }
             # "3" { return "Reticulum" }
             default {
                 Write-Host "Invalid selection. Please enter 1 or 2." -ForegroundColor Yellow
@@ -2145,6 +2145,7 @@ function GetHW() {
 	$FirmwareVersion = ""
 	$hwModelSlug = ""
 	$selectedNodeProject = ""
+	$detectedNodeProject = ""
 	if ($DFU_node) {
 		$HWNameShort = $DFU_node
 		$hwModelSlug = $HWNameShort
@@ -2161,6 +2162,7 @@ function GetHW() {
 		$FirmwareVersion     = $result[2]
 		$usbComDevices       = $result[3]
 		$selectedNodeProject = $result[4]
+		$detectedNodeProject = $selectedNodeProject
 	}
 	Write-Host "$selectedComPort. Device: $hwModelSlug. Firmware: $FirmwareVersion."
 	$selectedNodeProject = Select-FlashTarget
@@ -2188,6 +2190,7 @@ function GetHW() {
 		$SelectedFirmwareFile = SelectMatchingFile
 		$hw = GetHardwareInfo -Slug $HWNameFile -ListPath $HARDWARE_LIST -SelectedFirmwareFile $SelectedFirmwareFile -selectedComPort $selectedComPort -HWNameFile $HWNameFile -Version $FirmwareVersion
 		$hw | Add-Member -NotePropertyName Project -NotePropertyValue "Meshtastic" -Force
+		$hw | Add-Member -NotePropertyName DetectedProject -NotePropertyValue $detectedNodeProject -Force
 
 
 
@@ -2199,8 +2202,12 @@ function GetHW() {
 		Write-Host "  New Firmware:      $($hw.FirmwareFile)"
 		Write-Host "  COM Port:          $($hw.ComPort)"
 		
-		if ($hw.ComPort -ne "NA" -and $hw.Version -ne "--") {
+		if ($hw.ComPort -ne "NA" -and $hw.Version -ne "--" -and $detectedNodeProject -eq "Meshtastic") {
 			MakeConfigBackup $hw.HWNameFile $hw.ComPort
+		}
+		elseif ($hw.ComPort -ne "NA" -and $hw.Version -ne "--") {
+			$detectedLabel = if ([string]::IsNullOrWhiteSpace($detectedNodeProject)) { "non-Meshtastic firmware" } else { $detectedNodeProject }
+			Write-Host "Skipping Meshtastic config backup because the current device appears to be $detectedLabel." -ForegroundColor Yellow
 		}
 		
 	}
@@ -3281,9 +3288,10 @@ function updateFlashViaEspTool {
 	}
 
 		
-	Start-Sleep -Seconds 12
-	$devicesAfter = getUSBComPort -SkipInfo
-	$selectedComPortPart2 = $devicesAfter[0]
+	$selectedComPortPart2 = Resolve-EspUsbComPort -PreferredComPort $selectedComPort -TimeoutMs 5000
+	if ([string]::IsNullOrWhiteSpace($selectedComPortPart2)) {
+		$selectedComPortPart2 = $selectedComPort
+	}
 	Write-Host "Flashing $SelectedFirmwareFile at 0x10000. Write application firmware."
 	Write-Host "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $WriteFlashCommand 0x10000 $SelectedFirmwareFile"
 	Write-Host ""
@@ -3306,6 +3314,42 @@ function Get-FirstExistingLocalFileName {
 		if (Test-Path (Join-Path $Folder $candidate)) {
 			return $candidate
 		}
+	}
+
+	return ""
+}
+
+function Resolve-EspUsbComPort {
+	param(
+		[string]$PreferredComPort = "",
+		[int]$TimeoutMs = 5000
+	)
+
+	$deadline = (Get-Date).AddMilliseconds($TimeoutMs)
+	do {
+		$ports = @(
+			getallUSBCom |
+				Select-Object -ExpandProperty drive_letter |
+				Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+		)
+
+		if (-not [string]::IsNullOrWhiteSpace($PreferredComPort) -and $ports -contains $PreferredComPort) {
+			return $PreferredComPort
+		}
+
+		if ($ports.Count -eq 1) {
+			return $ports[0]
+		}
+
+		if ($ports.Count -gt 0 -and [string]::IsNullOrWhiteSpace($PreferredComPort)) {
+			return $ports[0]
+		}
+
+		Start-Sleep -Milliseconds 250
+	} while ((Get-Date) -lt $deadline)
+
+	if (-not [string]::IsNullOrWhiteSpace($PreferredComPort)) {
+		return $PreferredComPort
 	}
 
 	return ""
@@ -3601,47 +3645,26 @@ function installFlashViaEspTool {
 	Write-Host ""
 	Write-Host "Setting baud to 1200 for firmware update mode. $ESPTOOL_CMD --baud 1200 --port $selectedComPort chip_id"
 	$a = run_cmd "$ESPTOOL_CMD --baud 1200 --port $selectedComPort chip_id"
-	Start-Sleep -Seconds 1
-	$devicesAfter = getUSBComPort -SkipInfo
-	$selectedComPortPart2 = $devicesAfter[0]
+	$selectedComPortPart2 = Resolve-EspUsbComPort -PreferredComPort $selectedComPort -TimeoutMs 5000
+	if ([string]::IsNullOrWhiteSpace($selectedComPortPart2)) {
+		$selectedComPortPart2 = $selectedComPort
+	}
 	Write-Host "Erasing the flash."
 	Write-Host "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $EraseFlashCommand"
 	run_cmd "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $EraseFlashCommand" -Stream
 	Write-Host ""
-	Write-Host "Flashing $installImage at 0x00. Write Meshtastic Firmware."
-	Write-Host "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $WriteFlashCommand 0x00 $installImage"
+	$installLeaf = Split-Path -Leaf $installImage
+	$otaLeaf = Split-Path -Leaf $OTA_FILENAME
+	$spiffsLeaf = Split-Path -Leaf $SPIFFS_FILENAME
+	Write-Host "Flashing install, OTA, and filesystem images in one esptool session."
+	Write-Host "Image map:"
+	Write-Host "  0x00000000 -> $installLeaf"
+	Write-Host "  $OTA_OFFSET -> $otaLeaf"
+	Write-Host "  $SPIFFS_OFFSET -> $spiffsLeaf"
+	$combinedWriteCommand = "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $WriteFlashCommand 0x00 `"$installLeaf`" $OTA_OFFSET `"$otaLeaf`" $SPIFFS_OFFSET `"$spiffsLeaf`""
+	Write-Host $combinedWriteCommand
 	Write-Host ""
-	run_cmd "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $WriteFlashCommand 0x00 $installImage" -Stream
-
-
-	Write-Host ""
-	Write-Host ""
-	Write-Host ""
-	Write-Host "Waiting 12 seconds"
-	Start-Sleep -Seconds 12
-	$devicesAfter = getUSBComPort -SkipInfo
-	$selectedComPort = $devicesAfter[0]
-	Write-Host "Setting baud to 1200 for firmware update mode. $ESPTOOL_CMD --baud 1200 --port $selectedComPort chip_id"
-	$b = run_cmd "$ESPTOOL_CMD --baud 1200 --port $selectedComPort chip_id"
-	Start-Sleep -Seconds 1
-	Write-Host "Flashing $OTA_FILENAME at $OTA_OFFSET. Write Bluetooth Over The Air Update firmware."
-	Write-Host "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $WriteFlashCommand $OTA_OFFSET $OTA_FILENAME"
-	Write-Host ""
-	run_cmd "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $WriteFlashCommand $OTA_OFFSET $OTA_FILENAME" -Stream
-
-
-	Write-Host ""
-	Write-Host ""
-	Write-Host ""
-	Write-Host "Waiting 12 seconds"
-	Start-Sleep -Seconds 12
-	Write-Host "Setting baud to 1200 for firmware update mode. $ESPTOOL_CMD --baud 1200 --port $selectedComPort chip_id"
-	$c = run_cmd "$ESPTOOL_CMD --baud 1200 --port $selectedComPort chip_id"
-	Start-Sleep -Seconds 1
-	Write-Host "Flashing $SPIFFS_FILENAME at $SPIFFS_OFFSET. Write Filesystem firmware."
-	Write-Host "$ESPTOOL_CMD" "--baud" "115200" "--port" "$selectedComPortPart2" $WriteFlashCommand "$SPIFFS_OFFSET" "$SPIFFS_FILENAME"
-	Write-Host ""
-	run_cmd "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $WriteFlashCommand $SPIFFS_OFFSET $SPIFFS_FILENAME" -Stream
+	run_cmd $combinedWriteCommand -Stream
 	
 	
 	Write-Host ""
