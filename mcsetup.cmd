@@ -94,7 +94,8 @@ function Test-IsLogLine {
         $value -match '^[\W_]*(DEBUG|TRACE|INFO|WARN|ERROR)\s*(?:\:|\|)\s*' -or
         $value -match '^[\W_]*\[[^\]]+\]\s*(DEBUG|TRACE|INFO|WARN|ERROR)\b' -or
         $value -match '^\s*\[[^\]]+\]\s*$' -or
-        $value -match '\[SerialConsole\].*\bState\s*:\s*\w+\b'
+        $value -match '\[SerialConsole\].*\bState\s*:\s*\w+\b' -or
+        $value -match '^\d{1,2}:\d{2}(?::\d{2})?\s*-\s*\d{1,2}/\d{1,2}/\d{4}\s+[A-Z]+(?:\s+[A-Z]+)*:'
     )
 }
 
