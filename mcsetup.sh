@@ -892,6 +892,7 @@ load_repeater_settings() {
 
   # fetch generic keys
   for k in "${keys[@]}"; do
+    printf '\rReading setting: %-24s' "$k"
     v="$(serial_cmd "get $k" | trim)"
     case "$k" in
 	  dutycycle)             setting_dutycycle="$v" ;;
@@ -923,14 +924,17 @@ load_repeater_settings() {
     esac
   done
   
+  printf '\rReading setting: %-24s' "powersaving"
   setting_powersaving="$(serial_cmd 'powersaving' | trim)"
 
   # radio needs CSV parsing: {freq},{bw},{sf},{cr}
   local radio_raw
+  printf '\rReading setting: %-24s' "radio"
   radio_raw="$(serial_cmd 'get radio' | trim)"
   # remove spaces around commas just in case
   radio_raw="$(echo "$radio_raw" | sed -E 's/[[:space:]]*,[[:space:]]*/,/g')"
   IFS=',' read -r RADIO_FREQ RADIO_BW RADIO_SF RADIO_CR <<< "$radio_raw"
+  printf '\n\n'
 }
 
 edit_repeater_settings_menu() {
