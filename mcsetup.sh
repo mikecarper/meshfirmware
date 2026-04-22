@@ -612,6 +612,8 @@ serial_cmd() {
 
   local max_retries="${SERIAL_RETRIES:-3}"
   local delay_between="${SERIAL_RETRY_DELAY:-0.08}"
+  local allow_blank_response="${SERIAL_ALLOW_BLANK_RESPONSE:-0}"
+  local first_candidate_only="${SERIAL_FIRST_CANDIDATE_ONLY:-0}"
 
   # Fast read/exit behavior
   local total_timeout="${SERIAL_TOTAL_TIMEOUT:-7.5s}"  # hard cap
@@ -647,6 +649,9 @@ serial_cmd() {
   for b in "${DEFAULT_BAUDS[@]}"; do
     _add_unique "$b"
   done
+  if [[ "$first_candidate_only" == "1" && ${#candidates[@]} -gt 0 ]]; then
+    candidates=("${candidates[0]}")
+  fi
 
   local baud attempt out last_out
   last_out=""
@@ -688,6 +693,12 @@ serial_cmd() {
 		fi
 
       last_out="$out"
+
+      if [[ "$allow_blank_response" == "1" && $rc -eq 0 && ( -z "$out" || "$out" == "$line" || "$out" =~ $log_pat ) ]]; then
+        SERIAL_BAUD_CACHE="$baud"
+        BAUD="$baud"
+        return 0
+      fi
 
       # Empty, echo, or log line -> retry
       if [[ -z "$out" || "$out" == "$line" || "$out" =~ $log_pat ]]; then
@@ -893,7 +904,14 @@ load_repeater_settings() {
   # fetch generic keys
   for k in "${keys[@]}"; do
     printf '\rReading setting: %-24s' "$k"
-    v="$(serial_cmd "get $k" | trim)"
+    case "$k" in
+      guest.password|owner.info)
+        v="$(SERIAL_RETRIES=1 SERIAL_ALLOW_BLANK_RESPONSE=1 SERIAL_FIRST_CANDIDATE_ONLY=1 serial_cmd "get $k" | trim)"
+        ;;
+      *)
+        v="$(serial_cmd "get $k" | trim)"
+        ;;
+    esac
     case "$k" in
 	  dutycycle)             setting_dutycycle="$v" ;;
 	  af)             		  setting_af="$v" ;;
