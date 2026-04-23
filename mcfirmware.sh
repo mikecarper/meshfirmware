@@ -189,6 +189,8 @@ spinner() {
 classify_bin() {
 	local f="$1"
 
+	ensure_command xxd vim-common
+
 	hex() {
 		xxd -p -l "$2" -s "$1" "$f" 2>/dev/null | tr -d '\n'
 	}
@@ -502,11 +504,11 @@ check_internet() {
 
 install_packages() {
     if (( ! APT_UPDATED )); then
-        sudo apt update || return 1
+        sudo apt-get update || return 1
         APT_UPDATED=1
     fi
 
-	sudo apt -y install "$@"
+	sudo apt-get -y install "$@"
 }
 
 ensure_command() {
@@ -640,8 +642,6 @@ serial_cmd() {
 
   # Ensure serial and binary-inspection tools are installed.
   ensure_command socat
-  ensure_command xxd
-  ensure_command vim-common
 
   # Build local candidate list (unique, in priority order)
   local -a candidates=()
