@@ -390,6 +390,78 @@ esp_firmware_layout() {
 	esac
 }
 
+describe_flash_action() {
+	local action="${1:-}"
+
+	case "$action" in
+		flash-wipe)   printf 'new install (erase + install)' ;;
+		flash-update) printf 'update' ;;
+		*)            printf 'unknown' ;;
+	esac
+}
+
+detect_custom_firmware_type() {
+	local selection="${1:-}" arch_lc="${2,,}" check="" name_lc=""
+
+	[[ -n "$selection" ]] || return 0
+
+	check="$selection"
+	[[ "$check" == file:///* ]] && check="${check#file://}"
+	check="${check%%[\?#]*}"
+	name_lc="${check##*/}"
+	name_lc="${name_lc,,}"
+
+	if [[ "$arch_lc" == esp32* ]]; then
+		case "$name_lc" in
+			*merged.bin|*cleaninstall.bin|*factory.bin|*freshinstall*.bin|*install*.bin)
+				printf '%s' "flash-wipe"
+				return 0
+				;;
+			*update.bin|*upgrade.bin|*ota.bin)
+				printf '%s' "flash-update"
+				return 0
+				;;
+			*.bin)
+				case "$(esp_filename_layout_hint "$name_lc" 2>/dev/null || true)" in
+					merged)
+						printf '%s' "flash-wipe"
+						return 0
+						;;
+					app-only)
+						printf '%s' "flash-update"
+						return 0
+						;;
+				esac
+				;;
+		esac
+	else
+		case "$name_lc" in
+			*.uf2|*.hex)
+				printf '%s' "flash-wipe"
+				return 0
+				;;
+			*-ota.zip|*update*.zip|*upgrade*.zip|*.zip)
+				printf '%s' "flash-update"
+				return 0
+				;;
+		esac
+	fi
+}
+
+apply_custom_firmware_selection() {
+	local selection="${1:-}" detected_type=""
+
+	CHOSEN_FILE="$selection"
+	VERSION="custom"
+	detected_type="$(detect_custom_firmware_type "$selection" "$ARCHITECTURE")"
+	if [[ -n "$detected_type" ]]; then
+		TYPE="$detected_type"
+		echo "Auto-detected custom firmware as: $(describe_flash_action "$TYPE")"
+	else
+		echo "Could not determine install mode from the custom filename; the flash step will inspect it again."
+	fi
+}
+
 show_help() {
 	echo "Usage: $(basename "$0") [OPTIONS]"
 	echo ""
@@ -689,8 +761,7 @@ choose_custom_firmware_file() {
       continue
     fi
 
-    CHOSEN_FILE="$local_input"
-    VERSION="custom"
+    apply_custom_firmware_selection "$local_input"
     return 0
   done
 }
@@ -810,8 +881,7 @@ choose_version_from_releases() {
 							echo "ERROR: Selection must end with ${required_ext}"
 							continue
 						fi
-						CHOSEN_FILE="$input"
-						VERSION="custom"
+						apply_custom_firmware_selection "$input"
 						break
 					fi
 
@@ -1094,7 +1164,7 @@ choose_meshcore_firmware() {
 				echo ""
 				ROLE="custom"
 				VERSION="custom"
-				TYPE="custom"
+				[[ -n "$TYPE" ]] || TYPE="custom"
 				break
 			else
 				echo "Custom selection failed; please choose again."
@@ -2182,6 +2252,7 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 	get_espcmd
 	[[ -f "$ESPTOOL_FILE"     ]] && ESPTOOL_CMD="$(<"$ESPTOOL_FILE")"
 	export ESPTOOL_PORT=$DEVICE_PORT
+	[[ -f "$SELECTED_TYPE_FILE"    ]] && TYPE="$(<"$SELECTED_TYPE_FILE")"
 	print_fw_line "Downloaded firmware:" "$DOWNLOADED_FILE"
 	print_file_size_line "Downloaded bytes:" "$DOWNLOADED_FILE"
 	FW_LAYOUT="$(esp_firmware_layout "$DOWNLOADED_FILE")"
@@ -2190,6 +2261,10 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 		echo "Firmware layout: merged image detected from file contents"
 	elif [[ "$FW_LAYOUT" == "app-only" ]]; then
 		echo "Firmware layout: app-only image detected from file contents"
+	elif [[ "$TYPE" == "flash-wipe" ]]; then
+		echo "Firmware layout: unknown from file contents; using custom file hint for a new install"
+	elif [[ "$TYPE" == "flash-update" ]]; then
+		echo "Firmware layout: unknown from file contents; using custom file hint for an update"
 	else
 		echo "Firmware layout: unknown from file contents; falling back to selected type"
 	fi
@@ -2199,7 +2274,6 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 		echo "Notice: filename does not match the detected firmware layout."
 	fi
 	
-	[[ -f "$SELECTED_TYPE_FILE"    ]] && TYPE="$(<"$SELECTED_TYPE_FILE")"
 	echo
 	echo "Device firmware backup will be attempted after you confirm flashing."
 	echo "Commands that will be ran."
@@ -2226,19 +2300,24 @@ else
 	echo "nrf52 device"
 	echo "Downloaded firmware: $DOWNLOADED_FILE"
 
-	while true; do
-		echo "Choose firmware action for ${DEVICE} on ${DEVICE_PORT}:"
-		echo "  1) flash-update       (write only)"
-		echo "  2) flash-wipe + flash (erase, then write)"
-		read -r -p "Selection [1/2]: " choice < /dev/tty
+	if [[ "$TYPE" == "flash-update" || "$TYPE" == "flash-wipe" ]]; then
+		ACTION="$TYPE"
+		echo "Auto-detected firmware action: $(describe_flash_action "$ACTION")"
+	else
+		while true; do
+			echo "Choose firmware action for ${DEVICE} on ${DEVICE_PORT}:"
+			echo "  1) flash-update       (write only)"
+			echo "  2) flash-wipe + flash (erase, then write)"
+			read -r -p "Selection [1/2]: " choice < /dev/tty
 
-		case "$choice" in
-			1) ACTION="flash-update"; break ;;
-			2) ACTION="flash-wipe";   break ;;
-			0) echo "Skipped."; exit 0 ;;
-			*) echo "Invalid choice."; continue ;;
-		esac
-	done
+			case "$choice" in
+				1) ACTION="flash-update"; break ;;
+				2) ACTION="flash-wipe";   break ;;
+				0) echo "Skipped."; exit 0 ;;
+				*) echo "Invalid choice."; continue ;;
+			esac
+		done
+	fi
 	
 	echo "Getting the latest version of adafruit-nrfutil"
 	pipx run adafruit-nrfutil version
