@@ -46,6 +46,7 @@ fi
 
 # Global argument variables.
 DEBUG_JQ="0"
+APT_UPDATED=0
 
 # Global variable to track the spinner index.
 spinner_index=0
@@ -428,8 +429,12 @@ check_internet() {
 }
 
 install_packages() {
-	sudo apt-get update
-	sudo apt-get -y install "$@"
+    if (( ! APT_UPDATED )); then
+        sudo apt update || return 1
+        APT_UPDATED=1
+    fi
+
+	sudo apt -y install "$@"
 }
 
 ensure_command() {
@@ -563,7 +568,8 @@ serial_cmd() {
 
   # Ensure serial and binary-inspection tools are installed.
   ensure_command socat
-  ensure_command xxd xxd vim-common
+  ensure_command xxd
+  ensure_command vim-common
 
   # Build local candidate list (unique, in priority order)
   local -a candidates=()
@@ -1610,7 +1616,8 @@ get_espcmd() {
 	done
 	if [ -z "$PYTHON" ]; then
 		echo "No Python interpreter found. Installing python3..."
-		install_packages python3 pipx
+		install_packages python3
+		install_packages pipx
 		PYTHON=$(command -v python3) || {
 			echo "Failed to install python3"
 			exit 1
@@ -1618,7 +1625,8 @@ get_espcmd() {
 	fi
 
 	# Ensure pipx & meshcore-cli are installed.
-	ensure_command pipx pipx pip
+	ensure_command pip 
+	ensure_command pipx
 
 	esptool_set_variables
 	ESPTOOL_CMD="pipx run esptool"
