@@ -50,7 +50,7 @@ https://www.amazon.com/JMT-Bandpass-Connector-Anti-Interference-Receiver/dp/B0BP
 #### 5x SMA to N bulkhead (2 pc): $50  
 https://www.amazon.com/coaxial-Assembly-Bulkhead-Connector-Adapter/dp/B0932VTJ2C/
 
-## Battery Hookup
+## Battery Hookup (use code DIY for 5% off)
 #### 80x 18650 Batteries: $93  
 https://batteryhookup.com/products/eve-icr18650-20p-3-6v-2000mah-30a-high-rate-18650-li-ion-cells-overstock?variant=47194900103330  
 
