@@ -2,17 +2,17 @@
 <img width="709" height="945" alt="image" src="https://github.com/user-attachments/assets/421c9198-9da5-49a9-9b3c-89a0187936ff" />  
 https://github.com/IoTThinks/EasySkyMesh/releases/tag/PowerSaving14.1 (5.5 mA idle power draw)  
 
-#### Common for Both
-Heltec v4.3.1 board  
-RAKwireless Solar Panel  
-18650 Battery Holders  
-18650 Batteries  
+#### Common All Both
+- Heltec v4.3.1 board  
+- RAKwireless Solar Panel  
+- 18650 Battery Holders  
+- 18650 Batteries  
 
 #### Differences
-Box  
-Antenna Connector  
-Antenna  
-Number of Batteries  
+- Box  
+- Radio to antenna Connectors  
+- Antenna  
+- Number of Batteries  
 
 ---
 
