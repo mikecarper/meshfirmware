@@ -1,6 +1,6 @@
 # 10x Heltec v4 builds  
 <img width="709" height="945" alt="image" src="https://github.com/user-attachments/assets/421c9198-9da5-49a9-9b3c-89a0187936ff" />  
-https://github.com/IoTThinks/EasySkyMesh/releases/tag/PowerSaving14.1 (5.5 mA idle power draw)  
+0https://github.com/IoTThinks/EasySkyMesh/releases/tag/PowerSaving15 (5.8 mA idle power draw)  
 
 #### Common All Both
 - Heltec v4.3.1 board  
