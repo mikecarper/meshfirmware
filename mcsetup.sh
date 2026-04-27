@@ -614,6 +614,7 @@ serial_cmd() {
   local delay_between="${SERIAL_RETRY_DELAY:-0.08}"
   local allow_blank_response="${SERIAL_ALLOW_BLANK_RESPONSE:-0}"
   local first_candidate_only="${SERIAL_FIRST_CANDIDATE_ONLY:-0}"
+  local output_mode="${SERIAL_OUTPUT_MODE:-last}" # "last" (default) or "all"
 
   # Fast read/exit behavior
   local total_timeout="${SERIAL_TOTAL_TIMEOUT:-7.5s}"  # hard cap
@@ -669,6 +670,7 @@ serial_cmd() {
 			  line="$3"
 			  idle="$4"
 			  noise_pat="$5"
+			  output_mode="$6"
 
 			  printf "%b" "${line}\r\n" \
 				| socat -T "${idle}" - "OPEN:${device},raw,echo=0,b${baud}" 2>/dev/null \
@@ -678,14 +680,20 @@ serial_cmd() {
 				| sed -E "s/^[[:space:][:cntrl:]]+//; s/[[:space:]]+$//" \
 				| sed -E "s/^[^0-9A-Za-z+\\-]+//" \
 				| grep -E -v "$noise_pat" \
-				| awk -v cmd="$line" '"'"'
+				| awk -v cmd="$line" -v mode="$output_mode" '"'"'
 					NF {
 					  if ($0 == cmd) next
-					  keep = $0
+					  if (mode == "all") {
+					    print
+					  } else {
+					    keep = $0
+					  }
 					}
-					END { print keep }
+					END {
+					  if (mode != "all") print keep
+					}
 				  '"'"'
-			' _ "${device_name_now}" "${baud}" "${line}" "${idle_timeout}" "${noise_pat}"
+			' _ "${device_name_now}" "${baud}" "${line}" "${idle_timeout}" "${noise_pat}" "${output_mode}"
 		)"
 		rc=$?
 
@@ -719,6 +727,10 @@ serial_cmd() {
   # Total failure: return empty (or whatever last_out was), but success exit code
   printf '%s' "$last_out"
   return 0
+}
+
+serial_cmd_multiline_200ms() {
+  SERIAL_RETRIES=1 SERIAL_OUTPUT_MODE=all SERIAL_IDLE_TIMEOUT=0.2 SERIAL_TOTAL_TIMEOUT=2s serial_cmd "$@"
 }
 
 trim() {
@@ -1014,17 +1026,21 @@ edit_repeater_settings_menu() {
         ;;
 
 		0)
-		  read -rp "Command to run: " v
-		  if [ -n "$v" ] && [ "$v" != "$setting_name" ]; then
+		  read -rp "Command to run (multiline read, 200ms idle timeout): " v
+		  if [ -n "$v" ]; then
 			echo "Running: $v"
 			if [[ -n "${device_epoch:-}" ]]; then
-				serial_cmd "$v"
+				raw_out="$(serial_cmd_multiline_200ms "$v" | trim)"
+				if [[ -n "$raw_out" ]]; then
+				  printf '%s\n' "$raw_out"
+				else
+				  echo "(No response within 200ms idle window.)"
+				fi
 			else
 				serial_cmd_echo "$v"
 			fi
-			setting_name="$v"
 		  else
-			echo "No change to name"
+			echo "No command entered."
 		  fi
 		  ;;
 
