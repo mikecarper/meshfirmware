@@ -625,8 +625,10 @@ serial_cmd() {
 
   ensure_serial_access "$device_name_now"
 
-  # Timestamped device log line pattern (skip).
-  local log_pat='^[0-9]{1,2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]+[A-Z]+([[:space:]]+[A-Z]+)*:'
+  # Device noise lines to skip when reading command replies.
+  local ts_log_pat='^[0-9]{1,2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]+[A-Z]+([[:space:]]+[A-Z]+)*:'
+  local level_log_pat='^(DEBUG|TRACE|INFO|WARN|WARNING|ERROR|ERR|CRITICAL|NOTICE|VERBOSE)[[:space:]]*:'
+  local noise_pat="(${ts_log_pat})|(${level_log_pat})"
 
   # Ensure socat is installed.
   ensure_command socat >&2
@@ -666,7 +668,7 @@ serial_cmd() {
 			  baud="$2"
 			  line="$3"
 			  idle="$4"
-			  log_pat="$5"
+			  noise_pat="$5"
 
 			  printf "%b" "${line}\r\n" \
 				| socat -T "${idle}" - "OPEN:${device},raw,echo=0,b${baud}" 2>/dev/null \
@@ -675,7 +677,7 @@ serial_cmd() {
 				| sed -E "s/^[[:space:][:cntrl:]]*(->|>)+[[:space:]]*//" \
 				| sed -E "s/^[[:space:][:cntrl:]]+//; s/[[:space:]]+$//" \
 				| sed -E "s/^[^0-9A-Za-z+\\-]+//" \
-				| grep -E -v "$log_pat" \
+				| grep -E -v "$noise_pat" \
 				| awk -v cmd="$line" '"'"'
 					NF {
 					  if ($0 == cmd) next
@@ -683,7 +685,7 @@ serial_cmd() {
 					}
 					END { print keep }
 				  '"'"'
-			' _ "${device_name_now}" "${baud}" "${line}" "${idle_timeout}" "${log_pat}"
+			' _ "${device_name_now}" "${baud}" "${line}" "${idle_timeout}" "${noise_pat}"
 		)"
 		rc=$?
 
@@ -694,14 +696,14 @@ serial_cmd() {
 
       last_out="$out"
 
-      if [[ "$allow_blank_response" == "1" && $rc -eq 0 && ( -z "$out" || "$out" == "$line" || "$out" =~ $log_pat ) ]]; then
+      if [[ "$allow_blank_response" == "1" && $rc -eq 0 && ( -z "$out" || "$out" == "$line" || "$out" =~ $noise_pat ) ]]; then
         SERIAL_BAUD_CACHE="$baud"
         BAUD="$baud"
         return 0
       fi
 
       # Empty, echo, or log line -> retry
-      if [[ -z "$out" || "$out" == "$line" || "$out" =~ $log_pat ]]; then
+      if [[ -z "$out" || "$out" == "$line" || "$out" =~ $noise_pat ]]; then
         sleep "$delay_between"
         continue
       fi
