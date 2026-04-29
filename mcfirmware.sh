@@ -1435,15 +1435,51 @@ download_and_verify() {
 		echo "rm -rf $DOWNLOAD_DIR" >&2
 		return 1
 	fi
+
+	next_non_overwrite_path_keep_ext() {
+		local path="$1"
+		local dir file stem ext candidate n
+
+		if [[ ! -e "$path" ]]; then
+			printf '%s' "$path"
+			return 0
+		fi
+
+		dir="$(dirname -- "$path")"
+		file="$(basename -- "$path")"
+
+		if [[ "$file" == *.* && "$file" != .* ]]; then
+			stem="${file%.*}"
+			ext=".${file##*.}"
+		else
+			stem="$file"
+			ext=""
+		fi
+
+		n=1
+		while :; do
+			candidate="${dir}/${stem}.${n}${ext}"
+			if [[ ! -e "$candidate" ]]; then
+				printf '%s' "$candidate"
+				return 0
+			fi
+			((n++))
+		done
+	}
 	
 	local VERSION
 	[[ -f "$SELECTED_VERSION_FILE" ]] && VERSION="$(<"$SELECTED_VERSION_FILE")"
+	local version_lc="${VERSION,,}"
 	local bytes
 	local basename
 	basename=${url##*/}           # -> file.tar.gz?version=3
 	basename=${basename%%[\?#]*}  # -> file.tar.gz   (removes ?version=3 or #fragment)
 	local dest="${DOWNLOAD_DIR}/${VERSION}/${basename}"
 	mkdir -p "${DOWNLOAD_DIR}/${VERSION}/"
+
+	if [[ "$version_lc" == "custom" && -e "$dest" ]]; then
+		dest="$(next_non_overwrite_path_keep_ext "$dest")"
+	fi
 	
 	MIN_BYTES_LOCAL=$MIN_BYTES               # default
     if [[ $verify -eq 0 ]]; then
