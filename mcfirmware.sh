@@ -53,6 +53,9 @@ spinner_index=0
 # Array holding the spinner characters.
 spinner_chars=("-" "\\" "|" "/")
 CACHE_TIMEOUT_SECONDS=$((6 * 3600)) # 6 hours
+CURL_FETCH_MAX_TIME=10
+CURL_FETCH_RETRIES=3
+CURL_FETCH_RETRY_DELAY=1
 MOUNT_FOLDER="/mnt/meshDeviceSD"
 USB_AUTOSUSPEND=$(cat /sys/module/usbcore/parameters/autosuspend)
 BASE_USER="${SUDO_USER:-$USER}"
@@ -135,8 +138,8 @@ fi
 MIN_BYTES=$((50 * 1024))   # 50 KB in bytes
 REPO_OWNER="meshcore-dev"
 REPO_NAME="MeshCore"
-RELEASE_INFO1_URL="https://flasher.meshcore.dev/config.json"
-RELEASE_INFO2_URL="https://flasher.meshcore.dev/releases"
+RELEASE_INFO1_URL="https://flasher.meshcore.io/config.json"
+RELEASE_INFO2_URL="https://flasher.meshcore.io/releases"
 VENDORLIST="elecrow|heltec|lilygo|seeed|seed|studio|rak|wireless|wisblock|wismesh|raspberry|pi|pico|waveshare|promicro|uniteng|sensecap|wio|xiao"
 RADIOLIST="sx1262|sx126x|sx1276|sx127x"
 NORESET="no-reset"
@@ -578,8 +581,41 @@ _cached_json() {
     fi
 
     if (( fetch_needed )); then
-        echo "Downloading $(basename "$cache_file")"
-        curl -sSL --fail "$url" -o "$cache_file"
+        local cache_name
+        local tmp_file
+        local attempt=1
+        local max_attempts="${CURL_FETCH_RETRIES:-3}"
+        local max_time="${CURL_FETCH_MAX_TIME:-10}"
+        local retry_sleep="${CURL_FETCH_RETRY_DELAY:-1}"
+        local download_ok=0
+
+        cache_name="$(basename "$cache_file")"
+        tmp_file="${cache_file}.tmp.$$"
+        echo "Downloading ${cache_name}"
+
+        while (( attempt <= max_attempts )); do
+            if curl -sSL --fail --max-time "$max_time" "$url" -o "$tmp_file"; then
+                mv -f "$tmp_file" "$cache_file"
+                download_ok=1
+                break
+            fi
+
+            rm -f "$tmp_file"
+            if (( attempt < max_attempts )); then
+                echo "Download failed (${attempt}/${max_attempts}); retrying in ${retry_sleep}s..." >&2
+                sleep "$retry_sleep"
+            fi
+            ((attempt++))
+        done
+
+        if (( !download_ok )); then
+            if [[ -s "$cache_file" ]]; then
+                echo "Download failed after ${max_attempts} attempts; using cached ${cache_name}." >&2
+                return 0
+            fi
+            echo "ERROR: failed to download ${cache_name} after ${max_attempts} attempts and no cached file is available." >&2
+            return 1
+        fi
     fi
 }
 
@@ -1179,7 +1215,7 @@ choose_meshcore_firmware() {
 	fi
 	_cached_json "$RELEASE_INFO2_URL" "$CACHE_FILE"
 	ERASE_URL=$( _jq1 --arg d "$DEVICE" ".device[]|select(.name==\$d)|.erase // empty" )
-	[[ -n $ERASE_URL ]] && ERASE_URL="https://flasher.meshcore.dev/firmware/$ERASE_URL"
+	[[ -n $ERASE_URL ]] && ERASE_URL="https://flasher.meshcore.io/firmware/$ERASE_URL"
 
     # ---------------- step 3 – role ---------------------------------------
 	if [[ -z "$ROLE" ]]; then
@@ -2224,7 +2260,7 @@ else
         printf '%s\n' "$URL_PATH" > "$DOWNLOADED_FILE_FILE"
     else
         [[ "$URL_PATH" != /* ]] && URL_PATH="/$URL_PATH"
-        URL="https://flasher.meshcore.dev${URL_PATH}"
+        URL="https://flasher.meshcore.io${URL_PATH}"
 	    download_and_verify "$URL" "$DOWNLOADED_FILE_FILE" 1 "Firmware"
     fi
 fi
@@ -2330,7 +2366,7 @@ else
 		#echo "$ERASE_URL"
 		if [[ -z "$ERASE_URL" ]]; then
 			ERASE_ZIP="$(choose_erase_zip)" || exit 1
-			ERASE_URL="https://flasher.meshcore.dev/firmware/$ERASE_ZIP"
+			ERASE_URL="https://flasher.meshcore.io/firmware/$ERASE_ZIP"
 		fi
 			download_and_verify "$ERASE_URL" "$ERASE_FILE_FILE" 0 "Erase"
 			[[ -f "$ERASE_FILE_FILE" ]] && ERASE_FILE="$(<"$ERASE_FILE_FILE")"
