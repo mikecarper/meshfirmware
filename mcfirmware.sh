@@ -595,9 +595,12 @@ _cached_json() {
 
         while (( attempt <= max_attempts )); do
             if curl -sSL --fail --max-time "$max_time" "$url" -o "$tmp_file"; then
-                mv -f "$tmp_file" "$cache_file"
-                download_ok=1
-                break
+                if [[ -s "$tmp_file" ]]; then
+                    mv -f "$tmp_file" "$cache_file"
+                    download_ok=1
+                    break
+                fi
+                rm -f "$tmp_file"
             fi
 
             rm -f "$tmp_file"
@@ -858,9 +861,10 @@ choose_version_from_releases() {
 	local ARCHITECTURE="$3"
 	local ERASE_URL="$4"
 	local TITLE="$5"
+	local cache_file="${CACHE_FILE:-$RELEASES_FILE}"
 
 	# ---- fetch / reuse cache ---------------------------------------------
-    _cached_json "$RELEASE_INFO2_URL" "$CACHE_FILE"
+    _cached_json "$RELEASE_INFO2_URL" "$cache_file"
 
 	local VERSION=''
     local TYPE=''
@@ -871,10 +875,28 @@ choose_version_from_releases() {
     # ---------------- step 3 – version ------------------------------------
 	if [[ -z "$VERSION" ]]; then
 		local -a VERSIONS=()
-		mapfile -t VERSIONS < <(_jq2 -r '.[] | .version' | sort -ru)
+		mapfile -t VERSIONS < <(
+			_jq2 -r 'if type=="array" then .[] | (.version // empty) else empty end' \
+			  | sed -E '/^[[:space:]]*$/d' \
+			  | sort -ru || true
+		)
 		if ((${#VERSIONS[@]} == 0)); then
-			echo "ERROR: no versions in /releases endpoint" >&2
-			return 1
+			echo "No versions found in cached releases.json; forcing refresh and retry..." >&2
+			local saved_cache_timeout="${CACHE_TIMEOUT_SECONDS}"
+			CACHE_TIMEOUT_SECONDS=0 _cached_json "$RELEASE_INFO2_URL" "$cache_file" || true
+			CACHE_TIMEOUT_SECONDS="$saved_cache_timeout"
+
+			mapfile -t VERSIONS < <(
+				_jq2 -r 'if type=="array" then .[] | (.version // empty) else empty end' \
+				  | sed -E '/^[[:space:]]*$/d' \
+				  | sort -ru || true
+			)
+
+			if ((${#VERSIONS[@]} == 0)); then
+				echo "ERROR: no versions in /releases endpoint (file: $RELEASES_FILE)" >&2
+				echo "Try removing cache and rerun: rm -f \"$RELEASES_FILE\"" >&2
+				return 1
+			fi
 		fi
 
 		if ((${#VERSIONS[@]} == 1)); then
