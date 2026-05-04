@@ -121,6 +121,123 @@ function SetProjectVars($selectedNodeProject) {
 	}
 }
 
+function Remove-TemporaryPath {
+	param(
+		[Parameter(Mandatory)][string]$Path,
+		[switch]$Recurse
+	)
+
+	for ($attempt = 1; $attempt -le 8; $attempt++) {
+		if (-not (Test-Path -LiteralPath $Path)) {
+			return $true
+		}
+
+		try {
+			Remove-Item -LiteralPath $Path -Force -Recurse:$Recurse -ErrorAction Stop
+			return $true
+		}
+		catch {
+			if ($attempt -ge 8) {
+				throw
+			}
+			Start-Sleep -Milliseconds 250
+		}
+	}
+
+	return (-not (Test-Path -LiteralPath $Path))
+}
+
+function Cleanup-ScriptTempArtifacts {
+	param(
+		[switch]$Quiet
+	)
+
+	$removedCount = 0
+
+	$rootFiles = @(
+		Join-Path $ScriptPath 'usb_devices.xml'
+	)
+	foreach ($rootFile in $rootFiles) {
+		if (Test-Path -LiteralPath $rootFile) {
+			try {
+				Remove-TemporaryPath -Path $rootFile | Out-Null
+				$removedCount++
+			}
+			catch {
+				if (-not $Quiet) {
+					Write-Warning ("Could not remove temporary file {0}: {1}" -f $rootFile, $_.Exception.Message)
+				}
+			}
+		}
+	}
+
+	$rootPatterns = @(
+		'tmp_*',
+		'meshtastic_outputCOM*.txt',
+		'meshtastic_errorCOM*.txt'
+	)
+	foreach ($pattern in $rootPatterns) {
+		$matches = @(Get-ChildItem -Path $ScriptPath -Force -File -Filter $pattern -ErrorAction SilentlyContinue)
+		foreach ($match in $matches) {
+			try {
+				Remove-TemporaryPath -Path $match.FullName | Out-Null
+				$removedCount++
+			}
+			catch {
+				if (-not $Quiet) {
+					Write-Warning ("Could not remove temporary file {0}: {1}" -f $match.FullName, $_.Exception.Message)
+				}
+			}
+		}
+	}
+
+	$serialDfuFiles = @(Get-ChildItem -Path (Join-Path $ScriptPath '*') -Recurse -Force -File -Include '*.serial-dfu.hex', '*.serial-dfu.zip' -ErrorAction SilentlyContinue)
+	foreach ($serialDfuFile in $serialDfuFiles) {
+		try {
+			Remove-TemporaryPath -Path $serialDfuFile.FullName | Out-Null
+			$removedCount++
+		}
+		catch {
+			if (-not $Quiet) {
+				Write-Warning ("Could not remove temporary file {0}: {1}" -f $serialDfuFile.FullName, $_.Exception.Message)
+			}
+		}
+	}
+
+	$nrfutilTempDir = Join-Path $ScriptPath '.tmp\nrfutil'
+	if (Test-Path -LiteralPath $nrfutilTempDir) {
+		try {
+			Remove-TemporaryPath -Path $nrfutilTempDir -Recurse | Out-Null
+			$removedCount++
+		}
+		catch {
+			if (-not $Quiet) {
+				Write-Warning ("Could not remove temporary folder {0}: {1}" -f $nrfutilTempDir, $_.Exception.Message)
+			}
+		}
+	}
+
+	$tmpRoot = Join-Path $ScriptPath '.tmp'
+	if (Test-Path -LiteralPath $tmpRoot) {
+		$tmpRootHasChildren = Get-ChildItem -LiteralPath $tmpRoot -Force -ErrorAction SilentlyContinue | Select-Object -First 1
+		if (-not $tmpRootHasChildren) {
+			try {
+				Remove-TemporaryPath -Path $tmpRoot | Out-Null
+				$removedCount++
+			}
+			catch {
+				if (-not $Quiet) {
+					Write-Warning ("Could not remove temporary folder {0}: {1}" -f $tmpRoot, $_.Exception.Message)
+				}
+			}
+		}
+	}
+
+	if (-not $Quiet -and $removedCount -gt 0) {
+		Write-Host "Cleaned up $removedCount temporary artifact(s)."
+	}
+}
+
 
 function NormalizeString {
     [CmdletBinding()]
@@ -374,15 +491,57 @@ function check_requirements() {
 	}
 
 	# Check if adafruit-nrfutil is installed
-	& $pythonCommand -m pip show adafruit-nrfutil *> $null
-	$nrfutilInstalled = ($LASTEXITCODE -eq 0)
-	if (-not $nrfutilInstalled) {
-		Write-Host "adafruit-nrfutil is not installed. Installing..."
-		& $pythonCommand -m pip install --upgrade --no-warn-script-location "adafruit-nrfutil"
+	$pipxAvailable = $false
+	$pipxCmd = Get-Command pipx -ErrorAction SilentlyContinue
+	if ($pipxCmd) {
+		$pipxAvailable = $true
 	}
 	else {
+		try {
+			& $pythonCommand -m pipx --version *> $null
+			$pipxAvailable = ($LASTEXITCODE -eq 0)
+		}
+		catch {
+			$pipxAvailable = $false
+		}
+	}
+
+	if (-not $pipxAvailable) {
+		Write-Host "pipx is not installed. Installing..."
+		& $pythonCommand -m pip install --upgrade --no-warn-script-location "pipx"
+		try {
+			& $pythonCommand -m pipx ensurepath *> $null
+		}
+		catch {
+		}
+		try {
+			& $pythonCommand -m pipx --version *> $null
+			$pipxAvailable = ($LASTEXITCODE -eq 0)
+		}
+		catch {
+			$pipxAvailable = $false
+		}
+	}
+
+	if ($pipxAvailable) {
 		Write-Progress -Activity "Update adafruit-nrfutil command line tool"
-		& $pythonCommand -m pip install --upgrade --no-warn-script-location "adafruit-nrfutil" | out-null
+		& $pythonCommand -m pipx upgrade adafruit-nrfutil *> $null
+		if ($LASTEXITCODE -ne 0) {
+			Write-Progress -Activity "Install adafruit-nrfutil command line tool"
+			& $pythonCommand -m pipx install adafruit-nrfutil | Out-Null
+		}
+	}
+	else {
+		& $pythonCommand -m pip show adafruit-nrfutil *> $null
+		$nrfutilInstalled = ($LASTEXITCODE -eq 0)
+		if (-not $nrfutilInstalled) {
+			Write-Host "adafruit-nrfutil is not installed. Installing..."
+			& $pythonCommand -m pip install --upgrade --no-warn-script-location "adafruit-nrfutil"
+		}
+		else {
+			Write-Progress -Activity "Update adafruit-nrfutil command line tool"
+			& $pythonCommand -m pip install --upgrade --no-warn-script-location "adafruit-nrfutil" | out-null
+		}
 	}
 
 	Write-Progress -Activity " " -Status " " -Completed
@@ -1099,6 +1258,10 @@ function getUSBComPort() {
     )
 	
 	$selectedComPort = 0 
+	$spinnerFrames = @('|', '/', '-', '\')
+	$spinnerIndex = 0
+	$waitingForDevice = $false
+	$lastStatusWidth = 0
 	# Run in a loop until we get valid $comDevices
 	do {
 		if ($SkipInfo) {
@@ -1112,9 +1275,19 @@ function getUSBComPort() {
 
 		# If there are no USB COM devices, display an error and loop again
 		if ($usbComDevices.Count -eq 0) {
-			Write-Host "No valid COM devices found. Please check the connection. Trying again in 5 seconds." -ForegroundColor Red
-			Start-Sleep -Seconds 5  # Wait before trying again
+			$waitingForDevice = $true
+			$status = "{0} No valid COM devices found. Please check the connection." -f $spinnerFrames[$spinnerIndex]
+			$spinnerIndex = ($spinnerIndex + 1) % $spinnerFrames.Count
+			$padding = if ($lastStatusWidth -gt $status.Length) { ' ' * ($lastStatusWidth - $status.Length) } else { '' }
+			Write-Host -NoNewline "`r$status$padding" -ForegroundColor Red
+			$lastStatusWidth = $status.Length
+			Start-Sleep -Milliseconds 200
 		} else {
+			if ($waitingForDevice) {
+				Write-Host -NoNewline ("`r" + (' ' * $lastStatusWidth) + "`r")
+				$waitingForDevice = $false
+				$lastStatusWidth = 0
+			}
 			$availableComPorts = $usbComDevices | Select-Object -ExpandProperty ComPort
 			if ($availableComPorts.Count -eq 1) {
 				$FirmwareVersion = $usbComDevices | Select-Object -ExpandProperty FirmwareVersion
@@ -1151,7 +1324,92 @@ function getUSBComPort() {
 	return $selectedComPort, $hwModelSlug, $FirmwareVersion, $usbComDevices, $selectedNodeProject
 }
 
+function Test-UsbComPortPresent {
+    param(
+        [Parameter(Mandatory = $true)][string]$ComPort
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ComPort) -or $ComPort -eq "NA") {
+        return $false
+    }
+
+    try {
+        $ports = @(getUsbComDevices -SkipInfo | Select-Object -ExpandProperty ComPort)
+        return ($ports -contains $ComPort)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Read-HostWithConnectionMonitor {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Prompt,
+        [string]$MonitorComPort = "",
+        [int]$CheckIntervalMs = 2000
+    )
+
+    if ([string]::IsNullOrWhiteSpace($MonitorComPort) -or
+        $MonitorComPort -eq "NA" -or
+        [Console]::IsInputRedirected) {
+        return [pscustomobject]@{
+            Connected = $true
+            Text      = (Read-Host $Prompt)
+        }
+    }
+
+    $buffer = New-Object System.Text.StringBuilder
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    Write-Host -NoNewline ("{0}: " -f $Prompt)
+
+    while ($true) {
+        while ([Console]::KeyAvailable) {
+            $key = [Console]::ReadKey($true)
+            switch ($key.Key) {
+                'Enter' {
+                    Write-Host ""
+                    return [pscustomobject]@{
+                        Connected = $true
+                        Text      = $buffer.ToString()
+                    }
+                }
+                'Backspace' {
+                    if ($buffer.Length -gt 0) {
+                        $buffer.Length--
+                        Write-Host -NoNewline "`b `b"
+                    }
+                }
+                default {
+                    if (-not [char]::IsControl($key.KeyChar)) {
+                        [void]$buffer.Append($key.KeyChar)
+                        Write-Host -NoNewline $key.KeyChar
+                    }
+                }
+            }
+        }
+
+        if ($watch.ElapsedMilliseconds -ge $CheckIntervalMs) {
+            if (-not (Test-UsbComPortPresent -ComPort $MonitorComPort)) {
+                Write-Host ""
+                return [pscustomobject]@{
+                    Connected = $false
+                    Text      = $buffer.ToString()
+                }
+            }
+            $watch.Restart()
+        }
+
+        Start-Sleep -Milliseconds 50
+    }
+}
+
 function Select-FlashTarget {
+    param(
+        [string]$MonitorComPort = "",
+        [int]$CheckIntervalMs = 2000
+    )
+
     while ($true) {
         Write-Host ""
         Write-Host "What do you want to flash to?"
@@ -1159,7 +1417,12 @@ function Select-FlashTarget {
         Write-Host "  2) Meshtastic"
         # Write-Host "  3) Reticulum"
 
-        $choice = Read-Host "Enter choice (1-2)"
+        $response = Read-HostWithConnectionMonitor -Prompt "Enter choice (1-2)" -MonitorComPort $MonitorComPort -CheckIntervalMs $CheckIntervalMs
+        if (-not $response.Connected) {
+            return $null
+        }
+
+        $choice = $response.Text
 
         switch ($choice.Trim()) {
             "1" { return "MeshCore" }
@@ -1893,6 +2156,374 @@ function SelectMatchingFile {
     return $fullPaths[$sel - 1]
 }
 
+function Resolve-MeshtasticNrf52FirmwareFile {
+	param(
+		[Parameter(Mandatory)][pscustomobject]$hw
+	)
+
+	if ($hw.Project -ne "Meshtastic" -or $hw.Architecture -notlike 'nrf52*') {
+		return $hw.FirmwareFile
+	}
+
+	$currentFile = [string]$hw.FirmwareFile
+	if ([string]::IsNullOrWhiteSpace($currentFile)) {
+		return $currentFile
+	}
+	$currentLower = $currentFile.ToLowerInvariant()
+	if ($currentLower.EndsWith('.uf2') -or $currentLower.EndsWith('.hex')) {
+		return $currentFile
+	}
+	if (-not $currentLower.EndsWith('.zip')) {
+		return $currentFile
+	}
+
+	$folder = Split-Path -Path $currentFile -Parent
+	$leaf = Split-Path -Path $currentFile -Leaf
+	$candidates = @()
+
+	if ($leaf -match '(?i)-ota\.zip$') {
+		$candidates += ($leaf -replace '(?i)-ota\.zip$', '.uf2')
+		$candidates += ($leaf -replace '(?i)-ota\.zip$', '.hex')
+	}
+
+	foreach ($candidateLeaf in ($candidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
+		$candidatePath = Join-Path $folder $candidateLeaf
+		if (Test-Path $candidatePath) {
+			Write-Host "Using board firmware image: $candidatePath"
+			return $candidatePath
+		}
+	}
+
+	return $currentFile
+}
+
+function Resolve-MeshtasticNrf52ReferencePackage {
+	param(
+		[Parameter(Mandatory)][string]$FirmwarePath
+	)
+
+	$firmwareLower = $FirmwarePath.ToLowerInvariant()
+	if ($firmwareLower.EndsWith('.zip')) {
+		return $FirmwarePath
+	}
+
+	$folder = Split-Path -Path $FirmwarePath -Parent
+	$leaf = Split-Path -Path $FirmwarePath -Leaf
+	$candidates = @()
+	if ($leaf -match '(?i)\.(uf2|hex)$') {
+		$candidates += ($leaf -replace '(?i)\.(uf2|hex)$', '-ota.zip')
+	}
+
+	foreach ($candidateLeaf in ($candidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
+		$candidatePath = Join-Path $folder $candidateLeaf
+		if (Test-Path $candidatePath) {
+			return $candidatePath
+		}
+	}
+
+	throw "Could not find a matching Meshtastic OTA package for metadata: $FirmwarePath"
+}
+
+function New-IntelHexRecord {
+	param(
+		[int]$RecordType,
+		[int]$Address,
+		[byte[]]$Data = @()
+	)
+
+	$bytes = @($Data)
+	$length = $bytes.Count
+	$sum = $length + (($Address -shr 8) -band 0xFF) + ($Address -band 0xFF) + ($RecordType -band 0xFF)
+	$payload = New-Object System.Text.StringBuilder
+	foreach ($b in $bytes) {
+		[void]$payload.AppendFormat('{0:X2}', $b)
+		$sum += $b
+	}
+
+	$checksum = (0x100 - ($sum % 0x100)) % 0x100
+	return (":{0:X2}{1:X4}{2:X2}{3}{4:X2}" -f $length, $Address, $RecordType, $payload.ToString(), $checksum)
+}
+
+function Convert-Uf2ToIntelHex {
+	param(
+		[Parameter(Mandatory)][string]$Uf2Path,
+		[Parameter(Mandatory)][string]$HexPath
+	)
+
+	$uf2Bytes = [System.IO.File]::ReadAllBytes($Uf2Path)
+	$magicStart0 = [Convert]::ToUInt32('0A324655', 16)
+	$magicStart1 = [Convert]::ToUInt32('9E5D5157', 16)
+	$magicEnd = [Convert]::ToUInt32('0AB16F30', 16)
+	$payloadBlocks = @{}
+
+	for ($offset = 0; $offset -le ($uf2Bytes.Length - 512); $offset += 512) {
+		$start0 = [BitConverter]::ToUInt32($uf2Bytes, $offset)
+		$start1 = [BitConverter]::ToUInt32($uf2Bytes, $offset + 4)
+		$endMagic = [BitConverter]::ToUInt32($uf2Bytes, $offset + 508)
+		if ($start0 -ne $magicStart0 -or $start1 -ne $magicStart1 -or $endMagic -ne $magicEnd) {
+			continue
+		}
+
+		$targetAddress = [BitConverter]::ToUInt32($uf2Bytes, $offset + 12)
+		$payloadSize = [BitConverter]::ToUInt32($uf2Bytes, $offset + 16)
+		if ($payloadSize -le 0 -or $payloadSize -gt 476) {
+			continue
+		}
+
+		$payload = New-Object byte[] $payloadSize
+		[Array]::Copy($uf2Bytes, $offset + 32, $payload, 0, $payloadSize)
+		$payloadBlocks[[uint32]$targetAddress] = $payload
+	}
+
+	if ($payloadBlocks.Count -eq 0) {
+		throw "No UF2 payload blocks were found in $Uf2Path"
+	}
+
+	$hexLines = New-Object 'System.Collections.Generic.List[string]'
+	$currentUpper = -1
+	$addresses = @($payloadBlocks.Keys | Sort-Object { [uint32]$_ })
+
+	foreach ($addressKey in $addresses) {
+		[uint32]$baseAddress = [uint32]$addressKey
+		$payload = [byte[]]$payloadBlocks[$addressKey]
+		for ($i = 0; $i -lt $payload.Length; $i += 16) {
+			$chunkLength = [Math]::Min(16, $payload.Length - $i)
+			$chunk = New-Object byte[] $chunkLength
+			[Array]::Copy($payload, $i, $chunk, 0, $chunkLength)
+
+			[uint32]$chunkAddress = $baseAddress + [uint32]$i
+			$upper = [int](($chunkAddress -shr 16) -band 0xFFFF)
+			if ($upper -ne $currentUpper) {
+				$upperBytes = [byte[]]@(
+					[byte](($upper -shr 8) -band 0xFF),
+					[byte]($upper -band 0xFF)
+				)
+				$hexLines.Add((New-IntelHexRecord -RecordType 4 -Address 0 -Data $upperBytes))
+				$currentUpper = $upper
+			}
+
+			$hexLines.Add((New-IntelHexRecord -RecordType 0 -Address ([int]($chunkAddress -band 0xFFFF)) -Data $chunk))
+		}
+	}
+
+	$hexLines.Add(':00000001FF')
+	[System.IO.File]::WriteAllLines($HexPath, $hexLines, [System.Text.Encoding]::ASCII)
+	return $HexPath
+}
+
+function Get-MeshtasticNrf52OtaPackageMetadata {
+	param(
+		[Parameter(Mandatory)][string]$PackageFile
+	)
+
+	Add-Type -AssemblyName System.IO.Compression.FileSystem
+	$archive = [System.IO.Compression.ZipFile]::OpenRead($PackageFile)
+	try {
+		$manifestEntry = $archive.Entries | Where-Object { $_.FullName -ieq 'manifest.json' } | Select-Object -First 1
+		if (-not $manifestEntry) {
+			throw "manifest.json was not found in $PackageFile"
+		}
+
+		$reader = New-Object System.IO.StreamReader($manifestEntry.Open())
+		try {
+			$manifestText = $reader.ReadToEnd()
+		}
+		finally {
+			$reader.Dispose()
+		}
+	}
+	finally {
+		$archive.Dispose()
+	}
+
+	$manifestJson = $manifestText | ConvertFrom-Json
+	$initPacketData = $manifestJson.manifest.application.init_packet_data
+	if (-not $initPacketData) {
+		throw "Could not read init_packet_data from $PackageFile"
+	}
+
+	return [pscustomobject]@{
+		ApplicationVersion = [uint32]$initPacketData.application_version
+		DeviceRevision     = [int]$initPacketData.device_revision
+		DeviceType         = [int]$initPacketData.device_type
+		SoftDeviceReq      = @($initPacketData.softdevice_req | ForEach-Object { [int]$_ })
+	}
+}
+
+function Get-MeshtasticNrf52FlashAction {
+	param(
+		[Parameter(Mandatory)][pscustomobject]$hw
+	)
+
+	$fwType = ([string]$hw.FWType).Trim().ToLowerInvariant()
+	switch ($fwType) {
+		'flash-wipe'   { return 'flash-wipe' }
+		'flash-update' { return 'flash-update' }
+	}
+
+	$displayName = if (-not [string]::IsNullOrWhiteSpace([string]$hw.DisplayName)) { $hw.DisplayName } else { $hw.HWNameFile }
+	$sel = Prompt-Menu `
+		-Title "Choose firmware action for $displayName on $($hw.ComPort):" `
+		-Options @("flash-update       (write only)", "flash-wipe + flash (erase, then write)") `
+		-Prompt "Choice"
+
+	if ($sel.Index -eq 2) {
+		return 'flash-wipe'
+	}
+	return 'flash-update'
+}
+
+function Get-MeshtasticNrf52EraseUf2Candidates {
+	param(
+		[Parameter(Mandatory)][string]$FolderPath
+	)
+
+	$candidates = @(
+		Get-ChildItem -Path $FolderPath -File -Filter 'Meshtastic_nRF52_factory_erase_v3_S140_*.uf2' -ErrorAction SilentlyContinue |
+			ForEach-Object {
+				$versionText = '0.0'
+				if ($_.BaseName -match 'S140_([0-9.]+)$') {
+					$versionText = $matches[1]
+				}
+				[pscustomobject]@{
+					FilePath = $_.FullName
+					Version  = [version]$versionText
+				}
+			} |
+			Sort-Object Version -Descending
+	)
+
+	if ($candidates.Count -eq 0) {
+		throw "No Meshtastic nRF52 erase UF2 files were found in $FolderPath"
+	}
+
+	return $candidates
+}
+
+function Resolve-MeshtasticNrf52ErasePackage {
+	param(
+		[Parameter(Mandatory)][string]$EraseUf2Path,
+		[Parameter(Mandatory)][string]$ReferenceFile
+	)
+
+	$referencePackage = Resolve-MeshtasticNrf52ReferencePackage -FirmwarePath $ReferenceFile
+	$otaMetadata = Get-MeshtasticNrf52OtaPackageMetadata -PackageFile $ReferencePackage
+	$folder = Split-Path -Path $EraseUf2Path -Parent
+	$baseName = [System.IO.Path]::GetFileNameWithoutExtension($EraseUf2Path)
+	$hexPath = Join-Path $folder ($baseName + '.serial-dfu.hex')
+	$zipPath = Join-Path $folder ($baseName + '.serial-dfu.zip')
+
+	$needsRebuild = -not (Test-Path $zipPath)
+	if (-not $needsRebuild) {
+		$zipTime = (Get-Item $zipPath).LastWriteTimeUtc
+		$needsRebuild = $zipTime -lt (Get-Item $EraseUf2Path).LastWriteTimeUtc -or
+			$zipTime -lt (Get-Item $ReferencePackage).LastWriteTimeUtc
+	}
+
+	if (-not $needsRebuild) {
+		return $zipPath
+	}
+
+	Write-Host "Generating Meshtastic nRF52 erase DFU package from $EraseUf2Path"
+	$null = Convert-Uf2ToIntelHex -Uf2Path $EraseUf2Path -HexPath $hexPath
+
+	$softDeviceReqArg = (@($otaMetadata.SoftDeviceReq | ForEach-Object { '0x{0:X}' -f $_ }) -join ',')
+	if ([string]::IsNullOrWhiteSpace($softDeviceReqArg)) {
+		throw "No SoftDevice requirement was found in $ReferencePackage"
+	}
+
+	$nrfutilCommand = Get-NrfutilCommand
+	$genPkgArgs = @(
+		'dfu', 'genpkg',
+		'--application', $hexPath,
+		'--application-version', ('0x{0:X}' -f [uint32]$otaMetadata.ApplicationVersion),
+		'--dev-revision', [string]$otaMetadata.DeviceRevision,
+		'--dev-type', [string]$otaMetadata.DeviceType,
+		'--sd-req', $softDeviceReqArg,
+		$zipPath
+	)
+	$args = @($nrfutilCommand.PrefixArgs + $genPkgArgs)
+
+	$genPkgOutput = @(& $nrfutilCommand.FilePath @args 2>&1)
+	$genPkgExitCode = $LASTEXITCODE
+	if ($genPkgExitCode -ne 0 -or -not (Test-Path $zipPath)) {
+		$summary = (($genPkgOutput | ForEach-Object { ([string]$_).Trim() }) | Where-Object { $_ } | Select-Object -Last 6) -join ' | '
+		if ([string]::IsNullOrWhiteSpace($summary)) {
+			$summary = 'No additional diagnostic output.'
+		}
+		throw "Failed to generate Meshtastic nRF52 erase DFU package: $zipPath. ExitCode=$genPkgExitCode. $summary"
+	}
+	Write-Host "Created erase DFU package $zipPath"
+
+	return $zipPath
+}
+
+function Resolve-MeshtasticNrf52AppPackage {
+	param(
+		[Parameter(Mandatory)][string]$FirmwareFile
+	)
+
+	$firmwareLower = $FirmwareFile.ToLowerInvariant()
+	if ($firmwareLower.EndsWith('.zip')) {
+		return $FirmwareFile
+	}
+
+	$referencePackage = Resolve-MeshtasticNrf52ReferencePackage -FirmwarePath $FirmwareFile
+	$otaMetadata = Get-MeshtasticNrf52OtaPackageMetadata -PackageFile $referencePackage
+	$folder = Split-Path -Path $FirmwareFile -Parent
+	$baseName = [System.IO.Path]::GetFileNameWithoutExtension($FirmwareFile)
+	$hexPath = Join-Path $folder ($baseName + '.serial-dfu.hex')
+	$zipPath = Join-Path $folder ($baseName + '.serial-dfu.zip')
+
+	$needsRebuild = -not (Test-Path $zipPath)
+	if (-not $needsRebuild) {
+		$zipTime = (Get-Item $zipPath).LastWriteTimeUtc
+		$needsRebuild = $zipTime -lt (Get-Item $FirmwareFile).LastWriteTimeUtc -or
+			$zipTime -lt (Get-Item $referencePackage).LastWriteTimeUtc
+	}
+
+	if (-not $needsRebuild) {
+		return $zipPath
+	}
+
+	Write-Host "Generating Meshtastic nRF52 app DFU package from $FirmwareFile"
+	$packageInputFile = $FirmwareFile
+	if ($firmwareLower.EndsWith('.uf2')) {
+		$null = Convert-Uf2ToIntelHex -Uf2Path $FirmwareFile -HexPath $hexPath
+		$packageInputFile = $hexPath
+	}
+
+	$softDeviceReqArg = (@($otaMetadata.SoftDeviceReq | ForEach-Object { '0x{0:X}' -f $_ }) -join ',')
+	if ([string]::IsNullOrWhiteSpace($softDeviceReqArg)) {
+		throw "No SoftDevice requirement was found in $referencePackage"
+	}
+
+	$nrfutilCommand = Get-NrfutilCommand
+	$genPkgArgs = @(
+		'dfu', 'genpkg',
+		'--application', $packageInputFile,
+		'--application-version', ('0x{0:X}' -f [uint32]$otaMetadata.ApplicationVersion),
+		'--dev-revision', [string]$otaMetadata.DeviceRevision,
+		'--dev-type', [string]$otaMetadata.DeviceType,
+		'--sd-req', $softDeviceReqArg,
+		$zipPath
+	)
+	$args = @($nrfutilCommand.PrefixArgs + $genPkgArgs)
+
+	$genPkgOutput = @(& $nrfutilCommand.FilePath @args 2>&1)
+	$genPkgExitCode = $LASTEXITCODE
+	if ($genPkgExitCode -ne 0 -or -not (Test-Path $zipPath)) {
+		$summary = (($genPkgOutput | ForEach-Object { ([string]$_).Trim() }) | Where-Object { $_ } | Select-Object -Last 6) -join ' | '
+		if ([string]::IsNullOrWhiteSpace($summary)) {
+			$summary = 'No additional diagnostic output.'
+		}
+		throw "Failed to generate Meshtastic nRF52 app DFU package: $zipPath. ExitCode=$genPkgExitCode. $summary"
+	}
+	Write-Host "Created app DFU package $zipPath"
+
+	return $zipPath
+}
+
 function GetModelFromNode {
     # Iterate all removable drives (DriveType=2)
     foreach ($vol in Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=2") {
@@ -2154,18 +2785,29 @@ function GetHW() {
 
 	}
 	else {
-		# Get node info
+		while ($true) {
+			# Get node info
+			$result = getUSBComPort
+			$selectedComPort     = $result[0]
+			$hwModelSlug         = $result[1]
+			$FirmwareVersion     = $result[2]
+			$usbComDevices       = $result[3]
+			$selectedNodeProject = $result[4]
+			$detectedNodeProject = $selectedNodeProject
 
-		$result = getUSBComPort
-		$selectedComPort     = $result[0]
-		$hwModelSlug         = $result[1]
-		$FirmwareVersion     = $result[2]
-		$usbComDevices       = $result[3]
-		$selectedNodeProject = $result[4]
-		$detectedNodeProject = $selectedNodeProject
+			Write-Host "$selectedComPort. Device: $hwModelSlug. Firmware: $FirmwareVersion."
+			$selectedNodeProject = Select-FlashTarget -MonitorComPort $selectedComPort -CheckIntervalMs 2000
+			if ($selectedNodeProject) {
+				break
+			}
+
+			Write-Host "Connection to $selectedComPort was lost. Returning to device wait..." -ForegroundColor Yellow
+		}
 	}
-	Write-Host "$selectedComPort. Device: $hwModelSlug. Firmware: $FirmwareVersion."
-	$selectedNodeProject = Select-FlashTarget
+	if ($DFU_node) {
+		Write-Host "$selectedComPort. Device: $hwModelSlug. Firmware: $FirmwareVersion."
+		$selectedNodeProject = Select-FlashTarget
+	}
 	Write-Host "Selected target: $selectedNodeProject" -ForegroundColor Green
 
 	SetProjectVars $selectedNodeProject
@@ -2191,6 +2833,7 @@ function GetHW() {
 		$hw = GetHardwareInfo -Slug $HWNameFile -ListPath $HARDWARE_LIST -SelectedFirmwareFile $SelectedFirmwareFile -selectedComPort $selectedComPort -HWNameFile $HWNameFile -Version $FirmwareVersion
 		$hw | Add-Member -NotePropertyName Project -NotePropertyValue "Meshtastic" -Force
 		$hw | Add-Member -NotePropertyName DetectedProject -NotePropertyValue $detectedNodeProject -Force
+		$hw.FirmwareFile = Resolve-MeshtasticNrf52FirmwareFile -hw $hw
 
 
 
@@ -3741,6 +4384,98 @@ function Get-NrfutilExecutable {
 	throw "adafruit-nrfutil was not found. Install it with $pythonCommand -m pip install adafruit-nrfutil"
 }
 
+function Get-NrfutilCommand {
+	$directExe = Get-Command adafruit-nrfutil -ErrorAction SilentlyContinue
+	if ($directExe) {
+		return [pscustomobject]@{
+			FilePath    = $directExe.Source
+			PrefixArgs  = @()
+			DisplayBase = $directExe.Source
+		}
+	}
+
+	$pipxCmd = Get-Command pipx -ErrorAction SilentlyContinue
+	if ($pipxCmd) {
+		return [pscustomobject]@{
+			FilePath    = $pipxCmd.Source
+			PrefixArgs  = @('run', 'adafruit-nrfutil')
+			DisplayBase = 'pipx run adafruit-nrfutil'
+		}
+	}
+
+	try {
+		& $pythonCommand -m pipx --version *> $null
+		if ($LASTEXITCODE -eq 0) {
+			return [pscustomobject]@{
+				FilePath    = $pythonCommand
+				PrefixArgs  = @('-m', 'pipx', 'run', 'adafruit-nrfutil')
+				DisplayBase = "$pythonCommand -m pipx run adafruit-nrfutil"
+			}
+		}
+	}
+	catch {
+	}
+
+	$exe = Get-NrfutilExecutable
+	return [pscustomobject]@{
+		FilePath    = $exe
+		PrefixArgs  = @()
+		DisplayBase = $exe
+	}
+}
+
+function Get-MeshCoreDeviceConfigEntry {
+	param(
+		[Parameter(Mandatory)][pscustomobject]$hw
+	)
+
+	$config = Load-JsonFile $CONFIG_FILE
+	if (-not $config) {
+		return $null
+	}
+
+	$candidateNames = @(
+		([string]$hw.HWNameFile).Trim(),
+		([string]$hw.Device).Trim()
+	) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+
+	foreach ($dev in @($config.device)) {
+		$name = ([string]$dev.name).Trim()
+		if ([string]::IsNullOrWhiteSpace($name)) { continue }
+		if ($candidateNames -contains $name) {
+			return $dev
+		}
+	}
+
+	return $null
+}
+
+function Get-MeshCoreBootloaderHintText {
+	param(
+		[Parameter(Mandatory)][pscustomobject]$hw
+	)
+
+	$dev = Get-MeshCoreDeviceConfigEntry -hw $hw
+	if (-not $dev) {
+		return ""
+	}
+
+	$bootloaders = @($dev.bootloader | ForEach-Object { ([string]$_).Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+	if ($bootloaders.Count -eq 0) {
+		return ""
+	}
+
+	$preferred = @($bootloaders | Where-Object { $_ -match '(?i)\.uf2$' } | Select-Object -First 1)
+	if ($preferred.Count -eq 0) {
+		$preferred = @($bootloaders | Where-Object { $_ -match '(?i)\.zip$' } | Select-Object -First 1)
+	}
+	if ($preferred.Count -eq 0) {
+		$preferred = @($bootloaders | Select-Object -First 1)
+	}
+
+	return "COM port returned but did not enter serial DFU. This device may need the OTAFIX bootloader first. Recommended bootloader file: $($preferred[0])"
+}
+
 function Get-MeshCoreNrf52FlashAction {
 	param(
 		[Parameter(Mandatory)][pscustomobject]$hw
@@ -3815,6 +4550,88 @@ function Get-AvailableComPorts {
 	return @($ports | Sort-Object { [int](($_ -replace '^[^\d]*','')) })
 }
 
+function Resolve-LiveUsbComPort {
+	param(
+		[string]$PreferredComPort = "",
+		[string]$Purpose = "operation"
+	)
+
+	$activeComPorts = @(Get-AvailableComPorts)
+	if ($activeComPorts.Count -eq 0) {
+		throw "No valid USB COM devices found while preparing for $Purpose."
+	}
+
+	$usbComDevices = @(
+		getUsbComDevices -SkipInfo |
+			Where-Object { $activeComPorts -contains $_.ComPort } |
+			Where-Object { -not [string]::IsNullOrWhiteSpace($_.ComPort) } |
+			Sort-Object @{ Expression = { [int](($_.ComPort -replace '^[^\d]*','')) } }
+	)
+
+	if ($usbComDevices.Count -eq 0) {
+		$usbComDevices = @(
+			$activeComPorts | ForEach-Object {
+				[pscustomobject]@{
+					ComPort         = $_
+					DeviceName      = "--"
+					Project         = ""
+					FirmwareVersion = "--"
+					ExtraInfo       = ""
+				}
+			}
+		)
+	}
+
+	$availableComPorts = @($activeComPorts)
+	if (-not [string]::IsNullOrWhiteSpace($PreferredComPort) -and ($availableComPorts -contains $PreferredComPort)) {
+		return $PreferredComPort
+	}
+
+	if ($usbComDevices.Count -eq 1) {
+		$detectedComPort = [string]$usbComDevices[0].ComPort
+		if (-not [string]::IsNullOrWhiteSpace($PreferredComPort) -and $detectedComPort -ne $PreferredComPort) {
+			Write-Host "Using live USB COM port $detectedComPort instead of stale port $PreferredComPort."
+		}
+		return $detectedComPort
+	}
+
+	Write-Host ""
+	Write-Host ("Current USB COM devices for {0}:" -f $Purpose)
+	$tableOutput = $usbComDevices | Format-Table -Property ComPort, DeviceName, Project, FirmwareVersion, ExtraInfo | Out-String
+	$tableOutput = $tableOutput -split "`n" | Where-Object { $_.Trim() -ne "" } | Out-String
+	Write-Host $tableOutput
+
+	if (-not [string]::IsNullOrWhiteSpace($PreferredComPort)) {
+		Write-Warning "Previously selected port $PreferredComPort is no longer present."
+	}
+
+	return (selectUSBCom -availableComPorts $availableComPorts)
+}
+
+function Resolve-NrfutilFallbackComPort {
+	param(
+		[string[]]$BeforePorts,
+		[string]$OriginalComPort,
+		[int]$TimeoutSec = 12
+	)
+
+	$before = @($BeforePorts | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+	$deadline = (Get-Date).AddSeconds($TimeoutSec)
+	while ((Get-Date) -lt $deadline) {
+		$current = @(Get-AvailableComPorts)
+		$newPorts = @($current | Where-Object { $_ -notin $before })
+		if ($newPorts.Count -eq 1) {
+			return $newPorts[0]
+		}
+		if ($newPorts.Count -gt 1) {
+			return ($newPorts | Sort-Object { [int](($_ -replace '^[^\d]*','')) } | Select-Object -Last 1)
+		}
+		Start-Sleep -Milliseconds 200
+	}
+
+	return ""
+}
+
 function Touch-ComPort1200 {
 	param(
 		[Parameter(Mandatory)][string]$ComPort
@@ -3841,16 +4658,22 @@ function Touch-ComPort1200 {
 		}
 	}
 	catch {
-		$fallbackScript = Join-Path $ScriptPath "nrf52.py"
-		if (Test-Path $fallbackScript) {
-			Write-Warning "Direct 1200-baud touch on $ComPort failed; trying python fallback."
-			$proc = Start-Process -FilePath $pythonCommand -ArgumentList @($fallbackScript, $ComPort) -NoNewWindow -Wait -PassThru
-			if ($proc.ExitCode -ne 0) {
-				Write-Warning "Python fallback touch failed on $ComPort with exit code $($proc.ExitCode)."
-			}
+		$portsAfterFailure = @(Get-AvailableComPorts)
+		if ($portsAfterFailure -notcontains $ComPort) {
+			Write-Host "1200-baud touch on $ComPort triggered a reset; waiting for the device to re-enumerate."
 		}
 		else {
-			Write-Warning "1200-baud touch on $ComPort failed: $($_.Exception.Message)"
+			$fallbackScript = Join-Path $ScriptPath "nrf52.py"
+			if (Test-Path $fallbackScript) {
+				Write-Warning "Direct 1200-baud touch on $ComPort failed; trying python fallback."
+				$proc = Start-Process -FilePath $pythonCommand -ArgumentList @($fallbackScript, $ComPort) -NoNewWindow -Wait -PassThru
+				if ($proc.ExitCode -ne 0) {
+					Write-Warning "Python fallback touch failed on $ComPort with exit code $($proc.ExitCode)."
+				}
+			}
+			else {
+				Write-Warning "1200-baud touch on $ComPort failed: $($_.Exception.Message)"
+			}
 		}
 	}
 
@@ -3864,7 +4687,7 @@ function Resolve-Nrf52DfuComPort {
 		[int]$TimeoutSec = 15
 	)
 
-	$before = Get-AvailableComPorts
+	$before = @(Get-AvailableComPorts)
 	$requestedTouch = -not [string]::IsNullOrWhiteSpace($TouchComPort)
 	$sawTouchPortDisappear = $false
 	$lastObservedPorts = $before
@@ -3878,7 +4701,7 @@ function Resolve-Nrf52DfuComPort {
 
 	$deadline = (Get-Date).AddSeconds($TimeoutSec)
 	while ((Get-Date) -lt $deadline) {
-		$current = Get-AvailableComPorts
+		$current = @(Get-AvailableComPorts)
 		$lastObservedPorts = $current
 		$newPorts = @($current | Where-Object { $_ -notin $before })
 		if ($requestedTouch -and ($current -notcontains $TouchComPort)) {
@@ -3913,7 +4736,7 @@ function Resolve-Nrf52DfuComPort {
 	}
 
 	if ($requestedTouch) {
-		$current = Get-AvailableComPorts
+		$current = @(Get-AvailableComPorts)
 		$lastObservedPorts = $current
 		if ($sawTouchPortDisappear -and ($current -contains $TouchComPort)) {
 			return $TouchComPort
@@ -3962,6 +4785,7 @@ function Invoke-NrfutilSerialDfu {
 	param(
 		[Parameter(Mandatory)][string]$PackageFile,
 		[Parameter(Mandatory)][string]$ComPort,
+		[int]$NrfutilTouchBaud = 0,
 		[string]$TouchComPort = "",
 		[int]$TimeoutSec = 15,
 		[string]$ProgressActivity = "nRF52 DFU"
@@ -3971,26 +4795,44 @@ function Invoke-NrfutilSerialDfu {
 		throw "Package file does not exist: $PackageFile"
 	}
 
-	$nrfutilExe = Get-NrfutilExecutable
-	$dfuComPort = Resolve-Nrf52DfuComPort -PreferredComPort $ComPort -TouchComPort $TouchComPort -TimeoutSec $TimeoutSec
-	if ([string]::IsNullOrWhiteSpace($dfuComPort)) {
-		throw "Could not find a DFU serial port after requesting bootloader mode. Last known runtime port: $TouchComPort"
+	$nrfutilCommand = Get-NrfutilCommand
+	$dfuComPort = $ComPort
+	$portsBeforeTouch = @()
+	if ($NrfutilTouchBaud -gt 0) {
+		$portsBeforeTouch = @(Get-AvailableComPorts)
+		if ($portsBeforeTouch -notcontains $dfuComPort) {
+			$observed = if ($portsBeforeTouch.Count -gt 0) { $portsBeforeTouch -join ', ' } else { '<none>' }
+			throw "COM port $dfuComPort was not present before DFU upload. Observed ports: $observed"
+		}
+	}
+	else {
+		$dfuComPort = Resolve-Nrf52DfuComPort -PreferredComPort $ComPort -TouchComPort $TouchComPort -TimeoutSec $TimeoutSec
+		if ([string]::IsNullOrWhiteSpace($dfuComPort)) {
+			throw "Could not find a DFU serial port after requesting bootloader mode. Last known runtime port: $TouchComPort"
+		}
 	}
 
-	$args = @(
+	$dfuArgs = @(
 		'dfu', 'serial',
 		'--package', $PackageFile,
 		'-p', $dfuComPort,
 		'-b', '115200'
 	)
+	if ($NrfutilTouchBaud -gt 0) {
+		$dfuArgs += @('--touch', [string]$NrfutilTouchBaud)
+	}
+	$args = @($nrfutilCommand.PrefixArgs + $dfuArgs)
 
-	Write-Host "$nrfutilExe $($args -join ' ')"
+	Write-Host "$($nrfutilCommand.DisplayBase) $($dfuArgs -join ' ')"
 	$totalSteps = Get-NrfutilUploadSteps -PackageFile $PackageFile
 	$progressId = 44
 	$progressStatus = "Opening DFU transport on $dfuComPort"
 	$hashCount = 0
 	$outputBuffer = New-Object System.Text.StringBuilder
 	$lineBuffer = New-Object System.Text.StringBuilder
+	$lastInlineProgressText = ""
+	$lastInlineProgressWidth = 0
+	$inlineProgressVisible = $false
 
 	function ConvertTo-ProcessArgumentString {
 		param([string[]]$Values)
@@ -4012,6 +4854,28 @@ function Invoke-NrfutilSerialDfu {
 		return ($quoted -join ' ')
 	}
 
+	function Update-NrfutilInlineProgress {
+		param([string]$Text)
+
+		if ([string]::IsNullOrWhiteSpace($Text)) { return }
+		if ($Text -eq $lastInlineProgressText) { return }
+
+		$padding = if ($lastInlineProgressWidth -gt $Text.Length) { ' ' * ($lastInlineProgressWidth - $Text.Length) } else { '' }
+		Write-Host -NoNewline ("`r{0}{1}" -f $Text, $padding)
+		$lastInlineProgressText = $Text
+		$lastInlineProgressWidth = $Text.Length
+		$inlineProgressVisible = $true
+	}
+
+	function Clear-NrfutilInlineProgress {
+		if (-not $inlineProgressVisible) { return }
+
+		Write-Host -NoNewline ("`r" + (' ' * $lastInlineProgressWidth) + "`r")
+		$lastInlineProgressText = ""
+		$lastInlineProgressWidth = 0
+		$inlineProgressVisible = $false
+	}
+
 	function Flush-NrfutilLine {
 		param([string]$Line)
 
@@ -4024,9 +4888,11 @@ function Invoke-NrfutilSerialDfu {
 			Set-Variable -Name progressStatus -Scope 1 -Value $trimmed
 			if ($totalSteps -gt 0) {
 				Write-Progress -Id $progressId -Activity $progressActivity -Status $progressStatus -PercentComplete 0
+				Update-NrfutilInlineProgress ("{0}: 0% (0/{1})" -f $progressActivity, $totalSteps)
 			}
 			else {
 				Write-Progress -Id $progressId -Activity $progressActivity -Status $progressStatus
+				Update-NrfutilInlineProgress ("{0}: {1}" -f $progressActivity, $progressStatus)
 			}
 			return
 		}
@@ -4035,10 +4901,13 @@ function Invoke-NrfutilSerialDfu {
 			Set-Variable -Name progressStatus -Scope 1 -Value $trimmed
 			if ($totalSteps -gt 0) {
 				Write-Progress -Id $progressId -Activity $progressActivity -Status $progressStatus -PercentComplete 99
+				Update-NrfutilInlineProgress ("{0}: 99% ({1}/{2})" -f $progressActivity, [Math]::Min($hashCount, $totalSteps), $totalSteps)
 			}
 			else {
 				Write-Progress -Id $progressId -Activity $progressActivity -Status $progressStatus
+				Update-NrfutilInlineProgress ("{0}: {1}" -f $progressActivity, $progressStatus)
 			}
+			Clear-NrfutilInlineProgress
 			Write-Host $trimmed
 			return
 		}
@@ -4047,14 +4916,18 @@ function Invoke-NrfutilSerialDfu {
 			Set-Variable -Name progressStatus -Scope 1 -Value $trimmed
 			if ($totalSteps -gt 0) {
 				Write-Progress -Id $progressId -Activity $progressActivity -Status $progressStatus -PercentComplete 100
+				Update-NrfutilInlineProgress ("{0}: 100% ({1}/{2})" -f $progressActivity, $totalSteps, $totalSteps)
 			}
 			else {
 				Write-Progress -Id $progressId -Activity $progressActivity -Status $progressStatus
+				Update-NrfutilInlineProgress ("{0}: {1}" -f $progressActivity, $progressStatus)
 			}
+			Clear-NrfutilInlineProgress
 			Write-Host $trimmed
 			return
 		}
 
+		Clear-NrfutilInlineProgress
 		Write-Host $trimmed
 	}
 
@@ -4071,6 +4944,7 @@ function Invoke-NrfutilSerialDfu {
 					if ($totalSteps -gt 0) {
 						$pct = [Math]::Min(99, [int](($hashCount * 100) / [Math]::Max(1, $totalSteps)))
 						Write-Progress -Id $progressId -Activity $progressActivity -Status "$progressStatus ($hashCount/$totalSteps)" -PercentComplete $pct
+						Update-NrfutilInlineProgress ("{0}: {1}% ({2}/{3})" -f $progressActivity, $pct, $hashCount, $totalSteps)
 					}
 				}
 				"`r" { }
@@ -4087,7 +4961,7 @@ function Invoke-NrfutilSerialDfu {
 	}
 
 	$psi = New-Object System.Diagnostics.ProcessStartInfo
-	$psi.FileName = $nrfutilExe
+	$psi.FileName = $nrfutilCommand.FilePath
 	$psi.UseShellExecute = $false
 	$psi.RedirectStandardOutput = $true
 	$psi.RedirectStandardError = $true
@@ -4130,6 +5004,7 @@ function Invoke-NrfutilSerialDfu {
 		$proc.WaitForExit()
 	}
 	finally {
+		Clear-NrfutilInlineProgress
 		Write-Progress -Id $progressId -Activity $progressActivity -Completed
 	}
 
@@ -4138,13 +5013,44 @@ function Invoke-NrfutilSerialDfu {
 		$lineBuffer.Clear() | Out-Null
 	}
 
+	$remainingStdOut = $proc.StandardOutput.ReadToEnd()
+	if (-not [string]::IsNullOrEmpty($remainingStdOut)) {
+		Add-NrfutilChars $remainingStdOut
+	}
+	$remainingStdErr = $proc.StandardError.ReadToEnd()
+	if (-not [string]::IsNullOrEmpty($remainingStdErr)) {
+		Add-NrfutilChars $remainingStdErr
+	}
+	if ($lineBuffer.Length -gt 0) {
+		Flush-NrfutilLine $lineBuffer.ToString()
+		$lineBuffer.Clear() | Out-Null
+	}
+
 	$outputText = $outputBuffer.ToString()
 	$exitCode = $proc.ExitCode
+	$sawDfuStart = $outputText -match '(?im)^Upgrading target on '
+	$sawDeviceProgrammed = $outputText -match '(?im)^Device programmed\.'
+	$serialOpenFailure = $outputText -match ('(?im)Serial port could not be opened on {0}\.' -f [regex]::Escape($dfuComPort))
+	if ($NrfutilTouchBaud -gt 0 -and $serialOpenFailure) {
+		$fallbackComPort = Resolve-NrfutilFallbackComPort -BeforePorts $portsBeforeTouch -OriginalComPort $dfuComPort -TimeoutSec $TimeoutSec
+		if (-not [string]::IsNullOrWhiteSpace($fallbackComPort) -and $fallbackComPort -ne $dfuComPort) {
+			Write-Warning "nrfutil could not reopen $dfuComPort after 1200-baud touch; detected $fallbackComPort. Retrying on the new COM port."
+			return (Invoke-NrfutilSerialDfu -PackageFile $PackageFile -ComPort $fallbackComPort -ProgressActivity $ProgressActivity -TimeoutSec $TimeoutSec)
+		}
+	}
 	if ($exitCode -ne 0 -or
 		$outputText -match '(?im)^Failed to upgrade target\.' -or
 		$outputText -match '(?im)NordicSemiException' -or
-		$outputText -match '(?im)^Traceback ') {
-		throw "adafruit-nrfutil failed on $dfuComPort. ExitCode=$exitCode"
+		$outputText -match '(?im)^Traceback ' -or
+		$outputText -match '(?im)Timed out waiting for acknowledgement from device\.' -or
+		$outputText -match '(?im)No data received on serial port\.' -or
+		-not $sawDfuStart -or
+		-not $sawDeviceProgrammed) {
+		$summary = (($outputText -split "\r?\n") | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Last 6) -join ' | '
+		if ([string]::IsNullOrWhiteSpace($summary)) {
+			$summary = 'No additional diagnostic output.'
+		}
+		throw "adafruit-nrfutil failed on $dfuComPort. ExitCode=$exitCode. $summary"
 	}
 
 	return [pscustomobject]@{
@@ -4153,13 +5059,82 @@ function Invoke-NrfutilSerialDfu {
 	}
 }
 
+function flashMeshtasticNrf52 {
+	param(
+		[Parameter(Mandatory)][pscustomobject]$hw
+	)
+
+	$selectedFirmwareFile = Resolve-MeshtasticNrf52FirmwareFile -hw $hw
+	$selectedComPort = Resolve-LiveUsbComPort -PreferredComPort $hw.ComPort -Purpose "Meshtastic nRF52 flash"
+	$hw.ComPort = $selectedComPort
+	$hw.FirmwareFile = $selectedFirmwareFile
+	$action = Get-MeshtasticNrf52FlashAction -hw $hw
+	$hw | Add-Member -NotePropertyName FWType -NotePropertyValue $action -Force
+
+	if (-not (Test-Path $selectedFirmwareFile)) {
+		throw "Firmware file does not exist: $selectedFirmwareFile"
+	}
+
+	$meshtasticLeaf = (Split-Path -Path $selectedFirmwareFile -Leaf).ToLowerInvariant()
+	if (-not ($meshtasticLeaf.EndsWith('.uf2') -or $meshtasticLeaf.EndsWith('.hex') -or $meshtasticLeaf.EndsWith('.zip'))) {
+		throw "Meshtastic nRF52 flashing expects a .uf2, .hex, or .zip firmware image: $selectedFirmwareFile"
+	}
+
+	Write-Host "Running $action..."
+	$runtimeComPort = $selectedComPort
+	if ($action -eq 'flash-wipe') {
+		$eraseCandidates = Get-MeshtasticNrf52EraseUf2Candidates -FolderPath (Split-Path -Path $selectedFirmwareFile -Parent)
+		$eraseSucceeded = $false
+		$lastEraseError = ""
+		for ($i = 0; $i -lt $eraseCandidates.Count; $i++) {
+			$candidate = $eraseCandidates[$i]
+			$erasePackage = Resolve-MeshtasticNrf52ErasePackage -EraseUf2Path $candidate.FilePath -ReferenceFile $selectedFirmwareFile
+			Write-Host "Erasing UF2 area using $erasePackage"
+			Start-Sleep -Seconds 1
+			try {
+				$eraseResult = Invoke-NrfutilSerialDfu -PackageFile $erasePackage -ComPort $runtimeComPort -NrfutilTouchBaud 1200 -ProgressActivity "nRF52 Erase"
+				$runtimeComPort = $eraseResult.ComPort
+				$eraseSucceeded = $true
+				Write-Host "Erase done."
+				Write-Host ""
+				break
+			}
+			catch {
+				$lastEraseError = $_.Exception.Message
+				$canTryAlternate = ($i + 1) -lt $eraseCandidates.Count -and $lastEraseError -match 'Selected Bootloader version does not match|Please upgrade the Bootloader'
+				if ($canTryAlternate) {
+					Write-Warning "Erase package $(Split-Path -Path $candidate.FilePath -Leaf) did not match the current bootloader. Trying the alternate Meshtastic erase image."
+					continue
+				}
+				throw
+			}
+		}
+
+		if (-not $eraseSucceeded) {
+			throw $lastEraseError
+		}
+	}
+
+	$runtimeComPort = Resolve-LiveUsbComPort -PreferredComPort $runtimeComPort -Purpose "Meshtastic nRF52 firmware flash"
+	$hw.ComPort = $runtimeComPort
+	$appPackage = Resolve-MeshtasticNrf52AppPackage -FirmwareFile $selectedFirmwareFile
+	Write-Host "Flashing firmware file $appPackage"
+	Start-Sleep -Seconds 1
+	$flashResult = Invoke-NrfutilSerialDfu -PackageFile $appPackage -ComPort $runtimeComPort -NrfutilTouchBaud 1200 -ProgressActivity "nRF52 Flash"
+	if ($flashResult.ComPort) {
+		$hw.ComPort = $flashResult.ComPort
+	}
+	return $true
+}
+
 function flashMeshCoreNrf52 {
 	param(
 		[Parameter(Mandatory)][pscustomobject]$hw
 	)
 
 	$selectedFirmwareFile = $hw.FirmwareFile
-	$selectedComPort = $hw.ComPort
+	$selectedComPort = Resolve-LiveUsbComPort -PreferredComPort $hw.ComPort -Purpose "MeshCore nRF52 flash"
+	$hw.ComPort = $selectedComPort
 	if (-not (Test-Path $selectedFirmwareFile)) {
 		throw "Firmware file does not exist: $selectedFirmwareFile"
 	}
@@ -4171,22 +5146,44 @@ function flashMeshCoreNrf52 {
 	$action = Get-MeshCoreNrf52FlashAction -hw $hw
 	Write-Host "Running $action..."
 	$runtimeComPort = $selectedComPort
-	$dfuComPort = $selectedComPort
+	$bootloaderHint = Get-MeshCoreBootloaderHintText -hw $hw
 
 	if ($action -eq 'flash-wipe') {
 		$eraseUrl = Select-MeshCoreEraseUrl -hw $hw
 		$eraseFile = Resolve-MeshCoreFirmwareFile -SelectedReference $eraseUrl -CacheFile $ERASE_FILE_FILE
 		Write-Host "Erasing UF2 area using $eraseFile"
 		Start-Sleep -Seconds 1
-		$eraseResult = Invoke-NrfutilSerialDfu -PackageFile $eraseFile -ComPort $dfuComPort -TouchComPort $runtimeComPort -ProgressActivity "nRF52 Erase"
-		$dfuComPort = $eraseResult.ComPort
+		try {
+			$eraseResult = Invoke-NrfutilSerialDfu -PackageFile $eraseFile -ComPort $runtimeComPort -NrfutilTouchBaud 1200 -ProgressActivity "nRF52 Erase"
+		}
+		catch {
+			$message = $_.Exception.Message
+			if (($message -match 'No data received on serial port|Timed out waiting for acknowledgement from device|Serial port could not be opened on') -and
+				-not [string]::IsNullOrWhiteSpace($bootloaderHint)) {
+				throw "$message $bootloaderHint"
+			}
+			throw
+		}
+		$runtimeComPort = $eraseResult.ComPort
 		Write-Host "Erase done."
 		Write-Host ""
 	}
 
+	$runtimeComPort = Resolve-LiveUsbComPort -PreferredComPort $runtimeComPort -Purpose "MeshCore nRF52 firmware flash"
+	$hw.ComPort = $runtimeComPort
 	Write-Host "Flashing firmware file $selectedFirmwareFile"
 	Start-Sleep -Seconds 1
-	$flashResult = Invoke-NrfutilSerialDfu -PackageFile $selectedFirmwareFile -ComPort $dfuComPort -TouchComPort $(if ($action -eq 'flash-update') { $runtimeComPort } else { "" }) -ProgressActivity "nRF52 Flash"
+	try {
+		$flashResult = Invoke-NrfutilSerialDfu -PackageFile $selectedFirmwareFile -ComPort $runtimeComPort -NrfutilTouchBaud 1200 -ProgressActivity "nRF52 Flash"
+	}
+	catch {
+		$message = $_.Exception.Message
+		if (($message -match 'No data received on serial port|Timed out waiting for acknowledgement from device|Serial port could not be opened on') -and
+			-not [string]::IsNullOrWhiteSpace($bootloaderHint)) {
+			throw "$message $bootloaderHint"
+		}
+		throw
+	}
 	if ($flashResult.ComPort) {
 		$hw.ComPort = $flashResult.ComPort
 	}
@@ -4205,6 +5202,9 @@ function InvokeFlash {
 		if ($hw.Architecture -like '*esp32*') {
 			$result = flashESP32 -hw $hw
 		}
+		elseif ($hw.Project -eq "Meshtastic" -and $hw.Architecture -like '*nrf52*') {
+			$result = flashMeshtasticNrf52 -hw $hw
+		}
 		elseif ($hw.Project -eq "MeshCore" -and $hw.Architecture -like '*nrf52*') {
 			$result = flashMeshCoreNrf52 -hw $hw
 		}
@@ -4222,12 +5222,16 @@ function InvokeFlash {
 		Write-Warning "Flash failed: $_"
 		return $false
 	}
+	finally {
+		Cleanup-ScriptTempArtifacts -Quiet
+	}
 	Write-Host ""
 	return ""
 }
 
 
 # Get release info
+Cleanup-ScriptTempArtifacts -Quiet
 check_requirements
 $hw = GetHW
 
@@ -4235,7 +5239,7 @@ $again = $true
 while ($again) {
 	$x = InvokeFlash $hw
 	
-	if ($hw.Architecture -like 'esp32*' -or ($hw.Project -eq "MeshCore" -and $hw.Architecture -like 'nrf52*')) {
+	if ($hw.Architecture -like 'esp32*' -or $hw.Architecture -like 'nrf52*') {
 		$choice = Read-Host "`nEverything OK?  [Y]es / [R]etry / change [C]OM port / [E]xit"
 		switch ($choice.ToUpper()) {
 			'Y' { $again = $false }
