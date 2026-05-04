@@ -4632,6 +4632,59 @@ function Resolve-NrfutilFallbackComPort {
 	return ""
 }
 
+function Invoke-PythonSerialTouch1200 {
+	param(
+		[Parameter(Mandatory)][string]$ComPort
+	)
+
+	if ([string]::IsNullOrWhiteSpace($pythonCommand)) {
+		throw "Python is not available for the 1200-baud fallback touch."
+	}
+
+	$pythonScript = @'
+import sys
+import time
+
+try:
+    import serial
+except Exception as exc:
+    print(f"Error: pyserial is not installed: {exc}")
+    sys.exit(1)
+
+DFU_TOUCH_BAUD = 1200
+SERIAL_PORT_OPEN_WAIT_TIME = 0.1
+TOUCH_RESET_WAIT_TIME = 1.5
+
+port_name = sys.argv[1]
+print(f"--- Attempting to force DFU mode on {port_name} ---")
+
+try:
+    print(f"Opening {port_name} at {DFU_TOUCH_BAUD} baud...")
+    with serial.Serial(port_name, baudrate=DFU_TOUCH_BAUD) as ser:
+        print("Port opened successfully.")
+        time.sleep(SERIAL_PORT_OPEN_WAIT_TIME)
+        print("Closing port...")
+    print("Port closed.")
+except serial.SerialException as exc:
+    print(f"\nError: Could not access serial port '{port_name}'.")
+    print(f"Details: {exc}")
+    print("Please check the following:")
+    print("  - The device is connected.")
+    print("  - The port name is correct.")
+    print("  - You have the necessary permissions to access the port.")
+    print("  - No other program (like a Serial Monitor) is using the port.")
+    sys.exit(1)
+
+print(f"Waiting {TOUCH_RESET_WAIT_TIME} seconds for the device to enumerate in DFU mode...")
+time.sleep(TOUCH_RESET_WAIT_TIME)
+
+print("\n--- Operation complete. The device should now be in DFU mode. ---")
+'@
+
+	& $pythonCommand -c $pythonScript $ComPort
+	return $LASTEXITCODE
+}
+
 function Touch-ComPort1200 {
 	param(
 		[Parameter(Mandatory)][string]$ComPort
@@ -4663,15 +4716,14 @@ function Touch-ComPort1200 {
 			Write-Host "1200-baud touch on $ComPort triggered a reset; waiting for the device to re-enumerate."
 		}
 		else {
-			$fallbackScript = Join-Path $ScriptPath "nrf52.py"
-			if (Test-Path $fallbackScript) {
+			try {
 				Write-Warning "Direct 1200-baud touch on $ComPort failed; trying python fallback."
-				$proc = Start-Process -FilePath $pythonCommand -ArgumentList @($fallbackScript, $ComPort) -NoNewWindow -Wait -PassThru
-				if ($proc.ExitCode -ne 0) {
-					Write-Warning "Python fallback touch failed on $ComPort with exit code $($proc.ExitCode)."
+				$exitCode = Invoke-PythonSerialTouch1200 -ComPort $ComPort
+				if ($exitCode -ne 0) {
+					Write-Warning "Python fallback touch failed on $ComPort with exit code $exitCode."
 				}
 			}
-			else {
+			catch {
 				Write-Warning "1200-baud touch on $ComPort failed: $($_.Exception.Message)"
 			}
 		}
