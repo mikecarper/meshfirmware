@@ -44,8 +44,8 @@ $PORTABLE_PYTHON_URL="https://api.github.com/repos/winpython/winpython/releases/
 $MT_REPO_API_URL="https://api.github.com/repos/meshtastic/meshtastic.github.io/contents"
 $MT_WEB_HARDWARE_LIST_URL="https://raw.githubusercontent.com/meshtastic/web-flasher/refs/heads/main/public/data/hardware-list.json"
 
-$MC_CONFIG_URL = "https://flasher.meshcore.dev/config.json"
-$MC_RELEASE_URL = "https://flasher.meshcore.dev/releases"
+$MC_CONFIG_URL = "https://flasher.meshcore.io/config.json"
+$MC_RELEASE_URL = "https://flasher.meshcore.io/releases"
 
 $timeoutMeshtastic = 10 # Timeout duration in seconds
 $baud = 1200 # 115200
@@ -2972,14 +2972,14 @@ function Resolve-MeshCoreFirmwareSource {
     if ($trimmed.StartsWith('/firmware/')) {
         return [pscustomobject]@{
             Kind  = "url"
-            Value = "https://flasher.meshcore.dev$trimmed"
+            Value = "https://flasher.meshcore.io$trimmed"
         }
     }
 
     if ($trimmed.StartsWith('firmware/')) {
         return [pscustomobject]@{
             Kind  = "url"
-            Value = "https://flasher.meshcore.dev/$trimmed"
+            Value = "https://flasher.meshcore.io/$trimmed"
         }
     }
 
@@ -2989,7 +2989,7 @@ function Resolve-MeshCoreFirmwareSource {
 
     return [pscustomobject]@{
         Kind  = "url"
-        Value = "https://flasher.meshcore.dev/firmware/$trimmed"
+        Value = "https://flasher.meshcore.io/firmware/$trimmed"
     }
 }
 
@@ -3689,7 +3689,7 @@ function ChooseMeshCoreFirmware {
 
     $script:ERASE_URL = ""
     if ($devObj -and $devObj.erase) {
-        $script:ERASE_URL = "https://flasher.meshcore.dev/firmware/$($devObj.erase)"
+        $script:ERASE_URL = "https://flasher.meshcore.io/firmware/$($devObj.erase)"
     }
 
     # Step 3: Role
@@ -4542,7 +4542,7 @@ function Select-MeshCoreEraseUrl {
 	if ($eraseValue -match '^\s*https?://') {
 		return $eraseValue
 	}
-	return "https://flasher.meshcore.dev/firmware/$eraseValue"
+	return "https://flasher.meshcore.io/firmware/$eraseValue"
 }
 
 function Get-AvailableComPorts {
