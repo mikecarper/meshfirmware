@@ -467,6 +467,46 @@ apply_custom_firmware_selection() {
 	fi
 }
 
+latest_custom_firmware_file() {
+	local required_ext="${1:-}" custom_dir latest
+
+	custom_dir="${DOWNLOAD_DIR}/custom"
+	[[ -d "$custom_dir" ]] || return 1
+
+	if [[ -n "$required_ext" ]]; then
+		latest="$(
+			find "$custom_dir" -maxdepth 1 -type f -iname "*${required_ext}" -printf '%T@\t%p\n' 2>/dev/null \
+				| sort -nr \
+				| sed -n $'1{s/^[^\t]*\t//;p;}' \
+				|| true
+		)"
+	else
+		latest="$(
+			find "$custom_dir" -maxdepth 1 -type f -printf '%T@\t%p\n' 2>/dev/null \
+				| sort -nr \
+				| sed -n $'1{s/^[^\t]*\t//;p;}' \
+				|| true
+		)"
+	fi
+
+	[[ -n "$latest" && -f "$latest" ]] || return 1
+	printf '%s\n' "$latest"
+}
+
+print_latest_custom_firmware_option() {
+	local required_ext="${1:-}" latest
+
+	latest="$(latest_custom_firmware_file "$required_ext" || true)"
+	if [[ -n "$latest" ]]; then
+		echo "Custom folder: ${DOWNLOAD_DIR}/custom"
+		echo "  latest) $(basename -- "$latest")"
+		echo "          $latest"
+	else
+		echo "Custom folder: ${DOWNLOAD_DIR}/custom"
+		echo "  No custom firmware files ending with ${required_ext} found."
+	fi
+}
+
 show_help() {
 	echo "Usage: $(basename "$0") [OPTIONS]"
 	echo ""
@@ -783,13 +823,23 @@ choose_custom_firmware_file() {
     room*)      printf " https://files.brazio.org/meshcore/nightly/room-server/ \n https://analyzer.letsmesh.net/observer/onboard?type=room \n "  ;;
   esac
 
+  print_latest_custom_firmware_option "$required_ext"
+
   while :; do
-    read -rp "Enter full filename or url: " input < /dev/tty
+    read -rp "Enter full filename, url, or latest: " input < /dev/tty
     [[ -z "$input" ]] && { echo "Empty input. Try again."; continue; }
 
     local_input="$input"
     if [[ "$local_input" == file:///* ]]; then
       local_input="${local_input#file://}"
+    fi
+    if [[ "${local_input,,}" == "latest" ]]; then
+      local_input="$(latest_custom_firmware_file "$required_ext" || true)"
+      if [[ -z "$local_input" ]]; then
+        echo "ERROR: No custom firmware files ending with ${required_ext} found in ${DOWNLOAD_DIR}/custom"
+        continue
+      fi
+      echo "Selected latest custom firmware: $local_input"
     fi
 
     # Strip query/fragment for extension test
