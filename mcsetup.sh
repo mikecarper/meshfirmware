@@ -1365,9 +1365,10 @@ prompt_powercycle_and_retry_time_sync() {
   local ans
 
   while :; do
-    read -rp "Power-cycle the node, wait for it to reconnect, then retry clock sync now? [Y/n]: " ans
+    read -rp "Wait for the node to reconnect, then retry clock sync now? [Y/n]: " ans
     case "$ans" in
       [Yy]|"")
+        host_epoch=$(date +%s)
         echo "Retrying clock sync. Sending: time $host_epoch"
         if ! serial_cmd "time $host_epoch" >/dev/null; then
           echo "Warning: device did not acknowledge the retried time sync command"
@@ -1375,6 +1376,32 @@ prompt_powercycle_and_retry_time_sync() {
         return 0
         ;;
       [Nn])
+        return 1
+        ;;
+      *)
+        echo "Please answer y or n."
+        ;;
+    esac
+  done
+}
+
+prompt_clock_reset_and_retry_time_sync() {
+  local host_epoch="$1"
+  local ans
+
+  while :; do
+    read -rp "Device clock is in the future. Run clkreboot now? [Y/n]: " ans
+    case "$ans" in
+      [Yy]|"")
+        echo "Sending clock-reset reboot..."
+        serial_cmd "clkreboot" >/dev/null || true
+        if prompt_powercycle_and_retry_time_sync "$host_epoch"; then
+          return 0
+        fi
+        return 1
+        ;;
+      [Nn])
+        echo "Clock-reset reboot skipped."
         return 1
         ;;
       *)
@@ -1410,13 +1437,28 @@ fi
 
 # Verdict: only act if more than 2 days off (86400 sec * 2)
 if [ "$adiff" -gt 172800 ]; then
-  if [[ -n "${device_epoch:-}" ]]; then
+  if [[ -n "${device_epoch:-}" && "$diff" -gt 172800 ]]; then
+    echo "Clock off by more than 2 days and device time is in the future."
+    if prompt_clock_reset_and_retry_time_sync "$host_epoch"; then
+      sleep 2
+      host_epoch=$(date +%s)
+      device_epoch="$(read_device_clock_epoch)"
+      if [[ -n "${device_epoch:-}" ]]; then
+        diff=$(( device_epoch - host_epoch ))
+        adiff=${diff#-}
+        echo "Device time after reset (Local): $(date -d "@$device_epoch" '+%Y-%m-%d %H:%M %Z')"
+      fi
+    fi
+  elif [[ -n "${device_epoch:-}" ]]; then
     echo "Clock off by more than 2 days; syncing time now. Sending: time $host_epoch"
+    if ! serial_cmd "time $host_epoch" >/dev/null; then
+      echo "Warning: device did not acknowledge the time sync command"
+    fi
   else
     echo "Device clock unreadable; syncing time now. Sending: time $host_epoch"
-  fi
-  if ! serial_cmd "time $host_epoch" >/dev/null; then
-    echo "Warning: device did not acknowledge the time sync command"
+    if ! serial_cmd "time $host_epoch" >/dev/null; then
+      echo "Warning: device did not acknowledge the time sync command"
+    fi
   fi
   echo
 else
