@@ -59,7 +59,6 @@ CURL_FETCH_RETRY_DELAY=1
 MOUNT_FOLDER="/mnt/meshDeviceSD"
 USB_AUTOSUSPEND=$(cat /sys/module/usbcore/parameters/autosuspend)
 BASE_USER="${SUDO_USER:-$USER}"
-BASE_GROUP="$(id -gn "$BASE_USER")"
 SUDO_KEEPALIVE_PID=""
 BOOTLOADER_PROBE_PORT=""
 BOOTLOADER_PROBE_ACTIVE=0
@@ -272,7 +271,7 @@ classify_bin() {
 	}
 
 	local b0 b1000 b8000 b10000 result
-	local img0=0 img1000=0 img10000=0
+	local img0=0 img1000=0 img10000=0 img150000=0
 	local size_bytes
 	local esptool_out=""
 	local detected_image_type=""
@@ -292,16 +291,17 @@ classify_bin() {
 	looks_like_esp_image_at 0x0     && img0=1
 	looks_like_esp_image_at 0x1000  && img1000=1
 	looks_like_esp_image_at 0x10000 && img10000=1
+	looks_like_esp_image_at 0x150000 && img150000=1
 
-	if [[ "$b8000" == "aa50" && $img10000 -eq 1 ]]; then
+	if [[ "$b8000" == "aa50" && ( $img10000 -eq 1 || $img150000 -eq 1 ) ]]; then
 		result="HAS_PARTITION_TABLE_AND_APP"
-	elif [[ $img0 -eq 1 && "$b8000" != "aa50" && $img10000 -eq 1 ]]; then
+	elif [[ $img0 -eq 1 && "$b8000" != "aa50" && ( $img10000 -eq 1 || $img150000 -eq 1 ) ]]; then
 		result="MULTI_IMAGE_NO_PARTITION_TABLE"
 	elif [[ $img0 -eq 1 && "$b8000" != "aa50" && $img10000 -eq 0 ]]; then
 		result="LIKELY_SINGLE"
-	elif [[ "$b8000" == "ffff" && $img0 -eq 0 && $img1000 -eq 0 && $img10000 -eq 0 ]]; then
+	elif [[ "$b8000" == "ffff" && $img0 -eq 0 && $img1000 -eq 0 && $img10000 -eq 0 && $img150000 -eq 0 ]]; then
 		result="DATA_IMAGE"
-	elif [[ $img0 -eq 0 && $img1000 -eq 0 && "$b8000" != "aa50" && $img10000 -eq 0 ]]; then
+	elif [[ $img0 -eq 0 && $img1000 -eq 0 && "$b8000" != "aa50" && $img10000 -eq 0 && $img150000 -eq 0 ]]; then
 		result="NON_ESP_OR_UNKNOWN"
 	else
 		result="AMBIGUOUS"
@@ -322,6 +322,8 @@ classify_bin() {
 			HAS_PARTITION_TABLE_AND_APP)
 				if [[ $img10000 -eq 1 ]]; then
 					esptool_out=$(run_esptool_on_offset_image 0x10000)
+				elif [[ $img150000 -eq 1 ]]; then
+					esptool_out=$(run_esptool_on_offset_image 0x150000)
 				fi
 				;;
 		esac
@@ -1914,8 +1916,6 @@ finally:
 	echo "Waiting 10 seconds for device to reboot..."
 	sleep 10
 	return 0
-
-	return 1
 }
 
 manual_reboot_choice() {
@@ -2000,7 +2000,7 @@ run_esptool() {
 		fi
 		printf '%s\n' "$retry_output" >&2
 		print_esptool_recovery_hint "$retry_output"
-		return $status
+		return "$status"
 	fi
 
 	if [[ -n "$port" ]] && esptool_output_needs_reset "$output"; then
@@ -2039,13 +2039,13 @@ run_esptool() {
 			fi
 			printf '%s\n' "$retry_output" >&2
 			print_esptool_recovery_hint "$retry_output"
-			return $status
+			return "$status"
 		fi
 	fi
 
 	printf '%s\n' "$output" >&2
 	print_esptool_recovery_hint "$output"
-	return $status
+	return "$status"
 }
 
 prepare_esp32_flash_session() {
@@ -2182,6 +2182,112 @@ probe_esptool_mac() {
 	return $status
 }
 
+parse_esp32_app_partition_offsets() {
+	local partition_file="$1"
+
+	python3 - "$partition_file" <<'PY'
+import struct
+import sys
+
+path = sys.argv[1]
+data = open(path, "rb").read()
+seen = set()
+
+for i in range(0, min(len(data), 0x1000), 32):
+    entry = data[i:i + 32]
+    if len(entry) < 32:
+        break
+
+    magic = entry[0:2]
+    if magic == b"\xff\xff":
+        break
+    if magic != b"\xaa\x50":
+        continue
+
+    part_type = entry[2]
+    if part_type != 0x00:
+        continue
+
+    offset = struct.unpack_from("<I", entry, 4)[0]
+    if offset and offset not in seen:
+        seen.add(offset)
+        print(f"0x{offset:x}")
+PY
+}
+
+read_esp32_app_partition_offsets() {
+	local port="$1"
+	local partition_file
+
+	partition_file="$(mktemp)"
+	if run_esptool --port "$port" --after "$NORESET" --baud 921600 "$READFLASH" 0x8000 0x1000 "$partition_file" >/dev/null; then
+		parse_esp32_app_partition_offsets "$partition_file"
+	else
+		echo "Warning: could not read ESP32 partition table; defaulting app update to 0x10000" >&2
+	fi
+	rm -f "$partition_file"
+}
+
+esp32_device_image_present_at_offset() {
+	local port="$1"
+	local offset="$2"
+	local probe_file magic segs mode segs_dec mode_dec
+
+	probe_file="$(mktemp)"
+	if ! run_esptool --port "$port" --after "$NORESET" --baud 921600 "$READFLASH" "$offset" 4 "$probe_file" >/dev/null; then
+		rm -f "$probe_file"
+		return 1
+	fi
+
+	magic=$(xxd -p -l 1 -s 0 "$probe_file" 2>/dev/null | tr -d '\n')
+	segs=$(xxd -p -l 1 -s 1 "$probe_file" 2>/dev/null | tr -d '\n')
+	mode=$(xxd -p -l 1 -s 2 "$probe_file" 2>/dev/null | tr -d '\n')
+	rm -f "$probe_file"
+
+	[[ "$magic" == "e9" && -n "$segs" && -n "$mode" ]] || return 1
+
+	segs_dec=$((16#$segs))
+	mode_dec=$((16#$mode))
+	(( segs_dec >= 1 && segs_dec <= 16 )) || return 1
+	(( mode_dec >= 0 && mode_dec <= 3 )) || return 1
+}
+
+esp32_update_flash_offsets() {
+	local port="$1"
+	local offset has_10000=0 has_150000=0
+	local -a app_offsets=()
+	local -a update_offsets=()
+
+	mapfile -t app_offsets < <(read_esp32_app_partition_offsets "$port" || true)
+
+	for offset in "${app_offsets[@]}"; do
+		case "$offset" in
+			0x10000) has_10000=1 ;;
+			0x150000) has_150000=1 ;;
+		esac
+	done
+
+	if (( has_10000 )); then
+		update_offsets+=(0x10000)
+	else
+		echo "Warning: partition table did not list an app slot at 0x10000; using 0x10000 fallback" >&2
+		update_offsets+=(0x10000)
+	fi
+
+	if (( has_150000 )); then
+		if esp32_device_image_present_at_offset "$port" 0x150000; then
+			echo "Detected existing ESP32 app image at 0x150000; updating both app slots." >&2
+			update_offsets+=(0x150000)
+		else
+			echo "ESP32 app partition exists at 0x150000, but no app image magic was detected there; updating 0x10000 only." >&2
+		fi
+	else
+		echo "ESP32 partition table does not list an app slot at 0x150000; updating 0x10000 only." >&2
+	fi
+
+	printf '%s\n' "${update_offsets[@]}"
+}
+
 list_usb_block_devs() {
 	lsblk -rpo NAME,TYPE,TRAN,MOUNTPOINT | awk '$3=="usb" {print $1}' | sort -u; 
 }
@@ -2243,10 +2349,10 @@ autodetect_device() {
 
 	[[ -f "$DEVICE_PORT_FILE"     ]] && DEVICE_PORT="$(<"$DEVICE_PORT_FILE")"
 
-	if timeout 5s $ESPTOOL_CMD --port "$DEVICE_PORT" --after "$NORESET" --baud 1200 "$READMAC" 2>&1 | perl -pe 's/\e\[[0-9;]*[A-Za-z]//g' | sed '/^Warning: Deprecated/d' | grep -qi -m1 'MAC'; then
+	if timeout 5s pipx run esptool --port "$DEVICE_PORT" --after "$NORESET" --baud 1200 "$READMAC" 2>&1 | perl -pe 's/\e\[[0-9;]*[A-Za-z]//g' | sed '/^Warning: Deprecated/d' | grep -qi -m1 'MAC'; then
 		echo "ESP chip responded; getting existing firmware"
 		sleep 1
-		$ESPTOOL_CMD --port "$DEVICE_PORT" --after "$NORESET" --baud 921600 "$READFLASH" 0x10000 0x70000 "$DOWNLOAD_DIR/CURRENT.BAK" 2>&1 | perl -pe 's/\e\[[0-9;]*[A-Za-z]//g' | sed '/^Warning: Deprecated/d'
+		pipx run esptool --port "$DEVICE_PORT" --after "$NORESET" --baud 921600 "$READFLASH" 0x10000 0x70000 "$DOWNLOAD_DIR/CURRENT.BAK" 2>&1 | perl -pe 's/\e\[[0-9;]*[A-Za-z]//g' | sed '/^Warning: Deprecated/d'
 
 		AUTODETECT_DEVICE=$( detect_device_from_fw "$DOWNLOAD_DIR/CURRENT.BAK" )
 	
@@ -2432,10 +2538,15 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 		sleep 1
 		run_esptool --port "${DEVICE_PORT}" --after "$HARDRESET" --baud 115200 "$WRITEFLASH" 0x0000 "${DOWNLOADED_FILE}"
 	else
-		echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $HARDRESET --baud 115200 $WRITEFLASH 0x10000 \"${DOWNLOADED_FILE}\""
+		echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $HARDRESET --baud 115200 $WRITEFLASH <device app offset> \"${DOWNLOADED_FILE}\""
+		echo "The ESP32 partition table will be read from the device. If an existing app image is detected at 0x150000, both 0x10000 and 0x150000 will be updated."
 		read -r -p "Press Enter to UPDATE the ${DEVICE} firmware on port ${DEVICE_PORT}"
 		prepare_esp32_flash_session "${DEVICE_PORT}" "${DEVICE}"
-		run_esptool --port "${DEVICE_PORT}" --after "$HARDRESET" --baud 115200 "$WRITEFLASH" 0x10000 "${DOWNLOADED_FILE}"
+		mapfile -t ESP32_UPDATE_OFFSETS < <(esp32_update_flash_offsets "${DEVICE_PORT}")
+		for flash_offset in "${ESP32_UPDATE_OFFSETS[@]}"; do
+			echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $HARDRESET --baud 115200 $WRITEFLASH ${flash_offset} \"${DOWNLOADED_FILE}\""
+			run_esptool --port "${DEVICE_PORT}" --after "$HARDRESET" --baud 115200 "$WRITEFLASH" "$flash_offset" "${DOWNLOADED_FILE}"
+		done
 	fi
 	BOOTLOADER_PROBE_ACTIVE=0
 	BOOTLOADER_PROBE_PORT=""
