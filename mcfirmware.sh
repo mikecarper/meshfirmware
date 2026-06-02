@@ -2543,10 +2543,16 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 		read -r -p "Press Enter to UPDATE the ${DEVICE} firmware on port ${DEVICE_PORT}"
 		prepare_esp32_flash_session "${DEVICE_PORT}" "${DEVICE}"
 		mapfile -t ESP32_UPDATE_OFFSETS < <(esp32_update_flash_offsets "${DEVICE_PORT}")
+		ESP32_WRITE_ARGS=()
 		for flash_offset in "${ESP32_UPDATE_OFFSETS[@]}"; do
-			echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $HARDRESET --baud 115200 $WRITEFLASH ${flash_offset} \"${DOWNLOADED_FILE}\""
-			run_esptool --port "${DEVICE_PORT}" --after "$HARDRESET" --baud 115200 "$WRITEFLASH" "$flash_offset" "${DOWNLOADED_FILE}"
+			ESP32_WRITE_ARGS+=("$flash_offset" "${DOWNLOADED_FILE}")
 		done
+		printf '%s --port %s --after %s --baud 115200 %s' "$ESPTOOL_CMD" "$DEVICE_PORT" "$HARDRESET" "$WRITEFLASH"
+		for ((i=0; i<${#ESP32_WRITE_ARGS[@]}; i+=2)); do
+			printf ' %s "%s"' "${ESP32_WRITE_ARGS[i]}" "${ESP32_WRITE_ARGS[i+1]}"
+		done
+		printf '\n'
+		run_esptool --port "${DEVICE_PORT}" --after "$HARDRESET" --baud 115200 "$WRITEFLASH" "${ESP32_WRITE_ARGS[@]}"
 	fi
 	BOOTLOADER_PROBE_ACTIVE=0
 	BOOTLOADER_PROBE_PORT=""
