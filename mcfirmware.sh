@@ -19,6 +19,7 @@ cleanup() {
 		echo "$USB_AUTOSUSPEND" | sudo tee /sys/module/usbcore/parameters/autosuspend >/dev/null
 	fi
 	restore_port_after_bootloader_probe
+	restart_locked_services
 	if [[ -d "$FIRMWARE_ROOT" ]]; then
 		chmod -R a+rX "$FIRMWARE_ROOT" >/dev/null 2>&1 || true
 	fi
@@ -73,6 +74,20 @@ restore_port_after_bootloader_probe() {
 	timeout 8s pipx run esptool --port "$port" --before no-reset --after hard-reset read-mac >/dev/null 2>&1 || true
 	BOOTLOADER_PROBE_ACTIVE=0
 	BOOTLOADER_PROBE_PORT=""
+}
+
+restart_locked_services() {
+	local -a locked_services=()
+
+	[[ -n "${LOCKEDSERVICE:-}" ]] || return 0
+	[[ "${LOCKEDSERVICE:-}" != "None" ]] || return 0
+
+	read -r -a locked_services <<< "$LOCKEDSERVICE"
+	((${#locked_services[@]})) || return 0
+
+	echo "Starting service $LOCKEDSERVICE..."
+	sudo systemctl start "${locked_services[@]}" || true
+	LOCKEDSERVICE=""
 }
 
 ensure_sudo_session() {
@@ -1706,15 +1721,16 @@ choose_serial() {
 }
 
 check_tty_lock() {
-	    local device_path="$1"
-		local lock=""
-		lock="/var/lock/$(basename "$device_path").lock"
+    local device_path="$1"
+    local lock=""
+    lock="/var/lock/$(basename "$device_path").lock"
 
     # open FD 3 on the lock file for the lifetime of this shell
     exec 3>"$lock" || return 1
     # try to acquire non-blocking lock
     if ! flock -n 3; then
         # still locked by someone else
+        exec 3>&-
         return 0
     fi
     # we own the lock; release immediately and close FD
@@ -1724,73 +1740,105 @@ check_tty_lock() {
     return 1
 }
 
+service_from_pid() {
+	local pid="$1"
+	local cgroup_part
+
+	[[ -r "/proc/$pid/cgroup" ]] || return 0
+
+	while IFS=/ read -ra cgroup_part; do
+		for part in "${cgroup_part[@]}"; do
+			if [[ "$part" == *.service && "$part" != user@*.service ]]; then
+				printf '%s\n' "$part"
+				return 0
+			fi
+		done
+	done < "/proc/$pid/cgroup"
+}
+
 get_locked_service() {
-    local device_name=""
-    [[ -f "$DEVICE_PORT_FILE" ]] && device_name="$(<"$DEVICE_PORT_FILE")"
+    local device_name="${1:-}"
+    [[ -z "$device_name" && -f "$DEVICE_PORT_FILE" ]] && device_name="$(<"$DEVICE_PORT_FILE")"
 
     if [[ -z "$device_name" ]]; then
         # nothing to check yet
         return 0
     fi
 
-    if check_tty_lock "$device_name"; then
+    if [[ ! -e "$device_name" ]]; then
+        echo "Serial port ${device_name} is not present." > /dev/tty
         return 0
     fi
 
 	# Get all users locking the device (skip the header line)
-	echo "Finding the service that has $device_name locked" > /dev/tty
-	local users
+	echo "Finding the process that has $device_name locked" > /dev/tty
 	ensure_command lsof
-	users=$(sudo lsof "$device_name" 2>/dev/null | awk 'NR>1 {print $3}' | sort -u)
-	if [ -z "$users" ]; then
-		echo "No process found locking ${device_name}."  > /dev/tty
+	local -a pids=()
+	mapfile -t pids < <(sudo lsof -t "$device_name" 2>/dev/null | sort -u)
+	if ((${#pids[@]} == 0)); then
+		if check_tty_lock "$device_name"; then
+			echo "A UUCP-style lock exists for ${device_name}, but no open process was found." > /dev/tty
+		else
+			echo "No process found locking ${device_name}." > /dev/tty
+		fi
 		return 0
 	fi
-	#echo "User(s): $users"
 
-	# For each user, get all their PIDs.
-	local pids
-	pids=$(ps -u "$users" -o pid= | tr -s ' ' | tr '\n' ' ')
-
-	local found_service=""
-	#local last_pid=""
-	for pid in $pids; do
+	local -a found_services=()
+	local pid
+	for pid in "${pids[@]}"; do
 		echo "PID: $pid" > /dev/tty
 
 		# Get the full command line for the process.
 		local cmd
-		cmd=$(ps -p "$pid" -o cmd= | awk '{$1=$1};1')
-		#echo "Command: $cmd"
-
-		# Search for a systemd service file referencing the executable.
-		# Using || true so that grep failing does not exit the script.
-		local raw_service
-		raw_service=$({ sudo grep -sR "$cmd" /etc/systemd/system/ 2>/dev/null || true; } | awk -F: '{print $1}' | sort -u)
-		#echo "Raw service info: $raw_service"
+		cmd=$(ps -p "$pid" -o cmd= 2>/dev/null | awk '{$1=$1};1')
+		echo "Command: ${cmd:-unknown}" > /dev/tty
 
 		local service
-		if [ -n "$raw_service" ]; then
-			service=$(echo "$raw_service" | xargs -n1 basename | sort -u)
+		service="$(service_from_pid "$pid")"
+		if [ -n "$service" ]; then
+			found_services+=("$service")
 		else
 			service="None"
 		fi
 		echo "Service: $service"  > /dev/tty
-
-		# If a service file was found, store it.
-		if [ "$service" != "None" ]; then
-			found_service="$found_service $service"
-		fi
-		#last_pid="$pid"
 	done
 
-	#if [ -n "$found_service" ] && [ "$found_service" != "None" ]; then
-	#    echo "Service locking $device_name: $found_service"
-	#else
-	#    echo "Found matching process(es), but no systemd service file was identified."
-	#    echo "Last checked PID: $last_pid"
-	#    return 1
-	#fi
-	echo "$found_service" | awk '{$1=$1};1'
+	if ((${#found_services[@]})); then
+		printf '%s\n' "${found_services[@]}" | sort -u | xargs
+	fi
+}
+
+record_locked_service() {
+	local service="$1"
+
+	[[ -n "$service" && "$service" != "None" ]] || return 0
+	if [[ " ${LOCKEDSERVICE:-} " != *" $service "* ]]; then
+		LOCKEDSERVICE="${LOCKEDSERVICE:+$LOCKEDSERVICE }$service"
+	fi
+}
+
+stop_serial_locking_services() {
+	local port="$1"
+	local services=""
+	local -a service_list=()
+	local service
+
+	services="$(get_locked_service "$port" || true)"
+	[[ -n "$services" && "$services" != "None" ]] || return 1
+
+	read -r -a service_list <<< "$services"
+	((${#service_list[@]})) || return 1
+
+	echo "Stopping service $services..."
+	if ! sudo systemctl stop "${service_list[@]}"; then
+		return 1
+	fi
+	for service in "${service_list[@]}"; do
+		record_locked_service "$service"
+	done
+	sleep 3
+	return 0
 }
 
 
@@ -1874,6 +1922,24 @@ print_esptool_recovery_hint() {
 esptool_output_needs_reset() {
 	local output="$1"
 	grep -qiE 'Failed to connect to Espressif device|Protocol error|No serial data received' <<<"$output"
+}
+
+esptool_output_port_busy() {
+	local output="$1"
+	grep -qiE 'Could not exclusively lock port|Resource temporarily unavailable|Device or resource busy|port is busy' <<<"$output"
+}
+
+recover_busy_serial_port() {
+	local port="$1"
+
+	echo "Serial port $port is busy; checking for locking services..."
+	if stop_serial_locking_services "$port"; then
+		return 0
+	fi
+
+	echo "No locking service was stopped; waiting briefly for ${port} to be released..."
+	sleep 2
+	return 0
 }
 
 auto_reset_serial_port() {
@@ -1978,6 +2044,23 @@ run_esptool() {
 		return 0
 	fi
 
+	if [[ -n "$port" ]] && esptool_output_port_busy "$output"; then
+		recover_busy_serial_port "$port"
+		if tmpfile=$(mktemp); then
+			if pipx run esptool "$@" 2>&1 | tee "$tmpfile"; then
+				rm -f "$tmpfile"
+				return 0
+			fi
+			status=${PIPESTATUS[0]}
+			retry_output="$(<"$tmpfile")"
+			rm -f "$tmpfile"
+		else
+			retry_output=""
+			status=1
+		fi
+		output="$retry_output"
+	fi
+
 	if grep -qi "Permission denied" <<<"$output"; then
 		echo "Granting access to ${port:-serial port} and retrying esptool..."
 		if [[ -n "$port" ]]; then
@@ -2059,11 +2142,7 @@ prepare_esp32_flash_session() {
 	echo "$ESPTOOL_CMD --port ${port} --after $NORESET --baud 1200 $READMAC"
 	if ! probe_esptool --port "${port}" --after "$NORESET" --baud 1200 "$READMAC"; then
 		echo "esptool failed, checking if a service has the port locked"
-		LOCKEDSERVICE=$(get_locked_service)
-		if [ -n "$LOCKEDSERVICE" ] && [ "$LOCKEDSERVICE" != "None" ]; then
-			echo "Stopping service $LOCKEDSERVICE..."
-			sudo systemctl stop "$LOCKEDSERVICE"
-			sleep 3
+		if stop_serial_locking_services "$port"; then
 			probe_esptool --port "${port}" --after "$NORESET" --baud 1200 "$READMAC" || true
 		fi
 	fi
@@ -2096,6 +2175,15 @@ probe_esptool() {
 	fi
 
 	status=$?
+	if [[ -n "$port" ]] && esptool_output_port_busy "$output"; then
+		recover_busy_serial_port "$port"
+		if retry_output=$(pipx run esptool "$@" 2>&1); then
+			return 0
+		fi
+		status=$?
+		output="$retry_output"
+	fi
+
 	if grep -qi "Permission denied" <<<"$output"; then
 		echo "Granting access to ${port:-serial port} and retrying esptool..."
 		if [[ -n "$port" ]]; then
@@ -2146,6 +2234,16 @@ probe_esptool_mac() {
 	fi
 
 	status=$?
+	if [[ -n "$port" ]] && esptool_output_port_busy "$output"; then
+		recover_busy_serial_port "$port"
+		if retry_output=$(pipx run esptool "$@" 2>&1); then
+			grep -qi -m1 'MAC' <<<"$retry_output"
+			return $?
+		fi
+		status=$?
+		output="$retry_output"
+	fi
+
 	if grep -qi "Permission denied" <<<"$output"; then
 		echo "Granting access to ${port:-serial port} and retrying esptool..."
 		if [[ -n "$port" ]]; then
@@ -2337,22 +2435,17 @@ autodetect_device() {
 	echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $NORESET --baud 1200 $READMAC"
 	if ! probe_esptool --port "${DEVICE_PORT}" --after "$NORESET" --baud 1200 "$READMAC"; then
 		echo "esptool failed, checking if a service has the port locked"
-		# Stop the service.
-		LOCKEDSERVICE=$(get_locked_service)
-		if [ -n "$LOCKEDSERVICE" ] && [ "$LOCKEDSERVICE" != "None" ]; then
-			echo "Stopping service $LOCKEDSERVICE..."
-			sudo systemctl stop "$LOCKEDSERVICE"
-			sleep 3
+		if stop_serial_locking_services "$DEVICE_PORT"; then
 			probe_esptool --port "${DEVICE_PORT}" --after "$NORESET" --baud 1200 "$READMAC" || true
 		fi
 	fi
 
 	[[ -f "$DEVICE_PORT_FILE"     ]] && DEVICE_PORT="$(<"$DEVICE_PORT_FILE")"
 
-	if timeout 5s pipx run esptool --port "$DEVICE_PORT" --after "$NORESET" --baud 1200 "$READMAC" 2>&1 | perl -pe 's/\e\[[0-9;]*[A-Za-z]//g' | sed '/^Warning: Deprecated/d' | grep -qi -m1 'MAC'; then
+	if probe_esptool_mac --port "$DEVICE_PORT" --after "$NORESET" --baud 1200 "$READMAC"; then
 		echo "ESP chip responded; getting existing firmware"
 		sleep 1
-		pipx run esptool --port "$DEVICE_PORT" --after "$NORESET" --baud 921600 "$READFLASH" 0x10000 0x70000 "$DOWNLOAD_DIR/CURRENT.BAK" 2>&1 | perl -pe 's/\e\[[0-9;]*[A-Za-z]//g' | sed '/^Warning: Deprecated/d'
+		run_esptool --port "$DEVICE_PORT" --after "$NORESET" --baud 921600 "$READFLASH" 0x10000 0x70000 "$DOWNLOAD_DIR/CURRENT.BAK"
 
 		AUTODETECT_DEVICE=$( detect_device_from_fw "$DOWNLOAD_DIR/CURRENT.BAK" )
 	
@@ -2617,7 +2710,4 @@ else
 	fi
 
 # Restart the stopped service.
-if [ -n "$LOCKEDSERVICE" ] && [ "$LOCKEDSERVICE" != "None" ]; then
-	echo "Starting service $LOCKEDSERVICE..."
-	sudo systemctl start "$LOCKEDSERVICE"
-fi
+restart_locked_services
