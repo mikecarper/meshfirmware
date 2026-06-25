@@ -1756,6 +1756,15 @@ service_from_pid() {
 	done < "/proc/$pid/cgroup"
 }
 
+serial_lock_pids() {
+	local device_name="$1"
+
+	[[ -n "$device_name" && -e "$device_name" ]] || return 0
+
+	ensure_command lsof
+	sudo lsof -t "$device_name" 2>/dev/null | sort -u
+}
+
 get_locked_service() {
     local device_name="${1:-}"
     [[ -z "$device_name" && -f "$DEVICE_PORT_FILE" ]] && device_name="$(<"$DEVICE_PORT_FILE")"
@@ -1772,9 +1781,8 @@ get_locked_service() {
 
 	# Get all users locking the device (skip the header line)
 	echo "Finding the process that has $device_name locked" > /dev/tty
-	ensure_command lsof
 	local -a pids=()
-	mapfile -t pids < <(sudo lsof -t "$device_name" 2>/dev/null | sort -u)
+	mapfile -t pids < <(serial_lock_pids "$device_name")
 	if ((${#pids[@]} == 0)); then
 		if check_tty_lock "$device_name"; then
 			echo "A UUCP-style lock exists for ${device_name}, but no open process was found." > /dev/tty
@@ -1839,6 +1847,55 @@ stop_serial_locking_services() {
 	done
 	sleep 3
 	return 0
+}
+
+terminate_serial_locking_processes() {
+	local port="$1"
+	local pid service cmd owner choice
+	local -a pids=()
+	local -a process_pids=()
+	local -a remaining_pids=()
+
+	mapfile -t pids < <(serial_lock_pids "$port")
+	((${#pids[@]})) || return 1
+
+	for pid in "${pids[@]}"; do
+		service="$(service_from_pid "$pid")"
+		[[ -z "$service" ]] || continue
+		[[ "$pid" != "$$" && "$pid" != "$BASHPID" && "$pid" != "$PPID" ]] || continue
+		process_pids+=("$pid")
+	done
+
+	((${#process_pids[@]})) || return 1
+
+	echo "The following non-service process(es) are holding ${port}:" > /dev/tty
+	for pid in "${process_pids[@]}"; do
+		owner=$(ps -p "$pid" -o user= 2>/dev/null | awk '{$1=$1};1')
+		cmd=$(ps -p "$pid" -o cmd= 2>/dev/null | awk '{$1=$1};1')
+		echo "  PID ${pid} (${owner:-unknown}): ${cmd:-unknown}" > /dev/tty
+	done
+
+	read -r -p "Terminate these process(es) so flashing can continue? [y/N]: " choice < /dev/tty
+	case "$choice" in
+		y|Y|yes|YES)
+			;;
+		*)
+			return 1
+			;;
+	esac
+
+	sudo kill -TERM -- "${process_pids[@]}" 2>/dev/null || true
+	for _ in {1..20}; do
+		mapfile -t remaining_pids < <(serial_lock_pids "$port")
+		((${#remaining_pids[@]} == 0)) && return 0
+		sleep 0.25
+	done
+
+	echo "Process(es) still hold ${port}; forcing termination..." > /dev/tty
+	sudo kill -KILL -- "${process_pids[@]}" 2>/dev/null || true
+	sleep 1
+	mapfile -t remaining_pids < <(serial_lock_pids "$port")
+	((${#remaining_pids[@]} == 0))
 }
 
 
@@ -1934,6 +1991,10 @@ recover_busy_serial_port() {
 
 	echo "Serial port $port is busy; checking for locking services..."
 	if stop_serial_locking_services "$port"; then
+		return 0
+	fi
+
+	if terminate_serial_locking_processes "$port"; then
 		return 0
 	fi
 
