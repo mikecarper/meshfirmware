@@ -724,6 +724,7 @@ serial_cmd() {
 
   local max_retries="${SERIAL_RETRIES:-3}"
   local delay_between="${SERIAL_RETRY_DELAY:-0.08}"
+  local first_candidate_only="${SERIAL_FIRST_CANDIDATE_ONLY:-0}"
 
   # Fast read/exit behavior
   local total_timeout="${SERIAL_TOTAL_TIMEOUT:-7.5s}"  # hard cap
@@ -757,6 +758,9 @@ serial_cmd() {
   for b in "${DEFAULT_BAUDS[@]}"; do
     _add_unique "$b"
   done
+  if [[ "$first_candidate_only" == "1" && ${#candidates[@]} -gt 0 ]]; then
+    candidates=("${candidates[0]}")
+  fi
 
   local baud attempt out last_out
   last_out=""
@@ -1649,13 +1653,24 @@ choose_serial() {
 		printf '%s' "$summary"
 	}
 
+	quick_node_info_cmd() {
+		local device="$1"
+		shift
+		SERIAL_RETRIES=1 \
+		SERIAL_RETRY_DELAY=0.02 \
+		SERIAL_TOTAL_TIMEOUT="${SERIAL_INFO_TOTAL_TIMEOUT:-1.2s}" \
+		SERIAL_IDLE_TIMEOUT="${SERIAL_INFO_IDLE_TIMEOUT:-0.35}" \
+		SERIAL_FIRST_CANDIDATE_ONLY=1 \
+			serial_cmd "$device" "$@"
+	}
+
 	read_board_with_retry() {
 		local device="$1"
 		local board=""
 		local attempt
 
 		for attempt in 1 2; do
-			board=$(clean_node_info_field "$(serial_cmd "${device}" "board")")
+			board=$(clean_node_info_field "$(quick_node_info_cmd "${device}" "board")")
 			[[ -n "$board" ]] && break
 			sleep 0.1
 		done
@@ -1689,7 +1704,7 @@ choose_serial() {
 			detected_dev="${devs[0]}"
 			echo "Trying to get meshcore info from the node"
 			board=$(read_board_with_retry "${detected_dev}")
-			version=$(clean_node_info_field "$(serial_cmd "${detected_dev}" "ver")")
+			version=$(clean_node_info_field "$(quick_node_info_cmd "${detected_dev}" "ver")")
             echo "Only one device detected – selecting it automatically: $detected_dev - $(format_node_info_summary "${labels[0]}" "$board" "$version")"
 			echo "$detected_dev" > "$DEVICE_PORT_FILE"
 			echo "${labels[0]}" > "$DEVICE_PORT_NAME_FILE"
@@ -1700,7 +1715,7 @@ choose_serial() {
         echo "Select a serial device:"
         for i in "${!devs[@]}"; do
 			board=$(read_board_with_retry "${devs[$i]}")
-			version=$(clean_node_info_field "$(serial_cmd "${devs[$i]}" "ver")")
+			version=$(clean_node_info_field "$(quick_node_info_cmd "${devs[$i]}" "ver")")
             printf " %2d) %s  (%s)\n" $((i+1)) "${devs[$i]}" "$(format_node_info_summary "${labels[$i]}" "$board" "$version")"
         done
         echo "  0)  Scan again"
