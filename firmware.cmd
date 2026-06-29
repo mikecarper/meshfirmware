@@ -4550,6 +4550,10 @@ function Get-AvailableComPorts {
 	return @($ports | Sort-Object { [int](($_ -replace '^[^\d]*','')) })
 }
 
+function Test-IsWindowsHost {
+	return ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT)
+}
+
 function Resolve-LiveUsbComPort {
 	param(
 		[string]$PreferredComPort = "",
@@ -4695,8 +4699,8 @@ function Touch-ComPort1200 {
 		$sp.ReadTimeout = 300
 		$sp.WriteTimeout = 300
 		$sp.Handshake = [System.IO.Ports.Handshake]::None
-		$sp.DtrEnable = $false
-		$sp.RtsEnable = $false
+		$sp.DtrEnable = $true
+		$sp.RtsEnable = $true
 		try {
 			$sp.Open()
 			Start-Sleep -Milliseconds 150
@@ -4855,6 +4859,13 @@ function Invoke-NrfutilSerialDfu {
 		if ($portsBeforeTouch -notcontains $dfuComPort) {
 			$observed = if ($portsBeforeTouch.Count -gt 0) { $portsBeforeTouch -join ', ' } else { '<none>' }
 			throw "COM port $dfuComPort was not present before DFU upload. Observed ports: $observed"
+		}
+		if (Test-IsWindowsHost) {
+			$dfuComPort = Resolve-Nrf52DfuComPort -PreferredComPort $ComPort -TouchComPort $ComPort -TimeoutSec $TimeoutSec
+			if ([string]::IsNullOrWhiteSpace($dfuComPort)) {
+				throw "Could not find a DFU serial port after requesting bootloader mode. Last known runtime port: $ComPort"
+			}
+			$NrfutilTouchBaud = 0
 		}
 	}
 	else {

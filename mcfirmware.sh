@@ -847,8 +847,8 @@ choose_custom_firmware_file() {
   print_latest_custom_firmware_option "$required_ext"
 
   while :; do
-    read -rp "Enter full filename, url, or latest: " input < /dev/tty
-    [[ -z "$input" ]] && { echo "Empty input. Try again."; continue; }
+    read -rp "Enter full filename, url, or latest [latest]: " input < /dev/tty
+    [[ -z "$input" ]] && input="latest"
 
     local_input="$input"
     if [[ "$local_input" == file:///* ]]; then
