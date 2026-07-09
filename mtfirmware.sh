@@ -58,6 +58,9 @@ REPO_NAME="firmware"
 REPO_NAME_ALT="meshtastic.github.io"
 CACHE_TIMEOUT_SECONDS=$((6 * 3600)) # 6 hours
 MOUNT_FOLDER="/mnt/meshDeviceSD"
+NRF52_DFU_TIMEOUT_SECONDS=180
+NRF52_MANUAL_DFU_PROMPT_SECONDS=20
+NRF52_POST_FLASH_CHECK_TIMEOUT_SECONDS=60
 USB_AUTOSUSPEND=$(cat /sys/module/usbcore/parameters/autosuspend)
 if [[ "$USB_AUTOSUSPEND" -ne -1 ]]; then
 	# Only disable (-1) if it isn’t already
@@ -69,6 +72,8 @@ fi
         GITHUB_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases"
           REPO_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME_ALT}/contents"
  WEB_HARDWARE_LIST_URL="https://raw.githubusercontent.com/${REPO_OWNER}/web-flasher/refs/heads/main/public/data/hardware-list.json"
+NRF52_ERASE_BASE_URL="https://flasher.meshcore.io/firmware"
+NRF52_ERASE_FALLBACK_BASE_URL="https://files.brazio.org/meshcore/erase"
 # Set Folders
          FIRMWARE_ROOT="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}"
           DOWNLOAD_DIR="${PWD_SCRIPT}/${REPO_OWNER}_${REPO_NAME}/downloads"
@@ -1510,6 +1515,69 @@ list_block_devs() {
 	lsblk -nrpo NAME | sort; 
 }
 
+is_uf2_mount_dir() {
+	local mount_dir=$1
+
+	[[ -d "$mount_dir" ]] || return 1
+	[[ -f "$mount_dir/INFO_UF2.TXT" || -f "$mount_dir/CURRENT.UF2" || -f "$mount_dir/INDEX.HTM" ]]
+}
+
+find_mounted_uf2_dir() {
+	local mount_dir
+
+	while IFS= read -r mount_dir; do
+		[[ -n "$mount_dir" ]] || continue
+		if is_uf2_mount_dir "$mount_dir"; then
+			printf '%s\n' "$mount_dir"
+			return 0
+		fi
+	done < <(findmnt -rn -o TARGET 2>/dev/null | sort -u)
+
+	for mount_dir in "$MOUNT_FOLDER" /media/"$USER"/* /run/media/"$USER"/*; do
+		[[ -d "$mount_dir" ]] || continue
+		if is_uf2_mount_dir "$mount_dir"; then
+			printf '%s\n' "$mount_dir"
+			return 0
+		fi
+	done
+
+	return 1
+}
+
+find_uf2_mount_dir() {
+	local device_name type fstype mountpoint
+
+	if find_mounted_uf2_dir; then
+		return 0
+	fi
+
+	while read -r device_name type fstype mountpoint; do
+		[[ -n "$device_name" ]] || continue
+		[[ "$type" == "disk" || "$type" == "part" ]] || continue
+		[[ "$fstype" == "vfat" || "$fstype" == "msdos" || "$fstype" == "exfat" ]] || continue
+		[[ -z "${mountpoint:-}" ]] || continue
+
+		if mountpoint -q "$MOUNT_FOLDER"; then
+			if is_uf2_mount_dir "$MOUNT_FOLDER"; then
+				printf '%s\n' "$MOUNT_FOLDER"
+				return 0
+			fi
+			continue
+		fi
+
+		sudo mkdir -p "$MOUNT_FOLDER"
+		if sudo mount "$device_name" "$MOUNT_FOLDER" 2>/dev/null; then
+			if is_uf2_mount_dir "$MOUNT_FOLDER"; then
+				printf '%s\n' "$MOUNT_FOLDER"
+				return 0
+			fi
+			sudo umount "$MOUNT_FOLDER" 2>/dev/null || true
+		fi
+	done < <(lsblk -nrpo NAME,TYPE,FSTYPE,MOUNTPOINT 2>/dev/null)
+
+	return 1
+}
+
 list_serial_devs() {
 	local path
 
@@ -1749,6 +1817,31 @@ resolve_nrf52_dfu_package() {
 	printf '%s\n' "$zip_file"
 }
 
+resolve_nrf52_uf2_file() {
+	local firmware_file=$1
+	local folder leaf stem candidate
+
+	folder="$(dirname "$firmware_file")"
+	leaf="$(basename "$firmware_file")"
+
+	if [[ "$leaf" == *.uf2 ]]; then
+		printf '%s\n' "$firmware_file"
+		return 0
+	fi
+
+	stem="${leaf%.*}"
+	stem="${stem%-ota}"
+	for candidate in "${folder}/${stem}.uf2" "${folder}/${stem%-ota}.uf2"; do
+		if [[ -f "$candidate" ]]; then
+			printf '%s\n' "$candidate"
+			return 0
+		fi
+	done
+
+	echo "Could not find matching nRF52 UF2 file for USB storage flashing: $firmware_file" >&2
+	return 1
+}
+
 find_nrf52_erase_uf2() {
 	local firmware_file=$1
 	local reference_file=${2:-$firmware_file}
@@ -1781,6 +1874,84 @@ find_nrf52_erase_uf2() {
 		tail -n 1
 }
 
+nrf52_erase_zip_name() {
+	local reference_file=$1
+	local reference_package app_version dev_revision dev_type sd_req
+
+	reference_package="$(resolve_nrf52_reference_package "$reference_file")"
+	read -r app_version dev_revision dev_type sd_req < <(get_nrf52_dfu_metadata "$reference_package")
+
+	case ",${sd_req}," in
+		*,0x123,*) printf '%s\n' "FLASH_ERASE_nrf52_softdevice_v7.zip" ;;
+		*,0xB6,*)  printf '%s\n' "FLASH_ERASE_nrf52_softdevice_v6.zip" ;;
+		*)
+			echo "No nRF52 erase ZIP mapping for softdevice_req '${sd_req}' in ${reference_package}." >&2
+			return 1
+			;;
+	esac
+}
+
+download_nrf52_erase_zip() {
+	local erase_name=$1
+	local target_folder=$2
+	local dest tmp_file bytes base_url url downloaded
+
+	mkdir -p "$target_folder"
+	dest="${target_folder}/${erase_name}"
+
+	if [[ -f "$dest" ]] && unzip -p "$dest" manifest.json >/dev/null 2>&1; then
+		echo "Using existing nRF52 erase package: $dest" >&2
+		printf '%s\n' "$dest"
+		return 0
+	fi
+
+	ensure_command curl
+	downloaded=false
+	for base_url in "$NRF52_ERASE_BASE_URL" "$NRF52_ERASE_FALLBACK_BASE_URL"; do
+		url="${base_url}/${erase_name}"
+		tmp_file="$(mktemp "${dest}.tmp.XXXXXX")"
+		echo "Downloading nRF52 erase package: $erase_name" >&2
+		if ! curl -fsSL --retry 3 --connect-timeout 10 -o "$tmp_file" "$url"; then
+			rm -f "$tmp_file"
+			continue
+		fi
+
+		bytes=$(stat -c%s "$tmp_file" 2>/dev/null || printf '0')
+		if (( bytes < 50000 )); then
+			echo "Downloaded nRF52 erase package is too small (${bytes} bytes): $url" >&2
+			rm -f "$tmp_file"
+			continue
+		fi
+		if ! unzip -p "$tmp_file" manifest.json >/dev/null 2>&1; then
+			echo "Downloaded nRF52 erase package is not a valid DFU ZIP: $url" >&2
+			rm -f "$tmp_file"
+			continue
+		fi
+
+		downloaded=true
+		break
+	done
+
+	if ! $downloaded; then
+		echo "Failed to download nRF52 erase package: $erase_name" >&2
+		return 1
+	fi
+
+	mv "$tmp_file" "$dest"
+	printf '%s\n' "$dest"
+}
+
+resolve_nrf52_erase_package() {
+	local firmware_file=$1
+	local reference_file=${2:-$firmware_file}
+	local folder erase_name
+
+	folder="$(dirname "$firmware_file")"
+	erase_name="$(nrf52_erase_zip_name "$reference_file")" || return 1
+	echo "Selected nRF52 erase package from OTA manifest: $erase_name" >&2
+	download_nrf52_erase_zip "$erase_name" "$folder"
+}
+
 ensure_serial_port_rw() {
 	local device_port_name=$1
 
@@ -1795,77 +1966,94 @@ ensure_serial_port_rw() {
 	sudo chmod a+rw "$device_port_name"
 }
 
-send_nrf52_1200_reset() {
-	local device_port_name=$1
-
-	ensure_serial_port_rw "$device_port_name"
-	bash -c 'port=$1; exec 3<> "$port"; stty -F "$port" 1200; sleep 1.5; exec 3>&-; exec 3<&-' bash "$device_port_name"
-}
-
-resolve_nrf52_dfu_serial_port() {
-	local runtime_port=$1
-	local before_ports=$2
-	local timeout_sec=${3:-60}
-	local current_ports new_port deadline saw_runtime_disappear
-
-	current_ports="$(list_serial_devs)"
-	new_port="$(comm -13 <(printf '%s\n' "$before_ports") <(printf '%s\n' "$current_ports") | tail -n 1)"
-	if [[ -n "$new_port" ]]; then
-		echo "Detected DFU serial port $new_port after 1200-baud touch on $runtime_port." >&2
-		printf '%s\n' "$new_port"
-		return 0
-	fi
-
-	if [[ -e "$runtime_port" ]]; then
-		echo "Putting device into DFU mode via 1200 baud touch on $runtime_port" >&2
-		send_nrf52_1200_reset "$runtime_port" || true
-	else
-		echo "Runtime serial port $runtime_port is not present; watching for an active DFU serial port." >&2
-	fi
+resolve_nrf52_runtime_serial_port() {
+	local preferred_port=$1
+	local timeout_sec=${2:-20}
+	local current_ports deadline
 
 	deadline=$((SECONDS + timeout_sec))
-	saw_runtime_disappear=false
 	while (( SECONDS < deadline )); do
-		current_ports="$(list_serial_devs)"
-		new_port="$(comm -13 <(printf '%s\n' "$before_ports") <(printf '%s\n' "$current_ports") | tail -n 1)"
-		if [[ -n "$new_port" ]]; then
-			echo "Detected DFU serial port $new_port after 1200-baud touch on $runtime_port." >&2
-			printf '%s\n' "$new_port"
+		if [[ -n "$preferred_port" && -e "$preferred_port" ]]; then
+			printf '%s\n' "$preferred_port"
 			return 0
 		fi
 
-		if ! grep -Fxq "$runtime_port" <<<"$current_ports"; then
-			saw_runtime_disappear=true
-		elif $saw_runtime_disappear; then
-			echo "DFU serial port re-enumerated as $runtime_port." >&2
-			printf '%s\n' "$runtime_port"
+		current_ports="$(list_serial_devs)"
+		if [[ "$(printf '%s\n' "$current_ports" | sed '/^$/d' | wc -l)" -eq 1 ]]; then
+			printf '%s\n' "$current_ports"
 			return 0
 		fi
 
 		sleep 0.25
 	done
 
-	current_ports="$(list_serial_devs)"
-	if [[ "$(printf '%s\n' "$current_ports" | sed '/^$/d' | wc -l)" -eq 1 ]]; then
-		printf '%s\n' "$current_ports"
-		return 0
+	if [[ -n "$preferred_port" ]]; then
+		printf '%s\n' "$preferred_port"
+	else
+		list_serial_devs | tail -n 1
 	fi
-	if grep -Fxq "$runtime_port" <<<"$current_ports"; then
-		echo "Warning: DFU serial port did not enumerate on a new path; retrying $runtime_port." >&2
-		printf '%s\n' "$runtime_port"
+}
+
+check_nrf52_after_flash() {
+	local stage=$1
+	local preferred_port=${2:-}
+	local timeout_sec=${3:-$NRF52_POST_FLASH_CHECK_TIMEOUT_SECONDS}
+	local deadline uf2_mount current_ports serial_port
+
+	echo "Checking device after ${stage}..."
+	deadline=$((SECONDS + timeout_sec))
+	while (( SECONDS < deadline )); do
+		uf2_mount="$(find_uf2_mount_dir || true)"
+		if [[ -n "$uf2_mount" ]]; then
+			echo "Post-${stage} check: UF2 storage mode detected at $uf2_mount."
+			return 0
+		fi
+
+		sleep 1
+	done
+
+	if [[ -n "$preferred_port" && -e "$preferred_port" ]]; then
+		echo "Post-${stage} check: UF2 storage was not detected; serial port is present at $preferred_port."
 		return 0
 	fi
 
-	echo "Could not find a DFU serial port after 1200-baud touch. Observed ports: ${current_ports:-<none>}" >&2
+	current_ports="$(list_serial_devs)"
+	serial_port="$(printf '%s\n' "$current_ports" | sed '/^$/d' | head -n 1)"
+	if [[ -n "$serial_port" ]]; then
+		echo "Post-${stage} check: UF2 storage was not detected; serial port is present at $serial_port."
+		return 0
+	fi
+
+	echo "Post-${stage} check: no UF2 storage or serial port detected after ${timeout_sec}s." >&2
 	return 1
+}
+
+copy_nrf52_uf2_to_storage() {
+	local uf2_file=$1
+	local stage=$2
+	local mount_dir
+
+	if [[ ! -f "$uf2_file" || "$uf2_file" != *.uf2 ]]; then
+		echo "UF2 storage flashing requires a .uf2 file: $uf2_file" >&2
+		return 1
+	fi
+
+	mount_dir="$(find_uf2_mount_dir || true)"
+	if [[ -z "$mount_dir" ]]; then
+		echo "No UF2 USB storage volume was found for ${stage}." >&2
+		return 1
+	fi
+
+	echo "Using UF2 storage device at $mount_dir"
+	echo "Copying $(basename "$uf2_file") for ${stage}..."
+	sudo cp -v "$uf2_file" "$mount_dir/"
+	sync
 }
 
 run_nrf52_dfu_attempt() {
 	local package_file=$1
 	local device_port_name=$2
-	local touch_baud=$3
-	local timeout_sec=$4
-	local output_file exit_code dfu_cmd
+	local exit_code prompt_done_file prompt_pid
 
 	if [[ ! -e "$device_port_name" ]]; then
 		echo "Serial port $device_port_name is not present." >&2
@@ -1873,71 +2061,127 @@ run_nrf52_dfu_attempt() {
 	fi
 
 	ensure_serial_port_rw "$device_port_name"
-	output_file="$(mktemp)"
-	dfu_cmd=(pipx run adafruit-nrfutil dfu serial --package "$package_file" -p "$device_port_name" -b 115200)
-	if (( touch_baud > 0 )); then
-		dfu_cmd+=(--touch "$touch_baud")
-	fi
+	echo "pipx run adafruit-nrfutil dfu serial --package $package_file --touch 1200 -p $device_port_name -b 115200"
+	prompt_done_file="$(mktemp)"
+	rm -f "$prompt_done_file"
+	(
+		sleep "$NRF52_MANUAL_DFU_PROMPT_SECONDS"
+		if [[ ! -e "$prompt_done_file" ]]; then
+			echo
+			echo "nrfutil is still waiting for the bootloader."
+			echo "Put the device into DFU mode manually now; leave this script and nrfutil running."
+			echo "The nrfutil timeout is ${NRF52_DFU_TIMEOUT_SECONDS}s."
+		fi
+	) &
+	prompt_pid=$!
 
-	if (( touch_baud > 0 )); then
-		echo "Running nRF52 serial DFU on $device_port_name with ${touch_baud}-baud touch."
-	else
-		echo "Running nRF52 serial DFU on $device_port_name."
-	fi
-	echo "${dfu_cmd[*]}"
 	set +e
 	if command -v timeout >/dev/null 2>&1; then
-		timeout "${timeout_sec}s" "${dfu_cmd[@]}" 2>&1 | tee "$output_file"
+		timeout --foreground "${NRF52_DFU_TIMEOUT_SECONDS}s" pipx run adafruit-nrfutil dfu serial --package "$package_file" --touch 1200 -p "$device_port_name" -b 115200
 	else
-		"${dfu_cmd[@]}" 2>&1 | tee "$output_file"
+		pipx run adafruit-nrfutil dfu serial --package "$package_file" --touch 1200 -p "$device_port_name" -b 115200
 	fi
-	exit_code=${PIPESTATUS[0]}
+	exit_code=$?
+	touch "$prompt_done_file"
+	kill "$prompt_pid" 2>/dev/null || true
+	wait "$prompt_pid" 2>/dev/null || true
+	rm -f "$prompt_done_file"
 	set -e
 
 	if (( exit_code == 124 )); then
-		echo "nRF52 serial DFU timed out after ${timeout_sec}s on $device_port_name with package $package_file." >&2
-		rm -f "$output_file"
+		echo "nRF52 serial DFU timed out after ${NRF52_DFU_TIMEOUT_SECONDS}s on $device_port_name with package $package_file." >&2
 		return 1
 	fi
 
-	if (( exit_code != 0 )) ||
-		grep -Eiq 'Failed to upgrade target|NordicSemiException|No data received|Timed out waiting for acknowledgement|Traceback' "$output_file" ||
-		! grep -Eq '^Device programmed\.' "$output_file"; then
+	if (( exit_code != 0 )); then
 		echo "nRF52 serial DFU failed on $device_port_name with package $package_file." >&2
-		rm -f "$output_file"
 		return 1
 	fi
 
-	rm -f "$output_file"
+	NRF52_LAST_DFU_PORT="$device_port_name"
 	return 0
 }
 
 run_nrf52_serial_dfu() {
 	local package_file=$1
 	local device_port_name=$2
-	local before_ports dfu_port package_size touch_timeout
 
-	before_ports="$(list_serial_devs)"
-	package_size="$(stat -c%s "$package_file" 2>/dev/null || printf '0')"
-	if (( package_size > 300000 )); then
-		touch_timeout=150
-	else
-		touch_timeout=75
+	run_nrf52_dfu_attempt "$package_file" "$device_port_name"
+}
+
+record_stopped_service() {
+	local service=$1
+
+	[[ -n "$service" && "$service" != "None" ]] || return 0
+	if [[ " ${lockedService:-} " != *" $service "* ]]; then
+		lockedService="${lockedService:+$lockedService }$service"
 	fi
+}
 
-	if run_nrf52_dfu_attempt "$package_file" "$device_port_name" 1200 "$touch_timeout"; then
-		return 0
+stop_service_names() {
+	local services=$1
+	local service
+	local -a service_list=()
+
+	[[ -n "$services" && "$services" != "None" ]] || return 0
+	read -r -a service_list <<< "$services"
+	((${#service_list[@]})) || return 0
+
+	echo "Stopping service $services..."
+	sudo systemctl stop "${service_list[@]}"
+	for service in "${service_list[@]}"; do
+		record_stopped_service "$service"
+	done
+}
+
+stop_nrf52_serial_probe_services() {
+	local service
+
+	for service in ModemManager brltty gpsd; do
+		if systemctl is-active --quiet "$service" 2>/dev/null; then
+			stop_service_names "$service"
+		fi
+	done
+}
+
+restart_locked_service_if_needed() {
+	local -a service_list=()
+
+	if [ -n "${lockedService:-}" ] && [ "$lockedService" != "None" ]; then
+		echo "Starting service $lockedService..."
+		read -r -a service_list <<< "$lockedService"
+		sudo systemctl start "${service_list[@]}"
+		lockedService=""
 	fi
+}
 
-	echo "nrfutil did not complete with its built-in touch; scanning for a re-enumerated DFU serial port." >&2
-	dfu_port="$(resolve_nrf52_dfu_serial_port "$device_port_name" "$before_ports" 60)" || return 1
+prompt_nrf52_reboot_retry() {
+	local reply
 
-	run_nrf52_dfu_attempt "$package_file" "$dfu_port" 0 180
+	echo
+	echo "nRF52 flashing did not complete."
+	echo "Reboot/reset the device now. If it comes up as USB storage, the next try will use UF2 copy first."
+	while true; do
+		read -r -p "Press Enter after reboot to try again, or type E to exit: " reply </dev/tty
+		case "$reply" in
+			"")
+				return 0
+				;;
+			[Ee])
+				restart_locked_service_if_needed
+				return 1
+				;;
+			*)
+				echo "Please press Enter to retry or type E to exit."
+				;;
+		esac
+	done
 }
 
 # Run the firmware update/install script.
 run_update_script() {
 	local cmd user_choice PYTHON ESPTOOL_CMD device_name metadata_display_name nrf52_action nrf52_serial_dfu
+	local app_package erase_package app_uf2 erase_uf2 nrf52_uf2_mount
 	mapfile -t cmd_array <"$CMD_FILE"
 	abs_script="${cmd_array[0]}"
 	abs_selected="${cmd_array[1]}"
@@ -2037,19 +2281,21 @@ run_update_script() {
 	echo "$detected_dev"
 	lockedService=$(get_locked_service "$detected_dev")
 	if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
-		echo "Stopping service $lockedService..."
-		sudo systemctl stop "$lockedService"
+		stop_service_names "$lockedService"
+	fi
+	if $nrf52_serial_dfu; then
+		stop_nrf52_serial_probe_services
 	fi
 
 	
-	# Make a backup of the config.
-	echo "Making a backup of the configuration."
+	# Optionally make a backup of the config.
 	basename_device_port_name="$(basename "$device_port_name")"
 	backup_config_name="config_backup.${architecture}.${device_name}.${basename_device_port_name}.$(date +%s).yaml"
 	backup_config_name_sanitized=$(echo "$backup_config_name" | tr '/' '_' | tr ' ' '_')
 	read -rp "Create a backup configuration before flashing? [y/N]: " do_backup
 	case "$do_backup" in
 	  [Yy])
+		echo "Making a backup of the configuration."
 		echo "Attempting to create backup..."
 		while true; do
 			if timeout 30s pipx run meshtastic --port "${device_port_name}" --export-config > "${backup_config_name_sanitized}"; then
@@ -2099,30 +2345,156 @@ run_update_script() {
 		fi
 
 	elif $nrf52_serial_dfu; then
+		while true; do
+		NRF52_LAST_DFU_PORT="$device_port_name"
+		app_uf2="$(resolve_nrf52_uf2_file "$abs_selected" || true)"
+		nrf52_uf2_mount="$(find_uf2_mount_dir || true)"
+
+		if [[ -n "$nrf52_uf2_mount" && -n "$app_uf2" ]]; then
+			echo "nRF52 USB storage mode detected at $nrf52_uf2_mount; using UF2 copy."
+
+			if [[ "$nrf52_action" == "flash-wipe" ]]; then
+				erase_uf2="$(find_nrf52_erase_uf2 "$abs_selected" "$abs_selected")"
+				if [[ -z "$erase_uf2" ]]; then
+					echo "No Meshtastic nRF52 erase UF2 file was found next to $abs_selected" >&2
+					exit 1
+				fi
+
+				echo "Erasing UF2 area using $erase_uf2"
+				sleep 1
+				if ! copy_nrf52_uf2_to_storage "$erase_uf2" "erase"; then
+					echo "Failed to erase ${device_name} using UF2 storage." >&2
+					exit 1
+				fi
+				if ! check_nrf52_after_flash "erase" "$device_port_name"; then
+					exit 1
+				fi
+				echo "Erase done."
+				echo
+			fi
+
+			nrf52_uf2_mount="$(find_uf2_mount_dir || true)"
+			if [[ -n "$nrf52_uf2_mount" ]]; then
+				echo "Flashing firmware file $app_uf2"
+				sleep 1
+				if ! copy_nrf52_uf2_to_storage "$app_uf2" "firmware"; then
+					echo "Firmware ${nrf52_action} failed for ${device_name} using UF2 storage." >&2
+					exit 1
+				fi
+				if ! check_nrf52_after_flash "firmware" "$device_port_name"; then
+					exit 1
+				fi
+				echo
+				echo "Firmware ${nrf52_action} completed for ${device_name} using UF2 storage."
+			else
+				echo "UF2 storage did not reappear; falling back to nrfutil for firmware flash."
+				app_package="$(resolve_nrf52_dfu_package "$abs_selected" "$abs_selected")"
+				echo "Flashing firmware file $app_package"
+				sleep 1
+				if ! run_nrf52_serial_dfu "$app_package" "$device_port_name"; then
+					echo "Firmware ${nrf52_action} failed for ${device_name} on ${device_port_name}." >&2
+					if prompt_nrf52_reboot_retry; then
+						continue
+					fi
+					exit 1
+				fi
+				if ! check_nrf52_after_flash "firmware" "$device_port_name"; then
+					exit 1
+				fi
+				echo
+				echo "Firmware ${nrf52_action} completed for ${device_name} on ${device_port_name}."
+			fi
+
+			if [ -f "${backup_config_name_sanitized}" ]; then
+				echo "Configuration can be restored using this if it was wiped out"
+				echo "pipx run meshtastic --configure \"${backup_config_name_sanitized}\""
+			fi
+			restart_locked_service_if_needed
+			return 0
+		fi
+
+		if [[ -n "$nrf52_uf2_mount" && -z "$app_uf2" ]]; then
+			echo "nRF52 USB storage mode was detected, but no app UF2 was found; falling back to nrfutil." >&2
+		else
+			echo "No nRF52 UF2 USB storage volume detected; using nrfutil serial DFU."
+		fi
+
+		echo "Getting the latest version of adafruit-nrfutil"
+		pipx run adafruit-nrfutil version
+		echo "Running ${nrf52_action}..."
+
 		app_package="$(resolve_nrf52_dfu_package "$abs_selected" "$abs_selected")"
 
 		if [[ "$nrf52_action" == "flash-wipe" ]]; then
-			erase_uf2="$(find_nrf52_erase_uf2 "$abs_selected" "$abs_selected")"
-			if [[ -z "$erase_uf2" ]]; then
-				echo "No Meshtastic nRF52 erase UF2 file was found next to $abs_selected" >&2
-				exit 1
-			fi
-
-			erase_package="$(resolve_nrf52_dfu_package "$erase_uf2" "$abs_selected")"
+			erase_package="$(resolve_nrf52_erase_package "$abs_selected" "$abs_selected")" || exit 1
 			echo "Erasing UF2 area using $erase_package"
 			sleep 1
 			if ! run_nrf52_serial_dfu "$erase_package" "$device_port_name"; then
-				echo "Failed to erase ${device_name} on ${device_port_name}." >&2
+				nrf52_uf2_mount="$(find_uf2_mount_dir || true)"
+				erase_uf2="$(find_nrf52_erase_uf2 "$abs_selected" "$abs_selected" || true)"
+				if [[ -n "$nrf52_uf2_mount" && -n "$erase_uf2" ]]; then
+					echo "nrfutil failed, but UF2 storage is available; retrying erase with UF2 copy."
+					if ! copy_nrf52_uf2_to_storage "$erase_uf2" "erase"; then
+						echo "Failed to erase ${device_name} using UF2 storage." >&2
+						exit 1
+					fi
+				else
+					echo "Failed to erase ${device_name} on ${device_port_name}." >&2
+					if prompt_nrf52_reboot_retry; then
+						continue
+					fi
+					exit 1
+				fi
+			fi
+			if ! check_nrf52_after_flash "erase" "$device_port_name"; then
 				exit 1
 			fi
 			echo "Erase done."
+			device_port_name="$(resolve_nrf52_runtime_serial_port "${NRF52_LAST_DFU_PORT:-$device_port_name}" 20)"
+			nrf52_uf2_mount="$(find_uf2_mount_dir || true)"
+			if [[ -n "$nrf52_uf2_mount" && -n "$app_uf2" ]]; then
+				echo "UF2 storage mode detected after erase; using UF2 copy for firmware flash."
+				echo "Flashing firmware file $app_uf2"
+				sleep 1
+				if ! copy_nrf52_uf2_to_storage "$app_uf2" "firmware"; then
+					echo "Firmware ${nrf52_action} failed for ${device_name} using UF2 storage." >&2
+					exit 1
+				fi
+				if ! check_nrf52_after_flash "firmware" "$device_port_name"; then
+					exit 1
+				fi
+				echo
+				echo "Firmware ${nrf52_action} completed for ${device_name} using UF2 storage."
+				if [ -f "${backup_config_name_sanitized}" ]; then
+					echo "Configuration can be restored using this if it was wiped out"
+					echo "pipx run meshtastic --configure \"${backup_config_name_sanitized}\""
+				fi
+				restart_locked_service_if_needed
+				return 0
+			fi
+			echo "Using serial port ${device_port_name} for firmware flash after erase."
 			echo
 		fi
 
 		echo "Flashing firmware file $app_package"
 		sleep 1
 		if ! run_nrf52_serial_dfu "$app_package" "$device_port_name"; then
-			echo "Firmware ${nrf52_action} failed for ${device_name} on ${device_port_name}." >&2
+			nrf52_uf2_mount="$(find_uf2_mount_dir || true)"
+			if [[ -n "$nrf52_uf2_mount" && -n "$app_uf2" ]]; then
+				echo "nrfutil failed, but UF2 storage is available; retrying firmware flash with UF2 copy."
+				if ! copy_nrf52_uf2_to_storage "$app_uf2" "firmware"; then
+					echo "Firmware ${nrf52_action} failed for ${device_name} using UF2 storage." >&2
+					exit 1
+				fi
+			else
+				echo "Firmware ${nrf52_action} failed for ${device_name} on ${device_port_name}." >&2
+				if prompt_nrf52_reboot_retry; then
+					continue
+				fi
+				exit 1
+			fi
+		fi
+		if ! check_nrf52_after_flash "firmware" "$device_port_name"; then
 			exit 1
 		fi
 		echo
@@ -2131,6 +2503,8 @@ run_update_script() {
 			echo "Configuration can be restored using this if it was wiped out"
 			echo "pipx run meshtastic --configure \"${backup_config_name_sanitized}\""
 		fi
+		break
+		done
 
 	else
 		attempt=0
@@ -2188,10 +2562,7 @@ run_update_script() {
 	fi
 
 	# Restart the stopped service.
-	if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
-		echo "Starting service $lockedService..."
-		sudo systemctl start "$lockedService"
-	fi
+	restart_locked_service_if_needed
 }
 
 ##################
