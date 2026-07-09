@@ -1508,9 +1508,211 @@ list_block_devs() {
 	lsblk -nrpo NAME | sort; 
 }
 
+is_nrf52_arch() {
+	echo "${1:-}" | grep -Eqi 'nrf52|nrf52840'
+}
+
+choose_nrf52_flash_action() {
+	local device_name=$1
+	local device_port_name=$2
+	local choice choice_num
+
+	while true; do
+		echo "Choose firmware action for ${device_name} on ${device_port_name}:" >&2
+		echo "  1) flash-update       (write only)" >&2
+		echo "  2) flash-wipe + flash (erase, then write)" >&2
+		read -r -p "Selection [1/2]: " choice </dev/tty
+		if [[ "$choice" =~ ^[0-9]+$ ]]; then
+			choice_num=$((10#$choice))
+			case "$choice_num" in
+				1) printf '%s\n' "flash-update"; return 0 ;;
+				2) printf '%s\n' "flash-wipe"; return 0 ;;
+			esac
+		fi
+		echo "Invalid choice. Please enter 1 or 2." >&2
+	done
+}
+
+resolve_nrf52_reference_package() {
+	local firmware_file=$1
+	local folder leaf stem candidate
+
+	folder="$(dirname "$firmware_file")"
+	leaf="$(basename "$firmware_file")"
+
+	if [[ "$leaf" == *.zip ]]; then
+		printf '%s\n' "$firmware_file"
+		return 0
+	fi
+
+	stem="${leaf%.*}"
+	candidate="${folder}/${stem}-ota.zip"
+	if [[ -f "$candidate" ]]; then
+		printf '%s\n' "$candidate"
+		return 0
+	fi
+
+	echo "Could not find matching nRF52 OTA package for metadata: ${candidate}" >&2
+	return 1
+}
+
+convert_uf2_to_intel_hex() {
+	local uf2_file=$1
+	local hex_file=$2
+
+	"$PYTHON" - "$uf2_file" "$hex_file" <<'PY'
+import pathlib
+import struct
+import sys
+
+uf2_path = pathlib.Path(sys.argv[1])
+hex_path = pathlib.Path(sys.argv[2])
+data = uf2_path.read_bytes()
+
+MAGIC0 = 0x0A324655
+MAGIC1 = 0x9E5D5157
+MAGIC_END = 0x0AB16F30
+blocks = {}
+
+for offset in range(0, max(0, len(data) - 511), 512):
+    block = data[offset:offset + 512]
+    if len(block) != 512:
+        continue
+    start0, start1 = struct.unpack_from("<II", block, 0)
+    end_magic, = struct.unpack_from("<I", block, 508)
+    if start0 != MAGIC0 or start1 != MAGIC1 or end_magic != MAGIC_END:
+        continue
+    target, payload_size = struct.unpack_from("<II", block, 12)
+    if payload_size <= 0 or payload_size > 476:
+        continue
+    blocks[target] = block[32:32 + payload_size]
+
+if not blocks:
+    raise SystemExit(f"No UF2 payload blocks were found in {uf2_path}")
+
+def record(record_type, address, payload=b""):
+    values = bytes([len(payload), (address >> 8) & 0xFF, address & 0xFF, record_type]) + payload
+    checksum = (-sum(values)) & 0xFF
+    return ":" + values.hex().upper() + f"{checksum:02X}"
+
+lines = []
+current_upper = None
+for base in sorted(blocks):
+    payload = blocks[base]
+    for index in range(0, len(payload), 16):
+        chunk = payload[index:index + 16]
+        address = base + index
+        upper = (address >> 16) & 0xFFFF
+        if upper != current_upper:
+            lines.append(record(4, 0, bytes([(upper >> 8) & 0xFF, upper & 0xFF])))
+            current_upper = upper
+        lines.append(record(0, address & 0xFFFF, chunk))
+
+lines.append(":00000001FF")
+hex_path.write_text("\n".join(lines) + "\n", encoding="ascii")
+PY
+}
+
+get_nrf52_dfu_metadata() {
+	local reference_package=$1
+
+	"$PYTHON" - "$reference_package" <<'PY'
+import json
+import sys
+import zipfile
+
+with zipfile.ZipFile(sys.argv[1]) as zf:
+    with zf.open("manifest.json") as manifest_file:
+        manifest = json.load(manifest_file)
+
+init = manifest["manifest"]["application"]["init_packet_data"]
+sd_req = init.get("softdevice_req") or []
+print(
+    str(init["application_version"]),
+    str(init["device_revision"]),
+    str(init["device_type"]),
+    ",".join(f"0x{int(value):X}" for value in sd_req),
+)
+PY
+}
+
+resolve_nrf52_dfu_package() {
+	local firmware_file=$1
+	local reference_file=${2:-$firmware_file}
+	local reference_package folder leaf stem hex_file zip_file input_file metadata app_version dev_revision dev_type sd_req
+
+	if [[ "$firmware_file" == *.zip ]]; then
+		printf '%s\n' "$firmware_file"
+		return 0
+	fi
+
+	reference_package="$(resolve_nrf52_reference_package "$reference_file")"
+	folder="$(dirname "$firmware_file")"
+	leaf="$(basename "$firmware_file")"
+	stem="${leaf%.*}"
+	hex_file="${folder}/${stem}.serial-dfu.hex"
+	zip_file="${folder}/${stem}.serial-dfu.zip"
+
+	if [[ -f "$zip_file" && "$zip_file" -nt "$firmware_file" && "$zip_file" -nt "$reference_package" ]]; then
+		printf '%s\n' "$zip_file"
+		return 0
+	fi
+
+	input_file="$firmware_file"
+	if [[ "$firmware_file" == *.uf2 ]]; then
+		echo "Converting UF2 to Intel HEX: $hex_file" >&2
+		convert_uf2_to_intel_hex "$firmware_file" "$hex_file"
+		input_file="$hex_file"
+	fi
+
+	read -r app_version dev_revision dev_type sd_req < <(get_nrf52_dfu_metadata "$reference_package")
+	if [[ -z "${sd_req:-}" ]]; then
+		echo "No SoftDevice requirement was found in $reference_package" >&2
+		return 1
+	fi
+
+	echo "Generating nRF52 serial DFU package: $zip_file" >&2
+	pipx run adafruit-nrfutil dfu genpkg \
+		--application "$input_file" \
+		--application-version "$app_version" \
+		--dev-revision "$dev_revision" \
+		--dev-type "$dev_type" \
+		--sd-req "$sd_req" \
+		"$zip_file" >&2
+
+	printf '%s\n' "$zip_file"
+}
+
+find_nrf52_erase_uf2() {
+	local firmware_file=$1
+	local folder
+	folder="$(dirname "$firmware_file")"
+
+	find "$folder" -maxdepth 1 -type f -name 'Meshtastic_nRF52_factory_erase_v3_S140_*.uf2' |
+		sort -V |
+		tail -n 1
+}
+
+run_nrf52_serial_dfu() {
+	local package_file=$1
+	local device_port_name=$2
+
+	if [[ -r "$device_port_name" && -w "$device_port_name" ]]; then
+		pipx run adafruit-nrfutil dfu serial --package "$package_file" --touch 1200 -p "$device_port_name" -b 115200
+		return $?
+	fi
+
+	echo "Serial port $device_port_name requires elevated access."
+	echo "Current permissions: $(ls -l "$device_port_name")"
+	echo "Prompting for sudo so flashing can continue..."
+	ensure_sudo_session
+	sudo chmod a+rw "$device_port_name"
+	pipx run adafruit-nrfutil dfu serial --package "$package_file" --touch 1200 -p "$device_port_name" -b 115200
+}
+
 # Run the firmware update/install script.
 run_update_script() {
-	local cmd user_choice PYTHON ESPTOOL_CMD device_name
+	local cmd user_choice PYTHON ESPTOOL_CMD device_name nrf52_action
 	mapfile -t cmd_array <"$CMD_FILE"
 	abs_script="${cmd_array[0]}"
 	abs_selected="${cmd_array[1]}"
@@ -1554,6 +1756,9 @@ run_update_script() {
 
 		echo "Command to run for firmware $operation:"
 		echo "$abs_script -p ${device_port_name} -f $basename_selected"
+	elif is_nrf52_arch "$architecture"; then
+		nrf52_action="$(choose_nrf52_flash_action "$device_name" "$device_port_name")"
+		operation="$nrf52_action"
 	else
 		echo "$basename_selected"
 	fi
@@ -1633,7 +1838,7 @@ run_update_script() {
 		;;
 	esac
 
-	# Execute update for ESP32 or non-ESP32 devices.
+	# Execute update for ESP32, nRF52 serial DFU, or block-device UF2 devices.
 	if echo "$architecture" | grep -qi "esp32"; then
 		export ESPTOOL_PORT=$device_port_name
 		echo "Setting device into bootloader mode via baud 1200"
@@ -1654,6 +1859,40 @@ run_update_script() {
 		echo "If you see no errors above then"
 		echo "Firmware $operation for ESP32 device ${device_name} completed on port ${device_port_name}."
 		popd > /dev/null
+		if [ -f "${backup_config_name_sanitized}" ]; then
+			echo "Configuration can be restored using this if it was wiped out"
+			echo "pipx run meshtastic --configure \"${backup_config_name_sanitized}\""
+		fi
+
+	elif is_nrf52_arch "$architecture"; then
+		app_package="$(resolve_nrf52_dfu_package "$abs_selected" "$abs_selected")"
+
+		if [[ "$nrf52_action" == "flash-wipe" ]]; then
+			erase_uf2="$(find_nrf52_erase_uf2 "$abs_selected")"
+			if [[ -z "$erase_uf2" ]]; then
+				echo "No Meshtastic nRF52 erase UF2 file was found next to $abs_selected" >&2
+				exit 1
+			fi
+
+			erase_package="$(resolve_nrf52_dfu_package "$erase_uf2" "$abs_selected")"
+			echo "Erasing UF2 area using $erase_package"
+			sleep 1
+			if ! run_nrf52_serial_dfu "$erase_package" "$device_port_name"; then
+				echo "Failed to erase ${device_name} on ${device_port_name}." >&2
+				exit 1
+			fi
+			echo "Erase done."
+			echo
+		fi
+
+		echo "Flashing firmware file $app_package"
+		sleep 1
+		if ! run_nrf52_serial_dfu "$app_package" "$device_port_name"; then
+			echo "Firmware ${nrf52_action} failed for ${device_name} on ${device_port_name}." >&2
+			exit 1
+		fi
+		echo
+		echo "Firmware ${nrf52_action} completed for ${device_name} on ${device_port_name}."
 		if [ -f "${backup_config_name_sanitized}" ]; then
 			echo "Configuration can be restored using this if it was wiped out"
 			echo "pipx run meshtastic --configure \"${backup_config_name_sanitized}\""
