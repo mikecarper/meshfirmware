@@ -514,7 +514,7 @@ build_release_menu() {
 
 # Allow the user to select a firmware release version.
 select_release() {
-	local versions_tags versions_labels chosen_index auto_selected i selection
+	local versions_tags versions_labels chosen_index auto_selected i selection selection_num
 	local term_width max_len col_label_width col_width num_per_row num_entries index_width
 	local label formatted pre_colored stable_colored
 	local yellow green cyan reset
@@ -633,14 +633,18 @@ select_release() {
             echo ""
         fi
 
-		# Prompt for the user's selection.
 		echo ""
-		read -r -p "Enter the number of your selection: " selection </dev/tty
-		if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt "$num_entries" ]; then
-			echo "Invalid selection. Exiting."
-			exit 1
-		fi
-		chosen_index=$((selection - 1))
+		while true; do
+			read -r -p "Enter the number of your selection [1-$num_entries]: " selection </dev/tty
+			if [[ "$selection" =~ ^[0-9]+$ ]]; then
+				selection_num=$((10#$selection))
+				if (( selection_num >= 1 && selection_num <= num_entries )); then
+					break
+				fi
+			fi
+			echo "Invalid selection. Please enter a number from 1 to $num_entries."
+		done
+		chosen_index=$((selection_num - 1))
 	fi
 	tag="${versions_tags[$chosen_index]}"
 
@@ -779,7 +783,7 @@ detect_device() {
 pick_serial_port() {
   local -a ports=()
   local -a labels=()
-  local p idlabel i choice auto
+  local p idlabel i choice choice_num auto
 
   # Gather candidates (prefer ACM before USB)
   while IFS= read -r p; do
@@ -901,16 +905,22 @@ pick_serial_port() {
     printf '  %2d) %s\n' "$((i + 1))" "${labels[$i]}" >&2
   done
 
-  read -rp "Choice [0-${#ports[@]}]: " choice
-  [[ -z "$choice" ]] && choice=0
+  while true; do
+    read -rp "Choice [0-${#ports[@]}]: " choice
+    [[ -z "$choice" ]] && choice=0
+    if [[ "$choice" =~ ^[0-9]+$ ]]; then
+      choice_num=$((10#$choice))
+      if (( choice_num >= 0 && choice_num <= ${#ports[@]} )); then
+        break
+      fi
+    fi
+    echo "Invalid choice. Please enter a number from 0 to ${#ports[@]}." >&2
+  done
 
-	if [[ "$choice" == 0 ]]; then
+	if (( choice_num == 0 )); then
 	  printf '%s\n' "${labels[$((auto - 1))]}"
-	elif [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#ports[@]} )); then
-	  printf '%s\n' "${labels[$((choice - 1))]}"
 	else
-	  echo "Invalid choice." >&2
-	  return 1
+	  printf '%s\n' "${labels[$((choice_num - 1))]}"
 	fi
 }
 
@@ -1113,7 +1123,7 @@ choose_operation() {
 
 # Let the user select which firmware file to use if multiple are found.
 select_firmware_file() {
-    local selected_file file_choice count_candidates idx_width
+    local selected_file file_choice file_choice_num count_candidates idx_width
     local detected_info_file device_port_name
     local -a matching_files=()
     local -a firmware_candidates=()
@@ -1163,17 +1173,21 @@ select_firmware_file() {
         device_port_name="$(echo "$detected_info_file" | awk -F'-> ' '{print $2}')"
         echo "Current Device Info: $device_port_name"
 
-        read -r -p "Select which firmware file to use [0-${#firmware_candidates[@]}]: " file_choice </dev/tty
-        if ! [[ "$file_choice" =~ ^[0-9]+$ ]] ||
-            (( file_choice < 0 || file_choice > ${#firmware_candidates[@]} )); then
-            echo "Invalid selection. Exiting."
-            exit 1
-        fi
+        while true; do
+            read -r -p "Select which firmware file to use [0-${#firmware_candidates[@]}]: " file_choice </dev/tty
+            if [[ "$file_choice" =~ ^[0-9]+$ ]]; then
+                file_choice_num=$((10#$file_choice))
+                if (( file_choice_num >= 0 && file_choice_num <= ${#firmware_candidates[@]} )); then
+                    break
+                fi
+            fi
+            echo "Invalid selection. Please enter a number from 0 to ${#firmware_candidates[@]}."
+        done
 
-        if (( file_choice == 0 )); then
+        if (( file_choice_num == 0 )); then
             selected_file="$(prompt_from_file_list "Select which matching file to use" "${matching_files[@]}")"
         else
-            selected_file="${firmware_candidates[$((file_choice - 1))]}"
+            selected_file="${firmware_candidates[$((file_choice_num - 1))]}"
         fi
     else
         selected_file="$(prompt_from_file_list "Select which matching file to use" "${matching_files[@]}")"
@@ -1186,7 +1200,7 @@ select_firmware_file() {
 # prompt_for_firmware:
 #   Prompts the user to select from all files in the chosen tag directory.
 prompt_for_firmware() {
-	local chosen_tag count_choice i
+	local chosen_tag count_choice count_choice_num i
 	local -a file_list
 
 	chosen_tag="$(cat "${CHOSEN_TAG_FILE}")"
@@ -1216,16 +1230,19 @@ prompt_for_firmware() {
 		printf '  %d) %s\n' "$((i + 1))" "$(basename "${file_list[$i]}")" >&2
 	done
 
-	read -r -p "Select which firmware file to use [1-${#file_list[@]}]: " count_choice </dev/tty
-	if ! [[ "$count_choice" =~ ^[0-9]+$ ]] ||
-		[ "$count_choice" -lt 1 ] ||
-		[ "$count_choice" -gt "${#file_list[@]}" ]; then
-		echo "Invalid selection. Exiting." >&2
-		exit 1
-	fi
+	while true; do
+		read -r -p "Select which firmware file to use [1-${#file_list[@]}]: " count_choice </dev/tty
+		if [[ "$count_choice" =~ ^[0-9]+$ ]]; then
+			count_choice_num=$((10#$count_choice))
+			if (( count_choice_num >= 1 && count_choice_num <= ${#file_list[@]} )); then
+				break
+			fi
+		fi
+		echo "Invalid selection. Please enter a number from 1 to ${#file_list[@]}." >&2
+	done
 
 	# Return the selected full file path
-	printf '%s\n' "${file_list[$((count_choice - 1))]}"
+	printf '%s\n' "${file_list[$((count_choice_num - 1))]}"
 }
 
 # Prompt from a provided file list
@@ -1233,7 +1250,7 @@ prompt_from_file_list() {
     local prompt_text="${1:-Select which firmware file to use}"
     shift
 
-    local count_choice i
+    local count_choice count_choice_num i
     local -a file_list=("$@")
 
     if (( ${#file_list[@]} == 0 )); then
@@ -1251,14 +1268,18 @@ prompt_from_file_list() {
         printf '  %d) %s\n' "$((i + 1))" "$(basename "${file_list[$i]}")" >&2
     done
 
-    read -r -p "$prompt_text [1-${#file_list[@]}]: " count_choice </dev/tty
-    if ! [[ "$count_choice" =~ ^[0-9]+$ ]] ||
-        (( count_choice < 1 || count_choice > ${#file_list[@]} )); then
-        echo "Invalid selection. Exiting." >&2
-        exit 1
-    fi
+    while true; do
+        read -r -p "$prompt_text [1-${#file_list[@]}]: " count_choice </dev/tty
+        if [[ "$count_choice" =~ ^[0-9]+$ ]]; then
+            count_choice_num=$((10#$count_choice))
+            if (( count_choice_num >= 1 && count_choice_num <= ${#file_list[@]} )); then
+                break
+            fi
+        fi
+        echo "Invalid selection. Please enter a number from 1 to ${#file_list[@]}." >&2
+    done
 
-    printf '%s\n' "${file_list[$((count_choice - 1))]}"
+    printf '%s\n' "${file_list[$((count_choice_num - 1))]}"
 }
 
 # Prepare the update/install script and adjust parameters if necessary.
