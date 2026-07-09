@@ -1512,6 +1512,37 @@ is_nrf52_arch() {
 	echo "${1:-}" | grep -Eqi 'nrf52|nrf52840'
 }
 
+is_nrf52_serial_dfu_candidate() {
+	local architecture=$1
+	local firmware_file=$2
+	local folder leaf stem metadata_file
+
+	if is_nrf52_arch "$architecture"; then
+		return 0
+	fi
+
+	leaf="$(basename "$firmware_file")"
+	case "${leaf,,}" in
+		*.uf2|*.hex|*.zip) ;;
+		*) return 1 ;;
+	esac
+
+	folder="$(dirname "$firmware_file")"
+	stem="${leaf%.*}"
+	metadata_file="${folder}/${stem}.mt.json"
+	if [[ -f "$metadata_file" ]] &&
+		grep -Eiq '"(architecture|mcu)"[[:space:]]*:[[:space:]]*"nrf52(840)?"' "$metadata_file" &&
+		grep -Eiq '"requiresDfu"[[:space:]]*:[[:space:]]*true' "$metadata_file"; then
+		return 0
+	fi
+
+	if echo "$folder" | grep -Eqi 'nrf52|nrf52840'; then
+		return 0
+	fi
+
+	[[ -f "${folder}/${stem}-ota.zip" ]]
+}
+
 choose_nrf52_flash_action() {
 	local device_name=$1
 	local device_port_name=$2
@@ -1639,7 +1670,7 @@ PY
 resolve_nrf52_dfu_package() {
 	local firmware_file=$1
 	local reference_file=${2:-$firmware_file}
-	local reference_package folder leaf stem hex_file zip_file input_file metadata app_version dev_revision dev_type sd_req
+	local reference_package folder leaf stem hex_file zip_file input_file metadata app_version dev_revision dev_type sd_req is_erase_file
 
 	if [[ "$firmware_file" == *.zip ]]; then
 		printf '%s\n' "$firmware_file"
@@ -1649,6 +1680,17 @@ resolve_nrf52_dfu_package() {
 	reference_package="$(resolve_nrf52_reference_package "$reference_file")"
 	folder="$(dirname "$firmware_file")"
 	leaf="$(basename "$firmware_file")"
+	is_erase_file=false
+	if [[ "$leaf" == Meshtastic_nRF52_factory_erase_v3_S140_*.uf2 ]]; then
+		is_erase_file=true
+	fi
+
+	if ! $is_erase_file && [[ -f "$reference_package" ]]; then
+		echo "Using existing nRF52 OTA DFU package: $reference_package" >&2
+		printf '%s\n' "$reference_package"
+		return 0
+	fi
+
 	stem="${leaf%.*}"
 	hex_file="${folder}/${stem}.serial-dfu.hex"
 	zip_file="${folder}/${stem}.serial-dfu.zip"
@@ -1685,8 +1727,30 @@ resolve_nrf52_dfu_package() {
 
 find_nrf52_erase_uf2() {
 	local firmware_file=$1
-	local folder
+	local reference_file=${2:-$firmware_file}
+	local folder reference_package app_version dev_revision dev_type sd_req erase_version erase_file
 	folder="$(dirname "$firmware_file")"
+
+	reference_package="$(resolve_nrf52_reference_package "$reference_file")"
+	read -r app_version dev_revision dev_type sd_req < <(get_nrf52_dfu_metadata "$reference_package")
+
+	case ",${sd_req}," in
+		*,0x123,*) erase_version="7.3.0" ;;
+		*,0xB6,*)  erase_version="6.1.0" ;;
+		*)
+			echo "Warning: unknown nRF52 SoftDevice requirement '$sd_req' in $reference_package; using newest erase UF2." >&2
+			;;
+	esac
+
+	if [[ -n "${erase_version:-}" ]]; then
+		erase_file="${folder}/Meshtastic_nRF52_factory_erase_v3_S140_${erase_version}.uf2"
+		if [[ -f "$erase_file" ]]; then
+			echo "Selected erase UF2 from OTA manifest softdevice_req ${sd_req}: $(basename "$erase_file")" >&2
+			printf '%s\n' "$erase_file"
+			return 0
+		fi
+		echo "Warning: manifest requests S140_${erase_version}, but $erase_file was not found; using newest erase UF2." >&2
+	fi
 
 	find "$folder" -maxdepth 1 -type f -name 'Meshtastic_nRF52_factory_erase_v3_S140_*.uf2' |
 		sort -V |
@@ -1712,7 +1776,7 @@ run_nrf52_serial_dfu() {
 
 # Run the firmware update/install script.
 run_update_script() {
-	local cmd user_choice PYTHON ESPTOOL_CMD device_name nrf52_action
+	local cmd user_choice PYTHON ESPTOOL_CMD device_name nrf52_action nrf52_serial_dfu
 	mapfile -t cmd_array <"$CMD_FILE"
 	abs_script="${cmd_array[0]}"
 	abs_selected="${cmd_array[1]}"
@@ -1724,6 +1788,11 @@ run_update_script() {
 	operation=$(cat "${OPERATION_FILE}")
 	basename_selected="$(basename "$abs_selected")"
 	device_port_name=$(echo "$detected_dev" | awk -F'-> ' '{print $2}')
+	if is_nrf52_serial_dfu_candidate "$architecture" "$abs_selected"; then
+		nrf52_serial_dfu=true
+	else
+		nrf52_serial_dfu=false
+	fi
 	
 	if [[ -z "${device_port_name:-}" ]]; then
 		device_port_name="$(pick_serial_port)"
@@ -1756,7 +1825,7 @@ run_update_script() {
 
 		echo "Command to run for firmware $operation:"
 		echo "$abs_script -p ${device_port_name} -f $basename_selected"
-	elif is_nrf52_arch "$architecture"; then
+	elif $nrf52_serial_dfu; then
 		nrf52_action="$(choose_nrf52_flash_action "$device_name" "$device_port_name")"
 		operation="$nrf52_action"
 	else
@@ -1864,11 +1933,11 @@ run_update_script() {
 			echo "pipx run meshtastic --configure \"${backup_config_name_sanitized}\""
 		fi
 
-	elif is_nrf52_arch "$architecture"; then
+	elif $nrf52_serial_dfu; then
 		app_package="$(resolve_nrf52_dfu_package "$abs_selected" "$abs_selected")"
 
 		if [[ "$nrf52_action" == "flash-wipe" ]]; then
-			erase_uf2="$(find_nrf52_erase_uf2 "$abs_selected")"
+			erase_uf2="$(find_nrf52_erase_uf2 "$abs_selected" "$abs_selected")"
 			if [[ -z "$erase_uf2" ]]; then
 				echo "No Meshtastic nRF52 erase UF2 file was found next to $abs_selected" >&2
 				exit 1
