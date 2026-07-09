@@ -1773,14 +1773,6 @@ find_nrf52_erase_uf2() {
 		tail -n 1
 }
 
-list_serial_devs() {
-	local path
-
-	for path in /dev/ttyACM* /dev/ttyUSB*; do
-		[[ -e "$path" ]] && printf '%s\n' "$path"
-	done | sort -V
-}
-
 ensure_serial_port_rw() {
 	local device_port_name=$1
 
@@ -1795,104 +1787,42 @@ ensure_serial_port_rw() {
 	sudo chmod a+rw "$device_port_name"
 }
 
-touch_serial_1200() {
-	local device_port_name=$1
-
-	ensure_serial_port_rw "$device_port_name"
-	echo "Putting device into DFU mode via 1200 baud touch on $device_port_name" >&2
-	if stty -F "$device_port_name" 1200 cs8 -cstopb -parenb -ixon -ixoff 2>/dev/null; then
-		sleep 0.2
-		return 0
-	fi
-
-	"$PYTHON" - "$device_port_name" <<'PY'
-import os
-import sys
-import termios
-import time
-
-port = sys.argv[1]
-fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-try:
-    attrs = termios.tcgetattr(fd)
-    attrs[4] = termios.B1200
-    attrs[5] = termios.B1200
-    termios.tcsetattr(fd, termios.TCSANOW, attrs)
-    time.sleep(0.2)
-finally:
-    os.close(fd)
-PY
-}
-
-resolve_nrf52_dfu_serial_port() {
-	local runtime_port=$1
-	local timeout_sec=${2:-45}
-	local before current new_port deadline saw_runtime_disappear runtime_present_at_start
-
-	before="$(list_serial_devs)"
-	saw_runtime_disappear=false
-	runtime_present_at_start=false
-
-	if [[ -e "$runtime_port" ]]; then
-		runtime_present_at_start=true
-		touch_serial_1200 "$runtime_port" || true
-	else
-		echo "Runtime serial port $runtime_port is not present; looking for an active DFU serial port." >&2
-	fi
-
-	deadline=$((SECONDS + timeout_sec))
-	while (( SECONDS < deadline )); do
-		current="$(list_serial_devs)"
-		new_port="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$current") | tail -n 1)"
-
-		if [[ -n "$new_port" ]]; then
-			printf '%s\n' "$new_port"
-			return 0
-		fi
-
-		if ! grep -Fxq "$runtime_port" <<<"$current"; then
-			saw_runtime_disappear=true
-		elif $saw_runtime_disappear; then
-			printf '%s\n' "$runtime_port"
-			return 0
-		fi
-
-		sleep 0.25
-	done
-
-	current="$(list_serial_devs)"
-	if grep -Fxq "$runtime_port" <<<"$current"; then
-		echo "Warning: DFU serial port did not enumerate on a new path; retrying $runtime_port." >&2
-		printf '%s\n' "$runtime_port"
-		return 0
-	fi
-
-	if ! $runtime_present_at_start && [[ "$(printf '%s\n' "$current" | sed '/^$/d' | wc -l)" -eq 1 ]]; then
-		printf '%s\n' "$current"
-		return 0
-	fi
-
-	echo "Could not find a DFU serial port after 1200-baud touch. Observed ports: ${current:-<none>}" >&2
-	return 1
-}
-
 run_nrf52_serial_dfu() {
 	local package_file=$1
 	local device_port_name=$2
-	local dfu_port output_file exit_code
+	local output_file exit_code timeout_sec dfu_cmd
 
-	dfu_port="$(resolve_nrf52_dfu_serial_port "$device_port_name" 45)" || return 1
+	if [[ ! -e "$device_port_name" ]]; then
+		echo "Serial port $device_port_name is not present." >&2
+		return 1
+	fi
+
+	ensure_serial_port_rw "$device_port_name"
 	output_file="$(mktemp)"
+	timeout_sec=180
+	dfu_cmd=(pipx run adafruit-nrfutil dfu serial --package "$package_file" --touch 1200 -p "$device_port_name" -b 115200)
 
+	echo "Running nRF52 serial DFU on $device_port_name with 1200-baud touch."
+	echo "${dfu_cmd[*]}"
 	set +e
-	pipx run adafruit-nrfutil dfu serial --package "$package_file" -p "$dfu_port" -b 115200 2>&1 | tee "$output_file"
+	if command -v timeout >/dev/null 2>&1; then
+		timeout "${timeout_sec}s" "${dfu_cmd[@]}" 2>&1 | tee "$output_file"
+	else
+		"${dfu_cmd[@]}" 2>&1 | tee "$output_file"
+	fi
 	exit_code=${PIPESTATUS[0]}
 	set -e
+
+	if (( exit_code == 124 )); then
+		echo "nRF52 serial DFU timed out after ${timeout_sec}s on $device_port_name with package $package_file." >&2
+		rm -f "$output_file"
+		return 1
+	fi
 
 	if (( exit_code != 0 )) ||
 		grep -Eiq 'Failed to upgrade target|NordicSemiException|No data received|Timed out waiting for acknowledgement|Traceback' "$output_file" ||
 		! grep -Eq '^Device programmed\.' "$output_file"; then
-		echo "nRF52 serial DFU failed on $dfu_port with package $package_file." >&2
+		echo "nRF52 serial DFU failed on $device_port_name with package $package_file." >&2
 		rm -f "$output_file"
 		return 1
 	fi
