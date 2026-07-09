@@ -1510,6 +1510,40 @@ list_block_devs() {
 	lsblk -nrpo NAME | sort; 
 }
 
+list_usb_block_devs() {
+	lsblk -rpo NAME,TYPE,TRAN,MOUNTPOINT | awk '$3=="usb" {print $1}' | sort -u
+}
+
+scan_nrf52_uf2_bootloader() {
+	local -a usb_devs=()
+	local device_id mount_pt
+
+	mapfile -t usb_devs < <(list_usb_block_devs)
+	if ((${#usb_devs[@]} == 0)); then
+		return 1
+	fi
+
+	for device_id in "${usb_devs[@]}"; do
+		mount_pt="$(lsblk -nrpo MOUNTPOINT "$device_id" | head -n 1)"
+		if [[ -z "$mount_pt" ]]; then
+			echo "$device_id is not mounted. Mounting now..."
+			sudo mkdir -p "$MOUNT_FOLDER"
+			if ! sudo mount "$device_id" "$MOUNT_FOLDER" 2>/dev/null; then
+				continue
+			fi
+			mount_pt="$MOUNT_FOLDER"
+		fi
+
+		if [[ -e "$mount_pt/CURRENT.UF2" ]]; then
+			echo "Found CURRENT.UF2 on $device_id ($mount_pt)"
+			MOUNT_FOLDER="$mount_pt"
+			return 0
+		fi
+	done
+
+	return 2
+}
+
 is_nrf52_arch() {
 	echo "${1:-}" | grep -Eqi 'nrf52|nrf52840'
 }
@@ -1787,10 +1821,57 @@ ensure_serial_port_rw() {
 	sudo chmod a+rw "$device_port_name"
 }
 
+send_nrf52_1200_reset() {
+	local device_port_name=$1
+
+	ensure_serial_port_rw "$device_port_name"
+	bash -c 'port=$1; exec 3<> "$port"; stty -F "$port" 1200; sleep 1.5; exec 3>&-; exec 3<&-' bash "$device_port_name"
+}
+
+prepare_nrf52_dfu_bootloader() {
+	local device_port_name=$1
+	local i
+
+	if scan_nrf52_uf2_bootloader; then
+		return 0
+	fi
+
+	if [[ ! -e "$device_port_name" ]]; then
+		echo "Serial port $device_port_name is not present and no nRF52 UF2 bootloader volume was found." >&2
+		return 1
+	fi
+
+	echo "No USB mass-storage DFU volume found, sending 1200-baud reset on $device_port_name..."
+	send_nrf52_1200_reset "$device_port_name" || true
+	sleep 8
+
+	if scan_nrf52_uf2_bootloader; then
+		return 0
+	fi
+
+	echo "Device not in DFU mode yet. Waiting for nRF52 UF2 bootloader..."
+	for ((i=0; i<60; i++)); do
+		spinner
+		if scan_nrf52_uf2_bootloader; then
+			echo
+			return 0
+		fi
+		sleep 1
+	done
+	echo
+
+	echo "nRF52 DFU bootloader did not appear. Put the device into DFU mode and retry." >&2
+	return 1
+}
+
 run_nrf52_serial_dfu() {
 	local package_file=$1
 	local device_port_name=$2
 	local output_file exit_code timeout_sec dfu_cmd
+
+	if ! prepare_nrf52_dfu_bootloader "$device_port_name"; then
+		return 1
+	fi
 
 	if [[ ! -e "$device_port_name" ]]; then
 		echo "Serial port $device_port_name is not present." >&2
