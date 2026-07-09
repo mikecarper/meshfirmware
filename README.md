@@ -1,23 +1,27 @@
 # Alt CLI firmware selector for MeshCore & Meshtastic projects
 Scripts that automates the process of selecting, downloading, and applying firmware updates from the [meshcore-dev/MeshCore](https://github.com/meshcore-dev/MeshCore) & [meshtastic/firmware](https://github.com/meshtastic/firmware) GitHub repository via the USB port.  
 
-# Windows Quick start
-[Download mtfirmware.cmd (right click save)](https://github.com/mikecarper/meshfirmware/blob/main/mtfirmware.cmd?raw=true)  
-Make sure file is named mtfirmware.cmd and not mtfirmware.cmd.txt  
-double click and run the file mtfirmware.cmd  
+# Windows Quick start - MeshCore & Meshtastic in one script
+[Download firmware.cmd (right click save)](https://github.com/mikecarper/meshfirmware/blob/main/firmware.cmd?raw=true)  
+Make sure file is named firmware.cmd and not firmware.cmd.txt  
+double click and run the file firmware.cmd  
 
 Windows Video
 -----
 
 https://github.com/user-attachments/assets/ab68cb5e-63d5-4c73-ac4a-fdb76702fb20
 
+# Linux
 
 
 
-# Linux Quick start
+
+
+
+## MeshCore Quick start
 Copy and run this in your linux terminal 
 ```bash
-cd ~ && git clone https://github.com/mikecarper/meshfirmware.git && cd meshfirmware && chmod +x mtfirmware.sh && ./mtfirmware.sh
+cd ~ && git clone https://github.com/mikecarper/meshfirmware.git && cd meshfirmware && ./mcfirmware.sh
 ```
 <details>
   <summary>Readable Code</summary>  
@@ -26,9 +30,35 @@ cd ~ && git clone https://github.com/mikecarper/meshfirmware.git && cd meshfirmw
 cd ~
 git clone https://github.com/mikecarper/meshfirmware.git
 cd meshfirmware
-chmod +x mtfirmware.sh
+./mcfirmware.sh
+```
+
+</details>
+
+
+Linux Video
+-----
+https://github.com/user-attachments/assets/b3b24479-f17f-46ef-be97-504467e60aea
+
+
+# Meshtastic Quick start
+Copy and run this in your linux terminal 
+```bash
+cd ~ && git clone https://github.com/mikecarper/meshfirmware.git && cd meshfirmware && ./mtfirmware.sh
+```
+<details>
+  <summary>Readable Code</summary>  
+    
+```bash
+cd ~
+git clone https://github.com/mikecarper/meshfirmware.git
+cd meshfirmware
 ./mtfirmware.sh
 ```
+
+
+
+
 
 </details>
 
@@ -37,6 +67,7 @@ Linux Video
 -----
 
 https://github.com/user-attachments/assets/06fc7b59-ed03-44d7-a4d1-a0492dec5d16
+
 
 
 
