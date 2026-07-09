@@ -1510,38 +1510,12 @@ list_block_devs() {
 	lsblk -nrpo NAME | sort; 
 }
 
-list_usb_block_devs() {
-	lsblk -rpo NAME,TYPE,TRAN,MOUNTPOINT | awk '$3=="usb" {print $1}' | sort -u
-}
+list_serial_devs() {
+	local path
 
-scan_nrf52_uf2_bootloader() {
-	local -a usb_devs=()
-	local device_id mount_pt
-
-	mapfile -t usb_devs < <(list_usb_block_devs)
-	if ((${#usb_devs[@]} == 0)); then
-		return 1
-	fi
-
-	for device_id in "${usb_devs[@]}"; do
-		mount_pt="$(lsblk -nrpo MOUNTPOINT "$device_id" | head -n 1)"
-		if [[ -z "$mount_pt" ]]; then
-			echo "$device_id is not mounted. Mounting now..."
-			sudo mkdir -p "$MOUNT_FOLDER"
-			if ! sudo mount "$device_id" "$MOUNT_FOLDER" 2>/dev/null; then
-				continue
-			fi
-			mount_pt="$MOUNT_FOLDER"
-		fi
-
-		if [[ -e "$mount_pt/CURRENT.UF2" ]]; then
-			echo "Found CURRENT.UF2 on $device_id ($mount_pt)"
-			MOUNT_FOLDER="$mount_pt"
-			return 0
-		fi
-	done
-
-	return 2
+	for path in /dev/ttyACM* /dev/ttyUSB*; do
+		[[ -e "$path" ]] && printf '%s\n' "$path"
+	done | sort -V
 }
 
 is_nrf52_arch() {
@@ -1828,50 +1802,70 @@ send_nrf52_1200_reset() {
 	bash -c 'port=$1; exec 3<> "$port"; stty -F "$port" 1200; sleep 1.5; exec 3>&-; exec 3<&-' bash "$device_port_name"
 }
 
-prepare_nrf52_dfu_bootloader() {
-	local device_port_name=$1
-	local i
+resolve_nrf52_dfu_serial_port() {
+	local runtime_port=$1
+	local before_ports=$2
+	local timeout_sec=${3:-60}
+	local current_ports new_port deadline saw_runtime_disappear
 
-	if scan_nrf52_uf2_bootloader; then
+	current_ports="$(list_serial_devs)"
+	new_port="$(comm -13 <(printf '%s\n' "$before_ports") <(printf '%s\n' "$current_ports") | tail -n 1)"
+	if [[ -n "$new_port" ]]; then
+		echo "Detected DFU serial port $new_port after 1200-baud touch on $runtime_port." >&2
+		printf '%s\n' "$new_port"
 		return 0
 	fi
 
-	if [[ ! -e "$device_port_name" ]]; then
-		echo "Serial port $device_port_name is not present and no nRF52 UF2 bootloader volume was found." >&2
-		return 1
+	if [[ -e "$runtime_port" ]]; then
+		echo "Putting device into DFU mode via 1200 baud touch on $runtime_port" >&2
+		send_nrf52_1200_reset "$runtime_port" || true
+	else
+		echo "Runtime serial port $runtime_port is not present; watching for an active DFU serial port." >&2
 	fi
 
-	echo "No USB mass-storage DFU volume found, sending 1200-baud reset on $device_port_name..."
-	send_nrf52_1200_reset "$device_port_name" || true
-	sleep 8
-
-	if scan_nrf52_uf2_bootloader; then
-		return 0
-	fi
-
-	echo "Device not in DFU mode yet. Waiting for nRF52 UF2 bootloader..."
-	for ((i=0; i<60; i++)); do
-		spinner
-		if scan_nrf52_uf2_bootloader; then
-			echo
+	deadline=$((SECONDS + timeout_sec))
+	saw_runtime_disappear=false
+	while (( SECONDS < deadline )); do
+		current_ports="$(list_serial_devs)"
+		new_port="$(comm -13 <(printf '%s\n' "$before_ports") <(printf '%s\n' "$current_ports") | tail -n 1)"
+		if [[ -n "$new_port" ]]; then
+			echo "Detected DFU serial port $new_port after 1200-baud touch on $runtime_port." >&2
+			printf '%s\n' "$new_port"
 			return 0
 		fi
-		sleep 1
-	done
-	echo
 
-	echo "nRF52 DFU bootloader did not appear. Put the device into DFU mode and retry." >&2
+		if ! grep -Fxq "$runtime_port" <<<"$current_ports"; then
+			saw_runtime_disappear=true
+		elif $saw_runtime_disappear; then
+			echo "DFU serial port re-enumerated as $runtime_port." >&2
+			printf '%s\n' "$runtime_port"
+			return 0
+		fi
+
+		sleep 0.25
+	done
+
+	current_ports="$(list_serial_devs)"
+	if [[ "$(printf '%s\n' "$current_ports" | sed '/^$/d' | wc -l)" -eq 1 ]]; then
+		printf '%s\n' "$current_ports"
+		return 0
+	fi
+	if grep -Fxq "$runtime_port" <<<"$current_ports"; then
+		echo "Warning: DFU serial port did not enumerate on a new path; retrying $runtime_port." >&2
+		printf '%s\n' "$runtime_port"
+		return 0
+	fi
+
+	echo "Could not find a DFU serial port after 1200-baud touch. Observed ports: ${current_ports:-<none>}" >&2
 	return 1
 }
 
-run_nrf52_serial_dfu() {
+run_nrf52_dfu_attempt() {
 	local package_file=$1
 	local device_port_name=$2
-	local output_file exit_code timeout_sec dfu_cmd
-
-	if ! prepare_nrf52_dfu_bootloader "$device_port_name"; then
-		return 1
-	fi
+	local touch_baud=$3
+	local timeout_sec=$4
+	local output_file exit_code dfu_cmd
 
 	if [[ ! -e "$device_port_name" ]]; then
 		echo "Serial port $device_port_name is not present." >&2
@@ -1880,10 +1874,16 @@ run_nrf52_serial_dfu() {
 
 	ensure_serial_port_rw "$device_port_name"
 	output_file="$(mktemp)"
-	timeout_sec=180
-	dfu_cmd=(pipx run adafruit-nrfutil dfu serial --package "$package_file" --touch 1200 -p "$device_port_name" -b 115200)
+	dfu_cmd=(pipx run adafruit-nrfutil dfu serial --package "$package_file" -p "$device_port_name" -b 115200)
+	if (( touch_baud > 0 )); then
+		dfu_cmd+=(--touch "$touch_baud")
+	fi
 
-	echo "Running nRF52 serial DFU on $device_port_name with 1200-baud touch."
+	if (( touch_baud > 0 )); then
+		echo "Running nRF52 serial DFU on $device_port_name with ${touch_baud}-baud touch."
+	else
+		echo "Running nRF52 serial DFU on $device_port_name."
+	fi
 	echo "${dfu_cmd[*]}"
 	set +e
 	if command -v timeout >/dev/null 2>&1; then
@@ -1910,6 +1910,29 @@ run_nrf52_serial_dfu() {
 
 	rm -f "$output_file"
 	return 0
+}
+
+run_nrf52_serial_dfu() {
+	local package_file=$1
+	local device_port_name=$2
+	local before_ports dfu_port package_size touch_timeout
+
+	before_ports="$(list_serial_devs)"
+	package_size="$(stat -c%s "$package_file" 2>/dev/null || printf '0')"
+	if (( package_size > 300000 )); then
+		touch_timeout=150
+	else
+		touch_timeout=75
+	fi
+
+	if run_nrf52_dfu_attempt "$package_file" "$device_port_name" 1200 "$touch_timeout"; then
+		return 0
+	fi
+
+	echo "nrfutil did not complete with its built-in touch; scanning for a re-enumerated DFU serial port." >&2
+	dfu_port="$(resolve_nrf52_dfu_serial_port "$device_port_name" "$before_ports" 60)" || return 1
+
+	run_nrf52_dfu_attempt "$package_file" "$dfu_port" 0 180
 }
 
 # Run the firmware update/install script.
