@@ -1274,45 +1274,47 @@ prepare_script() {
 	script_to_run=""
 	abs_selected=""
 	if [ "$selected_file" ]; then
-		if [ "$operation" = "update" ]; then
-			script_to_run="$(dirname "$selected_file")/device-update.sh"
-		elif [ "$operation" = "install" ]; then
-			pipx install esptool
-			script_to_run="$(dirname "$selected_file")/device-install.sh"
-			tmpfile="$(mktemp)"
-			awk '
-			{
-			  lines[NR] = $0
-			}
+		if echo "$architecture" | grep -qi "esp32"; then
+			if [ "$operation" = "update" ]; then
+				script_to_run="$(dirname "$selected_file")/device-update.sh"
+			elif [ "$operation" = "install" ]; then
+				pipx install esptool
+				script_to_run="$(dirname "$selected_file")/device-install.sh"
+				tmpfile="$(mktemp)"
+				awk '
+				{
+				  lines[NR] = $0
+				}
 
-			# Collect indices of lines that start with $ESPTOOL_CMD and do not already have --after
-			/^[[:space:]]*\$ESPTOOL_CMD/ {
-			  if ($0 !~ /--after/) {
-				esp_idx[++esp_count] = NR
-			  }
-			}
-
-			END {
-			  if (esp_count > 0) {
-				for (k = 1; k <= esp_count; k++) {
-				  i = esp_idx[k]
-				  if (k < esp_count) {
-					# all but last: add --after no-reset
-					sub(/^[[:space:]]*\$ESPTOOL_CMD/, "& --after no-reset", lines[i])
-				  } else {
-					# last: add --after hard-reset
-					sub(/^[[:space:]]*\$ESPTOOL_CMD/, "& --after hard-reset", lines[i])
+				# Collect indices of lines that start with $ESPTOOL_CMD and do not already have --after
+				/^[[:space:]]*\$ESPTOOL_CMD/ {
+				  if ($0 !~ /--after/) {
+					esp_idx[++esp_count] = NR
 				  }
 				}
-			  }
 
-			  for (i = 1; i <= NR; i++) {
-				print lines[i]
-			  }
-			}
-			' "$script_to_run" > "$tmpfile"
+				END {
+				  if (esp_count > 0) {
+					for (k = 1; k <= esp_count; k++) {
+					  i = esp_idx[k]
+					  if (k < esp_count) {
+						# all but last: add --after no-reset
+						sub(/^[[:space:]]*\$ESPTOOL_CMD/, "& --after no-reset", lines[i])
+					  } else {
+						# last: add --after hard-reset
+						sub(/^[[:space:]]*\$ESPTOOL_CMD/, "& --after hard-reset", lines[i])
+					  }
+					}
+				  }
 
-			mv "$tmpfile" "$script_to_run"
+				  for (i = 1; i <= NR; i++) {
+					print lines[i]
+				  }
+				}
+				' "$script_to_run" > "$tmpfile"
+
+				mv "$tmpfile" "$script_to_run"
+			fi
 		fi
 		abs_selected="$(cd "$(dirname "$selected_file")" && pwd)/$(basename "$selected_file")"
 	fi

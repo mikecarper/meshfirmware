@@ -4740,7 +4740,7 @@ function Resolve-Nrf52DfuComPort {
 	param(
 		[string]$PreferredComPort,
 		[string]$TouchComPort = "",
-		[int]$TimeoutSec = 15
+		[int]$TimeoutSec = 45
 	)
 
 	$before = @(Get-AvailableComPorts)
@@ -4775,9 +4775,6 @@ function Resolve-Nrf52DfuComPort {
 			if ($sawTouchPortDisappear -and ($current -contains $TouchComPort)) {
 				return $TouchComPort
 			}
-			if ($current.Count -eq 1 -and $current[0] -ne $TouchComPort) {
-				return $current[0]
-			}
 		}
 		else {
 			if (-not [string]::IsNullOrWhiteSpace($PreferredComPort) -and ($current -contains $PreferredComPort)) {
@@ -4800,9 +4797,6 @@ function Resolve-Nrf52DfuComPort {
 		if ($current -contains $TouchComPort) {
 			Write-Warning "DFU port did not enumerate on a new COM number; retrying on the original COM port $TouchComPort."
 			return $TouchComPort
-		}
-		if ($current.Count -eq 1) {
-			return $current[0]
 		}
 	}
 
@@ -4843,7 +4837,7 @@ function Invoke-NrfutilSerialDfu {
 		[Parameter(Mandatory)][string]$ComPort,
 		[int]$NrfutilTouchBaud = 0,
 		[string]$TouchComPort = "",
-		[int]$TimeoutSec = 15,
+		[int]$TimeoutSec = 45,
 		[string]$ProgressActivity = "nRF52 DFU"
 	)
 
@@ -4861,10 +4855,16 @@ function Invoke-NrfutilSerialDfu {
 			throw "COM port $dfuComPort was not present before DFU upload. Observed ports: $observed"
 		}
 		if (Test-IsWindowsHost) {
-			$dfuComPort = Resolve-Nrf52DfuComPort -PreferredComPort $ComPort -TouchComPort $ComPort -TimeoutSec $TimeoutSec
-			if ([string]::IsNullOrWhiteSpace($dfuComPort)) {
-				throw "Could not find a DFU serial port after requesting bootloader mode. Last known runtime port: $ComPort"
+			$resolvedDfuComPort = Resolve-Nrf52DfuComPort -PreferredComPort $dfuComPort -TouchComPort $dfuComPort -TimeoutSec $TimeoutSec
+			if ([string]::IsNullOrWhiteSpace($resolvedDfuComPort)) {
+				$observed = @(Get-AvailableComPorts)
+				$observedText = if ($observed.Count -gt 0) { $observed -join ', ' } else { '<none>' }
+				throw "Could not find a DFU serial port after 1200-baud touch on $dfuComPort. Observed ports: $observedText"
 			}
+			if ($resolvedDfuComPort -ne $dfuComPort) {
+				Write-Host "Detected DFU COM port $resolvedDfuComPort after 1200-baud touch on $dfuComPort."
+			}
+			$dfuComPort = $resolvedDfuComPort
 			$NrfutilTouchBaud = 0
 		}
 	}
