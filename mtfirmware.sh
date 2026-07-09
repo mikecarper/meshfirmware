@@ -1118,7 +1118,9 @@ choose_operation() {
 	fi
 
 	echo "$operation" >"${OPERATION_FILE}"
-	echo "Operation chosen: $operation"
+	if ! is_nrf52_serial_dfu_candidate "$architecture" "$selected_file"; then
+		echo "Operation chosen: $operation"
+	fi
 }
 
 # Let the user select which firmware file to use if multiple are found.
@@ -1543,6 +1545,20 @@ is_nrf52_serial_dfu_candidate() {
 	[[ -f "${folder}/${stem}-ota.zip" ]]
 }
 
+get_firmware_metadata_display_name() {
+	local firmware_file=$1
+	local folder leaf stem metadata_file
+
+	folder="$(dirname "$firmware_file")"
+	leaf="$(basename "$firmware_file")"
+	stem="${leaf%.*}"
+	metadata_file="${folder}/${stem}.mt.json"
+
+	if [[ -f "$metadata_file" ]]; then
+		sed -nE 's/.*"displayName"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$metadata_file" | head -n 1
+	fi
+}
+
 choose_nrf52_flash_action() {
 	local device_name=$1
 	local device_port_name=$2
@@ -1757,26 +1773,137 @@ find_nrf52_erase_uf2() {
 		tail -n 1
 }
 
+list_serial_devs() {
+	local path
+
+	for path in /dev/ttyACM* /dev/ttyUSB*; do
+		[[ -e "$path" ]] && printf '%s\n' "$path"
+	done | sort -V
+}
+
+ensure_serial_port_rw() {
+	local device_port_name=$1
+
+	if [[ -r "$device_port_name" && -w "$device_port_name" ]]; then
+		return 0
+	fi
+
+	echo "Serial port $device_port_name requires elevated access." >&2
+	echo "Current permissions: $(ls -l "$device_port_name")" >&2
+	echo "Prompting for sudo so flashing can continue..." >&2
+	sudo -v
+	sudo chmod a+rw "$device_port_name"
+}
+
+touch_serial_1200() {
+	local device_port_name=$1
+
+	ensure_serial_port_rw "$device_port_name"
+	echo "Putting device into DFU mode via 1200 baud touch on $device_port_name" >&2
+	if stty -F "$device_port_name" 1200 cs8 -cstopb -parenb -ixon -ixoff 2>/dev/null; then
+		sleep 0.2
+		return 0
+	fi
+
+	"$PYTHON" - "$device_port_name" <<'PY'
+import os
+import sys
+import termios
+import time
+
+port = sys.argv[1]
+fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+try:
+    attrs = termios.tcgetattr(fd)
+    attrs[4] = termios.B1200
+    attrs[5] = termios.B1200
+    termios.tcsetattr(fd, termios.TCSANOW, attrs)
+    time.sleep(0.2)
+finally:
+    os.close(fd)
+PY
+}
+
+resolve_nrf52_dfu_serial_port() {
+	local runtime_port=$1
+	local timeout_sec=${2:-45}
+	local before current new_port deadline saw_runtime_disappear runtime_present_at_start
+
+	before="$(list_serial_devs)"
+	saw_runtime_disappear=false
+	runtime_present_at_start=false
+
+	if [[ -e "$runtime_port" ]]; then
+		runtime_present_at_start=true
+		touch_serial_1200 "$runtime_port" || true
+	else
+		echo "Runtime serial port $runtime_port is not present; looking for an active DFU serial port." >&2
+	fi
+
+	deadline=$((SECONDS + timeout_sec))
+	while (( SECONDS < deadline )); do
+		current="$(list_serial_devs)"
+		new_port="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$current") | tail -n 1)"
+
+		if [[ -n "$new_port" ]]; then
+			printf '%s\n' "$new_port"
+			return 0
+		fi
+
+		if ! grep -Fxq "$runtime_port" <<<"$current"; then
+			saw_runtime_disappear=true
+		elif $saw_runtime_disappear; then
+			printf '%s\n' "$runtime_port"
+			return 0
+		fi
+
+		sleep 0.25
+	done
+
+	current="$(list_serial_devs)"
+	if grep -Fxq "$runtime_port" <<<"$current"; then
+		echo "Warning: DFU serial port did not enumerate on a new path; retrying $runtime_port." >&2
+		printf '%s\n' "$runtime_port"
+		return 0
+	fi
+
+	if ! $runtime_present_at_start && [[ "$(printf '%s\n' "$current" | sed '/^$/d' | wc -l)" -eq 1 ]]; then
+		printf '%s\n' "$current"
+		return 0
+	fi
+
+	echo "Could not find a DFU serial port after 1200-baud touch. Observed ports: ${current:-<none>}" >&2
+	return 1
+}
+
 run_nrf52_serial_dfu() {
 	local package_file=$1
 	local device_port_name=$2
+	local dfu_port output_file exit_code
 
-	if [[ -r "$device_port_name" && -w "$device_port_name" ]]; then
-		pipx run adafruit-nrfutil dfu serial --package "$package_file" --touch 1200 -p "$device_port_name" -b 115200
-		return $?
+	dfu_port="$(resolve_nrf52_dfu_serial_port "$device_port_name" 45)" || return 1
+	output_file="$(mktemp)"
+
+	set +e
+	pipx run adafruit-nrfutil dfu serial --package "$package_file" -p "$dfu_port" -b 115200 2>&1 | tee "$output_file"
+	exit_code=${PIPESTATUS[0]}
+	set -e
+
+	if (( exit_code != 0 )) ||
+		grep -Eiq 'Failed to upgrade target|NordicSemiException|No data received|Timed out waiting for acknowledgement|Traceback' "$output_file" ||
+		! grep -Eq '^Device programmed\.' "$output_file"; then
+		echo "nRF52 serial DFU failed on $dfu_port with package $package_file." >&2
+		rm -f "$output_file"
+		return 1
 	fi
 
-	echo "Serial port $device_port_name requires elevated access."
-	echo "Current permissions: $(ls -l "$device_port_name")"
-	echo "Prompting for sudo so flashing can continue..."
-	ensure_sudo_session
-	sudo chmod a+rw "$device_port_name"
-	pipx run adafruit-nrfutil dfu serial --package "$package_file" --touch 1200 -p "$device_port_name" -b 115200
+	rm -f "$output_file"
+	return 0
 }
 
 # Run the firmware update/install script.
 run_update_script() {
-	local cmd user_choice PYTHON ESPTOOL_CMD device_name nrf52_action nrf52_serial_dfu
+	local cmd user_choice PYTHON ESPTOOL_CMD device_name metadata_display_name nrf52_action nrf52_serial_dfu
 	mapfile -t cmd_array <"$CMD_FILE"
 	abs_script="${cmd_array[0]}"
 	abs_selected="${cmd_array[1]}"
@@ -1792,6 +1919,10 @@ run_update_script() {
 		nrf52_serial_dfu=true
 	else
 		nrf52_serial_dfu=false
+	fi
+	metadata_display_name="$(get_firmware_metadata_display_name "$abs_selected")"
+	if [[ -n "$metadata_display_name" && (-z "$device_name" || "$device_name" == "$device_port_name" || "$device_name" == /dev/*) ]]; then
+		device_name="$metadata_display_name"
 	fi
 	
 	if [[ -z "${device_port_name:-}" ]]; then
@@ -1832,7 +1963,7 @@ run_update_script() {
 		echo "$basename_selected"
 	fi
 
-	if $RUN_UPDATE; then
+	if $RUN_UPDATE || $nrf52_serial_dfu; then
 		user_choice="y"
 	else
 		read -r -p "Would you like to $operation the firmware? (y/N): " user_choice </dev/tty
