@@ -587,6 +587,49 @@ ensure_command() {
 	fi
 }
 
+print_command() {
+	local arg
+
+	printf '  '
+	for arg in "$@"; do
+		printf '%q ' "$arg"
+	done
+	printf '\n'
+}
+
+choose_flash_execution_mode() {
+	local target=$1
+	local choice
+
+	while true; do
+		echo "Choose execution mode for ${target}:" >/dev/tty
+		echo "  1) run commands" >/dev/tty
+		echo "  2) echo commands only" >/dev/tty
+		read -r -p "Selection [1/2, Enter=1]: " choice </dev/tty
+		choice="${choice:-1}"
+		case "$choice" in
+			1|run|Run|RUN)
+				printf '%s\n' "run"
+				return 0
+				;;
+			2|echo|Echo|ECHO|dry-run|dryrun)
+				printf '%s\n' "echo"
+				return 0
+				;;
+			*)
+				echo "Please enter 1 or 2." >/dev/tty
+				;;
+		esac
+	done
+}
+
+print_nrfutil_dfu_command() {
+	local package_file=$1
+	shift || true
+
+	print_command pipx run adafruit-nrfutil dfu serial --package "$package_file" --touch 1200 -p "$DEVICE_PORT" -b 115200 "$@"
+}
+
 run_nrfutil_dfu_serial() {
 	local package_file=$1
 	shift || true
@@ -2695,13 +2738,17 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 	
 	echo
 	echo "Device firmware backup will be attempted after you confirm flashing."
-	echo "Commands that will be ran."
+	echo "Commands that would be run."
 	
 	if [[ "$FW_LAYOUT" == "merged" || ( "$FW_LAYOUT" != "app-only" && "$TYPE" == "flash-wipe" ) ]]; then
 
 		echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $NORESET --baud 115200 $ERASEFLASH"
 		echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $HARDRESET --baud 115200 $WRITEFLASH 0x0000 \"${DOWNLOADED_FILE}\""
-		read -r -p "Press Enter to ERASE and INSTALL the ${DEVICE} firmware on port ${DEVICE_PORT}"
+		EXECUTION_MODE="$(choose_flash_execution_mode "ERASE and INSTALL ${DEVICE} on ${DEVICE_PORT}")"
+		if [[ "$EXECUTION_MODE" == "echo" ]]; then
+			echo "Echo-only selected; no ESP32 flash commands were run."
+			exit 0
+		fi
 		prepare_esp32_flash_session "${DEVICE_PORT}" "${DEVICE}"
 		run_esptool --port "${DEVICE_PORT}" --after "$NORESET" --baud 115200 "$ERASEFLASH"
 		sleep 1
@@ -2709,7 +2756,12 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 	else
 		echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $HARDRESET --baud 115200 $WRITEFLASH <device app offset> \"${DOWNLOADED_FILE}\""
 		echo "The ESP32 partition table will be read from the device. If an existing app image is detected at 0x150000, both 0x10000 and 0x150000 will be updated."
-		read -r -p "Press Enter to UPDATE the ${DEVICE} firmware on port ${DEVICE_PORT}"
+		EXECUTION_MODE="$(choose_flash_execution_mode "UPDATE ${DEVICE} on ${DEVICE_PORT}")"
+		if [[ "$EXECUTION_MODE" == "echo" ]]; then
+			echo "Echo-only selected; no ESP32 flash commands were run."
+			echo "Dynamic app offsets are not read in echo-only mode."
+			exit 0
+		fi
 		prepare_esp32_flash_session "${DEVICE_PORT}" "${DEVICE}"
 		mapfile -t ESP32_UPDATE_OFFSETS < <(esp32_update_flash_offsets "${DEVICE_PORT}")
 		ESP32_WRITE_ARGS=()
@@ -2749,11 +2801,6 @@ else
 		done
 	fi
 	
-	echo "Getting the latest version of adafruit-nrfutil"
-	pipx run adafruit-nrfutil version
-
-	echo "Running ${ACTION}..."
-
 	if [[ $ACTION == "flash-wipe" ]]; then
 		
 		[[ -f "$ERASE_URL_FILE" ]] && ERASE_URL="$(<"$ERASE_URL_FILE")"
@@ -2762,28 +2809,46 @@ else
 			ERASE_ZIP="$(choose_erase_zip)" || exit 1
 			ERASE_URL="https://flasher.meshcore.io/firmware/$ERASE_ZIP"
 		fi
-			download_and_verify "$ERASE_URL" "$ERASE_FILE_FILE" 0 "Erase"
-			[[ -f "$ERASE_FILE_FILE" ]] && ERASE_FILE="$(<"$ERASE_FILE_FILE")"
-			
-			echo "Erasing UF2 area using $ERASE_FILE"
-			sleep 1
-			if ! run_nrfutil_dfu_serial "$ERASE_FILE"; then
-				echo "Failed to erase ${DEVICE} on ${DEVICE_PORT}."
-				exit 1
-			fi
-			echo "Erase done."
-			echo
-		fi
+		download_and_verify "$ERASE_URL" "$ERASE_FILE_FILE" 0 "Erase"
+		[[ -f "$ERASE_FILE_FILE" ]] && ERASE_FILE="$(<"$ERASE_FILE_FILE")"
+	fi
 
-		echo "Flashing firmware file $DOWNLOADED_FILE..."
+	echo "Commands that would be run."
+	if [[ $ACTION == "flash-wipe" ]]; then
+		print_nrfutil_dfu_command "$ERASE_FILE"
+	fi
+	print_nrfutil_dfu_command "$DOWNLOADED_FILE"
+	EXECUTION_MODE="$(choose_flash_execution_mode "${ACTION} ${DEVICE} on ${DEVICE_PORT}")"
+	if [[ "$EXECUTION_MODE" == "echo" ]]; then
+		echo "Echo-only selected; no nRF52 DFU commands were run."
+		exit 0
+	fi
+
+	echo "Getting the latest version of adafruit-nrfutil"
+	pipx run adafruit-nrfutil version
+
+	echo "Running ${ACTION}..."
+
+	if [[ $ACTION == "flash-wipe" ]]; then
+		echo "Erasing UF2 area using $ERASE_FILE"
 		sleep 1
-		if ! run_nrfutil_dfu_serial "$DOWNLOADED_FILE"; then
-			echo "Firmware ${ACTION} failed for ${DEVICE} on ${DEVICE_PORT}."
+		if ! run_nrfutil_dfu_serial "$ERASE_FILE"; then
+			echo "Failed to erase ${DEVICE} on ${DEVICE_PORT}."
 			exit 1
 		fi
+		echo "Erase done."
 		echo
-		echo "Firmware ${ACTION} completed for ${DEVICE} on ${DEVICE_PORT}."
 	fi
+
+	echo "Flashing firmware file $DOWNLOADED_FILE..."
+	sleep 1
+	if ! run_nrfutil_dfu_serial "$DOWNLOADED_FILE"; then
+		echo "Firmware ${ACTION} failed for ${DEVICE} on ${DEVICE_PORT}."
+		exit 1
+	fi
+	echo
+	echo "Firmware ${ACTION} completed for ${DEVICE} on ${DEVICE_PORT}."
+fi
 
 # Restart the stopped service.
 restart_locked_services
