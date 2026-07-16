@@ -46,6 +46,12 @@ $MT_WEB_HARDWARE_LIST_URL="https://raw.githubusercontent.com/meshtastic/web-flas
 
 $MC_CONFIG_URL = "https://flasher.meshcore.io/config.json"
 $MC_RELEASE_URL = "https://flasher.meshcore.io/releases"
+$MC_CONFIG_FALLBACK_URL = "https://apps.meshamerica.com/proxy/flasher/config.json"
+$MC_RELEASE_FALLBACK_URL = "https://apps.meshamerica.com/proxy/flasher/releases"
+$KEYMIND_GITHUB_TREE_URL = "https://api.github.com/repos/mikecarper/MeshCore/git/trees/keymindCascade?recursive=1"
+$KEYMIND_RAW_BASE_URL = "https://raw.githubusercontent.com/mikecarper/MeshCore/keymindCascade"
+$KEYMIND_CASCADE_FALLBACK_URL = "$KEYMIND_RAW_BASE_URL/mesh-america/keymind-cascade-v1.16.0-provider.json"
+$KEYMIND_CASCADE_LOGGING_FALLBACK_URL = "$KEYMIND_RAW_BASE_URL/mesh-america/keymind-cascade-logging-v1.16.0-provider.json"
 
 $timeoutMeshtastic = 10 # Timeout duration in seconds
 $baud = 1200 # 115200
@@ -70,12 +76,16 @@ function SetProjectVars($selectedNodeProject) {
 	$global:BLEOTA_FILE					= Join-Path $FIRMWARE_ROOT "bleota.json"
 	$global:GITHUB_FILE              	= Join-Path $FIRMWARE_ROOT "github.json"
 	$global:CONFIG_FILE              	= Join-Path $FIRMWARE_ROOT "config.json"
+	$global:DEFAULT_CONFIG_FILE        = $CONFIG_FILE
+	$global:CONFIG_SOURCE_FILE         = Join-Path $FIRMWARE_ROOT "00config_source.txt"
 	$global:RELEASES_FILE            	= Join-Path $FIRMWARE_ROOT "releases.json"
 	
 	$global:SELECTED_DEVICE_FILE     	= Join-Path $FIRMWARE_ROOT "01device.txt"
 	$global:ARCHITECTURE_FILE        	= Join-Path $FIRMWARE_ROOT "02architecture.txt"
 	$global:ERASE_URL_FILE           	= Join-Path $FIRMWARE_ROOT "03erase.txt"
 	$global:SELECTED_ROLE_FILE       	= Join-Path $FIRMWARE_ROOT "04role.txt"
+	$global:SELECTED_TITLE_FILE        = Join-Path $FIRMWARE_ROOT "04title.txt"
+	$global:SELECTED_SUBTITLE_FILE     = Join-Path $FIRMWARE_ROOT "04subtitle.txt"
 	$global:SELECTED_VERSION_FILE    	= Join-Path $FIRMWARE_ROOT "05version.txt"
 	$global:SELECTED_TYPE_FILE       	= Join-Path $FIRMWARE_ROOT "06type.txt"
 	$global:SELECTED_URL_FILE        	= Join-Path $FIRMWARE_ROOT "07selected_url.txt"
@@ -92,10 +102,13 @@ function SetProjectVars($selectedNodeProject) {
 	$global:MATCHING_FILES_FILE			= Join-Path $FIRMWARE_ROOT "07matching_files.txt"
 
 	$cleanupFiles = @(
+		$CONFIG_SOURCE_FILE,
 		$SELECTED_DEVICE_FILE,
 		$ARCHITECTURE_FILE,
 		$ERASE_URL_FILE,
 		$SELECTED_ROLE_FILE,
+		$SELECTED_TITLE_FILE,
+		$SELECTED_SUBTITLE_FILE,
 		$SELECTED_VERSION_FILE,
 		$SELECTED_TYPE_FILE,
 		$SELECTED_URL_FILE,
@@ -2898,22 +2911,26 @@ function GetHW() {
 # Update the release cache if needed.
 function UpdateMTAllCaches {
     # 1) GitHub releases (normalized)
-    UpdateJsonCache `
+    $null = UpdateJsonCache `
         -Url $GITHUB_API_URL `
         -OutFile $GITHUB_FILE `
         -Normalize $NormalizeGitHubReleases `
         -OnChangeDelete @($VERSIONS_TAGS_FILE, $VERSIONS_LABELS_FILE)
 
-    # 2) flasher config.json (no normalization)
-    UpdateJsonCache `
-        -Url $MC_CONFIG_URL `
-        -OutFile $CONFIG_FILE
+    # 2) flasher config.json, with the Mesh America proxy as fallback
+    $configOk = UpdateJsonCache `
+        -Url @($MC_CONFIG_URL, $MC_CONFIG_FALLBACK_URL) `
+        -OutFile $DEFAULT_CONFIG_FILE `
+        -Validate { param($obj) $null -ne $obj.device -and @($obj.device).Count -gt 0 }
 
-    # 3) flasher releases (no normalization, unless you want similar churn filtering)
-    UpdateJsonCache `
-        -Url $MC_RELEASE_URL `
+    # 3) flasher releases, with the Mesh America proxy as fallback
+    $null = UpdateJsonCache `
+        -Url @($MC_RELEASE_URL, $MC_RELEASE_FALLBACK_URL) `
         -OutFile $RELEASES_FILE `
+        -Validate { param($obj) @($obj).Count -gt 0 } `
         -OnChangeDelete @($VERSIONS_TAGS_FILE, $VERSIONS_LABELS_FILE)
+
+    return $configOk
 }
 
 function Load-JsonFile {
@@ -3296,10 +3313,9 @@ function Filter-LastTwoBranches {
 
     # Extract X.Y branches (unique, sorted desc)
 	$branches = foreach ($s in $clean) {
-		$t = ($s -replace '^[Vv]\s*', '')
-		$parts = ($t -split '[\.\-]', 3)
-		if ($parts.Count -ge 2 -and $parts[0] -match '^[0-9]+$' -and $parts[1] -match '^[0-9]+$') {
-			"{0}.{1}" -f $parts[0], $parts[1]
+		$match = [regex]::Match($s, '[Vv]?([0-9]+)\.([0-9]+)')
+		if ($match.Success) {
+			"{0}.{1}" -f $match.Groups[1].Value, $match.Groups[2].Value
 		}
 	}
 
@@ -3319,11 +3335,11 @@ function Filter-LastTwoBranches {
 
     # Filter original strings that start with one of chosen branches (allow V prefix)
     $escaped = $choose | ForEach-Object { [regex]::Escape($_) }
-    $re = "^\s*[Vv]?(?:{0})(?:\.|$)" -f ($escaped -join "|")
+	$re = "(?:^|[^0-9])[Vv]?(?:{0})(?:\.|$)" -f ($escaped -join "|")
 
     $out = $clean | Where-Object { $_ -match $re } | Sort-Object {
         # Best-effort version sort: take leading digits/dots after optional V
-        $m = [regex]::Match($_, '^\s*[Vv]?([0-9]+(\.[0-9]+)*)')
+		$m = [regex]::Match($_, '[Vv]?([0-9]+(\.[0-9]+)*)')
         if ($m.Success) { [version]($m.Groups[1].Value) } else { [version]"0.0" }
     } -Descending | Select-Object -Unique
 
@@ -3359,7 +3375,7 @@ function Choose-VersionFromReleases {
             Write-Host "Auto-selected version from fallback: $($script:VERSION)"
         } else {
             $versionsShow = Filter-LastTwoBranches -In $versions
-            $menu = @($versionsShow + @("Custom"))
+            $menu = @($versionsShow + @("Keymind Cascade", "Keymind Cascade Logging", "Custom"))
 
             while ([string]::IsNullOrWhiteSpace($script:VERSION)) {
                 $archLc = ([string]$Architecture).ToLowerInvariant()
@@ -3368,7 +3384,22 @@ function Choose-VersionFromReleases {
                 $sel = Prompt-Menu -Title "[3] Select version:" -Options $menu -Prompt "Choice" -AllowFreeText
                 if ($sel.IsIndex) {
                     $choice = $menu[$sel.Index - 1]
-                    if ($choice -eq "Custom") {
+					if ($choice -eq "Keymind Cascade" -or $choice -eq "Keymind Cascade Logging") {
+						$variant = if ($choice -eq "Keymind Cascade Logging") { "logging" } else { "cascade" }
+						$providerPath = Get-KeymindProviderConfigPath -Variant $variant
+						if ([string]::IsNullOrWhiteSpace($providerPath)) {
+							Write-Host "Keymind provider selection failed; please choose again."
+							continue
+						}
+						$global:CONFIG_FILE = $providerPath
+						Save-TextFile $CONFIG_SOURCE_FILE $providerPath
+						Remove-Item $SELECTED_DEVICE_FILE, $ARCHITECTURE_FILE, $ERASE_URL_FILE, `
+								$SELECTED_ROLE_FILE, $SELECTED_TITLE_FILE, $SELECTED_SUBTITLE_FILE, $SELECTED_VERSION_FILE, $SELECTED_TYPE_FILE, `
+							$SELECTED_URL_FILE -Force -ErrorAction Ignore
+						$script:CHOSEN_FILE = ""
+						ChooseMeshCoreFirmware
+						return
+					} elseif ($choice -eq "Custom") {
                         if (Choose-CustomFirmwareFile) { break }
                         Write-Host "Custom selection failed; please choose again."
                         continue
@@ -3486,23 +3517,26 @@ function Choose-VersionFromReleases {
 
 function UpdateJsonCache {
     param(
-        [Parameter(Mandatory=$true)][string]$Url,
+        [Parameter(Mandatory=$true)][string[]]$Url,
         [Parameter(Mandatory=$true)][string]$OutFile,
         [int]$TimeoutSec = 20,
         [scriptblock]$Normalize = $null,
+        [scriptblock]$Validate = $null,
         [string[]]$OnChangeDelete = @()
     )
-
-    if (-not (CheckInternet)) {
-        Write-Host "No internet; using cached: $OutFile"
-        return
-    }
 
     if (Test-Path $OutFile) {
         $ageSec = ((Get-Date) - (Get-Item $OutFile).LastWriteTime).TotalSeconds
         if ($ageSec -lt $CACHE_TIMEOUT_SECONDS) {
-            Write-Host "Using cached (fresh): $OutFile"
-            return
+            try {
+                $cachedObj = Get-Content -Path $OutFile -Raw | ConvertFrom-Json
+                if (-not $Validate -or [bool](& $Validate $cachedObj)) {
+                    Write-Host "Using cached (fresh): $OutFile"
+                    return $true
+                }
+            } catch {
+                Write-Host "Cached JSON is invalid; refreshing: $OutFile"
+            }
         }
     }
 
@@ -3511,52 +3545,130 @@ function UpdateJsonCache {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
 
-    Write-Host "Updating cache: $Url"
-
     $headers = @{
         "User-Agent" = "mcfirmware"
         "Accept"     = "application/json"
     }
 
     $tmp = [System.IO.Path]::GetTempFileName()
-    try {
-        Invoke-WebRequest -Uri $Url -Headers $headers -TimeoutSec $TimeoutSec -OutFile $tmp -ErrorAction Stop
+    $lastError = ""
+    foreach ($candidateUrl in $Url) {
+        Write-Host "Updating cache: $candidateUrl"
+        try {
+            Invoke-WebRequest -Uri $candidateUrl -Headers $headers -TimeoutSec $TimeoutSec -OutFile $tmp -ErrorAction Stop
 
-        # Validate JSON by parsing it
-        $obj = Get-Content -Path $tmp -Raw | ConvertFrom-Json
-
-        # Optional normalization (eg remove download_count)
-        if ($Normalize) {
-            & $Normalize $obj
-        }
-
-        # Re-serialize in a stable way for hashing/writing
-        $json = $obj | ConvertTo-Json -Depth 50
-        Set-Content -Path $tmp -Value $json -Encoding UTF8
-
-        if (-not (Test-Path $OutFile)) {
-            Move-Item -Path $tmp -Destination $OutFile -Force
-            return
-        }
-
-        $oldMd5 = (Get-FileHash -Path $OutFile -Algorithm MD5).Hash
-        $newMd5 = (Get-FileHash -Path $tmp    -Algorithm MD5).Hash
-
-        if ($oldMd5 -ne $newMd5) {
-            Write-Host "Cache changed: $OutFile"
-            Move-Item -Path $tmp -Destination $OutFile -Force
-            if ($OnChangeDelete.Count -gt 0) {
-                Remove-Item -Path $OnChangeDelete -ErrorAction Ignore
+            $obj = Get-Content -Path $tmp -Raw | ConvertFrom-Json
+            if ($Validate -and -not [bool](& $Validate $obj)) {
+                throw "Downloaded JSON did not have the expected structure."
             }
-        } else {
-            Write-Host "Cache unchanged: $OutFile"
-            (Get-Item $OutFile).LastWriteTime = Get-Date
+
+            if ($Normalize) {
+                & $Normalize $obj
+            }
+
+            $json = $obj | ConvertTo-Json -Depth 50
+            Set-Content -Path $tmp -Value $json -Encoding UTF8
+
+            if (-not (Test-Path $OutFile)) {
+                Move-Item -Path $tmp -Destination $OutFile -Force
+                return $true
+            }
+
+            $oldMd5 = (Get-FileHash -Path $OutFile -Algorithm MD5).Hash
+            $newMd5 = (Get-FileHash -Path $tmp -Algorithm MD5).Hash
+
+            if ($oldMd5 -ne $newMd5) {
+                Write-Host "Cache changed: $OutFile"
+                Move-Item -Path $tmp -Destination $OutFile -Force
+                if ($OnChangeDelete.Count -gt 0) {
+                    Remove-Item -Path $OnChangeDelete -ErrorAction Ignore
+                }
+            } else {
+                Write-Host "Cache unchanged: $OutFile"
+                (Get-Item $OutFile).LastWriteTime = Get-Date
+                Remove-Item -Path $tmp -Force -ErrorAction Ignore
+            }
+            return $true
+        } catch {
+            $lastError = $_.Exception.Message
+            Write-Host "Cache update failed for $candidateUrl : $lastError"
+            Remove-Item -Path $tmp -Force -ErrorAction Ignore
+            $tmp = [System.IO.Path]::GetTempFileName()
+        }
+    }
+
+    try {
+        if (Test-Path $OutFile) {
+            $cachedObj = Get-Content -Path $OutFile -Raw | ConvertFrom-Json
+            if (-not $Validate -or [bool](& $Validate $cachedObj)) {
+                Write-Host "All JSON sources failed; using cached: $OutFile"
+                return $true
+            }
         }
     } catch {
-        Write-Host "Cache update failed for $Url : $($_.Exception.Message)"
+        $lastError = $_.Exception.Message
     } finally {
         Remove-Item -Path $tmp -Force -ErrorAction Ignore
     }
+
+    Write-Host "All JSON sources failed and no valid cache is available: $OutFile ($lastError)"
+    return $false
+}
+
+function Resolve-KeymindProviderUrl {
+    param([Parameter(Mandatory=$true)][ValidateSet("cascade", "logging")][string]$Variant)
+
+    if ($Variant -eq "logging") {
+        $fallbackUrl = $KEYMIND_CASCADE_LOGGING_FALLBACK_URL
+        $pathPattern = '^mesh-america/keymind-cascade-logging-v[0-9][^/]*-provider\.json$'
+    } else {
+        $fallbackUrl = $KEYMIND_CASCADE_FALLBACK_URL
+        $pathPattern = '^mesh-america/keymind-cascade-v[0-9][^/]*-provider\.json$'
+    }
+
+    $fallbackPath = $fallbackUrl.Substring($KEYMIND_RAW_BASE_URL.Length + 1)
+    $paths = @($fallbackPath)
+    try {
+        $headers = @{ "User-Agent" = "mcfirmware"; "Accept" = "application/vnd.github+json" }
+        $tree = Invoke-RestMethod -Uri $KEYMIND_GITHUB_TREE_URL -Headers $headers -TimeoutSec 20 -ErrorAction Stop
+        $paths += @($tree.tree | ForEach-Object { $_.path } | Where-Object { $_ -match $pathPattern })
+    } catch {
+        Write-Host "Could not check GitHub for a newer Keymind provider; using the hardcoded fallback if needed."
+    }
+
+    $latestPath = $paths |
+        Where-Object { $_ } |
+        Sort-Object {
+            $match = [regex]::Match($_, '-v([0-9]+(?:\.[0-9]+){1,3})')
+            if ($match.Success) { [version]$match.Groups[1].Value } else { [version]"0.0" }
+        } -Descending |
+        Select-Object -First 1
+
+    if ([string]::IsNullOrWhiteSpace($latestPath)) {
+        return $fallbackUrl
+    }
+    return "$KEYMIND_RAW_BASE_URL/$latestPath"
+}
+
+function Get-KeymindProviderConfigPath {
+    param([Parameter(Mandatory=$true)][ValidateSet("cascade", "logging")][string]$Variant)
+
+    $providerUrl = Resolve-KeymindProviderUrl -Variant $Variant
+    $fallbackUrl = if ($Variant -eq "logging") {
+        $KEYMIND_CASCADE_LOGGING_FALLBACK_URL
+    } else {
+        $KEYMIND_CASCADE_FALLBACK_URL
+    }
+    $providerDir = Join-Path $DOWNLOAD_DIR "providers"
+    $providerFile = Join-Path $providerDir ([System.IO.Path]::GetFileName(([uri]$providerUrl).AbsolutePath))
+
+    Write-Host "Using Keymind provider manifest: $providerUrl"
+    $ok = UpdateJsonCache `
+        -Url @($providerUrl, $fallbackUrl) `
+        -OutFile $providerFile `
+        -Validate { param($obj) $null -ne $obj.device -and @($obj.device).Count -gt 0 }
+    if (-not $ok) { return "" }
+    return $providerFile
 }
 
 function ChooseMeshCoreFirmware {
@@ -3574,19 +3686,62 @@ function ChooseMeshCoreFirmware {
         }
     }
 	
-	UpdateMTAllCaches
-	$config = Get-Content $CONFIG_FILE -Raw | ConvertFrom-Json
+	$global:CONFIG_FILE = $DEFAULT_CONFIG_FILE
+	$configAvailable = $false
+	if (Test-Path $CONFIG_SOURCE_FILE) {
+		$savedConfigFile = Read-TextFileIfExists $CONFIG_SOURCE_FILE
+		if (-not [string]::IsNullOrWhiteSpace($savedConfigFile)) {
+			try {
+				$savedConfig = Load-JsonFile $savedConfigFile
+				if ($savedConfig -and @($savedConfig.device).Count -gt 0) {
+					$global:CONFIG_FILE = $savedConfigFile
+					$configAvailable = $true
+				}
+			} catch {
+				$configAvailable = $false
+			}
+		}
+	}
+	if (-not $configAvailable) {
+		Remove-Item $CONFIG_SOURCE_FILE -Force -ErrorAction Ignore
+		$configAvailable = [bool](UpdateMTAllCaches)
+	}
+	$config = if ($configAvailable) { Load-JsonFile $CONFIG_FILE } else { $null }
 	
     $script:DEVICE       = Read-TextFileIfExists $SELECTED_DEVICE_FILE
     $script:ARCHITECTURE = Read-TextFileIfExists $ARCHITECTURE_FILE
-    $script:ERASE_URL    = Read-TextFileIfExists $ERASE_URL_FILE
-    $script:ROLE         = Read-TextFileIfExists $SELECTED_ROLE_FILE
-    $script:VERSION      = Read-TextFileIfExists $SELECTED_VERSION_FILE
+	    $script:ERASE_URL    = Read-TextFileIfExists $ERASE_URL_FILE
+	    $script:ROLE         = Read-TextFileIfExists $SELECTED_ROLE_FILE
+	    $script:TITLE        = Read-TextFileIfExists $SELECTED_TITLE_FILE
+	    $script:SUBTITLE     = Read-TextFileIfExists $SELECTED_SUBTITLE_FILE
+	    $script:VERSION      = Read-TextFileIfExists $SELECTED_VERSION_FILE
     $script:TYPE         = Read-TextFileIfExists $SELECTED_TYPE_FILE
 	#$script:devicePortName = Read-TextFileIfExists $DEVICE_PORT_NAME_FILE
 	#$script:deviceName     = Read-TextFileIfExists $DEVICE_PORT_FILE
 	
     if (-not $script:CHOSEN_FILE) { $script:CHOSEN_FILE = "" }
+
+	if (-not $configAvailable -and [string]::IsNullOrWhiteSpace($script:DEVICE)) {
+		Write-Host "MeshCore and Mesh America flasher configs are unavailable."
+		$sourceMenu = @("Keymind Cascade", "Keymind Cascade Logging", "Custom")
+		while (-not $configAvailable -and [string]::IsNullOrWhiteSpace($script:DEVICE)) {
+			$sourceSelection = Prompt-Menu -Title "Select a firmware source:" -Options $sourceMenu -Prompt "Choice"
+			$selectedSource = $sourceMenu[$sourceSelection.Index - 1]
+			if ($selectedSource -eq "Custom") {
+				$script:DEVICE = "CustomFirmware"
+				continue
+			}
+			$providerVariant = if ($selectedSource -eq "Keymind Cascade Logging") { "logging" } else { "cascade" }
+
+			$providerPath = Get-KeymindProviderConfigPath -Variant $providerVariant
+			if (-not [string]::IsNullOrWhiteSpace($providerPath)) {
+				$global:CONFIG_FILE = $providerPath
+				Save-TextFile $CONFIG_SOURCE_FILE $providerPath
+				$config = Load-JsonFile $providerPath
+				$configAvailable = $true
+			}
+		}
+	}
 
     # Step 1: Device
     if ([string]::IsNullOrWhiteSpace($script:DEVICE)) {
@@ -3611,7 +3766,11 @@ function ChooseMeshCoreFirmware {
                 for ($i = 0; $i -lt $devices.Count; $i++) {
                     "  {0}) {1}" -f ($i + 1), $devices[$i] | Write-Host
                 }
-                $customIndex = $devices.Count + 1
+				$keymindIndex = $devices.Count + 1
+				$keymindLoggingIndex = $devices.Count + 2
+				$customIndex = $devices.Count + 3
+				Write-Host ("  {0}) Keymind Cascade" -f $keymindIndex)
+				Write-Host ("  {0}) Keymind Cascade Logging" -f $keymindLoggingIndex)
                 Write-Host ("  {0}) Custom" -f $customIndex)
                 Write-Host ""
 
@@ -3642,6 +3801,20 @@ function ChooseMeshCoreFirmware {
                         $script:DEVICE = $devices[$n - 1]
                         break
                     }
+					if ($n -eq $keymindIndex -or $n -eq $keymindLoggingIndex) {
+						$variant = if ($n -eq $keymindLoggingIndex) { "logging" } else { "cascade" }
+						$providerPath = Get-KeymindProviderConfigPath -Variant $variant
+						if (-not [string]::IsNullOrWhiteSpace($providerPath)) {
+							$global:CONFIG_FILE = $providerPath
+							Save-TextFile $CONFIG_SOURCE_FILE $providerPath
+							$config = Load-JsonFile $providerPath
+							$devices = @($config.device | ForEach-Object { $_.name } | Where-Object { $_ } | Sort-Object -Unique)
+							$match = $null
+							$providerLabel = if ($variant -eq "logging") { "Keymind Cascade Logging" } else { "Keymind Cascade" }
+							Write-Host "Loaded $providerLabel provider devices."
+						}
+						continue
+					}
                     if ($n -eq $customIndex) {
                         $script:DEVICE = "CustomFirmware"
                         break
@@ -3693,10 +3866,12 @@ function ChooseMeshCoreFirmware {
     }
 
     # Step 3: Role
-    $script:TITLE = ""
     if ([string]::IsNullOrWhiteSpace($script:ROLE)) {
+		$script:TITLE = ""
+		$script:SUBTITLE = ""
         $roles  = @()
         $titles = @()
+		$subtitles = @()
         $labels = @()
 
         foreach ($fw in @($devObj.firmware)) {
@@ -3714,17 +3889,19 @@ function ChooseMeshCoreFirmware {
             }
             $roles  += $role
             $titles += $title
+			$subtitles += [string]$fw.subTitle
         }
 
-        # Unique role+title pairs (best-effort)
+		# Preserve provider variants that share a role and title but have distinct subtitles.
         $pairs = @()
         for ($i = 0; $i -lt $roles.Count; $i++) {
-            $pairs += [pscustomobject]@{ Role=$roles[$i]; Title=$titles[$i] }
+			$pairs += [pscustomobject]@{ Role=$roles[$i]; Title=$titles[$i]; Subtitle=$subtitles[$i] }
         }
-        $pairs = $pairs | Sort-Object Role, Title -Unique
+		$pairs = $pairs | Sort-Object Role, Title, Subtitle -Unique
 
         $roles  = @($pairs | ForEach-Object { $_.Role })
         $titles = @($pairs | ForEach-Object { $_.Title })
+		$subtitles = @($pairs | ForEach-Object { $_.Subtitle })
 
         if ($roles.Count -eq 0) { throw "ERROR: no firmware roles found for device $($script:DEVICE)" }
 
@@ -3734,18 +3911,24 @@ function ChooseMeshCoreFirmware {
                 "companionBle" { $suffix = " (BLE) Phone" }
                 "companionUsb" { $suffix = " (USB) Computer" }
             }
-            $labels += ($titles[$i] + $suffix)
+			$label = $titles[$i] + $suffix
+			if (-not [string]::IsNullOrWhiteSpace($subtitles[$i])) {
+				$label += " — $($subtitles[$i])"
+			}
+			$labels += $label
         }
 
         if ($roles.Count -eq 1) {
             $script:ROLE  = $roles[0]
             $script:TITLE = $titles[0]
+			$script:SUBTITLE = $subtitles[0]
             Write-Host "Auto-selected role: $($script:ROLE) ($($labels[0]))"
         } else {
             $sel = Prompt-Menu -Title "[2] Select role for $($script:DEVICE):" -Options $labels -Prompt "Choice"
             $idx = $sel.Index - 1
             $script:ROLE  = $roles[$idx]
             $script:TITLE = $titles[$idx]
+			$script:SUBTITLE = $subtitles[$idx]
             Write-Host "Selected role: $($script:ROLE) ($($labels[$idx]))"
         }
 
@@ -3763,6 +3946,7 @@ function ChooseMeshCoreFirmware {
         $verKeys = @()
         foreach ($fw in $fwMatch) {
             if ($script:TITLE -and $fw.title -and $fw.title -ne $script:TITLE) { continue }
+			if ([string]$fw.subTitle -ne [string]$script:SUBTITLE) { continue }
             if ($fw.version) {
                 $verKeys += $fw.version.PSObject.Properties.Name
             }
@@ -3789,6 +3973,7 @@ function ChooseMeshCoreFirmware {
         $types = @()
         foreach ($fw in @($devObj.firmware | Where-Object { $_.role -eq $script:ROLE })) {
             if ($script:TITLE -and $fw.title -and $fw.title -ne $script:TITLE) { continue }
+			if ([string]$fw.subTitle -ne [string]$script:SUBTITLE) { continue }
             $v = $fw.version.$($script:VERSION)
             if ($v -and $v.files) {
                 $types += @($v.files | ForEach-Object { $_.type })
@@ -3815,16 +4000,24 @@ function ChooseMeshCoreFirmware {
         $chosenName = ""
         foreach ($fw in @($devObj.firmware | Where-Object { $_.role -eq $script:ROLE })) {
             if ($script:TITLE -and $fw.title -and $fw.title -ne $script:TITLE) { continue }
+			if ([string]$fw.subTitle -ne [string]$script:SUBTITLE) { continue }
             $v = $fw.version.$($script:VERSION)
             if ($v -and $v.files) {
                 $m = $v.files | Where-Object { $_.type -eq $script:TYPE } | Select-Object -First 1
-                if ($m) { $chosenName = [string]$m.name; break }
+                if ($m) {
+                    $chosenName = if (-not [string]::IsNullOrWhiteSpace([string]$m.url)) { [string]$m.url } else { [string]$m.name }
+                    break
+                }
             }
         }
         if ([string]::IsNullOrWhiteSpace($chosenName)) { throw "ERROR: could not select a firmware filename" }
 
         $script:CHOSEN_FILE = $chosenName
-        Save-TextFile $SELECTED_URL_FILE ("firmware/$chosenName")
+		if ($chosenName -match '^\s*https?://' -or $chosenName.StartsWith('/') -or $chosenName.StartsWith('firmware/')) {
+			Save-TextFile $SELECTED_URL_FILE $chosenName
+		} else {
+			Save-TextFile $SELECTED_URL_FILE ("firmware/$chosenName")
+		}
     } else {
         Save-TextFile $SELECTED_URL_FILE $script:CHOSEN_FILE
     }
@@ -3834,6 +4027,8 @@ function ChooseMeshCoreFirmware {
     Save-TextFile $ARCHITECTURE_FILE     $script:ARCHITECTURE
     Save-TextFile $ERASE_URL_FILE        $script:ERASE_URL
     Save-TextFile $SELECTED_ROLE_FILE    $script:ROLE
+	Save-TextFile $SELECTED_TITLE_FILE   $script:TITLE
+	Save-TextFile $SELECTED_SUBTITLE_FILE $script:SUBTITLE
     Save-TextFile $SELECTED_VERSION_FILE $script:VERSION
     Save-TextFile $SELECTED_TYPE_FILE    $script:TYPE
 }

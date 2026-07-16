@@ -154,6 +154,12 @@ REPO_OWNER="meshcore-dev"
 REPO_NAME="MeshCore"
 RELEASE_INFO1_URL="https://flasher.meshcore.io/config.json"
 RELEASE_INFO2_URL="https://flasher.meshcore.io/releases"
+RELEASE_INFO1_FALLBACK_URL="https://apps.meshamerica.com/proxy/flasher/config.json"
+RELEASE_INFO2_FALLBACK_URL="https://apps.meshamerica.com/proxy/flasher/releases"
+KEYMIND_GITHUB_TREE_URL="https://api.github.com/repos/mikecarper/MeshCore/git/trees/keymindCascade?recursive=1"
+KEYMIND_RAW_BASE_URL="https://raw.githubusercontent.com/mikecarper/MeshCore/keymindCascade"
+KEYMIND_CASCADE_FALLBACK_URL="${KEYMIND_RAW_BASE_URL}/mesh-america/keymind-cascade-v1.16.0-provider.json"
+KEYMIND_CASCADE_LOGGING_FALLBACK_URL="${KEYMIND_RAW_BASE_URL}/mesh-america/keymind-cascade-logging-v1.16.0-provider.json"
 VENDORLIST="elecrow|heltec|lilygo|seeed|seed|studio|rak|wireless|wisblock|wismesh|raspberry|pi|pico|waveshare|promicro|uniteng|sensecap|wio|xiao"
 RADIOLIST="sx1262|sx126x|sx1276|sx127x"
 NORESET="no-reset"
@@ -178,11 +184,15 @@ SERIAL_TOTAL_TIMEOUT=7.5
           DOWNLOAD_DIR="${FIRMWARE_ROOT}/downloads"
 # Vars to get passed around and cached as files.
            CONFIG_FILE="${FIRMWARE_ROOT}/config.json"
+   DEFAULT_CONFIG_FILE="$CONFIG_FILE"
+    CONFIG_SOURCE_FILE="${FIRMWARE_ROOT}/00config_source.txt"
          RELEASES_FILE="${FIRMWARE_ROOT}/releases.json"
   SELECTED_DEVICE_FILE="${FIRMWARE_ROOT}/01device.txt"
      ARCHITECTURE_FILE="${FIRMWARE_ROOT}/02architecture.txt"
         ERASE_URL_FILE="${FIRMWARE_ROOT}/03erase.txt"
     SELECTED_ROLE_FILE="${FIRMWARE_ROOT}/04role.txt"
+   SELECTED_TITLE_FILE="${FIRMWARE_ROOT}/04title.txt"
+SELECTED_SUBTITLE_FILE="${FIRMWARE_ROOT}/04subtitle.txt"
  SELECTED_VERSION_FILE="${FIRMWARE_ROOT}/05version.txt"
     SELECTED_TYPE_FILE="${FIRMWARE_ROOT}/06type.txt"
      SELECTED_URL_FILE="${FIRMWARE_ROOT}/07selected_url.txt"
@@ -668,58 +678,134 @@ _jq2() {
 }
 
 _cached_json() {
-    local url="$1"            # first arg = URL
+    local primary_url="$1"    # first arg = primary URL
     local cache_file="$2"     # second arg = path to cache file
+    shift 2
+    local -a urls=("$primary_url" "$@")
     local age_sec="$CACHE_TIMEOUT_SECONDS"
+    local validate_filter="${JSON_VALIDATE_FILTER:-.}"
+
+	# JSON downloads are validated below, so install both tools before either
+	# curl or jq can be invoked by this path.
+	ensure_command curl
+	ensure_command jq
 
     mkdir -p "$(dirname "$cache_file")"
 
     local fetch_needed=1
     if [[ -f "$cache_file" ]]; then
         local file_age=$(( $(date +%s) - $(stat -c %Y "$cache_file") ))
-        (( file_age < age_sec )) && fetch_needed=0
+        if (( file_age < age_sec )) && jq -e "$validate_filter" "$cache_file" >/dev/null 2>&1; then
+            fetch_needed=0
+        fi
     fi
 
     if (( fetch_needed )); then
         local cache_name
         local tmp_file
-        local attempt=1
+        local attempt
         local max_attempts="${CURL_FETCH_RETRIES:-3}"
         local max_time="${CURL_FETCH_MAX_TIME:-10}"
         local retry_sleep="${CURL_FETCH_RETRY_DELAY:-1}"
         local download_ok=0
+        local url
 
         cache_name="$(basename "$cache_file")"
         tmp_file="${cache_file}.tmp.$$"
         echo "Downloading ${cache_name}"
 
-        while (( attempt <= max_attempts )); do
-            if curl -sSL --fail --max-time "$max_time" "$url" -o "$tmp_file"; then
-                if [[ -s "$tmp_file" ]]; then
-                    mv -f "$tmp_file" "$cache_file"
-                    download_ok=1
-                    break
+        for url in "${urls[@]}"; do
+            attempt=1
+            while (( attempt <= max_attempts )); do
+                if curl -sSL --fail --max-time "$max_time" "$url" -o "$tmp_file"; then
+                    if [[ -s "$tmp_file" ]] && jq -e "$validate_filter" "$tmp_file" >/dev/null 2>&1; then
+                        mv -f "$tmp_file" "$cache_file"
+                        download_ok=1
+                        break 2
+                    fi
+                    echo "Downloaded JSON from $url did not have the expected structure." >&2
+                    rm -f "$tmp_file"
                 fi
-                rm -f "$tmp_file"
-            fi
 
-            rm -f "$tmp_file"
-            if (( attempt < max_attempts )); then
-                echo "Download failed (${attempt}/${max_attempts}); retrying in ${retry_sleep}s..." >&2
-                sleep "$retry_sleep"
+                rm -f "$tmp_file"
+                if (( attempt < max_attempts )); then
+                    echo "Download failed from $url (${attempt}/${max_attempts}); retrying in ${retry_sleep}s..." >&2
+                    sleep "$retry_sleep"
+                fi
+                ((attempt++))
+            done
+
+            if [[ "$url" != "${urls[${#urls[@]}-1]}" ]]; then
+                echo "Trying fallback JSON source..." >&2
             fi
-            ((attempt++))
         done
 
         if (( !download_ok )); then
-            if [[ -s "$cache_file" ]]; then
-                echo "Download failed after ${max_attempts} attempts; using cached ${cache_name}." >&2
+            if [[ -s "$cache_file" ]] && jq -e "$validate_filter" "$cache_file" >/dev/null 2>&1; then
+                echo "All JSON sources failed; using cached ${cache_name}." >&2
                 return 0
             fi
-            echo "ERROR: failed to download ${cache_name} after ${max_attempts} attempts and no cached file is available." >&2
+            echo "ERROR: all sources failed for ${cache_name} and no valid cached file is available." >&2
             return 1
         fi
     fi
+}
+
+latest_keymind_provider_url() {
+    local variant="$1"
+    local fallback_url pattern fallback_path latest_path tree_json
+
+    case "$variant" in
+        cascade)
+            fallback_url="$KEYMIND_CASCADE_FALLBACK_URL"
+            pattern='^mesh-america/keymind-cascade-v[0-9][^/]*-provider\.json$'
+            ;;
+        logging)
+            fallback_url="$KEYMIND_CASCADE_LOGGING_FALLBACK_URL"
+            pattern='^mesh-america/keymind-cascade-logging-v[0-9][^/]*-provider\.json$'
+            ;;
+        *)
+            echo "Unknown Keymind provider variant: $variant" >&2
+            return 1
+            ;;
+    esac
+
+    fallback_path="${fallback_url#"${KEYMIND_RAW_BASE_URL}"/}"
+    tree_json="$(curl -sSL --fail --max-time "${CURL_FETCH_MAX_TIME:-10}" "$KEYMIND_GITHUB_TREE_URL" 2>/dev/null || true)"
+    latest_path="$({
+        printf '%s\n' "$fallback_path"
+        if [[ -n "$tree_json" ]]; then
+            jq -r '.tree[]?.path // empty' <<< "$tree_json" 2>/dev/null | grep -E "$pattern" || true
+        fi
+    } | sort -V | tail -n 1)"
+
+    if [[ -z "$latest_path" ]]; then
+        printf '%s\n' "$fallback_url"
+    else
+        printf '%s/%s\n' "$KEYMIND_RAW_BASE_URL" "$latest_path"
+    fi
+}
+
+activate_keymind_provider() {
+    local variant="$1"
+    local provider_url fallback_url provider_file
+
+    provider_url="$(latest_keymind_provider_url "$variant")"
+    if [[ "$variant" == "logging" ]]; then
+        fallback_url="$KEYMIND_CASCADE_LOGGING_FALLBACK_URL"
+    else
+        fallback_url="$KEYMIND_CASCADE_FALLBACK_URL"
+    fi
+    provider_file="${DOWNLOAD_DIR}/providers/$(basename "${provider_url%%[?#]*}")"
+
+    echo "Using Keymind provider manifest: $provider_url"
+    if ! JSON_VALIDATE_FILTER='(.device | type == "array") and (.device | length > 0)' \
+        _cached_json "$provider_url" "$provider_file" "$fallback_url"; then
+        return 1
+    fi
+
+    CONFIG_FILE="$provider_file"
+    printf '%s\n' "$provider_file" > "$CONFIG_SOURCE_FILE"
 }
 
 normalize_id() {
@@ -944,8 +1030,8 @@ filter_last_two_branches() {
   local -a _BRANCHES=()
   mapfile -t _BRANCHES < <(
     printf '%s\n' "${_CLEAN[@]}" \
-      | sed -E 's/^[[:space:]]*[Vv]//' \
-      | awk -F'[.-]' '{ if ($1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/) print $1"."$2 }' \
+	  | grep -Eo '[Vv]?[0-9]+\.[0-9]+' \
+	  | sed -E 's/^[Vv]//' \
       | sort -t. -k1,1nr -k2,2nr \
       | awk '!seen[$0]++' || true
   )
@@ -961,7 +1047,7 @@ filter_last_two_branches() {
 
   mapfile -t _OUT < <(
     printf '%s\n' "${_CLEAN[@]}" \
-      | grep -E "^[[:space:]]*[Vv]?(${re})(\.|$)" 2>/dev/null \
+	  | grep -E "(^|[^0-9])[Vv]?(${re})(\.|$)" 2>/dev/null \
       | sort -V -r \
       | awk '!seen[$0]++' || true
   )
@@ -978,7 +1064,8 @@ choose_version_from_releases() {
 	local cache_file="${CACHE_FILE:-$RELEASES_FILE}"
 
 	# ---- fetch / reuse cache ---------------------------------------------
-    _cached_json "$RELEASE_INFO2_URL" "$cache_file"
+    JSON_VALIDATE_FILTER='type == "array"' \
+        _cached_json "$RELEASE_INFO2_URL" "$cache_file" "$RELEASE_INFO2_FALLBACK_URL"
 
 	local VERSION=''
     local TYPE=''
@@ -997,7 +1084,8 @@ choose_version_from_releases() {
 		if ((${#VERSIONS[@]} == 0)); then
 			echo "No versions found in cached releases.json; forcing refresh and retry..." >&2
 			local saved_cache_timeout="${CACHE_TIMEOUT_SECONDS}"
-			CACHE_TIMEOUT_SECONDS=0 _cached_json "$RELEASE_INFO2_URL" "$cache_file" || true
+			CACHE_TIMEOUT_SECONDS=0 JSON_VALIDATE_FILTER='type == "array"' \
+				_cached_json "$RELEASE_INFO2_URL" "$cache_file" "$RELEASE_INFO2_FALLBACK_URL" || true
 			CACHE_TIMEOUT_SECONDS="$saved_cache_timeout"
 
 			mapfile -t VERSIONS < <(
@@ -1021,7 +1109,7 @@ choose_version_from_releases() {
 			local -a VERSIONS_SHOW=()
 			filter_last_two_branches VERSIONS VERSIONS_SHOW
 			CHOICE=""
-			local -a MENU_OPTIONS=("${VERSIONS_SHOW[@]}" "Custom")
+			local -a MENU_OPTIONS=("${VERSIONS_SHOW[@]}" "Keymind Cascade" "Keymind Cascade Logging" "Custom")
 		
 			while [[ -z $VERSION ]]; do
 				sleep 0.1
@@ -1058,6 +1146,20 @@ choose_version_from_releases() {
 					fi
 
 					case "$CHOICE" in
+							"Keymind Cascade"|"Keymind Cascade Logging")
+							  local provider_variant="cascade"
+							  [[ "$CHOICE" == "Keymind Cascade Logging" ]] && provider_variant="logging"
+							  if activate_keymind_provider "$provider_variant"; then
+								rm -f "$SELECTED_DEVICE_FILE" "$ARCHITECTURE_FILE" "$ERASE_URL_FILE" \
+								  "$SELECTED_ROLE_FILE" "$SELECTED_TITLE_FILE" "$SELECTED_SUBTITLE_FILE" "$SELECTED_VERSION_FILE" "$SELECTED_TYPE_FILE" \
+								  "$SELECTED_URL_FILE"
+								CHOSEN_FILE=""
+								choose_meshcore_firmware
+								return
+							  fi
+							  echo "Keymind provider selection failed; please choose again."
+							  continue
+							  ;;
 							"Custom")
 							  if choose_custom_firmware_file; then
 								break
@@ -1194,21 +1296,33 @@ choose_meshcore_firmware() {
     mkdir -p "$CACHE_DIR"
 
     # ---- fetch / reuse cache ---------------------------------------------
-    _cached_json "$JSON_URL" "$CONFIG_FILE"
+	local config_available=0
+	CONFIG_FILE="$DEFAULT_CONFIG_FILE"
+	if [[ -s "$CONFIG_SOURCE_FILE" ]]; then
+		local saved_config_file
+		saved_config_file="$(<"$CONFIG_SOURCE_FILE")"
+		if [[ -s "$saved_config_file" ]] \
+			&& jq -e '(.device | type == "array") and (.device | length > 0)' "$saved_config_file" >/dev/null 2>&1; then
+			CONFIG_FILE="$saved_config_file"
+			config_available=1
+		fi
+	fi
 
+	if (( !config_available )); then
+		rm -f "$CONFIG_SOURCE_FILE"
+		if JSON_VALIDATE_FILTER='(.device | type == "array") and (.device | length > 0)' \
+			_cached_json "$JSON_URL" "$CONFIG_FILE" "$RELEASE_INFO1_FALLBACK_URL"; then
+			config_available=1
+		else
+			echo "MeshCore and Mesh America flasher configs are unavailable." >&2
+		fi
+	fi
 
-    # make sure .device[].name exists
-    if ! _jq1 '.device[].name' >/dev/null 2>&1; then
-        echo "Cached file missing expected keys. Deleting and fetching again."
-        rm -f "$CONFIG_FILE"
-		sleep 1
-		_cached_json "$JSON_URL" "$CONFIG_FILE"
-    fi
-	
 	local DEVICE=''
 	local ARCHITECTURE=''
 	local ERASE_URL=''
 	local ROLE=''
+	local SUBTITLE=''
 	local VERSION=''
     local TYPE=''
 	local TITLE=''
@@ -1216,26 +1330,50 @@ choose_meshcore_firmware() {
 	[[ -f "$ARCHITECTURE_FILE"     ]] && ARCHITECTURE="$(<"$ARCHITECTURE_FILE")"
 	[[ -f "$ERASE_URL_FILE"        ]] && ERASE_URL="$(<"$ERASE_URL_FILE")"
 	[[ -f "$SELECTED_ROLE_FILE"    ]] && ROLE="$(<"$SELECTED_ROLE_FILE")"
+	[[ -f "$SELECTED_TITLE_FILE"   ]] && TITLE="$(<"$SELECTED_TITLE_FILE")"
+	[[ -f "$SELECTED_SUBTITLE_FILE" ]] && SUBTITLE="$(<"$SELECTED_SUBTITLE_FILE")"
 	[[ -f "$SELECTED_VERSION_FILE" ]] && VERSION="$(<"$SELECTED_VERSION_FILE")"
 	[[ -f "$SELECTED_TYPE_FILE"    ]] && TYPE="$(<"$SELECTED_TYPE_FILE")"
 
     # ---------------- step 1 – device -------------------------------------
 	if [[ -z "$DEVICE" ]]; then
-		local -a DEVICES=()
-		mapfile -t DEVICES < <(_jq1 '.device[].name' 2>/dev/null | sort -u)
-
-		if ((${#DEVICES[@]} == 0)); then
-			echo "ERROR: no .device[].name entries found in $CONFIG_FILE"
-			echo "Top-level keys in the JSON are:"
-			_jq1 'keys[]'
-			return 1
+		if (( !config_available )); then
+			echo
+			echo "Select a firmware source:"
+			select source_choice in "Keymind Cascade" "Keymind Cascade Logging" "Custom"; do
+				case "$source_choice" in
+					"Keymind Cascade")
+						activate_keymind_provider cascade && break
+						;;
+					"Keymind Cascade Logging")
+						activate_keymind_provider logging && break
+						;;
+					"Custom")
+						DEVICE="CustomFirmware"
+						break
+						;;
+					*)
+						echo "Invalid selection."
+						;;
+				esac
+			done < /dev/tty
 		fi
 
+		while [[ -z "$DEVICE" ]]; do
+			local -a DEVICES=()
+			mapfile -t DEVICES < <(_jq1 '.device[].name' 2>/dev/null | sort -u)
 
-		if ((${#DEVICES[@]} == 1)); then
-			DEVICE="${DEVICES[0]}"
-			echo "Auto-selected device: $DEVICE"
-		else
+			if ((${#DEVICES[@]} == 0)); then
+				echo "ERROR: no .device[].name entries found in $CONFIG_FILE"
+				return 1
+			fi
+
+			if ((${#DEVICES[@]} == 1)); then
+				DEVICE="${DEVICES[0]}"
+				echo "Auto-selected device: $DEVICE"
+				break
+			fi
+
 			local choice=''
 			local device_port_name=''
 			local device_name=''
@@ -1260,8 +1398,11 @@ choose_meshcore_firmware() {
 				for i in "${!DEVICES[@]}"; do
 					printf '  %d) %s\n' $((i+1)) "${DEVICES[$i]}"
 				done
-				# Custom option should be N+1
-				custom_index=$(( ${#DEVICES[@]} + 1 ))
+				keymind_index=$(( ${#DEVICES[@]} + 1 ))
+				keymind_logging_index=$(( ${#DEVICES[@]} + 2 ))
+				custom_index=$(( ${#DEVICES[@]} + 3 ))
+				printf '  %d) Keymind Cascade\n' "$keymind_index"
+				printf '  %d) Keymind Cascade Logging\n' "$keymind_logging_index"
 				printf '  %d) Custom\n' "$custom_index"
 				echo ""
 
@@ -1293,6 +1434,16 @@ choose_meshcore_firmware() {
 				elif [[ -z "$choice" && -n "$match" ]]; then
 					choice="$match_idx"
 					DEVICE="${DEVICES[$((choice-1))]}"
+				elif [[ "$choice" == "${keymind_index}" ]]; then
+					if activate_keymind_provider cascade; then
+						break
+					fi
+					choice=''
+				elif [[ "$choice" == "${keymind_logging_index}" ]]; then
+					if activate_keymind_provider logging; then
+						break
+					fi
+					choice=''
 				elif [[ "$choice" == "${custom_index}" ]]; then
 					echo "Custom."
 					DEVICE="CustomFirmware"
@@ -1300,8 +1451,8 @@ choose_meshcore_firmware() {
 					echo "Invalid selection."
 					choice=''
 				fi
-			done
-		fi
+				done
+		done
 	fi
 	
 	
@@ -1349,9 +1500,12 @@ choose_meshcore_firmware() {
 	if [[ -z "$ARCHITECTURE" ]]; then
 		ARCHITECTURE=$( _jq1 --arg d "$DEVICE" ".device[]|select(.name==\$d)|.type" )
 	fi
-	_cached_json "$RELEASE_INFO2_URL" "$CACHE_FILE"
-	ERASE_URL=$( _jq1 --arg d "$DEVICE" ".device[]|select(.name==\$d)|.erase // empty" )
-	[[ -n $ERASE_URL ]] && ERASE_URL="https://flasher.meshcore.io/firmware/$ERASE_URL"
+	if [[ "$DEVICE" != "CustomFirmware" ]]; then
+		JSON_VALIDATE_FILTER='type == "array"' \
+			_cached_json "$RELEASE_INFO2_URL" "$CACHE_FILE" "$RELEASE_INFO2_FALLBACK_URL" || true
+		ERASE_URL=$( _jq1 --arg d "$DEVICE" ".device[]|select(.name==\$d)|.erase // empty" )
+		[[ -n $ERASE_URL ]] && ERASE_URL="https://flasher.meshcore.io/firmware/$ERASE_URL"
+	fi
 
     # ---------------- step 3 – role ---------------------------------------
 	if [[ -z "$ROLE" ]]; then
@@ -1359,10 +1513,11 @@ choose_meshcore_firmware() {
 		# ROLES[i], TITLES[i], LABELS[i] belong together
 		local -a ROLES=()
 		local -a TITLES=()
+		local -a SUBTITLES=()
 		local -a LABELS=()
 
-		# Read "role<TAB>title" from jq; title may be empty
-		while IFS=$'\t' read -r role title; do
+		# Read "role<TAB>title<TAB>subtitle" from jq; labels may be empty
+		while IFS=$'\t' read -r role title subtitle; do
 			[[ -z "$role" ]] && continue
 
 			# Normalize missing or "null" title
@@ -1386,9 +1541,10 @@ choose_meshcore_firmware() {
 
 			ROLES+=("$role")
 			TITLES+=("$title")
+			SUBTITLES+=("$subtitle")
 			done < <(
 				# shellcheck disable=SC2016
-				_jq1 --arg d "$DEVICE" '.device[] | select(.name == $d) | .firmware[] | "\(.role)\t\(.title // "")"' | sort -u
+				_jq1 --arg d "$DEVICE" '.device[] | select(.name == $d) | .firmware[] | "\(.role)\t\(.title // "")\t\(.subTitle // "")"' | sort -u
 			)
 
 		if ((${#ROLES[@]} == 0)); then
@@ -1412,11 +1568,13 @@ choose_meshcore_firmware() {
 				# repeater / roomServer do not need extra suffix
 			esac
 			LABELS[i]="${TITLES[i]}${suffix}"
+			[[ -n "${SUBTITLES[i]}" ]] && LABELS[i]+=" — ${SUBTITLES[i]}"
 		done
 
 		if ((${#ROLES[@]} == 1)); then
 			ROLE="${ROLES[0]}"
 			TITLE="${TITLES[0]}"
+			SUBTITLE="${SUBTITLES[0]}"
 			echo "Auto-selected role: $ROLE (${LABELS[0]})"
 		else
 			while [[ -z $ROLE ]]; do
@@ -1430,6 +1588,7 @@ choose_meshcore_firmware() {
 					[[ -n ${choice:-} ]] || { echo "Invalid selection"; continue; }
 					ROLE="${ROLES[REPLY-1]}"
 					TITLE="${TITLES[REPLY-1]}"
+					SUBTITLE="${SUBTITLES[REPLY-1]}"
 					echo "Selected role: $ROLE ($choice)"
 					break
 				done < /dev/tty
@@ -1443,7 +1602,7 @@ choose_meshcore_firmware() {
 			local -a VERSIONS=()
 			mapfile -t VERSIONS < <(
 				# shellcheck disable=SC2016
-				_jq1 --arg d "$DEVICE" --arg r "$ROLE" '.device[] | select(.name == $d) | .firmware[] | select(.role == $r) | .version | keys[]' | sort -ru
+				_jq1 --arg d "$DEVICE" --arg r "$ROLE" --arg title "$TITLE" --arg subtitle "$SUBTITLE" '.device[] | select(.name == $d) | .firmware[] | select(.role == $r) | select((.title // "") == $title) | select((.subTitle // "") == $subtitle) | .version | keys[]' | sort -ru
 			)
 		if ((${#VERSIONS[@]} == 0)); then
 			choose_version_from_releases "$DEVICE" "$ROLE" "$ARCHITECTURE" "$ERASE_URL" "$TITLE"
@@ -1473,14 +1632,16 @@ choose_meshcore_firmware() {
 
 
 	    # ---------------- step 5 – type ---------------------------------------
-		# shellcheck disable=SC2016
-		_jq1 --arg d "$DEVICE" --arg r "$ROLE" --arg title "$TITLE" --arg v "$VERSION" '.device[] | select(.name == $d) | .firmware[] | select(.role == $r) | select(.title == $title) | .version[$v].files[]'
+		if [[ "$DEVICE" != "CustomFirmware" ]]; then
+			# shellcheck disable=SC2016
+			_jq1 --arg d "$DEVICE" --arg r "$ROLE" --arg title "$TITLE" --arg subtitle "$SUBTITLE" --arg v "$VERSION" '.device[] | select(.name == $d) | .firmware[] | select(.role == $r) | select((.title // "") == $title) | select((.subTitle // "") == $subtitle) | .version[$v].files[]'
+		fi
 	
     if [[ -z "$TYPE" ]]; then
 	        local -a TYPES=()
 	        mapfile -t TYPES < <(
 	            # shellcheck disable=SC2016
-	            _jq1 --arg d "$DEVICE" --arg r "$ROLE" --arg title "$TITLE" --arg v "$VERSION" '.device[] | select(.name == $d) | .firmware[] | select(.role == $r) | select(.title == $title) | .version[$v].files[] | .type' | sort -u
+	            _jq1 --arg d "$DEVICE" --arg r "$ROLE" --arg title "$TITLE" --arg subtitle "$SUBTITLE" --arg v "$VERSION" '.device[] | select(.name == $d) | .firmware[] | select(.role == $r) | select((.title // "") == $title) | select((.subTitle // "") == $subtitle) | .version[$v].files[] | .type' | sort -u
 	        )
 
         if ((${#TYPES[@]} == 0)); then
@@ -1513,9 +1674,13 @@ choose_meshcore_firmware() {
 	    if [[ -z "$CHOSEN_FILE" ]]; then
 	        CHOSEN_FILE=$(
 	            # shellcheck disable=SC2016
-	            _jq1 --arg d "$DEVICE" --arg r "$ROLE" --arg title "$TITLE" --arg v "$VERSION" --arg t "$TYPE" '.device[] | select(.name == $d) | .firmware[] | select(.role == $r) | select(.title == $title) | .version[$v].files[] | select(.type == $t) | .name '
+	            _jq1 --arg d "$DEVICE" --arg r "$ROLE" --arg title "$TITLE" --arg subtitle "$SUBTITLE" --arg v "$VERSION" --arg t "$TYPE" '.device[] | select(.name == $d) | .firmware[] | select(.role == $r) | select((.title // "") == $title) | select((.subTitle // "") == $subtitle) | .version[$v].files[] | select(.type == $t) | (.url // .name) '
 	        )
-        echo "firmware/$CHOSEN_FILE" > "$SELECTED_URL_FILE"
+		if [[ "$CHOSEN_FILE" =~ ^https?:// || "$CHOSEN_FILE" == /* || "$CHOSEN_FILE" == firmware/* ]]; then
+			echo "$CHOSEN_FILE" > "$SELECTED_URL_FILE"
+		else
+			echo "firmware/$CHOSEN_FILE" > "$SELECTED_URL_FILE"
+		fi
     else
         echo "$CHOSEN_FILE" > "$SELECTED_URL_FILE"
     fi
@@ -1524,6 +1689,8 @@ choose_meshcore_firmware() {
     echo "$ARCHITECTURE"  > "$ARCHITECTURE_FILE"
     echo "$ERASE_URL"     > "$ERASE_URL_FILE"
 	echo "$ROLE"          > "$SELECTED_ROLE_FILE"
+	echo "$TITLE"         > "$SELECTED_TITLE_FILE"
+	echo "$SUBTITLE"      > "$SELECTED_SUBTITLE_FILE"
     echo "$VERSION"       > "$SELECTED_VERSION_FILE"
     echo "$TYPE"          > "$SELECTED_TYPE_FILE"
 	echo ">>>"
@@ -1531,6 +1698,8 @@ choose_meshcore_firmware() {
 		CHOSEN_FILE="${CHOSEN_FILE#file://}"
 	fi
 	if [[ "$CHOSEN_FILE" == /* && -f "$CHOSEN_FILE" ]]; then
+		printf '%s\n' "$CHOSEN_FILE"
+	elif [[ "$CHOSEN_FILE" =~ ^https?:// || "$CHOSEN_FILE" == firmware/* ]]; then
 		printf '%s\n' "$CHOSEN_FILE"
 	else
 		printf 'firmware/%s\n' "$CHOSEN_FILE"
@@ -2644,10 +2813,13 @@ detect_device_from_fw() {
 mkdir -p "$FIRMWARE_ROOT"
 
 rm -f  \
+  "$CONFIG_SOURCE_FILE"       \
   "$SELECTED_DEVICE_FILE"   \
   "$ARCHITECTURE_FILE"      \
   "$ERASE_URL_FILE"         \
   "$SELECTED_ROLE_FILE"     \
+  "$SELECTED_TITLE_FILE"    \
+  "$SELECTED_SUBTITLE_FILE" \
   "$SELECTED_VERSION_FILE"  \
   "$SELECTED_TYPE_FILE"     \
   "$SELECTED_URL_FILE"      \
