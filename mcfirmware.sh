@@ -2568,7 +2568,7 @@ probe_esptool_mac() {
 	return $status
 }
 
-parse_esp32_app_partition_offsets() {
+parse_esp32_app_partitions() {
 	local partition_file="$1"
 
 	python3 - "$partition_file" <<'PY'
@@ -2594,24 +2594,41 @@ for i in range(0, min(len(data), 0x1000), 32):
     if part_type != 0x00:
         continue
 
-    offset = struct.unpack_from("<I", entry, 4)[0]
+    offset, size = struct.unpack_from("<II", entry, 4)
     if offset and offset not in seen:
         seen.add(offset)
-        print(f"0x{offset:x}")
+        print(f"0x{offset:x}\t0x{size:x}")
 PY
 }
 
-read_esp32_app_partition_offsets() {
+read_esp32_app_partitions() {
 	local port="$1"
 	local partition_file
 
 	partition_file="$(mktemp)"
 	if run_esptool --port "$port" --after "$NORESET" --baud 921600 "$READFLASH" 0x8000 0x1000 "$partition_file" >/dev/null; then
-		parse_esp32_app_partition_offsets "$partition_file"
+		parse_esp32_app_partitions "$partition_file"
 	else
 		echo "Warning: could not read ESP32 partition table; defaulting app update to 0x10000" >&2
 	fi
 	rm -f "$partition_file"
+}
+
+esp32_firmware_fits_app_partition() {
+	local firmware_size="$1"
+	local offset="$2"
+	local partition_size_hex="$3"
+	local partition_size
+
+	partition_size=$((partition_size_hex))
+	if (( firmware_size <= partition_size )); then
+		return 0
+	fi
+
+	echo "ERROR: firmware is ${firmware_size} bytes, but the ESP32 app partition at ${offset} is only ${partition_size} bytes (${partition_size_hex})." >&2
+	echo "The app-only image cannot be flashed safely with the device's current partition table." >&2
+	echo "Use the matching -merged.bin firmware as a new install to replace the partition layout (this erases device settings), or use a smaller app-only image." >&2
+	return 1
 }
 
 esp32_device_image_present_at_offset() {
@@ -2640,38 +2657,61 @@ esp32_device_image_present_at_offset() {
 
 esp32_update_flash_offsets() {
 	local port="$1"
-	local offset has_10000=0 has_150000=0
+	local firmware_file="$2"
+	local firmware_size partition offset size primary_index=0 i
+	local -a app_partitions=()
 	local -a app_offsets=()
-	local -a update_offsets=()
+	local -a app_sizes=()
+	local -a update_indices=()
 
-	mapfile -t app_offsets < <(read_esp32_app_partition_offsets "$port" || true)
+	if [[ ! -f "$firmware_file" ]]; then
+		echo "ERROR: firmware file not found: ${firmware_file}" >&2
+		return 1
+	fi
+	firmware_size="$(stat -c '%s' "$firmware_file")"
 
-	for offset in "${app_offsets[@]}"; do
-		case "$offset" in
-			0x10000) has_10000=1 ;;
-			0x150000) has_150000=1 ;;
-		esac
+	mapfile -t app_partitions < <(read_esp32_app_partitions "$port" || true)
+	for partition in "${app_partitions[@]}"; do
+		read -r offset size <<< "$partition"
+		[[ "$offset" =~ ^0x[0-9a-fA-F]+$ && "$size" =~ ^0x[0-9a-fA-F]+$ ]] || continue
+		app_offsets+=("$offset")
+		app_sizes+=("$size")
 	done
 
-	if (( has_10000 )); then
-		update_offsets+=(0x10000)
-	else
-		echo "Warning: partition table did not list an app slot at 0x10000; using 0x10000 fallback" >&2
-		update_offsets+=(0x10000)
+	if ((${#app_offsets[@]} == 0)); then
+		echo "Warning: no app partitions were parsed; using 0x10000 without a partition-size check" >&2
+		printf '%s\n' 0x10000
+		return 0
 	fi
 
-	if (( has_150000 )); then
-		if esp32_device_image_present_at_offset "$port" 0x150000; then
-			echo "Detected existing ESP32 app image at 0x150000; updating both app slots." >&2
-			update_offsets+=(0x150000)
-		else
-			echo "ESP32 app partition exists at 0x150000, but no app image magic was detected there; updating 0x10000 only." >&2
+	for ((i=0; i<${#app_offsets[@]}; i++)); do
+		if [[ "${app_offsets[i]}" == "0x10000" ]]; then
+			primary_index=$i
+			break
 		fi
-	else
-		echo "ESP32 partition table does not list an app slot at 0x150000; updating 0x10000 only." >&2
+	done
+	if [[ "${app_offsets[primary_index]}" != "0x10000" ]]; then
+		echo "ESP32 partition table does not list an app slot at 0x10000; using first app slot at ${app_offsets[primary_index]}." >&2
 	fi
 
-	printf '%s\n' "${update_offsets[@]}"
+	esp32_firmware_fits_app_partition "$firmware_size" "${app_offsets[primary_index]}" "${app_sizes[primary_index]}" || return 1
+	update_indices+=("$primary_index")
+
+	for ((i=0; i<${#app_offsets[@]}; i++)); do
+		(( i == primary_index )) && continue
+		offset="${app_offsets[i]}"
+		if esp32_device_image_present_at_offset "$port" "$offset"; then
+			esp32_firmware_fits_app_partition "$firmware_size" "$offset" "${app_sizes[i]}" || return 1
+			echo "Detected existing ESP32 app image at ${offset}; adding that app slot to the update." >&2
+			update_indices+=("$i")
+		else
+			echo "ESP32 app partition at ${offset} contains no app image; skipping that slot." >&2
+		fi
+	done
+
+	for i in "${update_indices[@]}"; do
+		printf '%s\n' "${app_offsets[i]}"
+	done
 }
 
 list_usb_block_devs() {
@@ -2927,7 +2967,7 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 		run_esptool --port "${DEVICE_PORT}" --after "$HARDRESET" --baud 115200 "$WRITEFLASH" 0x0000 "${DOWNLOADED_FILE}"
 	else
 		echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $HARDRESET --baud 115200 $WRITEFLASH <device app offset> \"${DOWNLOADED_FILE}\""
-		echo "The ESP32 partition table will be read from the device. If an existing app image is detected at 0x150000, both 0x10000 and 0x150000 will be updated."
+		echo "The ESP32 partition table will be read from the device. The update will stop if the image does not fit; populated secondary app slots will also be updated."
 		EXECUTION_MODE="$(choose_flash_execution_mode "UPDATE ${DEVICE} on ${DEVICE_PORT}")"
 		if [[ "$EXECUTION_MODE" == "echo" ]]; then
 			echo "Echo-only selected; no ESP32 flash commands were run."
@@ -2935,7 +2975,15 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 			exit 0
 		fi
 		prepare_esp32_flash_session "${DEVICE_PORT}" "${DEVICE}"
-		mapfile -t ESP32_UPDATE_OFFSETS < <(esp32_update_flash_offsets "${DEVICE_PORT}")
+		ESP32_UPDATE_OFFSETS_OUTPUT=""
+		if ! ESP32_UPDATE_OFFSETS_OUTPUT="$(esp32_update_flash_offsets "${DEVICE_PORT}" "${DOWNLOADED_FILE}")"; then
+			exit 1
+		fi
+		if [[ -z "$ESP32_UPDATE_OFFSETS_OUTPUT" ]]; then
+			echo "ERROR: no ESP32 app partitions were selected for the update." >&2
+			exit 1
+		fi
+		mapfile -t ESP32_UPDATE_OFFSETS <<< "$ESP32_UPDATE_OFFSETS_OUTPUT"
 		ESP32_WRITE_ARGS=()
 		for flash_offset in "${ESP32_UPDATE_OFFSETS[@]}"; do
 			ESP32_WRITE_ARGS+=("$flash_offset" "${DOWNLOADED_FILE}")
