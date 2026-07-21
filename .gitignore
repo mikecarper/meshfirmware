@@ -1,0 +1,20 @@
+# Firmware downloads, release metadata, and runtime state
+/meshcore-dev_MeshCore/
+/meshtastic_firmware/
+
+# Runtime dependencies downloaded by the Windows scripts
+/winpython/
+/USBDeview.exe
+
+# Temporary script output
+/.tmp/
+/tmp_*
+/usb_devices.xml
+/meshtastic_outputCOM*.txt
+/meshtastic_errorCOM*.txt
+/*.serial-dfu.hex
+/*.serial-dfu.zip
+
+# Local device configuration and backups (may contain credentials)
+/config.yaml
+/config_backup.*.yaml*
