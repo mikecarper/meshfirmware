@@ -19,7 +19,7 @@ while [ $count -lt 2 ]; do
     fi
     count=$((count + 1))
     # determine parent directory
-    # if we’re at / (or somehow can’t go up), break out
+    # if we're at / (or somehow can't go up), break out
     if [[ "$parent" == "$PWD" ]]; then
         break
     fi
@@ -52,14 +52,14 @@ echo "$PWD"
 cleanup() {
   cd "$ORIG_DIR" || exit
 }
-# arrange for cleanup() to run on EXIT (this covers normal exit, errors, and Ctrl‑C)
+# arrange for cleanup() to run on EXIT (this covers normal exit, errors, and Ctrl-C)
 trap cleanup EXIT
 
 # Create small package (no debugging symbols)
 # Add `argp` for musl
 # -Os: Optimize for size; enables most -O2 optimizations.
 #-ffunction-sections -fdata-sections: Place individual functions and data in their own sections. 
-#   Allows the linker to later remove any sections that aren’t referenced in the final executable.
+#   Allows the linker to later remove any sections that aren't referenced in the final executable.
 # -Wl,--gc-sections: Linker garbage collection of unused sections.
 # -largp: Link against the argp library; provides command-line argument parsing.
 PLATFORMIO_BUILD_FLAGS="-Os -ffunction-sections -fdata-sections -Wl,--gc-sections -largp"
@@ -121,7 +121,7 @@ if [ -z "$selected_env" ]; then
         printf "%d) %s\n" $((i+1)) "${envs[$i]}"
     done
     
-    # If .pio/libdeps exists, show the short list of already built environments—but only if there is at least one.
+    # If .pio/libdeps exists, show the short list of already built environments-but only if there is at least one.
     if [ -d ".pio/libdeps" ]; then
         # Enable nullglob so that the array is empty if no match is found.
         shopt -s nullglob
@@ -263,7 +263,7 @@ fi
 
 # --- Option 4: Enable Remote Hardware + apply extra patch ---
 # Only add if extra patch exists and no env patch exists,
-# OR if both exist we’ll add a dedicated option later.
+# OR if both exist we'll add a dedicated option later.
 if [ -n "$extraPatchFile" ] && [ -z "$envPatchFile" ]; then
     options+=("Enable Remote Hardware + apply $extraPatchFile")
     actions+=("$enableRHAction

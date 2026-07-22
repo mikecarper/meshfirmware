@@ -419,7 +419,7 @@ function Split-CommandLine {
 function run_cmd {
     param(
         [Parameter(Mandatory)][string] $CommandLine,
-        [switch] $Stream          # -Stream → live to console
+        [switch] $Stream          # -Stream -> live to console
     )
 	
 
@@ -1594,7 +1594,7 @@ function BuildReleaseMenuData {
         $tag = $tag.Substring(1)  # Remove the 'v' from the version tag
         $label = "{0,-14} {1}" -f $tag, $suffix
 
-        if ($body -match '⚠️') {
+        if ($body -match '[WARN]') {
             $label = "! $label"
         } elseif ($body -match 'Known issue') {
 			$label = "! $label"
@@ -1723,7 +1723,7 @@ function SelectRelease {
             [PSCustomObject]@{ Text = $text; Color = $color }
         }
 
-		# 2) reverse in-place (oldest → newest)
+		# 2) reverse in-place (oldest -> newest)
 		[Array]::Reverse($formatted)
 
 		# 3) print in rows unchanged
@@ -1764,7 +1764,7 @@ function SelectRelease {
 function DownloadAssets {
     <#
     .SYNOPSIS
-      Download all firmware-* assets for the chosen release (skipping any “debug” builds).
+      Download all firmware-* assets for the chosen release (skipping any "debug" builds).
     #>
 
     # 1) Read & parse the cached release JSON
@@ -1868,7 +1868,7 @@ function UnzipAssets {
         Throw "Release '$chosenTag' not found in JSON."
     }
 
-    # 4) Filter for firmware-… zip assets (exclude debug)
+    # 4) Filter for firmware-... zip assets (exclude debug)
     $assets = $release.assets |
         Where-Object { 
             $_.name -match '^firmware-' -and 
@@ -1878,7 +1878,7 @@ function UnzipAssets {
         Throw "No matching firmware assets found for release '$chosenTag'."
     }
 
-    # 5) Unzip each asset to <FirmwareRoot>\<tag>\<product>\…
+    # 5) Unzip each asset to <FirmwareRoot>\<tag>\<product>\...
     foreach ($asset in $assets) {
         $name      = $asset.name
         $localFile = Join-Path $DownloadDir $name
@@ -2613,7 +2613,7 @@ function UpdateBleOta {
 				  ((Get-Date) -gt ((Get-Item $BleOtaFile).LastWriteTime.AddSeconds($CacheTimeoutSeconds)))
 
 	if ($needUpdate) {
-		Write-Host "Checking if Bluetooth-OTA bin files need updating…"
+		Write-Host "Checking if Bluetooth-OTA bin files need updating..."
 
 		$tmp = [IO.Path]::GetTempFileName()
 		try {
@@ -2663,7 +2663,7 @@ function UpdateBleOta {
 	foreach ($f in $folders) {
 		$attempt++
 		$url = "$RepoApiUrl/$f"
-		Write-Host "Attempt $attempt - Checking folder '$f'…"
+		Write-Host "Attempt $attempt - Checking folder '$f'..."
 		$contents = Invoke-RestMethod -Uri $url
 		$fileUrls = $contents |
 			Where-Object { $_.type -eq 'file' -and $_.name.StartsWith('bleota') } |

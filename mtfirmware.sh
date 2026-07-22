@@ -63,7 +63,7 @@ NRF52_MANUAL_DFU_PROMPT_SECONDS=20
 NRF52_POST_FLASH_CHECK_TIMEOUT_SECONDS=60
 USB_AUTOSUSPEND=$(cat /sys/module/usbcore/parameters/autosuspend)
 if [[ "$USB_AUTOSUSPEND" -ne -1 ]]; then
-	# Only disable (-1) if it isn’t already
+	# Only disable (-1) if it isn't already
 	echo "sudo needed to disable USB autosuspend and keep all USB ports active."
 	echo -1 | sudo tee /sys/module/usbcore/parameters/autosuspend >/dev/null
 fi
@@ -449,7 +449,7 @@ build_release_menu() {
 		label="$label $suffix"
 
 		# Check for the warning emoji in body.
-		if echo "$body" | grep -q -- '⚠️'; then
+		if echo "$body" | grep -q -- '[WARN]'; then
 			label="! $label"
 		else
 			label="  $label"

@@ -545,7 +545,7 @@ choose_serial() {
     while :; do
         scan
 
-        # ────────────────────────── nothing found ──────────────────────────
+        # -------------------------- nothing found --------------------------
         if ((${#devs[@]} == 0)); then
             echo "No serial devices found under /dev/serial/by-id."
             read -rp "Try again? [y/N] " yn
@@ -553,15 +553,15 @@ choose_serial() {
             continue                                # rescan
         fi
 
-        # ────────────────────────── single device ──────────────────────────
+        # -------------------------- single device --------------------------
 	        if ((${#devs[@]} == 1)); then
 				detected_dev="${devs[0]}"
-	            #echo "Only one device detected – selecting it automatically: $detected_dev - ${labels[0]}"
+	            #echo "Only one device detected - selecting it automatically: $detected_dev - ${labels[0]}"
 				DEVICE_NAME="$detected_dev"
 				return
 	        fi
 
-        # ────────────────────────── menu ──────────────────────────
+        # -------------------------- menu --------------------------
         echo "Select a serial device:"
         for i in "${!devs[@]}"; do
             printf " %2d) %s  (%s)\n" $((i+1)) "${devs[$i]}" "${labels[$i]}"
@@ -578,7 +578,7 @@ choose_serial() {
 					return
 	            fi
         fi
-        echo "Invalid selection – please try again."
+        echo "Invalid selection - please try again."
     done
 }
 choose_serial || true

@@ -144,7 +144,7 @@ if [[ -n "${SUDO_USER:-}" ]]; then
 fi
 
 if [[ "$USB_AUTOSUSPEND" -ne -1 ]]; then
-	# Only disable (-1) if it isn’t already
+	# Only disable (-1) if it isn't already
 	echo "sudo needed to disable USB autosuspend and keep all USB ports active."
 	echo -1 | sudo tee /sys/module/usbcore/parameters/autosuspend >/dev/null
 fi
@@ -1073,7 +1073,7 @@ choose_version_from_releases() {
 	[[ -f "$SELECTED_TYPE_FILE"    ]] && TYPE="$(<"$SELECTED_TYPE_FILE")"
 	local CHOSEN_FILE=''
 
-    # ---------------- step 3 – version ------------------------------------
+    # ---------------- step 3 - version ------------------------------------
 	if [[ -z "$VERSION" ]]; then
 		local -a VERSIONS=()
 		mapfile -t VERSIONS < <(
@@ -1181,7 +1181,7 @@ choose_version_from_releases() {
 		fi
 	fi
 
-    # ---------------- step 4 – type ---------------------------------------
+    # ---------------- step 4 - type ---------------------------------------
 	if [[ -z "$TYPE" ]]; then
 		local -a TYPES=()
 		mapfile -t TYPES < <( _jq1 --arg d "$DEVICE" --arg r "$ROLE" ".device[] | select(.name==\$d) | .firmware[] | select(.role==\$r) | .github | .files | keys[]" | sort -u )
@@ -1201,7 +1201,7 @@ choose_version_from_releases() {
 		fi
 	fi
 
-    # ---------------- step 5 – filename -----------------------------------
+    # ---------------- step 5 - filename -----------------------------------
 	if [[ -z "$CHOSEN_FILE" ]]; then
 		local REGEX=''
 		if [[ -n "$TITLE" ]]; then
@@ -1218,7 +1218,10 @@ choose_version_from_releases() {
 		fi
 		
 
-		CHOSEN_FILE=$( _jq2 --arg reg "$REGEX" --arg ver "$VERSION" --arg t "$TYPE" --arg d "$DEVICE" --arg r "$ROLE_ALT" ".[] | select(.version==\$ver and .type==\$r) | .files[] | select(.name|test(\$reg)) | .url " )
+		# Provider patterns describe a single release asset. Anchor them so a
+		# normal repeater entry cannot accidentally select its
+		# _lora_ota_no_external_sensors sibling (or the reverse).
+		CHOSEN_FILE=$( _jq2 --arg reg "$REGEX" --arg ver "$VERSION" --arg t "$TYPE" --arg d "$DEVICE" --arg r "$ROLE_ALT" ".[] | select(.version==\$ver and .type==\$r) | .files[] | select(.name|test(\"^(?:\" + \$reg + \")$\")) | .url " )
 	fi
 	
 	echo "$DEVICE" > "$SELECTED_DEVICE_FILE"
@@ -1335,7 +1338,7 @@ choose_meshcore_firmware() {
 	[[ -f "$SELECTED_VERSION_FILE" ]] && VERSION="$(<"$SELECTED_VERSION_FILE")"
 	[[ -f "$SELECTED_TYPE_FILE"    ]] && TYPE="$(<"$SELECTED_TYPE_FILE")"
 
-    # ---------------- step 1 – device -------------------------------------
+    # ---------------- step 1 - device -------------------------------------
 	if [[ -z "$DEVICE" ]]; then
 		if (( !config_available )); then
 			echo
@@ -1496,7 +1499,7 @@ choose_meshcore_firmware() {
 		done
 	fi
 	
-	# ---------------- step 2 – architecture & erase -----------------------
+	# ---------------- step 2 - architecture & erase -----------------------
 	if [[ -z "$ARCHITECTURE" ]]; then
 		ARCHITECTURE=$( _jq1 --arg d "$DEVICE" ".device[]|select(.name==\$d)|.type" )
 	fi
@@ -1507,7 +1510,7 @@ choose_meshcore_firmware() {
 		[[ -n $ERASE_URL ]] && ERASE_URL="https://flasher.meshcore.io/firmware/$ERASE_URL"
 	fi
 
-    # ---------------- step 3 – role ---------------------------------------
+    # ---------------- step 3 - role ---------------------------------------
 	if [[ -z "$ROLE" ]]; then
 
 		# ROLES[i], TITLES[i], LABELS[i] belong together
@@ -1568,7 +1571,7 @@ choose_meshcore_firmware() {
 				# repeater / roomServer do not need extra suffix
 			esac
 			LABELS[i]="${TITLES[i]}${suffix}"
-			[[ -n "${SUBTITLES[i]}" ]] && LABELS[i]+=" — ${SUBTITLES[i]}"
+			[[ -n "${SUBTITLES[i]}" ]] && LABELS[i]+=" - ${SUBTITLES[i]}"
 		done
 
 		if ((${#ROLES[@]} == 1)); then
@@ -1597,7 +1600,7 @@ choose_meshcore_firmware() {
 
 		fi
 	
-	# ---------------- step 4 – version ------------------------------------
+	# ---------------- step 4 - version ------------------------------------
 	if [[ -z "$VERSION" ]]; then
 			local -a VERSIONS=()
 			mapfile -t VERSIONS < <(
@@ -1631,7 +1634,7 @@ choose_meshcore_firmware() {
 	fi
 
 
-	    # ---------------- step 5 – type ---------------------------------------
+	    # ---------------- step 5 - type ---------------------------------------
 		if [[ "$DEVICE" != "CustomFirmware" ]]; then
 			# shellcheck disable=SC2016
 			_jq1 --arg d "$DEVICE" --arg r "$ROLE" --arg title "$TITLE" --arg subtitle "$SUBTITLE" --arg v "$VERSION" '.device[] | select(.name == $d) | .firmware[] | select(.role == $r) | select((.title // "") == $title) | select((.subTitle // "") == $subtitle) | .version[$v].files[]'
@@ -1670,7 +1673,7 @@ choose_meshcore_firmware() {
         fi
     fi
 
-    # ---------------- step 6 – filename -----------------------------------
+    # ---------------- step 6 - filename -----------------------------------
 	    if [[ -z "$CHOSEN_FILE" ]]; then
 	        CHOSEN_FILE=$(
 	            # shellcheck disable=SC2016
@@ -1787,10 +1790,10 @@ download_and_verify() {
 			return 1
 		fi
 
-		echo "Downloaded $dest – $bytes bytes OK"
+		echo "Downloaded $dest - $bytes bytes OK"
 	else
 		bytes=$(stat -c%s "$dest" 2>/dev/null);
-		echo "Already downloaded $dest – $bytes bytes OK"
+		echo "Already downloaded $dest - $bytes bytes OK"
 	fi
 
     echo "$dest" > "$dest_file"
@@ -1903,7 +1906,7 @@ choose_serial() {
     while :; do
         scan
 
-        # ────────────────────────── nothing found ──────────────────────────
+        # -------------------------- nothing found --------------------------
         if ((${#devs[@]} == 0)); then
             echo "No serial devices found under /dev/serial/by-id."
             read -rp "Try again? [y/N] " yn
@@ -1911,19 +1914,19 @@ choose_serial() {
             continue                                # rescan
         fi
 
-        # ────────────────────────── single device ──────────────────────────
+        # -------------------------- single device --------------------------
         if ((${#devs[@]} == 1)); then
 			detected_dev="${devs[0]}"
 			echo "Trying to get meshcore info from the node"
 			board=$(read_board_with_retry "${detected_dev}")
 			version=$(clean_node_info_field "$(quick_node_info_cmd "${detected_dev}" "ver")")
-            echo "Only one device detected – selecting it automatically: $detected_dev - $(format_node_info_summary "${labels[0]}" "$board" "$version")"
+            echo "Only one device detected - selecting it automatically: $detected_dev - $(format_node_info_summary "${labels[0]}" "$board" "$version")"
 			echo "$detected_dev" > "$DEVICE_PORT_FILE"
 			echo "${labels[0]}" > "$DEVICE_PORT_NAME_FILE"
 			return
         fi
 
-        # ────────────────────────── menu ──────────────────────────
+        # -------------------------- menu --------------------------
         echo "Select a serial device:"
         for i in "${!devs[@]}"; do
 			board=$(read_board_with_retry "${devs[$i]}")
@@ -1943,7 +1946,7 @@ choose_serial() {
 				return
             fi
         fi
-        echo "Invalid selection – please try again."
+        echo "Invalid selection - please try again."
     done
 }
 
@@ -2822,7 +2825,7 @@ extract_name_from_firmware() {
   ' "$f" 2>/dev/null
 }
 
-# prints one line with fallback to .pio/libdeps/… segment
+# prints one line with fallback to .pio/libdeps/... segment
 print_fw_line() {
   local label="$1" file="$2" val
   val="$(extract_name_from_firmware "$file")"
