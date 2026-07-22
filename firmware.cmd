@@ -3913,7 +3913,7 @@ function ChooseMeshCoreFirmware {
             }
 			$label = $titles[$i] + $suffix
 			if (-not [string]::IsNullOrWhiteSpace($subtitles[$i])) {
-				$label += " — $($subtitles[$i])"
+				$label += " - $($subtitles[$i])"
 			}
 			$labels += $label
         }
