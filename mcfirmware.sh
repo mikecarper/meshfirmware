@@ -520,13 +520,52 @@ latest_custom_firmware_file() {
 	printf '%s\n' "$latest"
 }
 
+format_human_age() {
+	local age_seconds="${1:-0}" rounded_minutes days hours minutes
+	local day_suffix="s" hour_suffix="s" minute_suffix="s"
+
+	[[ "$age_seconds" =~ ^-?[0-9]+$ ]] || return 1
+	(( age_seconds < 0 )) && age_seconds=0
+
+	# Round to the nearest minute, with 30 seconds rounding up.
+	rounded_minutes=$(( (age_seconds + 30) / 60 ))
+	days=$(( rounded_minutes / 1440 ))
+	hours=$(( (rounded_minutes % 1440) / 60 ))
+	minutes=$(( rounded_minutes % 60 ))
+
+	[[ "$days" -eq 1 ]] && day_suffix=""
+	[[ "$hours" -eq 1 ]] && hour_suffix=""
+	[[ "$minutes" -eq 1 ]] && minute_suffix=""
+
+	if (( days > 0 )); then
+		printf '%d day%s, %d hour%s, %d minute%s old' \
+			"$days" "$day_suffix" "$hours" "$hour_suffix" "$minutes" "$minute_suffix"
+	elif (( hours > 0 )); then
+		printf '%d hour%s, %d minute%s old' \
+			"$hours" "$hour_suffix" "$minutes" "$minute_suffix"
+	else
+		printf '%d minute%s old' "$minutes" "$minute_suffix"
+	fi
+}
+
+custom_firmware_file_age() {
+	local firmware_file="${1:-}" now modified
+
+	[[ -f "$firmware_file" ]] || return 1
+	now="$(date +%s)"
+	modified="$(stat -c %Y -- "$firmware_file")"
+	format_human_age "$(( now - modified ))"
+}
+
 print_latest_custom_firmware_option() {
-	local required_ext="${1:-}" latest
+	local required_ext="${1:-}" latest age age_label=""
 
 	latest="$(latest_custom_firmware_file "$required_ext" || true)"
 	if [[ -n "$latest" ]]; then
+		age="$(custom_firmware_file_age "$latest" || true)"
+		[[ -n "$age" ]] && age_label=" ($age)"
 		echo "Custom folder: ${DOWNLOAD_DIR}/custom"
-		echo "  latest) $(basename -- "$latest")"
+		echo "  latest) $(basename -- "$latest")${age_label}"
 		echo "          $latest"
 	else
 		echo "Custom folder: ${DOWNLOAD_DIR}/custom"
