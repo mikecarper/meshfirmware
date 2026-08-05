@@ -2154,6 +2154,22 @@ terminate_serial_locking_processes() {
 	((${#remaining_pids[@]} == 0))
 }
 
+prepare_serial_port_for_flash() {
+	local port="$1"
+
+	echo "Checking for services or processes using ${port} before flashing..."
+	if stop_serial_locking_services "$port"; then
+		return 0
+	fi
+
+	if terminate_serial_locking_processes "$port"; then
+		return 0
+	fi
+
+	echo "No process found locking ${port}."
+	return 0
+}
+
 
 esptool_set_variables() {
 
@@ -2451,6 +2467,8 @@ run_esptool() {
 prepare_esp32_flash_session() {
 	local port="$1"
 	local device="$2"
+
+	prepare_serial_port_for_flash "$port"
 
 	BOOTLOADER_PROBE_PORT="$port"
 	BOOTLOADER_PROBE_ACTIVE=1
@@ -3072,6 +3090,7 @@ else
 		echo "Echo-only selected; no nRF52 DFU commands were run."
 		exit 0
 	fi
+	prepare_serial_port_for_flash "$DEVICE_PORT"
 
 	echo "Getting the latest version of adafruit-nrfutil"
 	pipx run adafruit-nrfutil version
