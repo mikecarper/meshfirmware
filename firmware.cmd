@@ -4880,7 +4880,10 @@ time.sleep(TOUCH_RESET_WAIT_TIME)
 print("\n--- Operation complete. The device should now be in DFU mode. ---")
 '@
 
-	& $pythonCommand -c $pythonScript $ComPort
+	# Windows PowerShell 5.1 strips quotes from multiline native-command
+	# arguments. Encode the source so Python receives it without alteration.
+	$pythonScriptBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($pythonScript))
+	& $pythonCommand -c 'import base64,sys;exec(base64.b64decode(sys.argv.pop(1)))' $pythonScriptBase64 $ComPort
 	return $LASTEXITCODE
 }
 

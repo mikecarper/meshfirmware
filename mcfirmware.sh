@@ -642,19 +642,45 @@ print_nrfutil_dfu_command() {
 
 run_nrfutil_dfu_serial() {
 	local package_file=$1
+	local output_file output exit_code
 	shift || true
 
-	if [[ -r "$DEVICE_PORT" && -w "$DEVICE_PORT" ]]; then
-		pipx run adafruit-nrfutil dfu serial --package "$package_file" --touch 1200 -p "${DEVICE_PORT}" -b 115200 "$@"
-		return $?
+	if [[ ! -r "$DEVICE_PORT" || ! -w "$DEVICE_PORT" ]]; then
+		echo "Serial port $DEVICE_PORT requires elevated access."
+		echo "Current permissions: $(ls -l "$DEVICE_PORT")"
+		echo "Prompting for sudo so flashing can continue..."
+		ensure_sudo_session
+		sudo chmod a+rw "$DEVICE_PORT"
 	fi
 
-	echo "Serial port $DEVICE_PORT requires elevated access."
-	echo "Current permissions: $(ls -l "$DEVICE_PORT")"
-	echo "Prompting for sudo so flashing can continue..."
-	ensure_sudo_session
-	sudo chmod a+rw "$DEVICE_PORT"
-	pipx run adafruit-nrfutil dfu serial --package "$package_file" --touch 1200 -p "${DEVICE_PORT}" -b 115200 "$@"
+	if ! output_file=$(mktemp); then
+		echo "Could not create temporary output file for nRF52 DFU validation." >&2
+		return 1
+	fi
+
+	if pipx run adafruit-nrfutil dfu serial --package "$package_file" --touch 1200 -p "${DEVICE_PORT}" -b 115200 "$@" 2>&1 | tee "$output_file"; then
+		exit_code=0
+	else
+		exit_code=${PIPESTATUS[0]}
+	fi
+	output="$(<"$output_file")"
+	rm -f "$output_file"
+
+	if (( exit_code != 0 )); then
+		return "$exit_code"
+	fi
+
+	if grep -Eqi 'Timed out waiting for acknowledgement|Failed to upgrade target|No data received on serial port|NordicSemiException|PortNotOpenError|^Traceback ' <<<"$output"; then
+		echo "nRF52 DFU reported a failure despite returning exit code 0." >&2
+		return 1
+	fi
+
+	if ! grep -Eq '^Device programmed\.?$' <<<"$output"; then
+		echo "nRF52 DFU did not report that the device was programmed." >&2
+		return 1
+	fi
+
+	return 0
 }
 
 _jq1() {
