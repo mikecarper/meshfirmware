@@ -121,9 +121,64 @@ if [[ -n "${SUDO_USER:-}" ]]; then
   umask 022
 fi
 
+PACKAGE_MANAGER=""
+PACKAGE_METADATA_UPDATED=0
+
+detect_package_manager() {
+  if [[ -n "$PACKAGE_MANAGER" ]]; then
+    return 0
+  fi
+
+  for PACKAGE_MANAGER in pacman dnf apt-get; do
+    if command -v "$PACKAGE_MANAGER" >/dev/null 2>&1; then
+      echo "Using ${PACKAGE_MANAGER} for system packages." >&2
+      return 0
+    fi
+  done
+
+  PACKAGE_MANAGER=""
+  echo "No supported package manager found (pacman, dnf, or apt-get)." >&2
+  return 1
+}
+
+package_name_for_manager() {
+  local package_name="$1"
+
+  case "${PACKAGE_MANAGER}:${package_name}" in
+    pacman:python3) package_name="python" ;;
+    pacman:pip) package_name="python-pip" ;;
+    pacman:pipx) package_name="python-pipx" ;;
+    pacman:vim-common) package_name="tinyxxd" ;;
+    dnf:pip|apt-get:pip) package_name="python3-pip" ;;
+  esac
+
+  printf '%s\n' "$package_name"
+}
+
 install_packages() {
-  sudo apt-get update
-  sudo apt-get -y install "$@"
+  detect_package_manager || return 1
+
+  local package_name
+  local -a packages=()
+  for package_name in "$@"; do
+    packages+=("$(package_name_for_manager "$package_name")")
+  done
+
+  case "$PACKAGE_MANAGER" in
+    pacman)
+      sudo pacman -S --needed --noconfirm "${packages[@]}"
+      ;;
+    dnf)
+      sudo dnf install -y "${packages[@]}"
+      ;;
+    apt-get)
+      if (( ! PACKAGE_METADATA_UPDATED )); then
+        sudo apt-get update || return 1
+        PACKAGE_METADATA_UPDATED=1
+      fi
+      sudo apt-get install -y "${packages[@]}"
+      ;;
+  esac
 }
 
 ensure_command() {
