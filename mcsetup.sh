@@ -988,8 +988,11 @@ load_repeater_settings() {
       loop.detect)
         response_regex='^(off|minimal|moderate|strict)$'
         ;;
-      prv.key|public.key)
-        response_regex='^[0-9A-Fa-f]{64}$'
+      prv.key)
+        response_regex='[0-9A-Fa-f]{128}'
+        ;;
+      public.key)
+        response_regex='[0-9A-Fa-f]{64}'
         ;;
       role)
         response_regex='^[0-9A-Za-z_.-]+$'
@@ -1001,6 +1004,9 @@ load_repeater_settings() {
     case "$k" in
       guest.password|owner.info)
         v="$(SERIAL_RETRIES=1 SERIAL_ALLOW_BLANK_RESPONSE=1 SERIAL_FIRST_CANDIDATE_ONLY=1 SERIAL_RESPONSE_REGEX="$response_regex" serial_cmd "get $k" | trim)"
+        ;;
+      prv.key|public.key)
+        v="$(SERIAL_RETRIES=5 SERIAL_RESPONSE_REGEX="$response_regex" serial_cmd "get $k" | trim)"
         ;;
       *)
         v="$(SERIAL_RESPONSE_REGEX="$response_regex" serial_cmd "get $k" | trim)"
@@ -1024,8 +1030,8 @@ load_repeater_settings() {
 	  repeat)                 setting_repeat="$v" ;;
 	  lat)                    setting_lat="$v" ;;
       lon)                    setting_lon="$v" ;;
-      prv.key)                setting_private_key="$v" ;;
-      public.key)             setting_public_key="$v" ;;
+      prv.key)                setting_private_key="$(printf '%s\n' "$v" | grep -Eo '[0-9A-Fa-f]{128}' | head -n1 || true)" ;;
+      public.key)             setting_public_key="$(printf '%s\n' "$v" | grep -Eo '[0-9A-Fa-f]{64}' | head -n1 || true)" ;;
       rxdelay)                setting_rxdelay="$v" ;;
       txdelay)                setting_txdelay="$v" ;;
       direct.txdelay)         setting_direct_txdelay="$v" ;;
