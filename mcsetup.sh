@@ -687,7 +687,8 @@ serial_cmd() {
   local level_log_pat='^\[?(D?EBUG|T?RACE|I?NFO|W?ARN(ING)?|E?RR(OR)?|C?RITICAL|N?OTICE|V?ERBOSE)\]?[[:space:]]*:'
   local traffic_log_pat='(Dispatcher::|RadioLibWrapper:|payload_len=|SNR=|RSSI=|score delay|noise_floor|recv_errors|"(recv|sent|flood_tx|direct_tx|flood_rx|direct_rx)"[[:space:]]*:|[[:space:]]U[[:space:]]*(RX|TX)[,[:space:]])'
   local command_artifact_pat='^[[:space:]]*(get|set)[[:space:]]|[-=]+>[[:space:]]*>?'
-  local noise_pat="(${ts_log_pat})|(${level_log_pat})|(${traffic_log_pat})|(${command_artifact_pat})"
+  local damaged_guest_echo_pat='^[[:space:]]*g?e?t?[[:space:]]+gues?t?[.]password[[:space:]]*$'
+  local noise_pat="(${ts_log_pat})|(${level_log_pat})|(${traffic_log_pat})|(${command_artifact_pat})|(${damaged_guest_echo_pat})"
 
   # Ensure socat is installed.
   ensure_command socat >&2
@@ -791,6 +792,18 @@ serial_cmd() {
 
 serial_cmd_multiline_200ms() {
   SERIAL_RETRIES=1 SERIAL_OUTPUT_MODE=all SERIAL_IDLE_TIMEOUT=0.2 SERIAL_TOTAL_TIMEOUT=2s serial_cmd "$@"
+}
+
+read_hex_key_setting() {
+  local key="$1"
+  local hex_chars="$2"
+  local raw
+
+  # Key replies are immediate and can be followed by unrelated debug output.
+  # Stop at the same short idle window used by the successful raw-command path,
+  # then extract only a complete key from everything received in that window.
+  raw="$(serial_cmd_multiline_200ms "get $key")"
+  printf '%s\n' "$raw" | grep -Eo "[0-9A-Fa-f]{$hex_chars}" | head -n1 || true
 }
 
 trim() {
@@ -988,12 +1001,6 @@ load_repeater_settings() {
       loop.detect)
         response_regex='^(off|minimal|moderate|strict)$'
         ;;
-      prv.key)
-        response_regex='[0-9A-Fa-f]{128}'
-        ;;
-      public.key)
-        response_regex='[0-9A-Fa-f]{64}'
-        ;;
       role)
         response_regex='^[0-9A-Za-z_.-]+$'
         ;;
@@ -1002,11 +1009,17 @@ load_repeater_settings() {
         ;;
     esac
     case "$k" in
-      guest.password|owner.info)
-        v="$(SERIAL_RETRIES=1 SERIAL_ALLOW_BLANK_RESPONSE=1 SERIAL_FIRST_CANDIDATE_ONLY=1 SERIAL_RESPONSE_REGEX="$response_regex" serial_cmd "get $k" | trim)"
+      guest.password)
+        v="$(SERIAL_RETRIES=1 SERIAL_IDLE_TIMEOUT=0.2 SERIAL_TOTAL_TIMEOUT=2s SERIAL_ALLOW_BLANK_RESPONSE=1 SERIAL_FIRST_CANDIDATE_ONLY=1 serial_cmd "get $k" | trim)"
         ;;
-      prv.key|public.key)
-        v="$(SERIAL_RETRIES=5 SERIAL_RESPONSE_REGEX="$response_regex" serial_cmd "get $k" | trim)"
+      owner.info)
+        v="$(SERIAL_RETRIES=1 SERIAL_ALLOW_BLANK_RESPONSE=1 SERIAL_FIRST_CANDIDATE_ONLY=1 serial_cmd "get $k" | trim)"
+        ;;
+      prv.key)
+        v="$(read_hex_key_setting "$k" 128)"
+        ;;
+      public.key)
+        v="$(read_hex_key_setting "$k" 64)"
         ;;
       *)
         v="$(SERIAL_RESPONSE_REGEX="$response_regex" serial_cmd "get $k" | trim)"
