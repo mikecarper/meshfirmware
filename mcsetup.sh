@@ -670,6 +670,7 @@ serial_cmd() {
   local allow_blank_response="${SERIAL_ALLOW_BLANK_RESPONSE:-0}"
   local first_candidate_only="${SERIAL_FIRST_CANDIDATE_ONLY:-0}"
   local output_mode="${SERIAL_OUTPUT_MODE:-last}" # "last" (default) or "all"
+  local response_regex="${SERIAL_RESPONSE_REGEX:-}"
 
   # Fast read/exit behavior
   local total_timeout="${SERIAL_TOTAL_TIMEOUT:-7.5s}"  # hard cap
@@ -682,9 +683,11 @@ serial_cmd() {
   ensure_serial_access "$device_name_now"
 
   # Device noise lines to skip when reading command replies.
-  local ts_log_pat='^[0-9]{1,2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]+[A-Z]+([[:space:]]+[A-Z]+)*:'
-  local level_log_pat='^\[?(DEBUG|TRACE|INFO|WARN|WARNING|ERROR|ERR|CRITICAL|NOTICE|VERBOSE)\]?[[:space:]]*:'
-  local noise_pat="(${ts_log_pat})|(${level_log_pat})"
+  local ts_log_pat='[0-9]{1,2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]+[A-Z]+([[:space:]]+[A-Z]+)*[:,]'
+  local level_log_pat='^\[?(D?EBUG|T?RACE|I?NFO|W?ARN(ING)?|E?RR(OR)?|C?RITICAL|N?OTICE|V?ERBOSE)\]?[[:space:]]*:'
+  local traffic_log_pat='(Dispatcher::|RadioLibWrapper:|payload_len=|SNR=|RSSI=|score delay|noise_floor|recv_errors|"(recv|sent|flood_tx|direct_tx|flood_rx|direct_rx)"[[:space:]]*:|[[:space:]]U[[:space:]]*(RX|TX)[,[:space:]])'
+  local command_artifact_pat='^[[:space:]]*(get|set)[[:space:]]|[-=]+>[[:space:]]*>?'
+  local noise_pat="(${ts_log_pat})|(${level_log_pat})|(${traffic_log_pat})|(${command_artifact_pat})"
 
   # Ensure socat is installed.
   ensure_command socat >&2
@@ -726,18 +729,20 @@ serial_cmd() {
 			  idle="$4"
 			  noise_pat="$5"
 			  output_mode="$6"
+			  response_regex="$7"
 
 			  printf "%b" "${line}\r\n" \
 				| socat -T "${idle}" - "OPEN:${device},raw,echo=0,b${baud}" 2>/dev/null \
-				| tr -d "\r" \
+				| tr "\r" "\n" \
 				| sed -E $'"'"'s/\x1B\\[[0-9;]*[A-Za-z]//g'"'"' \
 				| sed -E "s/^[[:space:][:cntrl:]]*(->|>)+[[:space:]]*//" \
 				| sed -E "s/^[[:space:][:cntrl:]]+//; s/[[:space:]]+$//" \
 				| sed -E "s/^[^0-9A-Za-z+\\-]+//" \
 				| grep -E -v "$noise_pat" \
-				| awk -v cmd="$line" -v mode="$output_mode" '"'"'
+				| awk -v cmd="$line" -v mode="$output_mode" -v response_regex="$response_regex" '"'"'
 					NF {
 					  if ($0 == cmd) next
+					  if (response_regex != "" && $0 !~ response_regex) next
 					  if (mode == "all") {
 					    print
 					  } else {
@@ -748,7 +753,7 @@ serial_cmd() {
 					  if (mode != "all") print keep
 					}
 				  '"'"'
-			' _ "${device_name_now}" "${baud}" "${line}" "${idle_timeout}" "${noise_pat}" "${output_mode}"
+			' _ "${device_name_now}" "${baud}" "${line}" "${idle_timeout}" "${noise_pat}" "${output_mode}" "${response_regex}"
 		)"
 		rc=$?
 
@@ -941,7 +946,7 @@ load_repeater_settings() {
 
   # https://github.com/meshcore-dev/MeshCore/blob/main/src/helpers/CommonCLI.cpp#L131
   # keys to fetch (radio handled separately)
-  local k v
+  local k v response_regex
   local keys=(
 	  dutycycle
 	  tx
@@ -974,11 +979,31 @@ load_repeater_settings() {
   for k in "${keys[@]}"; do
     printf '\rReading setting: %-24s' "$k"
     case "$k" in
-      guest.password|owner.info)
-        v="$(SERIAL_RETRIES=1 SERIAL_ALLOW_BLANK_RESPONSE=1 SERIAL_FIRST_CANDIDATE_ONLY=1 serial_cmd "get $k" | trim)"
+      dutycycle|tx|txdelay|rxdelay|direct.txdelay|agc.reset.interval|int.thresh|af|multi.acks|advert.interval|flood.advert.interval|flood.max|lat|lon|path.hash.mode)
+        response_regex='^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)%?$'
+        ;;
+      repeat|allow.read.only)
+        response_regex='^(on|off|true|false|0|1)$'
+        ;;
+      loop.detect)
+        response_regex='^(off|minimal|moderate|strict)$'
+        ;;
+      prv.key|public.key)
+        response_regex='^[0-9A-Fa-f]{64}$'
+        ;;
+      role)
+        response_regex='^[0-9A-Za-z_.-]+$'
         ;;
       *)
-        v="$(serial_cmd "get $k" | trim)"
+        response_regex=''
+        ;;
+    esac
+    case "$k" in
+      guest.password|owner.info)
+        v="$(SERIAL_RETRIES=1 SERIAL_ALLOW_BLANK_RESPONSE=1 SERIAL_FIRST_CANDIDATE_ONLY=1 SERIAL_RESPONSE_REGEX="$response_regex" serial_cmd "get $k" | trim)"
+        ;;
+      *)
+        v="$(SERIAL_RESPONSE_REGEX="$response_regex" serial_cmd "get $k" | trim)"
         ;;
     esac
     case "$k" in
@@ -1012,12 +1037,12 @@ load_repeater_settings() {
   done
   
   printf '\rReading setting: %-24s' "powersaving"
-  setting_powersaving="$(serial_cmd 'powersaving' | trim)"
+  setting_powersaving="$(SERIAL_RESPONSE_REGEX='^(on|off)$' serial_cmd 'powersaving' | trim)"
 
   # radio needs CSV parsing: {freq},{bw},{sf},{cr}
   local radio_raw
   printf '\rReading setting: %-24s' "radio"
-  radio_raw="$(serial_cmd 'get radio' | trim)"
+  radio_raw="$(SERIAL_RESPONSE_REGEX='^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+),[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+),[0-9]+,[0-9]+$' serial_cmd 'get radio' | trim)"
   # remove spaces around commas just in case
   radio_raw="$(echo "$radio_raw" | sed -E 's/[[:space:]]*,[[:space:]]*/,/g')"
   IFS=',' read -r RADIO_FREQ RADIO_BW RADIO_SF RADIO_CR <<< "$radio_raw"

@@ -939,9 +939,11 @@ serial_cmd() {
   fi
 
   # Asynchronous device log lines must not be mistaken for command replies.
-  local ts_log_pat='^[0-9]{1,2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]+[A-Z]+([[:space:]]+[A-Z]+)*:'
-  local level_log_pat='^\[?(DEBUG|TRACE|INFO|WARN|WARNING|ERROR|ERR|CRITICAL|NOTICE|VERBOSE)\]?[[:space:]]*:'
-  local noise_pat="(${ts_log_pat})|(${level_log_pat})"
+  local ts_log_pat='[0-9]{1,2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]+[A-Z]+([[:space:]]+[A-Z]+)*[:,]'
+  local level_log_pat='^\[?(D?EBUG|T?RACE|I?NFO|W?ARN(ING)?|E?RR(OR)?|C?RITICAL|N?OTICE|V?ERBOSE)\]?[[:space:]]*:'
+  local traffic_log_pat='(Dispatcher::|RadioLibWrapper:|payload_len=|SNR=|RSSI=|score delay|noise_floor|recv_errors|"(recv|sent|flood_tx|direct_tx|flood_rx|direct_rx)"[[:space:]]*:|[[:space:]]U[[:space:]]*(RX|TX)[,[:space:]])'
+  local command_artifact_pat='^[[:space:]]*(get|set)[[:space:]]|[-=]+>[[:space:]]*>?'
+  local noise_pat="(${ts_log_pat})|(${level_log_pat})|(${traffic_log_pat})|(${command_artifact_pat})"
 
   # Ensure serial and binary-inspection tools are installed.
   ensure_command socat
@@ -985,7 +987,7 @@ serial_cmd() {
 
 			  printf "%b" "${line}\r\n" \
 				| socat -T "${idle}" - "OPEN:${device},raw,echo=0,b${baud}" 2>/dev/null \
-				| tr -d "\r" \
+				| tr "\r" "\n" \
 				| sed -E $'"'"'s/\x1B\\[[0-9;]*[A-Za-z]//g'"'"' \
 				| sed -E "s/^[[:space:][:cntrl:]]*(->|>)+[[:space:]]*//" \
 				| sed -E "s/^[[:space:][:cntrl:]]+//; s/[[:space:]]+$//" \
@@ -1925,9 +1927,11 @@ choose_serial() {
 
 	clean_node_info_field() {
 		local value="${1:-}"
-		local ts_log_pat='^[0-9]{1,2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]+[A-Z]+([[:space:]]+[A-Z]+)*:'
-		local level_log_pat='^\[?(DEBUG|TRACE|INFO|WARN|WARNING|ERROR|ERR|CRITICAL|NOTICE|VERBOSE)\]?[[:space:]]*:'
-		local noise_pat="(${ts_log_pat})|(${level_log_pat})"
+		local ts_log_pat='[0-9]{1,2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]+[A-Z]+([[:space:]]+[A-Z]+)*[:,]'
+		local level_log_pat='^\[?(D?EBUG|T?RACE|I?NFO|W?ARN(ING)?|E?RR(OR)?|C?RITICAL|N?OTICE|V?ERBOSE)\]?[[:space:]]*:'
+		local traffic_log_pat='(Dispatcher::|RadioLibWrapper:|payload_len=|SNR=|RSSI=|score delay|noise_floor|recv_errors|"(recv|sent|flood_tx|direct_tx|flood_rx|direct_rx)"[[:space:]]*:|[[:space:]]U[[:space:]]*(RX|TX)[,[:space:]])'
+		local command_artifact_pat='^[[:space:]]*(get|set)[[:space:]]|[-=]+>[[:space:]]*>?'
+		local noise_pat="(${ts_log_pat})|(${level_log_pat})|(${traffic_log_pat})|(${command_artifact_pat})"
 		value="$(printf '%s' "$value" | tr '\r' '\n' | sed -n '/./p' | grep -E -v "$noise_pat" | tail -n1 || true)"
 		value="$(printf '%s' "$value" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
 		shopt -s nocasematch
