@@ -1572,13 +1572,13 @@ if ($null -ne $script:DeviceEpoch) {
     Write-Host ("Device time (Local): {0}" -f ([DateTimeOffset]::FromUnixTimeSeconds([long]$script:DeviceEpoch).ToLocalTime().ToString('yyyy-MM-dd HH:mm zzz')))
 }
 else {
-    $deviceDiff = 172801
+    $deviceDiff = 301
     Write-Host 'Device time (Local): unavailable'
 }
 
-if ($deviceDiff -gt 172800) {
+if ($deviceDiff -gt 300) {
     if ($null -ne $script:DeviceEpoch) {
-        Write-Host "Clock off by more than 2 days; syncing time now. Sending: time $hostEpoch"
+        Write-Host "Clock off by more than 5 minutes; syncing time now. Sending: time $hostEpoch"
     }
     else {
         Write-Host "Device clock unreadable; syncing time now. Sending: time $hostEpoch"
@@ -1591,7 +1591,7 @@ if ($deviceDiff -gt 172800) {
     Write-Host ''
 }
 else {
-    Write-Host 'Clock within 2 days'
+    Write-Host 'Clock within 5 minutes'
 }
 
 if ($null -ne $script:DeviceEpoch) {

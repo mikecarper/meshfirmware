@@ -671,6 +671,7 @@ serial_cmd() {
   local first_candidate_only="${SERIAL_FIRST_CANDIDATE_ONLY:-0}"
   local output_mode="${SERIAL_OUTPUT_MODE:-last}" # "last" (default) or "all"
   local response_regex="${SERIAL_RESPONSE_REGEX:-}"
+  local extract_regex="${SERIAL_EXTRACT_REGEX:-}"
 
   # Fast read/exit behavior
   local total_timeout="${SERIAL_TOTAL_TIMEOUT:-7.5s}"  # hard cap
@@ -731,6 +732,7 @@ serial_cmd() {
 			  noise_pat="$5"
 			  output_mode="$6"
 			  response_regex="$7"
+			  extract_regex="$8"
 
 			  printf "%b" "${line}\r\n" \
 				| socat -T "${idle}" - "OPEN:${device},raw,echo=0,b${baud}" 2>/dev/null \
@@ -739,8 +741,12 @@ serial_cmd() {
 				| sed -E "s/^[[:space:][:cntrl:]]*(->|>)+[[:space:]]*//" \
 				| sed -E "s/^[[:space:][:cntrl:]]+//; s/[[:space:]]+$//" \
 				| sed -E "s/^[^0-9A-Za-z+\\-]+//" \
-				| grep -E -v "$noise_pat" \
-				| awk -v cmd="$line" -v mode="$output_mode" -v response_regex="$response_regex" '"'"'
+				| {
+					if [[ -n "$extract_regex" ]]; then
+					  grep -Eo "$extract_regex"
+					else
+					  grep -E -v "$noise_pat" \
+					  | awk -v cmd="$line" -v mode="$output_mode" -v response_regex="$response_regex" '"'"'
 					NF {
 					  if ($0 == cmd) next
 					  if (response_regex != "" && $0 !~ response_regex) next
@@ -753,8 +759,10 @@ serial_cmd() {
 					END {
 					  if (mode != "all") print keep
 					}
-				  '"'"'
-			' _ "${device_name_now}" "${baud}" "${line}" "${idle_timeout}" "${noise_pat}" "${output_mode}" "${response_regex}"
+					  '"'"'
+					fi
+				  }
+			' _ "${device_name_now}" "${baud}" "${line}" "${idle_timeout}" "${noise_pat}" "${output_mode}" "${response_regex}" "${extract_regex}"
 		)"
 		rc=$?
 
@@ -797,13 +805,14 @@ serial_cmd_multiline_200ms() {
 read_hex_key_setting() {
   local key="$1"
   local hex_chars="$2"
+  local extract_regex="[0-9A-Fa-f]{$hex_chars}"
   local raw
 
   # Key replies are immediate and can be followed by unrelated debug output.
-  # Stop at the same short idle window used by the successful raw-command path,
-  # then extract only a complete key from everything received in that window.
-  raw="$(serial_cmd_multiline_200ms "get $key")"
-  printf '%s\n' "$raw" | grep -Eo "[0-9A-Fa-f]{$hex_chars}" | head -n1 || true
+  # Extract the complete key before rejecting noisy lines, since debug output
+  # can otherwise cause a valid key sharing that line to be discarded.
+  raw="$(SERIAL_EXTRACT_REGEX="$extract_regex" serial_cmd_multiline_200ms "get $key")"
+  printf '%s\n' "$raw" | grep -Eo "$extract_regex" | head -n1 || true
 }
 
 trim() {
@@ -1221,6 +1230,10 @@ edit_repeater_settings_menu() {
 		  ;;
 
 		10)
+		  if [[ -z "$setting_private_key" ]]; then
+			echo "Retrying private key read..."
+			setting_private_key="$(read_hex_key_setting "prv.key" 128)"
+		  fi
 		  echo "Existing key: ${setting_private_key}"
 		  read -rp "private key (blank to keep): " v
 		  v="$(trim "$v")"
@@ -1529,15 +1542,15 @@ if [[ -n "${device_epoch:-}" ]]; then
   adiff=${diff#-}
   echo "Device time (Local): $(date -d "@$device_epoch" '+%Y-%m-%d %H:%M %Z')"
 else
-  adiff=$((172800 + 1))
+  adiff=$((300 + 1))
   echo "Device time (Local): unavailable"
 fi
 
 
-# Verdict: only act if more than 2 days off (86400 sec * 2)
-if [ "$adiff" -gt 172800 ]; then
-  if [[ -n "${device_epoch:-}" && "$diff" -gt 172800 ]]; then
-    echo "Clock off by more than 2 days and device time is in the future."
+# Verdict: only act if more than 5 minutes off (60 sec * 5)
+if [ "$adiff" -gt 300 ]; then
+  if [[ -n "${device_epoch:-}" && "$diff" -gt 300 ]]; then
+    echo "Clock off by more than 5 minutes and device time is in the future."
     if prompt_clock_reset_and_retry_time_sync "$host_epoch"; then
       sleep 2
       host_epoch=$(date +%s)
@@ -1549,7 +1562,7 @@ if [ "$adiff" -gt 172800 ]; then
       fi
     fi
   elif [[ -n "${device_epoch:-}" ]]; then
-    echo "Clock off by more than 2 days; syncing time now. Sending: time $host_epoch"
+    echo "Clock off by more than 5 minutes; syncing time now. Sending: time $host_epoch"
     if ! serial_cmd "time $host_epoch" >/dev/null; then
       echo "Warning: device did not acknowledge the time sync command"
     fi
@@ -1561,7 +1574,7 @@ if [ "$adiff" -gt 172800 ]; then
   fi
   echo
 else
-  echo "Clock within 2 days"
+  echo "Clock within 5 minutes"
 fi
 
 if [[ -n "${device_epoch:-}" ]]; then
