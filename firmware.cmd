@@ -4768,20 +4768,17 @@ function Resolve-LiveUsbComPort {
 	)
 
 	if ($usbComDevices.Count -eq 0) {
-		$usbComDevices = @(
-			$activeComPorts | ForEach-Object {
-				[pscustomobject]@{
-					ComPort         = $_
-					DeviceName      = "--"
-					Project         = ""
-					FirmwareVersion = "--"
-					ExtraInfo       = ""
-				}
-			}
-		)
+		$ignoredPorts = $activeComPorts -join ', '
+		$preferredText = if ([string]::IsNullOrWhiteSpace($PreferredComPort)) {
+			"The selected USB device is not currently enumerated."
+		}
+		else {
+			"The selected USB device on $PreferredComPort is not currently enumerated."
+		}
+		throw "$preferredText Active non-USB COM ports were ignored: $ignoredPorts. Reconnect the node and retry $Purpose."
 	}
 
-	$availableComPorts = @($activeComPorts)
+	$availableComPorts = @($usbComDevices | Select-Object -ExpandProperty ComPort -Unique)
 	if (-not [string]::IsNullOrWhiteSpace($PreferredComPort) -and ($availableComPorts -contains $PreferredComPort)) {
 		return $PreferredComPort
 	}
