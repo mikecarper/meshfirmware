@@ -938,8 +938,10 @@ serial_cmd() {
 	device_name_now="/dev/ttyACM0"
   fi
 
-  # RX-log line pattern (skip)
-  local rx_pat='^[0-9]{2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]*U:'
+  # Asynchronous device log lines must not be mistaken for command replies.
+  local ts_log_pat='^[0-9]{1,2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]+[A-Z]+([[:space:]]+[A-Z]+)*:'
+  local level_log_pat='^\[?(DEBUG|TRACE|INFO|WARN|WARNING|ERROR|ERR|CRITICAL|NOTICE|VERBOSE)\]?[[:space:]]*:'
+  local noise_pat="(${ts_log_pat})|(${level_log_pat})"
 
   # Ensure serial and binary-inspection tools are installed.
   ensure_command socat
@@ -979,7 +981,7 @@ serial_cmd() {
 			  baud="$2"
 			  line="$3"
 			  idle="$4"
-			  rx_pat="$5"
+			  noise_pat="$5"
 
 			  printf "%b" "${line}\r\n" \
 				| socat -T "${idle}" - "OPEN:${device},raw,echo=0,b${baud}" 2>/dev/null \
@@ -988,7 +990,7 @@ serial_cmd() {
 				| sed -E "s/^[[:space:][:cntrl:]]*(->|>)+[[:space:]]*//" \
 				| sed -E "s/^[[:space:][:cntrl:]]+//; s/[[:space:]]+$//" \
 				| sed -E "s/^[^0-9A-Za-z+\\-]+//" \
-				| grep -E -v "$rx_pat" \
+				| grep -E -v "$noise_pat" \
 				| awk -v cmd="$line" '"'"'
 					NF {
 					  if ($0 == cmd) next
@@ -996,7 +998,7 @@ serial_cmd() {
 					}
 					END { print keep }
 				  '"'"'
-			' _ "${device_name_now}" "${baud}" "${line}" "${idle_timeout}" "${rx_pat}"
+			' _ "${device_name_now}" "${baud}" "${line}" "${idle_timeout}" "${noise_pat}"
 		)"
 		rc=$?
 
@@ -1008,7 +1010,7 @@ serial_cmd() {
       last_out="$out"
 
       # Empty, echo, or log line -> retry
-      if [[ -z "$out" || "$out" == "$line" || "$out" =~ $rx_pat ]]; then
+      if [[ -z "$out" || "$out" == "$line" || "$out" =~ $noise_pat ]]; then
         sleep "$delay_between"
         continue
       fi
@@ -1923,7 +1925,10 @@ choose_serial() {
 
 	clean_node_info_field() {
 		local value="${1:-}"
-		value="$(printf '%s' "$value" | tr '\r' '\n' | sed -n '/./p' | tail -n1)"
+		local ts_log_pat='^[0-9]{1,2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]+[A-Z]+([[:space:]]+[A-Z]+)*:'
+		local level_log_pat='^\[?(DEBUG|TRACE|INFO|WARN|WARNING|ERROR|ERR|CRITICAL|NOTICE|VERBOSE)\]?[[:space:]]*:'
+		local noise_pat="(${ts_log_pat})|(${level_log_pat})"
+		value="$(printf '%s' "$value" | tr '\r' '\n' | sed -n '/./p' | grep -E -v "$noise_pat" | tail -n1 || true)"
 		value="$(printf '%s' "$value" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
 		shopt -s nocasematch
 		case "$value" in

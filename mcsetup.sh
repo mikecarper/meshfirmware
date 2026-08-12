@@ -683,7 +683,7 @@ serial_cmd() {
 
   # Device noise lines to skip when reading command replies.
   local ts_log_pat='^[0-9]{1,2}:[0-9]{2}(:[0-9]{2})?[[:space:]]*-[[:space:]]*[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}[[:space:]]+[A-Z]+([[:space:]]+[A-Z]+)*:'
-  local level_log_pat='^(DEBUG|TRACE|INFO|WARN|WARNING|ERROR|ERR|CRITICAL|NOTICE|VERBOSE)[[:space:]]*:'
+  local level_log_pat='^\[?(DEBUG|TRACE|INFO|WARN|WARNING|ERROR|ERR|CRITICAL|NOTICE|VERBOSE)\]?[[:space:]]*:'
   local noise_pat="(${ts_log_pat})|(${level_log_pat})"
 
   # Ensure socat is installed.
