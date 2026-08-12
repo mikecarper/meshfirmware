@@ -257,6 +257,30 @@ ensure_command() {
 	fi
 }
 
+ensure_pipx_uv_backend() {
+	local bootstrap_pipx resolved_backend uv_binary
+
+	ensure_command pipx
+	export PATH="${HOME}/.local/bin:${PATH}"
+	hash -r
+
+	uv_binary="$(pipx environment --value PIPX_UV_BINARY 2>/dev/null || true)"
+	if [[ -z "$uv_binary" || ! -x "$uv_binary" ]]; then
+		bootstrap_pipx="$(command -v pipx)"
+		echo "Installing a current pipx with the uv backend..." >&2
+		"$bootstrap_pipx" install --force 'pipx[uv]'
+		hash -r
+	fi
+
+	export PIPX_DEFAULT_BACKEND=uv
+	uv_binary="$(pipx environment --value PIPX_UV_BINARY 2>/dev/null || true)"
+	resolved_backend="$(pipx environment --value PIPX_RESOLVED_BACKEND 2>/dev/null || true)"
+	if [[ -z "$uv_binary" || ! -x "$uv_binary" || "$resolved_backend" != "uv" ]]; then
+		echo "Could not enable the pipx uv backend." >&2
+		return 1
+	fi
+}
+
 ensure_commands() {
 	local command_name
 
@@ -2618,6 +2642,7 @@ run_update_script() {
 # Main Execution #
 ##################
 parse_args "$@"
+ensure_pipx_uv_backend
 update_releases
 
 detect_device        # ${DEVICE_INFO_FILE} ${DETECTED_PRODUCT_FILE}

@@ -1,6 +1,49 @@
 #!/bin/bash
 set -euo pipefail
 
+ensure_pipx_available() {
+	if command -v pipx >/dev/null 2>&1; then
+		return 0
+	fi
+
+	echo "pipx not found - installing..."
+	if command -v pacman >/dev/null 2>&1; then
+		sudo pacman -S --needed --noconfirm python-pipx
+	elif command -v dnf >/dev/null 2>&1; then
+		sudo dnf install -y pipx
+	elif command -v apt-get >/dev/null 2>&1; then
+		sudo apt-get update
+		sudo apt-get install -y pipx
+	else
+		echo "No supported package manager found for installing pipx." >&2
+		return 1
+	fi
+}
+
+ensure_pipx_uv_backend() {
+	local bootstrap_pipx resolved_backend uv_binary
+
+	ensure_pipx_available
+	export PATH="${HOME}/.local/bin:${PATH}"
+	hash -r
+
+	uv_binary="$(pipx environment --value PIPX_UV_BINARY 2>/dev/null || true)"
+	if [[ -z "$uv_binary" || ! -x "$uv_binary" ]]; then
+		bootstrap_pipx="$(command -v pipx)"
+		echo "Installing a current pipx with the uv backend..."
+		"$bootstrap_pipx" install --force 'pipx[uv]'
+		hash -r
+	fi
+
+	export PIPX_DEFAULT_BACKEND=uv
+	uv_binary="$(pipx environment --value PIPX_UV_BINARY 2>/dev/null || true)"
+	resolved_backend="$(pipx environment --value PIPX_RESOLVED_BACKEND 2>/dev/null || true)"
+	if [[ -z "$uv_binary" || ! -x "$uv_binary" || "$resolved_backend" != "uv" ]]; then
+		echo "Could not enable the pipx uv backend." >&2
+		return 1
+	fi
+}
+
 # Directory we started in.
 ORIG_DIR="$(pwd)"
 
@@ -335,6 +378,7 @@ if [ -z "$env_arg" ]; then
 fi
 
 newpath=0
+ensure_pipx_uv_backend
 if ! command -v platformio &>/dev/null; then
 	pipx install "platformio"
 	newpath=1
