@@ -432,6 +432,26 @@ describe_flash_action() {
 	esac
 }
 
+expand_home_path() {
+	local path="${1:-}" prefix=""
+
+	if [[ "$path" == file://* ]]; then
+		prefix="file://"
+		path="${path#file://}"
+	fi
+
+	case "$path" in
+		\~)
+			path="$HOME"
+			;;
+		\~/*)
+			path="${HOME}/${path:2}"
+			;;
+	esac
+
+	printf '%s%s' "$prefix" "$path"
+}
+
 detect_custom_firmware_type() {
 	local selection="${1:-}" arch_lc="${2,,}" check="" name_lc=""
 
@@ -483,6 +503,7 @@ detect_custom_firmware_type() {
 apply_custom_firmware_selection() {
 	local selection="${1:-}" detected_type=""
 
+	selection="$(expand_home_path "$selection")"
 	CHOSEN_FILE="$selection"
 	VERSION="custom"
 	detected_type="$(detect_custom_firmware_type "$selection" "$ARCHITECTURE")"
@@ -2932,6 +2953,7 @@ done
 if [[ "$URL_PATH" == file:///* ]]; then
 	URL_PATH="${URL_PATH#file://}"
 fi
+URL_PATH="$(expand_home_path "$URL_PATH")"
 if [[ "$URL_PATH" =~ ^https?:// ]]; then
     URL="$URL_PATH"
 	download_and_verify "$URL" "$DOWNLOADED_FILE_FILE" 1 "Firmware"
