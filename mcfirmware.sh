@@ -14,13 +14,20 @@ set -euo pipefail
 
 # Ensure we always restore on exit
 cleanup() {
-	USB_AUTOSUSPEND_END=$(cat /sys/module/usbcore/parameters/autosuspend)
-	if [[ "$USB_AUTOSUSPEND_END" != "$USB_AUTOSUSPEND" ]]; then
+	local usb_autosuspend_end=""
+	if [[ -n "${USB_AUTOSUSPEND:-}" && -r /sys/module/usbcore/parameters/autosuspend ]]; then
+		usb_autosuspend_end="$(cat /sys/module/usbcore/parameters/autosuspend 2>/dev/null || true)"
+	fi
+	if [[ -n "$usb_autosuspend_end" && "$usb_autosuspend_end" != "${USB_AUTOSUSPEND:-}" ]]; then
 		echo "$USB_AUTOSUSPEND" | sudo tee /sys/module/usbcore/parameters/autosuspend >/dev/null
 	fi
-	restore_port_after_bootloader_probe
-	restart_locked_services
-	if [[ -d "$FIRMWARE_ROOT" ]]; then
+	if declare -F restore_port_after_bootloader_probe >/dev/null; then
+		restore_port_after_bootloader_probe
+	fi
+	if declare -F restart_locked_services >/dev/null; then
+		restart_locked_services
+	fi
+	if [[ -n "${FIRMWARE_ROOT:-}" && -d "$FIRMWARE_ROOT" ]]; then
 		chmod -R a+rX "$FIRMWARE_ROOT" >/dev/null 2>&1 || true
 	fi
 	if [[ -n "${SUDO_KEEPALIVE_PID:-}" ]]; then
@@ -693,28 +700,329 @@ choose_flash_execution_mode() {
 	done
 }
 
-print_nrfutil_dfu_command() {
+print_nrfutil_dfu_command_live_port() {
 	local package_file=$1
-	shift || true
+	local port=$2
+	shift 2 || true
 
-	print_command pipx run adafruit-nrfutil dfu serial --package "$package_file" --touch 1200 -p "$DEVICE_PORT" -b 115200 "$@"
+	print_command pipx run adafruit-nrfutil dfu serial --package "$package_file" -p "$port" -b 115200 "$@"
 }
 
-run_nrfutil_dfu_serial() {
-	local package_file=$1
-	shift || true
+nrf52_serial_port_access() {
+	local port=$1
 
-	if [[ -r "$DEVICE_PORT" && -w "$DEVICE_PORT" ]]; then
-		pipx run adafruit-nrfutil dfu serial --package "$package_file" --touch 1200 -p "${DEVICE_PORT}" -b 115200 "$@"
-		return $?
+	if [[ -r "$port" && -w "$port" ]]; then
+		return 0
 	fi
 
-	echo "Serial port $DEVICE_PORT requires elevated access."
-	echo "Current permissions: $(ls -l "$DEVICE_PORT")"
+	echo "Serial port $port requires elevated access."
+	if [[ -e "$port" ]]; then
+		echo "Current permissions: $(ls -l "$port")"
+	fi
 	echo "Prompting for sudo so flashing can continue..."
 	ensure_sudo_session
-	sudo chmod a+rw "$DEVICE_PORT"
-	pipx run adafruit-nrfutil dfu serial --package "$package_file" --touch 1200 -p "${DEVICE_PORT}" -b 115200 "$@"
+	sudo chmod a+rw "$port"
+}
+
+run_nrfutil_dfu_serial_checked() {
+	local package_file=$1
+	local port=$2
+	shift 2 || true
+	local output_file status
+	local -a command=(
+		pipx run adafruit-nrfutil dfu serial
+		--package "$package_file"
+	)
+
+	command+=(-p "$port" -b 115200 "$@")
+
+	nrf52_serial_port_access "$port" || return 1
+	output_file="$(mktemp)"
+
+	# adafruit-nrfutil 0.5.x catches DFU exceptions and returns process status 0
+	# after printing "Failed to upgrade target". Preserve its output, but also
+	# require the positive completion marker before reporting success ourselves.
+	set +e
+	"${command[@]}" 2>&1 | tee "$output_file"
+	status=${PIPESTATUS[0]}
+	set -e
+
+	if [[ "$status" -eq 0 ]] \
+		&& ! grep -Fq "Failed to upgrade target." "$output_file" \
+		&& grep -Fq "Device programmed." "$output_file"; then
+		rm -f "$output_file"
+		return 0
+	fi
+
+	if [[ "$status" -eq 0 ]]; then
+		echo "adafruit-nrfutil did not confirm that the device was programmed." >&2
+	else
+		echo "adafruit-nrfutil exited with status $status." >&2
+	fi
+	rm -f "$output_file"
+	return 1
+}
+
+run_nrfutil_dfu_serial_live_port() {
+	local package_file=$1
+	local port=$2
+	shift 2 || true
+
+	run_nrfutil_dfu_serial_checked "$package_file" "$port" "$@"
+}
+
+udev_device_property() {
+	local port=$1
+	local property=$2
+
+	command -v udevadm >/dev/null 2>&1 || return 0
+	udevadm info --query=property --name="$port" 2>/dev/null \
+		| sed -n "s/^${property}=//p" \
+		| head -n1
+}
+
+nrf52_usb_path_stem() {
+	# ID_PATH ends in the USB interface (for example :1.0), which may differ
+	# between the running application and bootloader CDC interfaces.
+	printf '%s' "${1:-}" | sed -E 's/:[0-9]+\.[0-9]+$//'
+}
+
+nrf52_port_instance() {
+	local port=$1
+	[[ -e "$port" ]] || return 0
+	stat -Lc '%d:%i' "$port" 2>/dev/null || true
+}
+
+nrf52_selected_by_id_path() {
+	local selected_name="" selected_path=""
+	local by_id_dir="${NRF52_SERIAL_BY_ID_DIR:-/dev/serial/by-id}"
+
+	if [[ -s "$DEVICE_PORT_NAME_FILE" ]]; then
+		selected_name="$(basename -- "$(<"$DEVICE_PORT_NAME_FILE")")"
+		selected_path="${by_id_dir}/${selected_name}"
+		# Return the saved identity even if it is currently disconnected. The
+		# caller must reject a dangling link instead of falling back to whatever
+		# unrelated device may now occupy the old ttyACM number.
+		printf '%s\n' "$selected_path"
+		return 0
+	fi
+
+	local link
+	shopt -s nullglob
+	for link in "${by_id_dir}"/*; do
+		if [[ "$(readlink -f "$link" 2>/dev/null || true)" == "$DEVICE_PORT" ]]; then
+			printf '%s\n' "$link"
+			break
+		fi
+	done
+	shopt -u nullglob
+}
+
+trigger_nrf52_1200_touch() {
+	local port=$1
+
+	nrf52_serial_port_access "$port" || return 1
+	echo "Sending one 1200-baud touch to $port..."
+	bash -c '
+		port=$1
+		exec 3<>"$port"
+		stty -F "$port" 1200 hupcl
+		sleep 0.1
+		exec 3>&-
+		exec 3<&-
+	' _ "$port"
+}
+
+nrf52_candidate_identity_rank() {
+	local candidate=$1
+	local candidate_link=$2
+	local selected_by_id=$3
+	local expected_serial=$4
+	local expected_path_stem=$5
+	local candidate_serial candidate_path_stem
+
+	candidate_serial="$(udev_device_property "$candidate" ID_SERIAL_SHORT)"
+	candidate_path_stem="$(nrf52_usb_path_stem "$(udev_device_property "$candidate" ID_PATH)")"
+
+	# Prefer the physical USB path across the application's and bootloader's
+	# different USB product names. If both sides publish a serial, reject a
+	# conflicting serial even on the same port. An exact serial is the fallback
+	# for VMs that attach the re-enumerated product at a different virtual port.
+	if [[ -n "$expected_path_stem" && "$candidate_path_stem" == "$expected_path_stem" ]]; then
+		if [[ -n "$expected_serial" && -n "$candidate_serial" \
+			&& "$candidate_serial" != "$expected_serial" ]]; then
+			printf '%s\n' 0
+			return 0
+		fi
+		printf '%s\n' 300
+		return 0
+	fi
+	if [[ -n "$expected_serial" && "$candidate_serial" == "$expected_serial" ]]; then
+		printf '%s\n' 200
+		return 0
+	fi
+	if [[ -n "$selected_by_id" && "$candidate_link" == "$selected_by_id" ]]; then
+		printf '%s\n' 100
+		return 0
+	fi
+	printf '%s\n' 0
+}
+
+nrf52_candidate_matches_identity() {
+	local rank
+	rank="$(nrf52_candidate_identity_rank "$@")"
+	[[ "$rank" =~ ^[0-9]+$ ]] && (( rank > 0 ))
+}
+
+find_reenumerated_nrf52_port() {
+	local runtime_port=$1
+	local selected_by_id=$2
+	local expected_serial=$3
+	local expected_path_stem=$4
+	local original_instance=$5
+	local by_id_dir="${NRF52_SERIAL_BY_ID_DIR:-/dev/serial/by-id}"
+	local link candidate rank best_rank=0
+	local -a links=() ports=() matches=()
+	local -A seen_candidates=()
+
+	shopt -s nullglob
+	links=("${by_id_dir}"/*)
+	ports=(/dev/ttyACM* /dev/ttyUSB*)
+	shopt -u nullglob
+
+	for link in "${links[@]}"; do
+		candidate="$(readlink -f "$link" 2>/dev/null || true)"
+		[[ -n "$candidate" && -e "$candidate" ]] || continue
+		rank="$(nrf52_candidate_identity_rank "$candidate" "$link" \
+			"$selected_by_id" "$expected_serial" "$expected_path_stem")"
+		if [[ "$rank" =~ ^[0-9]+$ ]] && (( rank > 0 )); then
+			if (( rank > best_rank )); then
+				best_rank=$rank
+				matches=()
+				seen_candidates=()
+			fi
+			(( rank == best_rank )) || continue
+			if [[ -z "${seen_candidates[$candidate]+x}" ]]; then
+				seen_candidates[$candidate]=1
+				matches+=("$candidate")
+			fi
+		fi
+	done
+
+	for candidate in "${ports[@]}"; do
+		[[ -e "$candidate" ]] || continue
+		rank="$(nrf52_candidate_identity_rank "$candidate" "" \
+			"$selected_by_id" "$expected_serial" "$expected_path_stem")"
+		if [[ "$rank" =~ ^[0-9]+$ ]] && (( rank > 0 )); then
+			if (( rank > best_rank )); then
+				best_rank=$rank
+				matches=()
+				seen_candidates=()
+			fi
+			(( rank == best_rank )) || continue
+			if [[ -z "${seen_candidates[$candidate]+x}" ]]; then
+				seen_candidates[$candidate]=1
+				matches+=("$candidate")
+			fi
+		fi
+	done
+
+	if ((${#matches[@]} == 1)); then
+		printf '%s\n' "${matches[0]}"
+		return 0
+	fi
+	if ((${#matches[@]} > 1)); then
+		echo "Refusing ambiguous nRF52 match: ${matches[*]}" >&2
+		return 2
+	fi
+	return 1
+}
+
+wait_for_nrf52_bootloader_port() {
+	local runtime_port=$1
+	local selected_by_id=$2
+	local expected_serial=$3
+	local expected_path_stem=$4
+	local original_instance=$5
+	local purpose="${6:-bootloader CDC port}"
+	local timeout_seconds="${NRF52_DFU_REENUMERATE_TIMEOUT_SECONDS:-30}"
+	local poll_seconds="${NRF52_DFU_REENUMERATE_POLL_SECONDS:-0.25}"
+	local deadline=$((SECONDS + timeout_seconds))
+	local reset_seen=0 current_instance live_port
+
+	echo "Waiting up to ${timeout_seconds}s for the matching ${purpose}..." >&2
+	while (( SECONDS <= deadline )); do
+		current_instance="$(nrf52_port_instance "$runtime_port")"
+		if [[ -z "$current_instance" || "$current_instance" != "$original_instance" ]]; then
+			reset_seen=1
+		fi
+
+		if (( reset_seen )); then
+			live_port="$(find_reenumerated_nrf52_port "$runtime_port" "$selected_by_id" \
+				"$expected_serial" "$expected_path_stem" "$original_instance" || true)"
+			if [[ -n "$live_port" ]]; then
+				printf '%s\n' "$live_port"
+				return 0
+			fi
+		fi
+		sleep "$poll_seconds"
+	done
+
+	echo "Timed out waiting for the selected nRF52 USB identity to re-enumerate as ${purpose}." >&2
+	return 1
+}
+
+run_nrf52_dfu_package_buttonless() {
+	local package_file=$1
+	local runtime_port=$2
+	local runtime_instance bootloader_port bootloader_instance candidate_link=""
+
+	[[ -r "$package_file" ]] || {
+		echo "nRF52 DFU package is not readable: $package_file" >&2
+		return 1
+	}
+	[[ -e "$runtime_port" ]] || {
+		echo "The selected nRF52 serial port is no longer present: $runtime_port" >&2
+		return 1
+	}
+	if [[ -n "$NRF52_SELECTED_BY_ID" \
+		&& "$(readlink -f "$NRF52_SELECTED_BY_ID" 2>/dev/null || true)" == "$runtime_port" ]]; then
+		candidate_link="$NRF52_SELECTED_BY_ID"
+	fi
+	if ! nrf52_candidate_matches_identity "$runtime_port" "$candidate_link" \
+		"$NRF52_SELECTED_BY_ID" "$NRF52_RUNTIME_SERIAL" "$NRF52_RUNTIME_PATH_STEM"; then
+		echo "Serial port $runtime_port no longer matches the selected nRF52 USB identity." >&2
+		return 1
+	fi
+
+	runtime_instance="$(nrf52_port_instance "$runtime_port")"
+	[[ -n "$runtime_instance" ]] || {
+		echo "Cannot identify the running nRF52 serial port $runtime_port." >&2
+		return 1
+	}
+	if ! trigger_nrf52_1200_touch "$runtime_port"; then
+		echo "Failed to send the 1200-baud DFU touch to $runtime_port." >&2
+		return 1
+	fi
+	if ! bootloader_port="$(wait_for_nrf52_bootloader_port "$runtime_port" \
+		"$NRF52_SELECTED_BY_ID" "$NRF52_RUNTIME_SERIAL" "$NRF52_RUNTIME_PATH_STEM" \
+		"$runtime_instance")"; then
+		return 1
+	fi
+
+	bootloader_instance="$(nrf52_port_instance "$bootloader_port")"
+	[[ -n "$bootloader_instance" ]] || {
+		echo "The matched nRF52 bootloader port disappeared before programming: $bootloader_port" >&2
+		return 1
+	}
+	echo "Matched bootloader port: $bootloader_port"
+	echo "Flashing $package_file without another 1200-baud touch..."
+	if ! run_nrfutil_dfu_serial_live_port "$package_file" "$bootloader_port"; then
+		return 1
+	fi
+
+	NRF52_LAST_DFU_PORT="$bootloader_port"
+	NRF52_LAST_DFU_INSTANCE="$bootloader_instance"
 }
 
 _jq1() {
@@ -3099,9 +3407,14 @@ else
 
 	echo "Commands that would be run."
 	if [[ $ACTION == "flash-wipe" ]]; then
-		print_nrfutil_dfu_command "$ERASE_FILE"
+		echo "  identity-safe 1200-baud touch ${DEVICE_PORT}"
+		echo "  wait up to ${NRF52_DFU_REENUMERATE_TIMEOUT_SECONDS:-30}s for the same USB device's bootloader"
+		print_nrfutil_dfu_command_live_port "$ERASE_FILE" "<matching-bootloader-port>"
+		echo "  wait for the same USB device to return after erase"
 	fi
-	print_nrfutil_dfu_command "$DOWNLOADED_FILE"
+	echo "  identity-safe 1200-baud touch <matching-runtime-port>"
+	echo "  wait up to ${NRF52_DFU_REENUMERATE_TIMEOUT_SECONDS:-30}s for the same USB device's bootloader"
+	print_nrfutil_dfu_command_live_port "$DOWNLOADED_FILE" "<matching-bootloader-port>"
 	EXECUTION_MODE="$(choose_flash_execution_mode "${ACTION} ${DEVICE} on ${DEVICE_PORT}")"
 	if [[ "$EXECUTION_MODE" == "echo" ]]; then
 		echo "Echo-only selected; no nRF52 DFU commands were run."
@@ -3112,23 +3425,62 @@ else
 	pipx run adafruit-nrfutil version
 
 	echo "Running ${ACTION}..."
+	NRF52_SELECTED_BY_ID="$(nrf52_selected_by_id_path)"
+	NRF52_RUNTIME_PORT="$DEVICE_PORT"
+	if [[ -n "$NRF52_SELECTED_BY_ID" ]]; then
+		NRF52_RUNTIME_PORT="$(readlink -f "$NRF52_SELECTED_BY_ID" 2>/dev/null || true)"
+		if [[ -z "$NRF52_RUNTIME_PORT" || ! -e "$NRF52_RUNTIME_PORT" ]]; then
+			echo "The selected nRF52 USB identity is no longer connected: $NRF52_SELECTED_BY_ID" >&2
+			exit 1
+		fi
+		if [[ "$NRF52_RUNTIME_PORT" != "$DEVICE_PORT" ]]; then
+			echo "Using live port $NRF52_RUNTIME_PORT instead of stale port $DEVICE_PORT."
+		fi
+	fi
+	NRF52_RUNTIME_SERIAL="$(udev_device_property "$NRF52_RUNTIME_PORT" ID_SERIAL_SHORT)"
+	NRF52_RUNTIME_PATH_STEM="$(nrf52_usb_path_stem "$(udev_device_property "$NRF52_RUNTIME_PORT" ID_PATH)")"
+	NRF52_RUNTIME_INSTANCE="$(nrf52_port_instance "$NRF52_RUNTIME_PORT")"
+	NRF52_LAST_DFU_PORT=""
+	NRF52_LAST_DFU_INSTANCE=""
+
+	if [[ -z "$NRF52_RUNTIME_INSTANCE" ]]; then
+		echo "Cannot identify the running nRF52 serial port $NRF52_RUNTIME_PORT." >&2
+		exit 1
+	fi
+	if [[ -z "$NRF52_SELECTED_BY_ID" && -z "$NRF52_RUNTIME_SERIAL" \
+		&& -z "$NRF52_RUNTIME_PATH_STEM" ]]; then
+		echo "Cannot preserve a stable USB identity for $NRF52_RUNTIME_PORT; refusing an ambiguous DFU reset." >&2
+		exit 1
+	fi
+	DEVICE_PORT="$NRF52_RUNTIME_PORT"
 
 	if [[ $ACTION == "flash-wipe" ]]; then
 		echo "Erasing UF2 area using $ERASE_FILE"
 		sleep 1
-		if ! run_nrfutil_dfu_serial "$ERASE_FILE"; then
+		if ! run_nrf52_dfu_package_buttonless "$ERASE_FILE" "$NRF52_RUNTIME_PORT"; then
 			echo "Failed to erase ${DEVICE} on ${DEVICE_PORT}."
 			exit 1
 		fi
 		echo "Erase done."
 		echo
-	fi
 
-	echo "Flashing firmware file $DOWNLOADED_FILE..."
-	sleep 1
-	if ! run_nrfutil_dfu_serial "$DOWNLOADED_FILE"; then
-		echo "Firmware ${ACTION} failed for ${DEVICE} on ${DEVICE_PORT}."
-		exit 1
+		echo "Flashing firmware file $DOWNLOADED_FILE..."
+		sleep 1
+		if ! NRF52_RUNTIME_PORT="$(wait_for_nrf52_bootloader_port "$NRF52_LAST_DFU_PORT" \
+			"$NRF52_SELECTED_BY_ID" "$NRF52_RUNTIME_SERIAL" "$NRF52_RUNTIME_PATH_STEM" \
+			"$NRF52_LAST_DFU_INSTANCE" "runtime CDC port after erase")"; then
+			echo "The erase package programmed successfully, but ${DEVICE} did not return for the firmware install." >&2
+			exit 1
+		fi
+		if ! run_nrf52_dfu_package_buttonless "$DOWNLOADED_FILE" "$NRF52_RUNTIME_PORT"; then
+			echo "Firmware ${ACTION} failed for ${DEVICE} on ${DEVICE_PORT}."
+			exit 1
+		fi
+	else
+		if ! run_nrf52_dfu_package_buttonless "$DOWNLOADED_FILE" "$NRF52_RUNTIME_PORT"; then
+			echo "Firmware ${ACTION} failed for ${DEVICE} on ${DEVICE_PORT}." >&2
+			exit 1
+		fi
 	fi
 	echo
 	echo "Firmware ${ACTION} completed for ${DEVICE} on ${DEVICE_PORT}."
