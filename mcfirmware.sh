@@ -782,9 +782,9 @@ udev_device_property() {
 }
 
 nrf52_usb_path_stem() {
-	# ID_PATH ends in the USB interface (for example :1.0), which may differ
-	# between the running application and bootloader CDC interfaces.
-	printf '%s' "${1:-}" | sed -E 's/:[0-9]+\.[0-9]+$//'
+	# Remove the USB interface and anything below it. A CDC tty may end at :1.0,
+	# while the same composite device's mass-storage path continues with -scsi.
+	printf '%s' "${1:-}" | sed -E 's/:[0-9]+\.[0-9]+.*$//'
 }
 
 nrf52_port_instance() {
@@ -816,6 +816,70 @@ nrf52_selected_by_id_path() {
 		fi
 	done
 	shopt -u nullglob
+}
+
+nrf52_uf2_mount_matches_identity() {
+	local expected_serial=$1
+	local expected_path_stem=$2
+	local source target info_file disk_serial disk_path_stem
+
+	command -v findmnt >/dev/null 2>&1 || return 1
+	while read -r source target; do
+		[[ -n "$source" && -n "$target" ]] || continue
+		info_file="${target%/}/INFO_UF2.TXT"
+		[[ -r "$info_file" && -r "${target%/}/CURRENT.UF2" ]] || continue
+		grep -Eiq 'UF2[[:space:]]+Bootloader' "$info_file" 2>/dev/null || continue
+		[[ -e "$source" ]] || continue
+
+		disk_serial="$(udev_device_property "$source" ID_SERIAL_SHORT)"
+		disk_path_stem="$(nrf52_usb_path_stem "$(udev_device_property "$source" ID_PATH)")"
+		if [[ -n "$expected_serial" && "$disk_serial" == "$expected_serial" ]]; then
+			return 0
+		fi
+		if [[ -n "$expected_path_stem" && "$disk_path_stem" == "$expected_path_stem" ]]; then
+			return 0
+		fi
+	done < <(findmnt -rn -o SOURCE,TARGET 2>/dev/null)
+	return 1
+}
+
+nrf52_port_is_dfu_bootloader() {
+	local port=$1
+	local candidate_link=$2
+	local selected_by_id=$3
+	local expected_serial=$4
+	local expected_path_stem=$5
+	local usb_bus usb_interfaces model
+
+	# This shortcut is allowed only for the exact by-id link selected by the
+	# user. A matching USB path or serial alone is sufficient after an expected
+	# reset, but is not enough to skip that reset in the first place.
+	[[ -n "$selected_by_id" && "$candidate_link" == "$selected_by_id" ]] || return 1
+	nrf52_candidate_matches_identity "$port" "$candidate_link" "$selected_by_id" \
+		"$expected_serial" "$expected_path_stem" || return 1
+	usb_bus="$(udev_device_property "$port" ID_BUS)"
+	[[ "$usb_bus" == "usb" ]] || return 1
+
+	if nrf52_uf2_mount_matches_identity "$expected_serial" "$expected_path_stem"; then
+		return 0
+	fi
+
+	# UF2 bootloaders expose CDC plus a USB mass-storage interface even when the
+	# volume is not mounted. MeshCore's CDC application and ESP32 USB-JTAG ports
+	# do not expose a class-08 mass-storage sibling.
+	usb_interfaces="$(udev_device_property "$port" ID_USB_INTERFACES)"
+	if [[ "$usb_interfaces" =~ (^|:)08[0-9A-Fa-f]{4}(:|$) ]]; then
+		return 0
+	fi
+
+	# Some serial-only DFU bootloaders identify themselves explicitly without a
+	# mass-storage interface. Product text is accepted only after the exact
+	# selected by-id and USB identity checks above.
+	model="${model:-$(udev_device_property "$port" ID_MODEL)}"
+	case "${model,,}" in
+		*bootloader*|*uf2*|*dfu*) return 0 ;;
+	esac
+	return 1
 }
 
 trigger_nrf52_1200_touch() {
@@ -1000,6 +1064,17 @@ run_nrf52_dfu_package_buttonless() {
 		echo "Cannot identify the running nRF52 serial port $runtime_port." >&2
 		return 1
 	}
+	if nrf52_port_is_dfu_bootloader "$runtime_port" "$candidate_link" \
+		"$NRF52_SELECTED_BY_ID" "$NRF52_RUNTIME_SERIAL" "$NRF52_RUNTIME_PATH_STEM"; then
+		echo "Selected nRF52 is already in its matching DFU bootloader on $runtime_port."
+		echo "Flashing $package_file directly without a 1200-baud touch..."
+		if ! run_nrfutil_dfu_serial_live_port "$package_file" "$runtime_port"; then
+			return 1
+		fi
+		NRF52_LAST_DFU_PORT="$runtime_port"
+		NRF52_LAST_DFU_INSTANCE="$runtime_instance"
+		return 0
+	fi
 	if ! trigger_nrf52_1200_touch "$runtime_port"; then
 		echo "Failed to send the 1200-baud DFU touch to $runtime_port." >&2
 		return 1
