@@ -83,6 +83,18 @@ mock_properties[ID_MODEL_ID]="8044"
 assert_classifier "XIAO MeshCore application 2886:8044 is rejected" 1
 
 reset_usb_properties
+mock_properties[ID_VENDOR_ID]="239a"
+mock_properties[ID_MODEL_ID]="0071"
+mock_properties[ID_MODEL]="HT-n5262"
+assert_classifier "exact selected MeshTower V2 serial-only DFU 239a:0071 is accepted" 0
+
+reset_usb_properties
+mock_properties[ID_VENDOR_ID]="239a"
+mock_properties[ID_MODEL_ID]="4405"
+mock_properties[ID_MODEL]="HT-n5262"
+assert_classifier "MeshTower V2 application 239a:4405 is rejected" 1
+
+reset_usb_properties
 mock_properties[ID_VENDOR_ID]="303a"
 mock_properties[ID_MODEL_ID]="1001"
 mock_properties[ID_MODEL]="USB_JTAG_serial_debug_unit"

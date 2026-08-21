@@ -15,7 +15,9 @@ set -euo pipefail
 # Ensure we always restore on exit
 cleanup() {
 	local usb_autosuspend_end=""
-	if [[ -n "${USB_AUTOSUSPEND:-}" && -r /sys/module/usbcore/parameters/autosuspend ]]; then
+	if [[ "${USB_AUTOSUSPEND_CHANGED:-0}" -eq 1 \
+		&& -n "${USB_AUTOSUSPEND:-}" \
+		&& -r /sys/module/usbcore/parameters/autosuspend ]]; then
 		usb_autosuspend_end="$(cat /sys/module/usbcore/parameters/autosuspend 2>/dev/null || true)"
 	fi
 	if [[ -n "$usb_autosuspend_end" && "$usb_autosuspend_end" != "${USB_AUTOSUSPEND:-}" ]]; then
@@ -56,6 +58,23 @@ fi
 DEBUG_JQ="0"
 APT_UPDATED=0
 
+# Opt-in constrained mode for hosts where the current shell cannot reuse a
+# sudo credential (for example, tty-scoped sudo tickets). This never weakens
+# the identity-safe DFU checks: it only skips proactive startup privilege
+# setup. Any later operation that actually needs privilege must refuse.
+MCFIRMWARE_NO_SUDO="${MCFIRMWARE_NO_SUDO:-0}"
+case "$MCFIRMWARE_NO_SUDO" in
+	0|1) ;;
+	*)
+		echo "MCFIRMWARE_NO_SUDO must be 0 or 1." >&2
+		exit 1
+		;;
+esac
+
+no_sudo_mode() {
+	[[ "${MCFIRMWARE_NO_SUDO:-0}" -eq 1 ]]
+}
+
 # Global variable to track the spinner index.
 spinner_index=0
 # Array holding the spinner characters.
@@ -66,6 +85,7 @@ CURL_FETCH_RETRIES=3
 CURL_FETCH_RETRY_DELAY=1
 MOUNT_FOLDER="/mnt/meshDeviceSD"
 USB_AUTOSUSPEND=$(cat /sys/module/usbcore/parameters/autosuspend)
+USB_AUTOSUSPEND_CHANGED=0
 BASE_USER="${SUDO_USER:-$USER}"
 SUDO_KEEPALIVE_PID=""
 BOOTLOADER_PROBE_PORT=""
@@ -91,6 +111,10 @@ restart_locked_services() {
 
 	read -r -a locked_services <<< "$LOCKEDSERVICE"
 	((${#locked_services[@]})) || return 0
+	if no_sudo_mode; then
+		echo "No-sudo mode cannot restart locked service(s): $LOCKEDSERVICE" >&2
+		return 1
+	fi
 
 	echo "Starting service $LOCKEDSERVICE..."
 	sudo systemctl start "${locked_services[@]}" || true
@@ -98,6 +122,10 @@ restart_locked_services() {
 }
 
 ensure_sudo_session() {
+	if no_sudo_mode; then
+		echo "No-sudo mode refuses an operation that requires elevated access." >&2
+		return 1
+	fi
 	if sudo -n true 2>/dev/null; then
 		return 0
 	fi
@@ -107,6 +135,10 @@ ensure_sudo_session() {
 }
 
 start_sudo_keepalive() {
+	if no_sudo_mode; then
+		echo "No-sudo mode cannot start a sudo keepalive." >&2
+		return 1
+	fi
 	if [[ -n "${SUDO_KEEPALIVE_PID:-}" ]] && kill -0 "$SUDO_KEEPALIVE_PID" >/dev/null 2>&1; then
 		return 0
 	fi
@@ -142,19 +174,33 @@ ensure_serial_group_access() {
 	echo "Group membership updated. Log out and back in for ${serial_group} access to apply."
 }
 
-ensure_sudo_session
-start_sudo_keepalive
-ensure_serial_group_access
+initialize_privilege_mode() {
+	if no_sudo_mode; then
+		echo "MCFIRMWARE_NO_SUDO=1: leaving groups and USB autosuspend unchanged; privileged fallbacks will refuse."
+		return 0
+	fi
+	ensure_sudo_session
+	start_sudo_keepalive
+	ensure_serial_group_access
+}
+
+configure_usb_autosuspend() {
+	if no_sudo_mode || [[ "$USB_AUTOSUSPEND" -eq -1 ]]; then
+		return 0
+	fi
+	# Only disable (-1) if it isn't already.
+	echo "sudo needed to disable USB autosuspend and keep all USB ports active."
+	USB_AUTOSUSPEND_CHANGED=1
+	echo -1 | sudo tee /sys/module/usbcore/parameters/autosuspend >/dev/null
+}
+
+initialize_privilege_mode
 
 if [[ -n "${SUDO_USER:-}" ]]; then
 	umask 022
 fi
 
-if [[ "$USB_AUTOSUSPEND" -ne -1 ]]; then
-	# Only disable (-1) if it isn't already
-	echo "sudo needed to disable USB autosuspend and keep all USB ports active."
-	echo -1 | sudo tee /sys/module/usbcore/parameters/autosuspend >/dev/null
-fi
+configure_usb_autosuspend
 
 MIN_BYTES=$((50 * 1024))   # 50 KB in bytes
 REPO_OWNER="meshcore-dev"
@@ -640,6 +686,10 @@ check_internet() {
 }
 
 install_packages() {
+	if no_sudo_mode; then
+		echo "No-sudo mode cannot install missing package(s): $*" >&2
+		return 1
+	fi
     if (( ! APT_UPDATED )); then
         sudo apt-get update || return 1
         APT_UPDATED=1
@@ -654,6 +704,10 @@ ensure_command() {
 
 	if command -v "$command_name" >/dev/null 2>&1; then
 		return 0
+	fi
+	if no_sudo_mode; then
+		echo "Required command '$command_name' is missing; no-sudo mode refuses package installation." >&2
+		return 1
 	fi
 
 	echo "Installing ${command_name}" >&2
@@ -718,6 +772,10 @@ nrf52_serial_port_access() {
 	echo "Serial port $port requires elevated access."
 	if [[ -e "$port" ]]; then
 		echo "Current permissions: $(ls -l "$port")"
+	fi
+	if no_sudo_mode; then
+		echo "No-sudo mode cannot change serial-port permissions; grant read/write access first." >&2
+		return 1
 	fi
 	echo "Prompting for sudo so flashing can continue..."
 	ensure_sudo_session
@@ -860,15 +918,20 @@ nrf52_port_is_dfu_bootloader() {
 	usb_bus="$(udev_device_property "$port" ID_BUS)"
 	[[ "$usb_bus" == "usb" ]] || return 1
 
-	# XIAO nRF52840's serial-only Adafruit DFU products may have no MSC sibling
-	# and publish no DFU-like model text. Accept their exact bootloader VID:PIDs,
+	# Some serial-only Adafruit DFU products may have no MSC sibling and publish
+	# no DFU-like model text. Accept their exact bootloader VID:PIDs,
 	# but only after the selected by-id link and stable USB identity gates above.
 	# The running base-XIAO MeshCore application is 2886:8044 and must not take
 	# this path; 0044 and 0045 are the OTAFIX base/Sense bootloader products.
+	# Likewise, HT-n5262 application firmware uses 239a:4405 while its exact
+	# MeshTower V2 bootloader identity is 239a:0071.
 	vendor_id="$(udev_device_property "$port" ID_VENDOR_ID)"
 	product_id="$(udev_device_property "$port" ID_MODEL_ID)"
 	if [[ "${vendor_id,,}" == "2886" \
 		&& ( "${product_id,,}" == "0044" || "${product_id,,}" == "0045" ) ]]; then
+		return 0
+	fi
+	if [[ "${vendor_id,,}" == "239a" && "${product_id,,}" == "0071" ]]; then
 		return 0
 	fi
 
@@ -2447,7 +2510,11 @@ serial_lock_pids() {
 	[[ -n "$device_name" && -e "$device_name" ]] || return 0
 
 	ensure_command lsof
-	sudo lsof -t "$device_name" 2>/dev/null | sort -u
+	if no_sudo_mode; then
+		lsof -t "$device_name" 2>/dev/null | sort -u
+	else
+		sudo lsof -t "$device_name" 2>/dev/null | sort -u
+	fi
 }
 
 get_locked_service() {
@@ -2522,6 +2589,10 @@ stop_serial_locking_services() {
 
 	read -r -a service_list <<< "$services"
 	((${#service_list[@]})) || return 1
+	if no_sudo_mode; then
+		echo "No-sudo mode found locking service(s) on $port: $services; stop them explicitly first." >&2
+		return 1
+	fi
 
 	echo "Stopping service $services..."
 	if ! sudo systemctl stop "${service_list[@]}"; then
@@ -2552,6 +2623,10 @@ terminate_serial_locking_processes() {
 	done
 
 	((${#process_pids[@]})) || return 1
+	if no_sudo_mode; then
+		echo "No-sudo mode found a process holding $port; close it explicitly before flashing." >&2
+		return 1
+	fi
 
 	echo "The following non-service process(es) are holding ${port}:" > /dev/tty
 	for pid in "${process_pids[@]}"; do
@@ -2682,6 +2757,10 @@ recover_busy_serial_port() {
 	if terminate_serial_locking_processes "$port"; then
 		return 0
 	fi
+	if no_sudo_mode; then
+		echo "No-sudo mode refuses to continue while ${port} may still be busy." >&2
+		return 1
+	fi
 
 	echo "No locking service was stopped; waiting briefly for ${port} to be released..."
 	sleep 2
@@ -2691,6 +2770,10 @@ recover_busy_serial_port() {
 auto_reset_serial_port() {
 	local port="$1"
 	[[ -z "$port" ]] && return 1
+	if no_sudo_mode; then
+		echo "No-sudo mode cannot run the privileged ESP serial-reset fallback on $port." >&2
+		return 1
+	fi
 
 	echo "Trying automatic serial reset on $port..."
 	sudo chmod a+rw "$port" 2>/dev/null || true
@@ -2791,7 +2874,10 @@ run_esptool() {
 	fi
 
 	if [[ -n "$port" ]] && esptool_output_port_busy "$output"; then
-		recover_busy_serial_port "$port"
+		if ! recover_busy_serial_port "$port"; then
+			printf '%s\n' "$output" >&2
+			return "$status"
+		fi
 		if tmpfile=$(mktemp); then
 			if pipx run esptool "$@" 2>&1 | tee "$tmpfile"; then
 				rm -f "$tmpfile"
@@ -2808,6 +2894,10 @@ run_esptool() {
 	fi
 
 	if grep -qi "Permission denied" <<<"$output"; then
+		if no_sudo_mode; then
+			echo "No-sudo mode cannot change access to ${port:-the serial port}." >&2
+			return "$status"
+		fi
 		echo "Granting access to ${port:-serial port} and retrying esptool..."
 		if [[ -n "$port" ]]; then
 			sudo chmod a+rw "$port"
@@ -2922,7 +3012,10 @@ probe_esptool() {
 
 	status=$?
 	if [[ -n "$port" ]] && esptool_output_port_busy "$output"; then
-		recover_busy_serial_port "$port"
+		if ! recover_busy_serial_port "$port"; then
+			printf '%s\n' "$output" >&2
+			return "$status"
+		fi
 		if retry_output=$(pipx run esptool "$@" 2>&1); then
 			return 0
 		fi
@@ -2931,6 +3024,10 @@ probe_esptool() {
 	fi
 
 	if grep -qi "Permission denied" <<<"$output"; then
+		if no_sudo_mode; then
+			echo "No-sudo mode cannot change access to ${port:-the serial port}." >&2
+			return "$status"
+		fi
 		echo "Granting access to ${port:-serial port} and retrying esptool..."
 		if [[ -n "$port" ]]; then
 			sudo chmod a+rw "$port"
@@ -2981,7 +3078,10 @@ probe_esptool_mac() {
 
 	status=$?
 	if [[ -n "$port" ]] && esptool_output_port_busy "$output"; then
-		recover_busy_serial_port "$port"
+		if ! recover_busy_serial_port "$port"; then
+			printf '%s\n' "$output" >&2
+			return "$status"
+		fi
 		if retry_output=$(pipx run esptool "$@" 2>&1); then
 			grep -qi -m1 'MAC' <<<"$retry_output"
 			return $?
@@ -2991,6 +3091,10 @@ probe_esptool_mac() {
 	fi
 
 	if grep -qi "Permission denied" <<<"$output"; then
+		if no_sudo_mode; then
+			echo "No-sudo mode cannot change access to ${port:-the serial port}." >&2
+			return "$status"
+		fi
 		echo "Granting access to ${port:-serial port} and retrying esptool..."
 		if [[ -n "$port" ]]; then
 			sudo chmod a+rw "$port"
@@ -3190,6 +3294,10 @@ scan_and_maybe_mount() {
 
         if [[ -z "$mount_pt" ]]; then
             echo "$device_id is not mounted. Mounting now..."
+			if no_sudo_mode; then
+				echo "No-sudo mode cannot mount $device_id; mount it explicitly first." >&2
+				return 1
+			fi
             sudo mkdir -p "$MOUNT_FOLDER"
             sudo mount "$device_id" "$MOUNT_FOLDER"
             mount_pt="$MOUNT_FOLDER"
@@ -3242,6 +3350,10 @@ autodetect_device() {
 		
 		if ! scan_and_maybe_mount; then
 			echo "No USB mass-storage device found, sending 1200-baud reset..."
+			if no_sudo_mode; then
+				echo "No-sudo mode cannot run this privileged autodetect reset." >&2
+				return 1
+			fi
 			sudo bash -c "exec 3<> \"$DEVICE_PORT\"; stty -F \"$DEVICE_PORT\" 1200; sleep 1.5"
 		fi
 		
