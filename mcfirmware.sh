@@ -849,7 +849,7 @@ nrf52_port_is_dfu_bootloader() {
 	local selected_by_id=$3
 	local expected_serial=$4
 	local expected_path_stem=$5
-	local usb_bus usb_interfaces model
+	local usb_bus usb_interfaces model vendor_id product_id
 
 	# This shortcut is allowed only for the exact by-id link selected by the
 	# user. A matching USB path or serial alone is sufficient after an expected
@@ -859,6 +859,18 @@ nrf52_port_is_dfu_bootloader() {
 		"$expected_serial" "$expected_path_stem" || return 1
 	usb_bus="$(udev_device_property "$port" ID_BUS)"
 	[[ "$usb_bus" == "usb" ]] || return 1
+
+	# XIAO nRF52840's serial-only Adafruit DFU products may have no MSC sibling
+	# and publish no DFU-like model text. Accept their exact bootloader VID:PIDs,
+	# but only after the selected by-id link and stable USB identity gates above.
+	# The running base-XIAO MeshCore application is 2886:8044 and must not take
+	# this path; 0044 and 0045 are the OTAFIX base/Sense bootloader products.
+	vendor_id="$(udev_device_property "$port" ID_VENDOR_ID)"
+	product_id="$(udev_device_property "$port" ID_MODEL_ID)"
+	if [[ "${vendor_id,,}" == "2886" \
+		&& ( "${product_id,,}" == "0044" || "${product_id,,}" == "0045" ) ]]; then
+		return 0
+	fi
 
 	if nrf52_uf2_mount_matches_identity "$expected_serial" "$expected_path_stem"; then
 		return 0
