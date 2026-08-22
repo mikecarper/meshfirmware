@@ -1,0 +1,13 @@
+diff --git a/variants/nrf52840/tracker-t1000-e/variant.h b/variants/nrf52840/tracker-t1000-e/variant.h
+index 81b4ef3fb..309a0b666 100644
+--- a/variants/nrf52840/tracker-t1000-e/variant.h
++++ b/variants/nrf52840/tracker-t1000-e/variant.h
+@@ -145,7 +145,7 @@ extern "C" {
+ 
+ // Buzzer
+ #define BUZZER_EN_PIN (32 + 5) // P1.05, always high
+-#define PIN_BUZZER (0 + 25)    // P0.25, pwm output
++#define PIN_BUZZER (0)    // P0.25, pwm output
+ 
+ #define T1000X_SENSOR_EN
+ #define T1000X_VCC_PIN (0 + 4)  // P0.4
