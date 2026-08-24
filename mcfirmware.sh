@@ -512,8 +512,8 @@ esp32_validate_image_for_device() {
 	# refusing an otherwise valid image.
 	[[ "$layout" == "merged" || "$layout" == "app-only" ]] || return 0
 	flash_mode="$(esp32_image_flash_mode "$file" 2>/dev/null || true)"
-	if [[ "$flash_mode" == "dio" ]]; then
-		echo "Station G2 image flash mode: DIO."
+	if [[ "$flash_mode" == "dio" || "$flash_mode" == "qio" ]]; then
+		echo "Station G2 image flash mode: ${flash_mode^^}."
 	else
 		echo "Warning: Station G2 image reports ${flash_mode:-an unreadable flash mode}; continuing at user request." >&2
 	fi

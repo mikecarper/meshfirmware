@@ -38,16 +38,16 @@ printf '\351\001\002\000' >"$dio_image"
 echo "PASS: ESP image flash-mode byte is decoded"
 
 esp32_validate_image_for_device "UnitEng Station G2" "$qio_image" merged \
-	2>"${tmp_dir}/qio-warning"
-grep -Fq 'Station G2 image reports qio; continuing at user request' \
-	"${tmp_dir}/qio-warning"
-echo "PASS: Station G2 QIO merged image is accepted with a warning"
+	>"${tmp_dir}/qio-output" 2>"${tmp_dir}/qio-error"
+grep -Fq 'Station G2 image flash mode: QIO' "${tmp_dir}/qio-output"
+[[ ! -s "${tmp_dir}/qio-error" ]]
+echo "PASS: Station G2 QIO merged image is accepted without a warning"
 
 esp32_validate_image_for_device "Station_G2" "$qio_image" app-only \
-	2>"${tmp_dir}/qio-app-warning"
-grep -Fq 'Station G2 image reports qio; continuing at user request' \
-	"${tmp_dir}/qio-app-warning"
-echo "PASS: Station G2 QIO app-only image is accepted with a warning"
+	>"${tmp_dir}/qio-app-output" 2>"${tmp_dir}/qio-app-error"
+grep -Fq 'Station G2 image flash mode: QIO' "${tmp_dir}/qio-app-output"
+[[ ! -s "${tmp_dir}/qio-app-error" ]]
+echo "PASS: Station G2 QIO app-only image is accepted without a warning"
 
 esp32_validate_image_for_device "Station_G2" "$unknown_image" merged \
 	2>"${tmp_dir}/unknown-warning"
