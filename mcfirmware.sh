@@ -840,9 +840,112 @@ udev_device_property() {
 }
 
 nrf52_usb_path_stem() {
-	# Remove the USB interface and anything below it. A CDC tty may end at :1.0,
+	local path="${1:-}"
+	local prefix usb_path interface_path interface_component
+
+	# ID_PATH also contains a PCI function such as :00.0. Only remove the final
+	# USB interface component after the -usb- marker. A CDC tty may end at :1.0,
 	# while the same composite device's mass-storage path continues with -scsi.
-	printf '%s' "${1:-}" | sed -E 's/:[0-9]+\.[0-9]+.*$//'
+	if [[ "$path" != *-usb-* ]]; then
+		printf '%s' "$path"
+		return 0
+	fi
+
+	prefix="${path%%-usb-*}"
+	usb_path="${path#*-usb-}"
+	interface_path="${usb_path%%-*}"
+	interface_component="${interface_path##*:}"
+	if [[ "$interface_path" == *:* \
+		&& "$interface_component" =~ ^[0-9]+\.[0-9]+$ ]]; then
+		printf '%s-usb-%s' "$prefix" "${interface_path%:*}"
+	else
+		printf '%s' "$path"
+	fi
+}
+
+serial_ports_share_usb_device() {
+	local first_port=$1
+	local second_port=$2
+	local first_path second_path first_serial second_serial
+
+	first_path="$(nrf52_usb_path_stem "$(udev_device_property "$first_port" ID_PATH)")"
+	second_path="$(nrf52_usb_path_stem "$(udev_device_property "$second_port" ID_PATH)")"
+	first_serial="$(udev_device_property "$first_port" ID_SERIAL_SHORT)"
+	second_serial="$(udev_device_property "$second_port" ID_SERIAL_SHORT)"
+	if [[ -n "$first_path" && -n "$second_path" ]]; then
+		[[ "$first_path" == "$second_path" ]] || return 1
+		if [[ -n "$first_serial" && -n "$second_serial" \
+			&& "$first_serial" != "$second_serial" ]]; then
+			return 1
+		fi
+		return 0
+	fi
+
+	[[ -n "$first_serial" && "$first_serial" == "$second_serial" ]]
+}
+
+preferred_flash_serial_link() {
+	local selected_link=$1
+	local selected_port selected_interface candidate candidate_port candidate_interface
+	local preferred_link="" preferred_port=""
+	local by_id_dir="${NRF52_SERIAL_BY_ID_DIR:-/dev/serial/by-id}"
+
+	selected_port="$(readlink -f "$selected_link" 2>/dev/null || true)"
+	if [[ -z "$selected_port" || ! -e "$selected_port" ]]; then
+		printf '%s\n' "$selected_link"
+		return 0
+	fi
+
+	selected_interface="$(udev_device_property "$selected_port" ID_USB_INTERFACE_NUM)"
+	if [[ -z "$selected_interface" || "$selected_interface" =~ ^0+$ ]]; then
+		printf '%s\n' "$selected_link"
+		return 0
+	fi
+
+	# A Full Companion can expose CDC interface 00 for Companion/DFU and a
+	# second CDC interface for output-only logging. Only the first CDC instance
+	# responds to the 1200-baud DFU touch. Prefer its by-id link when both belong
+	# to the same physical USB device, but leave single nonzero interfaces alone.
+	shopt -s nullglob
+	for candidate in "${by_id_dir}"/*; do
+		candidate_port="$(readlink -f "$candidate" 2>/dev/null || true)"
+		[[ -n "$candidate_port" && -e "$candidate_port" ]] || continue
+		candidate_interface="$(udev_device_property "$candidate_port" ID_USB_INTERFACE_NUM)"
+		[[ "$candidate_interface" =~ ^0+$ ]] || continue
+		serial_ports_share_usb_device "$selected_port" "$candidate_port" || continue
+
+		if [[ -n "$preferred_port" && "$candidate_port" != "$preferred_port" ]]; then
+			# A cloned/ambiguous USB identity must not silently redirect flashing.
+			shopt -u nullglob
+			printf '%s\n' "$selected_link"
+			return 0
+		fi
+		preferred_link="$candidate"
+		preferred_port="$candidate_port"
+	done
+	shopt -u nullglob
+
+	printf '%s\n' "${preferred_link:-$selected_link}"
+}
+
+preferred_flash_serial_port() {
+	local selected_port=$1
+	local link preferred_link preferred_port
+	local by_id_dir="${NRF52_SERIAL_BY_ID_DIR:-/dev/serial/by-id}"
+
+	shopt -s nullglob
+	for link in "${by_id_dir}"/*; do
+		if [[ "$(readlink -f "$link" 2>/dev/null || true)" == "$selected_port" ]]; then
+			preferred_link="$(preferred_flash_serial_link "$link")"
+			preferred_port="$(readlink -f "$preferred_link" 2>/dev/null || true)"
+			shopt -u nullglob
+			printf '%s\n' "${preferred_port:-$selected_port}"
+			return 0
+		fi
+	done
+	shopt -u nullglob
+
+	printf '%s\n' "$selected_port"
 }
 
 nrf52_port_instance() {
@@ -860,8 +963,9 @@ nrf52_selected_by_id_path() {
 		selected_path="${by_id_dir}/${selected_name}"
 		# Return the saved identity even if it is currently disconnected. The
 		# caller must reject a dangling link instead of falling back to whatever
-		# unrelated device may now occupy the old ttyACM number.
-		printf '%s\n' "$selected_path"
+		# unrelated device may now occupy the old ttyACM number. If this is a
+		# secondary CDC port, prefer the matching interface-00 sibling.
+		preferred_flash_serial_link "$selected_path"
 		return 0
 	fi
 
@@ -869,7 +973,7 @@ nrf52_selected_by_id_path() {
 	shopt -s nullglob
 	for link in "${by_id_dir}"/*; do
 		if [[ "$(readlink -f "$link" 2>/dev/null || true)" == "$DEVICE_PORT" ]]; then
-			printf '%s\n' "$link"
+			preferred_flash_serial_link "$link"
 			break
 		fi
 	done
@@ -959,6 +1063,13 @@ nrf52_port_is_dfu_bootloader() {
 
 trigger_nrf52_1200_touch() {
 	local port=$1
+	local preferred_port
+
+	preferred_port="$(preferred_flash_serial_port "$port")"
+	if [[ "$preferred_port" != "$port" ]]; then
+		echo "Refusing a DFU touch on secondary CDC port $port; use $preferred_port." >&2
+		return 1
+	fi
 
 	nrf52_serial_port_access "$port" || return 1
 	echo "Sending one 1200-baud touch to $port..."
@@ -978,10 +1089,14 @@ nrf52_candidate_identity_rank() {
 	local selected_by_id=$3
 	local expected_serial=$4
 	local expected_path_stem=$5
-	local candidate_serial candidate_path_stem
+	local candidate_serial candidate_path_stem candidate_interface interface_bonus=0
 
 	candidate_serial="$(udev_device_property "$candidate" ID_SERIAL_SHORT)"
 	candidate_path_stem="$(nrf52_usb_path_stem "$(udev_device_property "$candidate" ID_PATH)")"
+	candidate_interface="$(udev_device_property "$candidate" ID_USB_INTERFACE_NUM)"
+	if [[ "$candidate_interface" =~ ^0+$ ]]; then
+		interface_bonus=10
+	fi
 
 	# Prefer the physical USB path across the application's and bootloader's
 	# different USB product names. If both sides publish a serial, reject a
@@ -993,15 +1108,15 @@ nrf52_candidate_identity_rank() {
 			printf '%s\n' 0
 			return 0
 		fi
-		printf '%s\n' 300
+		printf '%s\n' $((300 + interface_bonus))
 		return 0
 	fi
 	if [[ -n "$expected_serial" && "$candidate_serial" == "$expected_serial" ]]; then
-		printf '%s\n' 200
+		printf '%s\n' $((200 + interface_bonus))
 		return 0
 	fi
 	if [[ -n "$selected_by_id" && "$candidate_link" == "$selected_by_id" ]]; then
-		printf '%s\n' 100
+		printf '%s\n' $((100 + interface_bonus))
 		return 0
 	fi
 	printf '%s\n' 0
@@ -2412,11 +2527,19 @@ choose_serial() {
 	}
 
     scan() {                        # fill devs[] / labels[]
+        local flash_link detected_path
+        local by_id_dir="${NRF52_SERIAL_BY_ID_DIR:-/dev/serial/by-id}"
+        local -A seen_paths=()
         devs=()  labels=()
         shopt -s nullglob           # make the glob expand to nothing if empty
-        for link in /dev/serial/by-id/*; do
-            devs+=( "$(readlink -f "$link")" )
-            labels+=( "$(basename "$link")" )
+        for link in "${by_id_dir}"/*; do
+			flash_link="$(preferred_flash_serial_link "$link")"
+			detected_path="$(readlink -f "$flash_link" 2>/dev/null || true)"
+			[[ -n "$detected_path" && -e "$detected_path" ]] || continue
+			[[ -z "${seen_paths[$detected_path]+x}" ]] || continue
+			seen_paths["$detected_path"]=1
+			devs+=( "$detected_path" )
+			labels+=( "$(basename "$flash_link")" )
         done
         shopt -u nullglob
     }
@@ -2426,7 +2549,7 @@ choose_serial() {
 
         # -------------------------- nothing found --------------------------
         if ((${#devs[@]} == 0)); then
-            echo "No serial devices found under /dev/serial/by-id."
+            echo "No serial devices found under ${NRF52_SERIAL_BY_ID_DIR:-/dev/serial/by-id}."
             read -rp "Try again? [y/N] " yn
             [[ $yn =~ ^[Yy]$ ]] || return 1         # give up
             continue                                # rescan
