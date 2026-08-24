@@ -28,31 +28,36 @@ done
 
 qio_image="${tmp_dir}/station-g2-qio.bin"
 dio_image="${tmp_dir}/station-g2-dio.bin"
+unknown_image="${tmp_dir}/station-g2-unknown.bin"
 printf '\351\001\000\000' >"$qio_image"
 printf '\351\001\002\000' >"$dio_image"
+: >"$unknown_image"
 
 [[ "$(esp32_image_flash_mode "$qio_image")" == "qio" ]]
 [[ "$(esp32_image_flash_mode "$dio_image")" == "dio" ]]
 echo "PASS: ESP image flash-mode byte is decoded"
 
-if esp32_validate_image_for_device "UnitEng Station G2" "$qio_image" merged \
-	2>"${tmp_dir}/qio-error"; then
-	echo "FAIL: Station G2 QIO merged image was accepted" >&2
-	exit 1
-fi
-grep -Fq 'Station G2 firmware must use DIO flash mode' "${tmp_dir}/qio-error"
-echo "PASS: Station G2 QIO merged image is refused"
+esp32_validate_image_for_device "UnitEng Station G2" "$qio_image" merged \
+	2>"${tmp_dir}/qio-warning"
+grep -Fq 'Station G2 image reports qio; continuing at user request' \
+	"${tmp_dir}/qio-warning"
+echo "PASS: Station G2 QIO merged image is accepted with a warning"
 
-if esp32_validate_image_for_device "Station_G2" "$qio_image" app-only \
-	2>"${tmp_dir}/qio-app-error"; then
-	echo "FAIL: Station G2 QIO app-only image was accepted" >&2
-	exit 1
-fi
-echo "PASS: Station G2 QIO app-only image is refused"
+esp32_validate_image_for_device "Station_G2" "$qio_image" app-only \
+	2>"${tmp_dir}/qio-app-warning"
+grep -Fq 'Station G2 image reports qio; continuing at user request' \
+	"${tmp_dir}/qio-app-warning"
+echo "PASS: Station G2 QIO app-only image is accepted with a warning"
+
+esp32_validate_image_for_device "Station_G2" "$unknown_image" merged \
+	2>"${tmp_dir}/unknown-warning"
+grep -Fq 'Station G2 image reports an unreadable flash mode; continuing at user request' \
+	"${tmp_dir}/unknown-warning"
+echo "PASS: Station G2 image with an unreadable mode is accepted with a warning"
 
 esp32_validate_image_for_device "UnitEng Station G2" "$dio_image" merged \
 	>"${tmp_dir}/dio-output"
-grep -Fq 'DIO flash mode confirmed' "${tmp_dir}/dio-output"
+grep -Fq 'Station G2 image flash mode: DIO' "${tmp_dir}/dio-output"
 echo "PASS: Station G2 DIO image is accepted"
 
 esp32_validate_image_for_device "Heltec V4" "$qio_image" merged

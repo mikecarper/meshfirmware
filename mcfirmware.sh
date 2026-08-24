@@ -507,16 +507,17 @@ esp32_validate_image_for_device() {
 	esac
 
 	# Both a merged image's first-stage bootloader and an app-only image carry
-	# the SPI flash mode in byte 2 of their ESP image header. Station G2 hardware
-	# watchdog-resets before the app starts when a QIO image is installed.
+	# the SPI flash mode in byte 2 of their ESP image header. Report the mode for
+	# Station G2 images, but leave compatibility decisions to the user instead of
+	# refusing an otherwise valid image.
 	[[ "$layout" == "merged" || "$layout" == "app-only" ]] || return 0
 	flash_mode="$(esp32_image_flash_mode "$file" 2>/dev/null || true)"
-	if [[ "$flash_mode" != "dio" ]]; then
-		echo "ERROR: Station G2 firmware must use DIO flash mode; this image reports ${flash_mode:-an unreadable mode}." >&2
-		echo "Refusing to erase or write an image that can leave the Station G2 in a boot watchdog loop." >&2
-		return 1
+	if [[ "$flash_mode" == "dio" ]]; then
+		echo "Station G2 image flash mode: DIO."
+	else
+		echo "Warning: Station G2 image reports ${flash_mode:-an unreadable flash mode}; continuing at user request." >&2
 	fi
-	echo "Station G2 image safety check: DIO flash mode confirmed."
+	return 0
 }
 
 describe_flash_action() {
