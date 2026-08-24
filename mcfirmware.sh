@@ -93,12 +93,20 @@ BOOTLOADER_PROBE_ACTIVE=0
 
 restore_port_after_bootloader_probe() {
 	local port="${BOOTLOADER_PROBE_PORT:-}"
+	local hard_reset="${HARDRESET:-hard-reset}"
+	local no_reset="${NORESET:-no-reset}"
+	local read_mac="${READMAC:-read-mac}"
+	local watchdog_reset="${WATCHDOGRESET:-watchdog-reset}"
 
 	[[ "${BOOTLOADER_PROBE_ACTIVE:-0}" -eq 1 ]] || return 0
 	[[ -n "$port" ]] || return 0
 
 	echo "Attempting to return ${port} to normal runtime mode..." >/dev/tty
-	timeout 8s pipx run esptool --port "$port" --before no-reset --after hard-reset read-mac >/dev/null 2>&1 || true
+	if ! invoke_esptool_timeout 8s --port "$port" --before "$no_reset" \
+		--after "$hard_reset" "$read_mac" >/dev/null 2>&1; then
+		invoke_esptool_timeout 8s --port "$port" --before "$no_reset" \
+			--after "$watchdog_reset" run >/dev/null 2>&1 || true
+	fi
 	BOOTLOADER_PROBE_ACTIVE=0
 	BOOTLOADER_PROBE_PORT=""
 }
@@ -221,6 +229,7 @@ READFLASH="read-flash"
 WRITEFLASH="write-flash"
 ERASEFLASH="erase-flash"
 HARDRESET="hard-reset"
+WATCHDOGRESET="watchdog-reset"
 LOCKEDSERVICE=""
 CHOSEN_FILE=""
 BAUD="${3:-115200}"
@@ -473,6 +482,41 @@ esp_firmware_layout() {
 			echo "unknown"
 			;;
 	esac
+}
+
+esp32_image_flash_mode() {
+	local file=$1 mode_byte=""
+
+	[[ -f "$file" ]] || return 1
+	mode_byte="$(od -An -tu1 -j2 -N1 -- "$file" 2>/dev/null | tr -d '[:space:]')"
+	case "$mode_byte" in
+		0) printf '%s\n' qio ;;
+		1) printf '%s\n' qout ;;
+		2) printf '%s\n' dio ;;
+		3) printf '%s\n' dout ;;
+		*) return 1 ;;
+	esac
+}
+
+esp32_validate_image_for_device() {
+	local device=$1 file=$2 layout=$3 flash_mode=""
+
+	case "${device,,}" in
+		*station*g2*) ;;
+		*) return 0 ;;
+	esac
+
+	# Both a merged image's first-stage bootloader and an app-only image carry
+	# the SPI flash mode in byte 2 of their ESP image header. Station G2 hardware
+	# watchdog-resets before the app starts when a QIO image is installed.
+	[[ "$layout" == "merged" || "$layout" == "app-only" ]] || return 0
+	flash_mode="$(esp32_image_flash_mode "$file" 2>/dev/null || true)"
+	if [[ "$flash_mode" != "dio" ]]; then
+		echo "ERROR: Station G2 firmware must use DIO flash mode; this image reports ${flash_mode:-an unreadable mode}." >&2
+		echo "Refusing to erase or write an image that can leave the Station G2 in a boot watchdog loop." >&2
+		return 1
+	fi
+	echo "Station G2 image safety check: DIO flash mode confirmed."
 }
 
 describe_flash_action() {
@@ -839,6 +883,11 @@ udev_device_property() {
 		| head -n1
 }
 
+normalize_usb_serial_identity() {
+	local serial="${1:-}"
+	printf '%s' "${serial,,}" | tr -cd '[:alnum:]'
+}
+
 nrf52_usb_path_stem() {
 	local path="${1:-}"
 	local prefix usb_path interface_path interface_component
@@ -872,6 +921,8 @@ serial_ports_share_usb_device() {
 	second_path="$(nrf52_usb_path_stem "$(udev_device_property "$second_port" ID_PATH)")"
 	first_serial="$(udev_device_property "$first_port" ID_SERIAL_SHORT)"
 	second_serial="$(udev_device_property "$second_port" ID_SERIAL_SHORT)"
+	first_serial="$(normalize_usb_serial_identity "$first_serial")"
+	second_serial="$(normalize_usb_serial_identity "$second_serial")"
 	if [[ -n "$first_path" && -n "$second_path" ]]; then
 		[[ "$first_path" == "$second_path" ]] || return 1
 		if [[ -n "$first_serial" && -n "$second_serial" \
@@ -882,6 +933,85 @@ serial_ports_share_usb_device() {
 	fi
 
 	[[ -n "$first_serial" && "$first_serial" == "$second_serial" ]]
+}
+
+serial_by_id_link_for_port() {
+	local port=$1
+	local link resolved match=""
+	local by_id_dir="${NRF52_SERIAL_BY_ID_DIR:-/dev/serial/by-id}"
+
+	shopt -s nullglob
+	for link in "${by_id_dir}"/*; do
+		resolved="$(readlink -f "$link" 2>/dev/null || true)"
+		[[ "$resolved" == "$port" ]] || continue
+		if [[ -n "$match" && "$match" != "$link" ]]; then
+			shopt -u nullglob
+			return 2
+		fi
+		match="$link"
+	done
+	shopt -u nullglob
+
+	[[ -n "$match" ]] || return 1
+	printf '%s\n' "$match"
+}
+
+serial_port_has_secondary_cdc() {
+	local primary_port=$1
+	local link candidate candidate_interface
+	local by_id_dir="${NRF52_SERIAL_BY_ID_DIR:-/dev/serial/by-id}"
+
+	shopt -s nullglob
+	for link in "${by_id_dir}"/*; do
+		candidate="$(readlink -f "$link" 2>/dev/null || true)"
+		[[ -n "$candidate" && -e "$candidate" && "$candidate" != "$primary_port" ]] || continue
+		candidate_interface="$(udev_device_property "$candidate" ID_USB_INTERFACE_NUM)"
+		[[ -n "$candidate_interface" && ! "$candidate_interface" =~ ^0+$ ]] || continue
+		if serial_ports_share_usb_device "$primary_port" "$candidate"; then
+			shopt -u nullglob
+			return 0
+		fi
+	done
+	shopt -u nullglob
+	return 1
+}
+
+esp32_port_uses_native_usb() {
+	local port=$1
+	local vendor_id
+
+	vendor_id="$(udev_device_property "$port" ID_VENDOR_ID)"
+	if [[ "${vendor_id,,}" == "303a" ]]; then
+		return 0
+	fi
+	# Full Companion may use a board-specific VID/PID, but its second CDC
+	# sibling still distinguishes native USB from an external UART bridge.
+	serial_port_has_secondary_cdc "$port"
+}
+
+esp32_port_is_rom_usb_jtag() {
+	local port=$1
+	local vendor_id model_id model
+
+	vendor_id="$(udev_device_property "$port" ID_VENDOR_ID)"
+	model_id="$(udev_device_property "$port" ID_MODEL_ID)"
+	model="$(udev_device_property "$port" ID_MODEL)"
+	[[ "${vendor_id,,}" == "303a" && "${model_id,,}" == "1001" \
+		&& "${model,,}" == *usb_jtag_serial_debug_unit* ]]
+}
+
+save_selected_serial_port() {
+	local port=$1
+	local by_id_link=""
+
+	DEVICE_PORT="$port"
+	printf '%s\n' "$port" > "$DEVICE_PORT_FILE"
+	by_id_link="$(serial_by_id_link_for_port "$port" 2>/dev/null || true)"
+	if [[ -n "$by_id_link" ]]; then
+		basename -- "$by_id_link" > "$DEVICE_PORT_NAME_FILE"
+	else
+		: > "$DEVICE_PORT_NAME_FILE"
+	fi
 }
 
 preferred_flash_serial_link() {
@@ -1091,7 +1221,9 @@ nrf52_candidate_identity_rank() {
 	local expected_path_stem=$5
 	local candidate_serial candidate_path_stem candidate_interface interface_bonus=0
 
-	candidate_serial="$(udev_device_property "$candidate" ID_SERIAL_SHORT)"
+	candidate_serial="$(normalize_usb_serial_identity \
+		"$(udev_device_property "$candidate" ID_SERIAL_SHORT)")"
+	expected_serial="$(normalize_usb_serial_identity "$expected_serial")"
 	candidate_path_stem="$(nrf52_usb_path_stem "$(udev_device_property "$candidate" ID_PATH)")"
 	candidate_interface="$(udev_device_property "$candidate" ID_USB_INTERFACE_NUM)"
 	if [[ "$candidate_interface" =~ ^0+$ ]]; then
@@ -1186,7 +1318,7 @@ find_reenumerated_nrf52_port() {
 		return 0
 	fi
 	if ((${#matches[@]} > 1)); then
-		echo "Refusing ambiguous nRF52 match: ${matches[*]}" >&2
+		echo "Refusing ambiguous USB serial match: ${matches[*]}" >&2
 		return 2
 	fi
 	return 1
@@ -1222,7 +1354,7 @@ wait_for_nrf52_bootloader_port() {
 		sleep "$poll_seconds"
 	done
 
-	echo "Timed out waiting for the selected nRF52 USB identity to re-enumerate as ${purpose}." >&2
+	echo "Timed out waiting for the selected USB identity to re-enumerate as ${purpose}." >&2
 	return 1
 }
 
@@ -2796,6 +2928,7 @@ esptool_set_variables() {
 	  WRITEFLASH="write-flash"
 	  ERASEFLASH="erase-flash"
 	  HARDRESET="hard-reset"
+	  WATCHDOGRESET="watchdog-reset"
 	else
 	  NORESET="no_reset"
 	  READMAC="read_mac"
@@ -2803,8 +2936,113 @@ esptool_set_variables() {
 	  WRITEFLASH="write_flash"
 	  ERASEFLASH="erase_flash"
 	  HARDRESET="hard_reset"
+	  WATCHDOGRESET="watchdog_reset"
 	fi
 
+}
+
+# esptool opens Linux serial ports before it applies --before=no-reset. On a
+# native ESP32-S3 USB/JTAG CDC port, pySerial's default DTR/RTS=True state can
+# therefore reset the chip before esptool has selected its requested reset
+# strategy. Besides selecting the wrong boot mode, that reset can also drop a
+# host powered through the attached device. Pre-open every local serial port
+# with both active-low control lines idle and disable HUPCL; esptool still owns
+# all intentional reset transitions after the safe open.
+esptool_safe_serial_bootstrap() {
+	command cat <<'PY'
+import sys
+import termios
+
+import serial
+
+
+_serial_for_url = serial.serial_for_url
+
+
+def safe_serial_for_url(*args, **kwargs):
+    open_immediately = not kwargs.get("do_not_open", False)
+    kwargs["do_not_open"] = True
+    port = _serial_for_url(*args, **kwargs)
+    port.rts = False
+    port.dtr = False
+    original_open = port.open
+
+    def safe_open():
+        # pySerial applies these cached states as part of open(). Set them
+        # before every reopen because an esptool reset strategy may have
+        # changed them during a previous connection attempt.
+        port.rts = False
+        port.dtr = False
+        original_open()
+        try:
+            attributes = termios.tcgetattr(port.fileno())
+            attributes[2] &= ~termios.HUPCL
+            termios.tcsetattr(port.fileno(), termios.TCSANOW, attributes)
+        except (AttributeError, OSError, ValueError, termios.error):
+            # RFC2217/socket transports and a few USB drivers do not expose
+            # termios state. The pre-open DTR/RTS protection still applies.
+            pass
+
+    port.open = safe_open
+    if open_immediately:
+        port.open()
+    return port
+
+
+serial.serial_for_url = safe_serial_for_url
+
+import esptool  # noqa: E402 (import only after installing the serial guard)
+
+esptool.main(sys.argv[1:])
+PY
+}
+
+esptool_port_argument() {
+	local arg
+	while (($#)); do
+		arg=$1
+		case "$arg" in
+			--port|-p)
+				(($# >= 2)) || return 1
+				printf '%s\n' "$2"
+				return 0
+				;;
+			--port=*)
+				printf '%s\n' "${arg#--port=}"
+				return 0
+				;;
+		esac
+		shift
+	done
+	return 1
+}
+
+configure_esptool_invocation() {
+	local port="" bootstrap=""
+	port="$(esptool_port_argument "$@" 2>/dev/null || true)"
+	ESPTOOL_INVOKE_COMMAND=(pipx run esptool)
+
+	# Image inspection and version checks have no serial port and need no guard.
+	# Restrict the bootstrap to local device paths so socket/RFC2217 behavior is
+	# unchanged.
+	if [[ "$port" == /dev/* ]]; then
+		bootstrap="$(esptool_safe_serial_bootstrap)"
+		ESPTOOL_INVOKE_COMMAND=(
+			pipx run --quiet --spec esptool python -c "$bootstrap"
+		)
+	fi
+}
+
+invoke_esptool() {
+	configure_esptool_invocation "$@"
+	"${ESPTOOL_INVOKE_COMMAND[@]}" "$@"
+}
+
+invoke_esptool_timeout() {
+	local duration=$1
+	shift
+	configure_esptool_invocation "$@"
+	command timeout "$duration" "${ESPTOOL_INVOKE_COMMAND[@]}" "$@"
 }
 
 get_espcmd() {
@@ -2893,6 +3131,11 @@ recover_busy_serial_port() {
 auto_reset_serial_port() {
 	local port="$1"
 	[[ -z "$port" ]] && return 1
+	if esp32_port_uses_native_usb "$port"; then
+		echo "Skipping raw DTR/RTS recovery on native ESP32 USB port $port." >&2
+		echo "The identity-safe application-to-ROM handoff must be retried instead." >&2
+		return 1
+	fi
 	if no_sudo_mode; then
 		echo "No-sudo mode cannot run the privileged ESP serial-reset fallback on $port." >&2
 		return 1
@@ -2979,7 +3222,7 @@ run_esptool() {
 	done
 
 	if tmpfile=$(mktemp); then
-		if pipx run esptool "$@" 2>&1 | tee "$tmpfile"; then
+		if invoke_esptool "$@" 2>&1 | tee "$tmpfile"; then
 			output="$(<"$tmpfile")"
 			status=0
 		else
@@ -3002,7 +3245,7 @@ run_esptool() {
 			return "$status"
 		fi
 		if tmpfile=$(mktemp); then
-			if pipx run esptool "$@" 2>&1 | tee "$tmpfile"; then
+			if invoke_esptool "$@" 2>&1 | tee "$tmpfile"; then
 				rm -f "$tmpfile"
 				return 0
 			fi
@@ -3026,7 +3269,7 @@ run_esptool() {
 			sudo chmod a+rw "$port"
 		fi
 		if tmpfile=$(mktemp); then
-			if pipx run esptool "$@" 2>&1 | tee "$tmpfile"; then
+			if invoke_esptool "$@" 2>&1 | tee "$tmpfile"; then
 				rm -f "$tmpfile"
 				return 0
 			fi
@@ -3048,7 +3291,7 @@ run_esptool() {
 	if [[ -n "$port" ]] && esptool_output_needs_reset "$output"; then
 		if auto_reset_serial_port "$port"; then
 			if tmpfile=$(mktemp); then
-				if pipx run esptool "$@" 2>&1 | tee "$tmpfile"; then
+				if invoke_esptool "$@" 2>&1 | tee "$tmpfile"; then
 					rm -f "$tmpfile"
 					return 0
 				fi
@@ -3064,7 +3307,7 @@ run_esptool() {
 			fi
 			if manual_reboot_choice "$port" "esptool command"; then
 				if tmpfile=$(mktemp); then
-					if pipx run esptool "$@" 2>&1 | tee "$tmpfile"; then
+					if invoke_esptool "$@" 2>&1 | tee "$tmpfile"; then
 						rm -f "$tmpfile"
 						return 0
 					fi
@@ -3090,32 +3333,131 @@ run_esptool() {
 	return "$status"
 }
 
+raw_esptool_mac_probe() {
+	local output
+	if ! output="$(invoke_esptool_timeout "${ESP32_PROBE_TIMEOUT_SECONDS:-8}s" \
+		"$@" 2>&1)"; then
+		return 1
+	fi
+	grep -qi -m1 'MAC' <<<"$output"
+}
+
 prepare_esp32_flash_session() {
 	local port="$1"
 	local device="$2"
+	local preferred_port selected_by_id expected_serial expected_path_stem
+	local original_instance bootloader_port
+
+	preferred_port="$(preferred_flash_serial_port "$port")"
+	if [[ "$preferred_port" != "$port" ]]; then
+		echo "Using primary Companion/flashing port $preferred_port instead of secondary logging port $port."
+		port="$preferred_port"
+	fi
+	save_selected_serial_port "$port"
 
 	BOOTLOADER_PROBE_PORT="$port"
 	BOOTLOADER_PROBE_ACTIVE=1
 
-	echo "Setting device ${device} on ${port} into bootloader mode via baud 1200"
-	echo "$ESPTOOL_CMD --port ${port} --after $NORESET --baud 1200 $READMAC"
-	if ! probe_esptool --port "${port}" --after "$NORESET" --baud 1200 "$READMAC"; then
-		echo "esptool failed, checking if a service has the port locked"
-		if stop_serial_locking_services "$port"; then
-			probe_esptool --port "${port}" --after "$NORESET" --baud 1200 "$READMAC" || true
-		fi
-	fi
+	selected_by_id="$(serial_by_id_link_for_port "$port" 2>/dev/null || true)"
+	expected_serial="$(udev_device_property "$port" ID_SERIAL_SHORT)"
+	expected_path_stem="$(nrf52_usb_path_stem \
+		"$(udev_device_property "$port" ID_PATH)")"
+	original_instance="$(nrf52_port_instance "$port")"
+	ESP32_FLASH_SELECTED_BY_ID="$selected_by_id"
+	ESP32_FLASH_EXPECTED_SERIAL="$expected_serial"
+	ESP32_FLASH_EXPECTED_PATH_STEM="$expected_path_stem"
 
-	echo
-	echo
-	if probe_esptool_mac --port "$port" --after "$NORESET" --baud 1200 "$READMAC"; then
+	# Native-USB ESP32 applications, including both single-CDC firmware and Full
+	# Companion's interface 00/02 pair, return as the ESP32-S3 ROM USB-JTAG port
+	# after a 1200-baud touch. The ROM often has a different tty number, product
+	# name, and serial punctuation. First accept an already-running ROM without
+	# touching it; otherwise follow the selected physical USB identity across
+	# that re-enumeration instead of handing esptool a stale application tty.
+	if esp32_port_uses_native_usb "$port"; then
+		if raw_esptool_mac_probe --port "$port" --before "$NORESET" \
+			--after "$NORESET" --baud 115200 "$READMAC"; then
+			echo "Selected ESP32 native USB port is already in ROM bootloader mode."
+			rm -f "$DOWNLOAD_DIR/CURRENT.BAK"
+			echo
+			return 0
+		fi
+		echo "Setting device ${device} on ${port} into its ESP32 ROM bootloader via the primary CDC port."
+		if ! trigger_nrf52_1200_touch "$port"; then
+			echo "The primary CDC touch failed; checking for a service holding $port."
+			stop_serial_locking_services "$port" || true
+			trigger_nrf52_1200_touch "$port"
+		fi
+		if ! bootloader_port="$(wait_for_nrf52_bootloader_port "$port" \
+			"$selected_by_id" "$expected_serial" "$expected_path_stem" \
+			"$original_instance" "ESP32 ROM serial port")"; then
+			return 1
+		fi
+		echo "Matched ESP32 ROM port: $bootloader_port"
+		if ! raw_esptool_mac_probe --port "$bootloader_port" \
+			--before "$NORESET" --after "$NORESET" --baud 115200 "$READMAC"; then
+			echo "The matched ESP32 ROM port did not answer an identity probe." >&2
+			return 1
+		fi
+		save_selected_serial_port "$bootloader_port"
+		BOOTLOADER_PROBE_PORT="$bootloader_port"
 		echo "ESP chip responded; skipping existing firmware backup."
 		rm -f "$DOWNLOAD_DIR/CURRENT.BAK"
-	else
-		echo "ESP chip did not confirm bootloader mode; skipping firmware backup."
-		rm -f "$DOWNLOAD_DIR/CURRENT.BAK"
+		echo
+		return 0
 	fi
-	echo
+
+	# A manually selected ROM port already answers without another reset.
+	if raw_esptool_mac_probe --port "$port" --before "$NORESET" \
+		--after "$NORESET" --baud 115200 "$READMAC"; then
+		echo "ESP chip already responds in bootloader mode; skipping existing firmware backup."
+		rm -f "$DOWNLOAD_DIR/CURRENT.BAK"
+		echo
+		return 0
+	fi
+
+	# UART-based ESP32 boards keep the same tty while esptool performs their
+	# ordinary DTR/RTS reset sequence. Retain the established recovery flow for
+	# those boards.
+	echo "Setting device ${device} on ${port} into bootloader mode"
+	echo "$ESPTOOL_CMD --port ${port} --after $NORESET --baud 1200 $READMAC"
+	if probe_esptool_mac --port "$port" --after "$NORESET" \
+		--baud 1200 "$READMAC"; then
+		echo "ESP chip responded; skipping existing firmware backup."
+		rm -f "$DOWNLOAD_DIR/CURRENT.BAK"
+		echo
+		return 0
+	fi
+
+	echo "ESP chip did not confirm bootloader mode; refusing to flash a stale or ambiguous serial port." >&2
+	rm -f "$DOWNLOAD_DIR/CURRENT.BAK"
+	return 1
+}
+
+finish_esp32_flash_session() {
+	local port="${1:-${DEVICE_PORT:-}}"
+	local rom_instance runtime_port
+
+	[[ -n "$port" && -e "$port" ]] || return 0
+	if ! esp32_port_is_rom_usb_jtag "$port"; then
+		return 0
+	fi
+
+	rom_instance="$(nrf52_port_instance "$port")"
+	echo "ESP32-S3 ROM port is still active; safely hard-resetting into the application."
+	if ! invoke_esptool_timeout "${ESP32_PROBE_TIMEOUT_SECONDS:-12}s" \
+		--port "$port" --before "$NORESET" --after "$HARDRESET" "$READMAC"; then
+		echo "Warning: the ESP32-S3 safe hard reset failed; press RESET once to start the application." >&2
+		return 1
+	fi
+
+	if runtime_port="$(wait_for_nrf52_bootloader_port "$port" \
+		"${ESP32_FLASH_SELECTED_BY_ID:-}" \
+		"${ESP32_FLASH_EXPECTED_SERIAL:-}" \
+		"${ESP32_FLASH_EXPECTED_PATH_STEM:-}" "$rom_instance" \
+		"ESP32 runtime primary CDC port" 2>/dev/null)"; then
+		save_selected_serial_port "$runtime_port"
+		echo "Matched ESP32 runtime port: $runtime_port"
+	fi
 }
 
 probe_esptool() {
@@ -3129,7 +3471,7 @@ probe_esptool() {
 		fi
 	done
 
-	if output=$(pipx run esptool "$@" 2>&1); then
+	if output=$(invoke_esptool "$@" 2>&1); then
 		return 0
 	fi
 
@@ -3139,7 +3481,7 @@ probe_esptool() {
 			printf '%s\n' "$output" >&2
 			return "$status"
 		fi
-		if retry_output=$(pipx run esptool "$@" 2>&1); then
+		if retry_output=$(invoke_esptool "$@" 2>&1); then
 			return 0
 		fi
 		status=$?
@@ -3155,7 +3497,7 @@ probe_esptool() {
 		if [[ -n "$port" ]]; then
 			sudo chmod a+rw "$port"
 		fi
-		if retry_output=$(pipx run esptool "$@" 2>&1); then
+		if retry_output=$(invoke_esptool "$@" 2>&1); then
 			return 0
 		fi
 		status=$?
@@ -3165,11 +3507,11 @@ probe_esptool() {
 
 	if [[ -n "$port" ]] && esptool_output_needs_reset "$output"; then
 		if auto_reset_serial_port "$port"; then
-			if retry_output=$(pipx run esptool "$@" 2>&1); then
+			if retry_output=$(invoke_esptool "$@" 2>&1); then
 				return 0
 			fi
 			if manual_reboot_choice "$port" "bootloader probe"; then
-				if retry_output=$(pipx run esptool "$@" 2>&1); then
+				if retry_output=$(invoke_esptool "$@" 2>&1); then
 					return 0
 				fi
 				status=$?
@@ -3194,7 +3536,7 @@ probe_esptool_mac() {
 		fi
 	done
 
-	if output=$(pipx run esptool "$@" 2>&1); then
+	if output=$(invoke_esptool "$@" 2>&1); then
 		grep -qi -m1 'MAC' <<<"$output"
 		return $?
 	fi
@@ -3205,7 +3547,7 @@ probe_esptool_mac() {
 			printf '%s\n' "$output" >&2
 			return "$status"
 		fi
-		if retry_output=$(pipx run esptool "$@" 2>&1); then
+		if retry_output=$(invoke_esptool "$@" 2>&1); then
 			grep -qi -m1 'MAC' <<<"$retry_output"
 			return $?
 		fi
@@ -3222,7 +3564,7 @@ probe_esptool_mac() {
 		if [[ -n "$port" ]]; then
 			sudo chmod a+rw "$port"
 		fi
-		if retry_output=$(pipx run esptool "$@" 2>&1); then
+		if retry_output=$(invoke_esptool "$@" 2>&1); then
 			grep -qi -m1 'MAC' <<<"$retry_output"
 			return $?
 		fi
@@ -3233,12 +3575,12 @@ probe_esptool_mac() {
 
 	if [[ -n "$port" ]] && esptool_output_needs_reset "$output"; then
 		if auto_reset_serial_port "$port"; then
-			if retry_output=$(pipx run esptool "$@" 2>&1); then
+			if retry_output=$(invoke_esptool "$@" 2>&1); then
 				grep -qi -m1 'MAC' <<<"$retry_output"
 				return $?
 			fi
 			if manual_reboot_choice "$port" "ESP32 MAC probe"; then
-				if retry_output=$(pipx run esptool "$@" 2>&1); then
+				if retry_output=$(invoke_esptool "$@" 2>&1); then
 					grep -qi -m1 'MAC' <<<"$retry_output"
 					return $?
 				fi
@@ -3291,7 +3633,8 @@ read_esp32_app_partitions() {
 	local partition_file
 
 	partition_file="$(mktemp)"
-	if run_esptool --port "$port" --after "$NORESET" --baud 921600 "$READFLASH" 0x8000 0x1000 "$partition_file" >/dev/null; then
+	if run_esptool --port "$port" --before "$NORESET" --after "$NORESET" \
+		--baud 921600 "$READFLASH" 0x8000 0x1000 "$partition_file" >/dev/null; then
 		parse_esp32_app_partitions "$partition_file"
 	else
 		echo "Warning: could not read ESP32 partition table; defaulting app update to 0x10000" >&2
@@ -3322,7 +3665,8 @@ esp32_device_image_present_at_offset() {
 	local probe_file magic segs mode segs_dec mode_dec
 
 	probe_file="$(mktemp)"
-	if ! run_esptool --port "$port" --after "$NORESET" --baud 921600 "$READFLASH" "$offset" 4 "$probe_file" >/dev/null; then
+	if ! run_esptool --port "$port" --before "$NORESET" --after "$NORESET" \
+		--baud 921600 "$READFLASH" "$offset" 4 "$probe_file" >/dev/null; then
 		rm -f "$probe_file"
 		return 1
 	fi
@@ -3439,33 +3783,50 @@ scan_and_maybe_mount() {
 
 autodetect_device() {
 	local -a DEVICES=()
+	local vendor_id="" esp32_ready=0
 	mapfile -t DEVICES < <(_jq1 '.device[].name' 2>/dev/null | sort -u)
 	
 	choose_serial
 	local DEVICE_PORT=""
 	[[ -f "$DEVICE_PORT_FILE"     ]] && DEVICE_PORT="$(<"$DEVICE_PORT_FILE")"
 	
-	# Probe for ESP32
+	# Probe for ESP32. Native ESP32-S3 USB must be followed across its application
+	# CDC -> ROM USB/JTAG re-enumeration; probing a stale application tty cannot
+	# work and an ordinary pySerial open can assert DTR/RTS before esptool applies
+	# --before=no-reset.
 	local ESPTOOL_CMD=""
 	get_espcmd
-
-	echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $NORESET --baud 1200 $READMAC"
-	if ! probe_esptool --port "${DEVICE_PORT}" --after "$NORESET" --baud 1200 "$READMAC"; then
-		echo "esptool failed, checking if a service has the port locked"
-		if stop_serial_locking_services "$DEVICE_PORT"; then
-			probe_esptool --port "${DEVICE_PORT}" --after "$NORESET" --baud 1200 "$READMAC" || true
+	vendor_id="$(udev_device_property "$DEVICE_PORT" ID_VENDOR_ID)"
+	if [[ "${vendor_id,,}" == "303a" ]]; then
+		if prepare_esp32_flash_session "$DEVICE_PORT" "ESP32 autodetect"; then
+			esp32_ready=1
 		fi
+	elif raw_esptool_mac_probe --port "$DEVICE_PORT" \
+		--after "$NORESET" --baud 115200 "$READMAC"; then
+		# UART bridges retain the tty while esptool's intentional reset enters ROM.
+		BOOTLOADER_PROBE_PORT="$DEVICE_PORT"
+		BOOTLOADER_PROBE_ACTIVE=1
+		esp32_ready=1
 	fi
 
-	[[ -f "$DEVICE_PORT_FILE"     ]] && DEVICE_PORT="$(<"$DEVICE_PORT_FILE")"
+	[[ -f "$DEVICE_PORT_FILE" ]] && DEVICE_PORT="$(<"$DEVICE_PORT_FILE")"
 
-	if probe_esptool_mac --port "$DEVICE_PORT" --after "$NORESET" --baud 1200 "$READMAC"; then
+	if (( esp32_ready )); then
 		echo "ESP chip responded; getting existing firmware"
-		sleep 1
-		run_esptool --port "$DEVICE_PORT" --after "$NORESET" --baud 921600 "$READFLASH" 0x10000 0x70000 "$DOWNLOAD_DIR/CURRENT.BAK"
+		run_esptool --port "$DEVICE_PORT" --before "$NORESET" \
+			--after "$NORESET" --baud 921600 "$READFLASH" \
+			0x10000 0x70000 "$DOWNLOAD_DIR/CURRENT.BAK"
 
 		AUTODETECT_DEVICE=$( detect_device_from_fw "$DOWNLOAD_DIR/CURRENT.BAK" )
-	
+		if esp32_port_is_rom_usb_jtag "$DEVICE_PORT"; then
+			finish_esp32_flash_session "$DEVICE_PORT"
+		else
+			invoke_esptool_timeout "${ESP32_PROBE_TIMEOUT_SECONDS:-12}s" \
+				--port "$DEVICE_PORT" --before "$NORESET" \
+				--after "$HARDRESET" "$READMAC" >/dev/null
+		fi
+		BOOTLOADER_PROBE_ACTIVE=0
+		BOOTLOADER_PROBE_PORT=""
 	else
 		# ---- Y: timed-out or grep found no match -------------------------
 		echo "nrf52 device"
@@ -3641,6 +4002,7 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 	elif [[ "$FW_LAYOUT" != "unknown" && "$FW_NAME_HINT" != "$FW_LAYOUT" ]]; then
 		echo "Notice: filename does not match the detected firmware layout."
 	fi
+	esp32_validate_image_for_device "$DEVICE" "$DOWNLOADED_FILE" "$FW_LAYOUT"
 	
 	echo
 	echo "Device firmware backup will be attempted after you confirm flashing."
@@ -3648,19 +4010,31 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 	
 	if [[ "$FW_LAYOUT" == "merged" || ( "$FW_LAYOUT" != "app-only" && "$TYPE" == "flash-wipe" ) ]]; then
 
-		echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $NORESET --baud 115200 $ERASEFLASH"
-		echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $HARDRESET --baud 115200 $WRITEFLASH 0x0000 \"${DOWNLOADED_FILE}\""
+		echo "  identity-safe serial open and application-to-ROM port handoff"
+		echo "  $ESPTOOL_CMD --port <matching-ROM-port> --before $NORESET --after $NORESET --baud 115200 $ERASEFLASH"
+		echo "  $ESPTOOL_CMD --port <matching-ROM-port> --before $NORESET --after <safe-reset> --baud 115200 $WRITEFLASH 0x0000 \"${DOWNLOADED_FILE}\""
 		EXECUTION_MODE="$(choose_flash_execution_mode "ERASE and INSTALL ${DEVICE} on ${DEVICE_PORT}")"
 		if [[ "$EXECUTION_MODE" == "echo" ]]; then
 			echo "Echo-only selected; no ESP32 flash commands were run."
 			exit 0
 		fi
 		prepare_esp32_flash_session "${DEVICE_PORT}" "${DEVICE}"
-		run_esptool --port "${DEVICE_PORT}" --after "$NORESET" --baud 115200 "$ERASEFLASH"
+		run_esptool --port "${DEVICE_PORT}" --before "$NORESET" \
+			--after "$NORESET" --baud 115200 "$ERASEFLASH"
 		sleep 1
-		run_esptool --port "${DEVICE_PORT}" --after "$HARDRESET" --baud 115200 "$WRITEFLASH" 0x0000 "${DOWNLOADED_FILE}"
+		ESP32_WRITE_AFTER="$HARDRESET"
+		if esp32_port_is_rom_usb_jtag "$DEVICE_PORT"; then
+			# Keep the known ROM instance available until the guarded close/reset
+			# path can release DTR/RTS safely and follow runtime re-enumeration.
+			ESP32_WRITE_AFTER="$NORESET"
+		fi
+		run_esptool --port "${DEVICE_PORT}" --before "$NORESET" \
+			--after "$ESP32_WRITE_AFTER" --baud 115200 "$WRITEFLASH" \
+			0x0000 "${DOWNLOADED_FILE}"
+		finish_esp32_flash_session "${DEVICE_PORT}"
 	else
-		echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $HARDRESET --baud 115200 $WRITEFLASH <device app offset> \"${DOWNLOADED_FILE}\""
+		echo "  identity-safe serial open and application-to-ROM port handoff"
+		echo "  $ESPTOOL_CMD --port <matching-ROM-port> --before $NORESET --after <safe-reset> --baud 115200 $WRITEFLASH <device app offset> \"${DOWNLOADED_FILE}\""
 		echo "The ESP32 partition table will be read from the device. The update will stop if the image does not fit; populated secondary app slots will also be updated."
 		EXECUTION_MODE="$(choose_flash_execution_mode "UPDATE ${DEVICE} on ${DEVICE_PORT}")"
 		if [[ "$EXECUTION_MODE" == "echo" ]]; then
@@ -3682,12 +4056,19 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 		for flash_offset in "${ESP32_UPDATE_OFFSETS[@]}"; do
 			ESP32_WRITE_ARGS+=("$flash_offset" "${DOWNLOADED_FILE}")
 		done
-		printf '%s --port %s --after %s --baud 115200 %s' "$ESPTOOL_CMD" "$DEVICE_PORT" "$HARDRESET" "$WRITEFLASH"
+		ESP32_WRITE_AFTER="$HARDRESET"
+		if esp32_port_is_rom_usb_jtag "$DEVICE_PORT"; then
+			ESP32_WRITE_AFTER="$NORESET"
+		fi
+		printf '%s --port %s --after %s --baud 115200 %s' "$ESPTOOL_CMD" "$DEVICE_PORT" "$ESP32_WRITE_AFTER" "$WRITEFLASH"
 		for ((i=0; i<${#ESP32_WRITE_ARGS[@]}; i+=2)); do
 			printf ' %s "%s"' "${ESP32_WRITE_ARGS[i]}" "${ESP32_WRITE_ARGS[i+1]}"
 		done
 		printf '\n'
-		run_esptool --port "${DEVICE_PORT}" --after "$HARDRESET" --baud 115200 "$WRITEFLASH" "${ESP32_WRITE_ARGS[@]}"
+		run_esptool --port "${DEVICE_PORT}" --before "$NORESET" \
+			--after "$ESP32_WRITE_AFTER" --baud 115200 "$WRITEFLASH" \
+			"${ESP32_WRITE_ARGS[@]}"
+		finish_esp32_flash_session "${DEVICE_PORT}"
 	fi
 	BOOTLOADER_PROBE_ACTIVE=0
 	BOOTLOADER_PROBE_PORT=""

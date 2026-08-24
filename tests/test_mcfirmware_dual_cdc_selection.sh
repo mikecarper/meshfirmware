@@ -16,7 +16,8 @@ extract_function() {
 }
 
 for function_name in \
-	nrf52_usb_path_stem serial_ports_share_usb_device \
+	normalize_usb_serial_identity nrf52_usb_path_stem \
+	serial_ports_share_usb_device serial_port_has_secondary_cdc \
 	preferred_flash_serial_link preferred_flash_serial_port \
 	nrf52_selected_by_id_path nrf52_candidate_identity_rank \
 	trigger_nrf52_1200_touch; do
@@ -36,7 +37,8 @@ primary_port="${tmp_dir}/ttyACM0"
 logging_port="${tmp_dir}/ttyACM4"
 other_port="${tmp_dir}/ttyACM7"
 conflict_port="${tmp_dir}/ttyACM8"
-touch "$primary_port" "$logging_port" "$other_port" "$conflict_port"
+rom_port="${tmp_dir}/ttyACM9"
+touch "$primary_port" "$logging_port" "$other_port" "$conflict_port" "$rom_port"
 
 primary_link="${by_id_dir}/usb-RAK4631_TEST-if00"
 logging_link="${by_id_dir}/usb-RAK4631_TEST-if02"
@@ -61,6 +63,9 @@ declare -A mock_properties=(
 	["${conflict_port}|ID_PATH"]="pci-0000:00:14.0-usb-0:2:1.4"
 	["${conflict_port}|ID_SERIAL_SHORT"]="CONFLICT"
 	["${conflict_port}|ID_USB_INTERFACE_NUM"]="04"
+	["${rom_port}|ID_PATH"]="pci-0000:00:14.0-usb-0:3:1.0"
+	["${rom_port}|ID_SERIAL_SHORT"]="44:1B:F6:6A:E8:44"
+	["${rom_port}|ID_USB_INTERFACE_NUM"]="00"
 )
 
 udev_device_property() {
@@ -91,6 +96,15 @@ expect_equal "a conflicting serial is not redirected even on the same USB path" 
 expect_equal "resolved tty for interface 02 is the primary tty" \
 	"$primary_port" "$(preferred_flash_serial_port "$logging_port")"
 
+serial_port_has_secondary_cdc "$primary_port" || {
+	echo "FAIL: primary interface did not detect its secondary CDC sibling" >&2
+	exit 1
+}
+echo "PASS: primary interface detects its secondary CDC sibling"
+
+expect_equal "ESP32 app and ROM serial formatting normalizes identically" \
+	"441bf66ae844" "$(normalize_usb_serial_identity '44:1B:F6:6A:E8:44')"
+
 DEVICE_PORT_FILE="${tmp_dir}/device-port"
 DEVICE_PORT_NAME_FILE="${tmp_dir}/device-port-name"
 printf '%s\n' "$logging_port" > "$DEVICE_PORT_FILE"
@@ -110,6 +124,11 @@ if (( primary_rank <= logging_rank )); then
 	exit 1
 fi
 echo "PASS: re-enumeration prefers interface 00 (${primary_rank} > ${logging_rank})"
+
+esp_rom_rank="$(nrf52_candidate_identity_rank "$rom_port" "" "" \
+	441BF66AE844 pci-0000:00:14.0-usb-0:2)"
+expect_equal "ESP32 ROM matches the app serial despite punctuation and path change" \
+	"210" "$esp_rom_rank"
 
 nrf52_serial_port_access() { return 0; }
 mock_bash_calls=0
