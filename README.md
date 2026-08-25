@@ -35,6 +35,29 @@ cd meshfirmware
 
 </details>
 
+### nRF52 RAK board safety check
+
+`mcfirmware.sh` checks RAK3401 and RAK4631/WisMesh Tag firmware before any
+erase or DFU command. It compares identity strings embedded in the firmware
+payload with the node's reported board/model and stable USB identity. A
+matching pair continues automatically.
+
+A mismatch, ambiguous identity, or unknown RAK payload cancels by default. If
+the mismatch is intentional, the script displays a one-time token such as
+`rak3401-to-rak4631` (`firmware-to-connected-device`). Type that exact token at
+the prompt to continue. Enter or any other response cancels without erasing or
+flashing.
+
+For deliberate unattended use, pass only the exact token printed by the
+script:
+
+```bash
+MCFIRMWARE_BOARD_OVERRIDE=rak3401-to-rak4631 ./mcfirmware.sh
+```
+
+This override is intentionally specific to the detected firmware/device pair;
+`yes`, `force`, and a token for another pair are rejected.
+
 
 Linux Video
 -----
@@ -152,4 +175,3 @@ Run the script with the following syntax:
 
 *   \-h, --help  
     Display the help message and exit.
-

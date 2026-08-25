@@ -90,6 +90,7 @@ BASE_USER="${SUDO_USER:-$USER}"
 SUDO_KEEPALIVE_PID=""
 BOOTLOADER_PROBE_PORT=""
 BOOTLOADER_PROBE_ACTIVE=0
+NRF52_BOARD_GUARD_PASSED=0
 
 restore_port_after_bootloader_probe() {
 	local port="${BOOTLOADER_PROBE_PORT:-}"
@@ -1364,6 +1365,11 @@ run_nrf52_dfu_package_buttonless() {
 	local runtime_port=$2
 	local runtime_instance bootloader_port bootloader_instance candidate_link=""
 
+	if [[ "${NRF52_BOARD_GUARD_PASSED:-0}" -ne 1 ]]; then
+		echo "The nRF52 board safety check has not passed; refusing DFU." >&2
+		return 1
+	fi
+
 	[[ -r "$package_file" ]] || {
 		echo "nRF52 DFU package is not readable: $package_file" >&2
 		return 1
@@ -2607,57 +2613,298 @@ choose_erase_zip() {
   done
 }
 
+clean_node_info_field() {
+	local value="${1:-}"
+	value="$(printf '%s' "$value" | tr '\r' '\n' | sed -n '/./p' | tail -n1)"
+	value="$(printf '%s' "$value" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+	shopt -s nocasematch
+	case "$value" in
+		""|"unknown command"|"error"|"unsupported command")
+			value=""
+			;;
+	esac
+	shopt -u nocasematch
+	printf '%s' "$value"
+}
+
+format_node_info_summary() {
+	local label="$1" board="$2" version="$3" summary=""
+	summary="$label"
+	[[ -n "$board" ]] && summary+=" $board"
+	[[ -n "$version" ]] && summary+=" $version"
+	printf '%s' "$summary"
+}
+
+quick_node_info_cmd() {
+	local device="$1"
+	shift
+	SERIAL_RETRIES=1 \
+	SERIAL_RETRY_DELAY=0.02 \
+	SERIAL_TOTAL_TIMEOUT="${SERIAL_INFO_TOTAL_TIMEOUT:-1.2s}" \
+	SERIAL_IDLE_TIMEOUT="${SERIAL_INFO_IDLE_TIMEOUT:-0.35}" \
+	SERIAL_FIRST_CANDIDATE_ONLY=1 \
+		serial_cmd "$device" "$@"
+}
+
+read_board_with_retry() {
+	local device="$1"
+	local board=""
+	local attempt
+
+	for attempt in 1 2; do
+		board=$(clean_node_info_field "$(quick_node_info_cmd "${device}" "board")")
+		[[ -n "$board" ]] && break
+		sleep 0.1
+	done
+
+	printf '%s' "$board"
+}
+
+query_companion_board_model() {
+	local device="$1"
+	local total_timeout="${SERIAL_INFO_TOTAL_TIMEOUT:-1.2s}"
+	local idle_timeout="${SERIAL_INFO_IDLE_TIMEOUT:-0.35}"
+
+	[[ -e "$device" ]] || return 1
+	ensure_command socat || return 1
+	ensure_command perl || return 1
+
+	# The positional parameters and shell variables expand in the child shell.
+	# shellcheck disable=SC2016
+	timeout -s KILL "$total_timeout" \
+		bash -o pipefail -c '
+			device=$1
+			idle=$2
+			printf "\x3c\x02\x00\x16\x03" \
+				| socat -T "$idle" - "OPEN:${device},raw,echo=0,b115200" 2>/dev/null
+		' _ "$device" "$idle_timeout" \
+		| LC_ALL=C perl -0777 -ne '
+			my $buf = $_;
+			my $pos = 0;
+			while (($pos = index($buf, ">", $pos)) >= 0) {
+				last if $pos + 3 > length($buf);
+				my $len = unpack("v", substr($buf, $pos + 1, 2));
+				my $end = $pos + 3 + $len;
+				if ($len >= 60 && $len <= 300 && $end <= length($buf)) {
+					my $payload = substr($buf, $pos + 3, $len);
+					if (ord(substr($payload, 0, 1)) == 13) {
+						my $model = substr($payload, 20, 40);
+						$model =~ s/\x00.*//s;
+						$model =~ s/^\s+|\s+$//g;
+						print $model;
+						exit;
+					}
+				}
+				$pos++;
+			}
+		'
+}
+
+rak_board_family_from_text() {
+	local text="${1:-}"
+	local has_3401=0
+	local has_4631=0
+
+	if LC_ALL=C grep -Eqi 'rak[[:space:]_-]*3401' <<< "$text"; then
+		has_3401=1
+	fi
+	if LC_ALL=C grep -Eqi 'rak[[:space:]_-]*4631|wismesh[[:space:]_-]*tag' <<< "$text"; then
+		has_4631=1
+	fi
+
+	if (( has_3401 && has_4631 )); then
+		printf '%s' "ambiguous"
+	elif (( has_3401 )); then
+		printf '%s' "rak3401"
+	elif (( has_4631 )); then
+		printf '%s' "rak4631"
+	fi
+}
+
+rak_board_family_label() {
+	case "${1:-unknown}" in
+		rak3401) printf '%s' "RAK3401" ;;
+		rak4631) printf '%s' "RAK4631 / WisMesh Tag" ;;
+		ambiguous) printf '%s' "ambiguous RAK3401/RAK4631 identity" ;;
+		*) printf '%s' "unknown" ;;
+	esac
+}
+
+nrf52_firmware_rak_family() {
+	local firmware_file="$1"
+	local name_lc="${firmware_file,,}"
+	local identity_text=""
+	local identity_pattern='^(WisCore[ _-]+RAK[ _-]*(3401|4631)([ _-]+Board)?|RAK[[:space:]]+(3401|4631)|RAK(3401|4631)_OTA|RAK[[:space:]]+WisMesh[[:space:]]+Tag|WISMESHTAG_OTA)[[:space:]]*$'
+
+	[[ -r "$firmware_file" ]] || return 1
+	ensure_command strings binutils || return 1
+	if [[ "$name_lc" == *.zip ]]; then
+		ensure_command unzip || return 1
+		identity_text="$({
+			unzip -p -- "$firmware_file" 2>/dev/null \
+				| LC_ALL=C strings -a \
+				| LC_ALL=C grep -Eai "$identity_pattern" \
+				|| true
+		})"
+	else
+		identity_text="$({
+			LC_ALL=C strings -a -- "$firmware_file" 2>/dev/null \
+				| LC_ALL=C grep -Eai "$identity_pattern" \
+				|| true
+		})"
+	fi
+
+	rak_board_family_from_text "$identity_text"
+}
+
+nrf52_board_override_token() {
+	local firmware_family="${1:-unknown}"
+	local device_family="${2:-unknown}"
+
+	[[ -n "$firmware_family" ]] || firmware_family="unknown"
+	[[ -n "$device_family" ]] || device_family="unknown"
+	printf '%s-to-%s' "$firmware_family" "$device_family"
+}
+
+nrf52_confirm_board_override() {
+	local firmware_family="${1:-unknown}"
+	local device_family="${2:-unknown}"
+	local reason="${3:-Board identity could not be verified.}"
+	local tty="${MCFIRMWARE_BOARD_GUARD_TTY:-/dev/tty}"
+	local required_token configured_token answer
+
+	required_token="$(nrf52_board_override_token "$firmware_family" "$device_family")"
+	configured_token="${MCFIRMWARE_BOARD_OVERRIDE:-}"
+	configured_token="${configured_token,,}"
+
+	echo "nRF52 board safety check stopped automatic flashing." >&2
+	echo "  $reason" >&2
+	echo "  Firmware payload: $(rak_board_family_label "$firmware_family")" >&2
+	echo "  Connected device: $(rak_board_family_label "$device_family")" >&2
+	echo "  Safe default: cancel before erase or DFU." >&2
+
+	if [[ -n "$configured_token" ]]; then
+		if [[ "$configured_token" == "$required_token" ]]; then
+			echo "  Explicit board override accepted: $required_token" >&2
+			return 0
+		fi
+		echo "  MCFIRMWARE_BOARD_OVERRIDE did not match the required token." >&2
+		echo "  Required token: $required_token" >&2
+		return 1
+	fi
+
+	if [[ ! -r "$tty" || ! -w "$tty" ]]; then
+		echo "  No interactive terminal is available." >&2
+		echo "  To override deliberately, rerun with:" >&2
+		echo "    MCFIRMWARE_BOARD_OVERRIDE=$required_token ./mcfirmware.sh" >&2
+		return 1
+	fi
+
+	{
+		echo "To override this check once, type the exact token shown below."
+		echo "Anything else, including Enter, cancels."
+		printf 'Override token (%s): ' "$required_token"
+	} >"$tty"
+	IFS= read -r answer <"$tty" || answer=""
+	answer="${answer,,}"
+	if [[ "$answer" == "$required_token" ]]; then
+		echo "Explicit one-time board override accepted: $required_token" >&2
+		return 0
+	fi
+
+	echo "Board override was not confirmed; no erase or DFU command was run." >&2
+	return 1
+}
+
+nrf52_validate_rak_board_pair() {
+	local firmware_file="$1"
+	local device_port="$2"
+	local selected_device="${3:-}"
+	local embedded_family=""
+	local selection_family=""
+	local device_family=""
+	local board_family=""
+	local usb_family=""
+	local reported_board=""
+	local usb_identity=""
+
+	embedded_family="$(nrf52_firmware_rak_family "$firmware_file" || true)"
+	selection_family="$(rak_board_family_from_text "$selected_device ${firmware_file##*/}")"
+	reported_board="$(read_board_with_retry "$device_port" 2>/dev/null || true)"
+	if [[ -z "$reported_board" ]]; then
+		reported_board="$(query_companion_board_model "$device_port" 2>/dev/null || true)"
+	fi
+	usb_identity="$(udev_device_property "$device_port" ID_MODEL) \
+$(udev_device_property "$device_port" ID_SERIAL) \
+$(udev_device_property "$device_port" ID_SERIAL_SHORT)"
+	if [[ -s "${DEVICE_PORT_NAME_FILE:-}" ]]; then
+		usb_identity+=" $(<"$DEVICE_PORT_NAME_FILE")"
+	fi
+	board_family="$(rak_board_family_from_text "$reported_board")"
+	usb_family="$(rak_board_family_from_text "$usb_identity")"
+
+	if [[ -n "$board_family" && -n "$usb_family" && "$board_family" != "$usb_family" ]]; then
+		device_family="ambiguous"
+	else
+		device_family="${board_family:-$usb_family}"
+	fi
+
+	if [[ -n "$embedded_family" && -n "$selection_family" \
+		&& "$embedded_family" != "$selection_family" ]]; then
+		if nrf52_confirm_board_override "ambiguous" "${device_family:-unknown}" \
+			"The embedded firmware target conflicts with its selected device or filename."; then
+			return 0
+		fi
+		return 1
+	fi
+
+	if [[ -n "$embedded_family" && -n "$device_family" \
+		&& "$embedded_family" == "$device_family" \
+		&& "$embedded_family" != "ambiguous" ]]; then
+		echo "Board safety check: $(rak_board_family_label "$embedded_family") firmware matches the connected $(rak_board_family_label "$device_family")."
+		[[ -n "$reported_board" ]] && echo "  Node reports: $reported_board"
+		return 0
+	fi
+
+	if [[ -z "$embedded_family" && -z "$selection_family" && -z "$device_family" ]]; then
+		return 0
+	fi
+
+	if [[ -z "$embedded_family" && -n "$selection_family" ]]; then
+		if nrf52_confirm_board_override "$selection_family" "${device_family:-unknown}" \
+			"The filename suggests a RAK target, but the firmware payload does not prove it."; then
+			return 0
+		fi
+		return 1
+	fi
+
+	if [[ -z "$embedded_family" ]]; then
+		if nrf52_confirm_board_override "unknown" "${device_family:-unknown}" \
+			"The connected node is a protected RAK target, but the firmware payload target is unknown."; then
+			return 0
+		fi
+		return 1
+	fi
+
+	if [[ -z "$device_family" ]]; then
+		if nrf52_confirm_board_override "$embedded_family" "unknown" \
+			"The firmware is for a protected RAK target, but the connected board identity is unknown."; then
+			return 0
+		fi
+		return 1
+	fi
+
+	if nrf52_confirm_board_override "$embedded_family" "$device_family" \
+		"The firmware target does not match the connected board target."; then
+		return 0
+	fi
+	return 1
+}
+
 choose_serial() {
 	local detected_dev
-    local devs labels               # arrays that hold paths and friendly names
-    local choice
-
-	clean_node_info_field() {
-		local value="${1:-}"
-		value="$(printf '%s' "$value" | tr '\r' '\n' | sed -n '/./p' | tail -n1)"
-		value="$(printf '%s' "$value" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
-		shopt -s nocasematch
-		case "$value" in
-			""|"unknown command"|"error"|"unsupported command")
-				value=""
-				;;
-		esac
-		shopt -u nocasematch
-		printf '%s' "$value"
-	}
-
-	format_node_info_summary() {
-		local label="$1" board="$2" version="$3" summary=""
-		summary="$label"
-		[[ -n "$board" ]] && summary+=" $board"
-		[[ -n "$version" ]] && summary+=" $version"
-		printf '%s' "$summary"
-	}
-
-	quick_node_info_cmd() {
-		local device="$1"
-		shift
-		SERIAL_RETRIES=1 \
-		SERIAL_RETRY_DELAY=0.02 \
-		SERIAL_TOTAL_TIMEOUT="${SERIAL_INFO_TOTAL_TIMEOUT:-1.2s}" \
-		SERIAL_IDLE_TIMEOUT="${SERIAL_INFO_IDLE_TIMEOUT:-0.35}" \
-		SERIAL_FIRST_CANDIDATE_ONLY=1 \
-			serial_cmd "$device" "$@"
-	}
-
-	read_board_with_retry() {
-		local device="$1"
-		local board=""
-		local attempt
-
-		for attempt in 1 2; do
-			board=$(clean_node_info_field "$(quick_node_info_cmd "${device}" "board")")
-			[[ -n "$board" ]] && break
-			sleep 0.1
-		done
-
-		printf '%s' "$board"
-	}
+	local devs labels               # arrays that hold paths and friendly names
+	local choice
 
     scan() {                        # fill devs[] / labels[]
         local flash_link detected_path
@@ -4077,6 +4324,11 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 else
 	echo "nrf52 device"
 	echo "Downloaded firmware: $DOWNLOADED_FILE"
+	if ! nrf52_validate_rak_board_pair "$DOWNLOADED_FILE" "$DEVICE_PORT" "$DEVICE"; then
+		echo "Firmware selection was cancelled by the nRF52 board safety check." >&2
+		exit 1
+	fi
+	NRF52_BOARD_GUARD_PASSED=1
 
 	if [[ "$TYPE" == "flash-update" || "$TYPE" == "flash-wipe" ]]; then
 		ACTION="$TYPE"
