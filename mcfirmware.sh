@@ -2049,7 +2049,20 @@ pick_matching_device() {
 
 	# optional aliases
 	case "$usb_slug" in
-		*station_g2*) MATCH="UnitEng Station G2"; MATCH_IDX=31; return 0 ;;
+		*station_g2*)
+			for i in "${!_DEVICES[@]}"; do
+				if [[ "${_DEVICES[$i]}" == "UnitEng Station G2" ]]; then
+					MATCH="${_DEVICES[$i]}"; MATCH_IDX=$((i+1)); return 0
+				fi
+			done
+			;;
+		*heltec*wifi*lora*32*v4*)
+			for i in "${!_DEVICES[@]}"; do
+				if [[ "${_DEVICES[$i]}" == "Heltec v4" ]]; then
+					MATCH="${_DEVICES[$i]}"; MATCH_IDX=$((i+1)); return 0
+				fi
+			done
+			;;
 	esac
 
 	return 1
@@ -4116,10 +4129,14 @@ autodetect_device() {
 extract_name_from_firmware() {
   local f="$1"
   LC_ALL=C perl -0777 -ne '
-    if (/(?<![A-Za-z0-9])
-          ([A-Z][A-Za-z0-9]*(?:[ _-][A-Za-z0-9]+){0,3})
-          (?=[^A-Za-z0-9_]*Espressif[^A-Za-z0-9_]*Systems)/six) {
-      print "$1\n"; exit
+    # Arduino-ESP32 stores the USB product and manufacturer as adjacent
+    # NUL-terminated strings.  Match that boundary exactly: looking merely
+    # "near" Espressif Systems can select the tail of a parenthesized memory
+    # description (for example, "MB PSRAM") instead of the board name.
+    if (/([\x20-\x7e]{1,160})\x00+Espressif Systems\x00/s) {
+      my $name = $1;
+      $name =~ s/\s*\([^)]*(?:FLASH|PSRAM)[^)]*\)\s*$//i;
+      print "$name\n"; exit
     }
   ' "$f" 2>/dev/null
 }
@@ -4127,10 +4144,12 @@ extract_name_from_firmware() {
 # prints one line with fallback to .pio/libdeps/... segment
 print_fw_line() {
   local label="$1" file="$2" val
-  val="$(extract_name_from_firmware "$file")"
-  if [[ -z "$val" ]]; then
-    val="$(LC_ALL=C grep -aom1 -P '\.pio/libdeps/\K[^/\n]{1,100}' "$file" 2>/dev/null || true)"
-  fi
+  # The PlatformIO environment names the exact firmware target and therefore
+  # carries more information than the generic USB product (for example V4.3,
+  # Full Companion, and FEM-off). Use the USB product only for binaries that
+  # do not retain a PlatformIO path.
+  val="$(LC_ALL=C grep -aom1 -P '\.pio/libdeps/\K[^/\n]{1,100}' "$file" 2>/dev/null || true)"
+  [[ -z "$val" ]] && val="$(extract_name_from_firmware "$file")"
   printf '    %-20s %s\n' "$label" "${val:-unknown}"
 }
 
@@ -4143,8 +4162,8 @@ print_file_size_line() {
 # wrapper that returns just the detected name (same logic as print_fw_line)
 detect_device_from_fw() {
   local f="$1" v
-  v="$(extract_name_from_firmware "$f")"
-  [[ -z "$v" ]] && v="$(LC_ALL=C grep -aom1 -P '\.pio/libdeps/\K[^/\n]{1,100}' "$f" 2>/dev/null || true)"
+  v="$(LC_ALL=C grep -aom1 -P '\.pio/libdeps/\K[^/\n]{1,100}' "$f" 2>/dev/null || true)"
+  [[ -z "$v" ]] && v="$(extract_name_from_firmware "$f")"
   printf '%s\n' "${v:-unknown}"
 }
 
