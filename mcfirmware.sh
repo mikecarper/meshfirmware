@@ -3327,7 +3327,7 @@ configure_esptool_invocation() {
 	if [[ "$port" == /dev/* && "$before" != "usb-reset" && "$before" != "usb_reset" ]]; then
 		bootstrap="$(esptool_safe_serial_bootstrap)"
 		ESPTOOL_INVOKE_COMMAND=(
-			pipx run --quiet --spec esptool python -c "$bootstrap"
+			pipx run --spec esptool python -c "$bootstrap"
 		)
 	fi
 }

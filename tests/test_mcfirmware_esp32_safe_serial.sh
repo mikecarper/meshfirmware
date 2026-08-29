@@ -46,11 +46,15 @@ expect_equal "equals port option is parsed" \
 
 configure_esptool_invocation --port /dev/ttyACM4 --before no-reset read-mac
 expect_equal "local serial uses pipx" "pipx" "${ESPTOOL_INVOKE_COMMAND[0]}"
-expect_equal "local serial uses isolated esptool environment" \
-	"run --quiet --spec esptool python -c" "${ESPTOOL_INVOKE_COMMAND[*]:1:6}"
-[[ "${ESPTOOL_INVOKE_COMMAND[7]}" == *'port.rts = False'* \
-	&& "${ESPTOOL_INVOKE_COMMAND[7]}" == *'port.dtr = False'* \
-	&& "${ESPTOOL_INVOKE_COMMAND[7]}" == *'~termios.HUPCL'* ]] || {
+expect_equal "local serial uses old-pipx-compatible isolated esptool environment" \
+	"run --spec esptool python -c" "${ESPTOOL_INVOKE_COMMAND[*]:1:5}"
+[[ " ${ESPTOOL_INVOKE_COMMAND[*]} " != *' --quiet '* ]] || {
+	echo "FAIL: guarded invocation still uses unsupported pipx 1.1.0 --quiet" >&2
+	exit 1
+}
+[[ "${ESPTOOL_INVOKE_COMMAND[6]}" == *'port.rts = False'* \
+	&& "${ESPTOOL_INVOKE_COMMAND[6]}" == *'port.dtr = False'* \
+	&& "${ESPTOOL_INVOKE_COMMAND[6]}" == *'~termios.HUPCL'* ]] || {
 	echo "FAIL: local serial bootstrap lacks idle-line or HUPCL protection" >&2
 	exit 1
 }
