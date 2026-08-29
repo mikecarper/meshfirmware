@@ -225,6 +225,7 @@ KEYMIND_CASCADE_LOGGING_FALLBACK_URL="${KEYMIND_RAW_BASE_URL}/mesh-america/keymi
 VENDORLIST="elecrow|heltec|lilygo|seeed|seed|studio|rak|wireless|wisblock|wismesh|raspberry|pi|pico|waveshare|promicro|uniteng|sensecap|wio|xiao"
 RADIOLIST="sx1262|sx126x|sx1276|sx127x"
 NORESET="no-reset"
+USBRESET="usb-reset"
 READMAC="read-mac"
 READFLASH="read-flash"
 WRITEFLASH="write-flash"
@@ -3206,6 +3207,7 @@ esptool_set_variables() {
 	if [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 5 )); then
 	  # X: esptool >= 5
 	  NORESET="no-reset"
+	  USBRESET="usb-reset"
 	  READMAC="read-mac"
 	  READFLASH="read-flash"
 	  WRITEFLASH="write-flash"
@@ -3214,6 +3216,7 @@ esptool_set_variables() {
 	  WATCHDOGRESET="watchdog-reset"
 	else
 	  NORESET="no_reset"
+	  USBRESET="usb_reset"
 	  READMAC="read_mac"
 	  READFLASH="read_flash"
 	  WRITEFLASH="write_flash"
@@ -3628,8 +3631,8 @@ raw_esptool_mac_probe() {
 prepare_esp32_flash_session() {
 	local port="$1"
 	local device="$2"
-	local preferred_port selected_by_id expected_serial expected_path_stem
-	local original_instance bootloader_port
+	local preferred_port selected_by_id selected_live_port expected_serial expected_path_stem reset_port
+	local original_instance bootloader_port candidate_port
 
 	preferred_port="$(preferred_flash_serial_port "$port")"
 	if [[ "$preferred_port" != "$port" ]]; then
@@ -3651,11 +3654,13 @@ prepare_esp32_flash_session() {
 	ESP32_FLASH_EXPECTED_PATH_STEM="$expected_path_stem"
 
 	# Native-USB ESP32 applications, including both single-CDC firmware and Full
-	# Companion's interface 00/02 pair, return as the ESP32-S3 ROM USB-JTAG port
-	# after a 1200-baud touch. The ROM often has a different tty number, product
-	# name, and serial punctuation. First accept an already-running ROM without
-	# touching it; otherwise follow the selected physical USB identity across
-	# that re-enumeration instead of handing esptool a stale application tty.
+	# Companion's interface 00/02 pair, use esptool's USB-JTAG reset sequence to
+	# enter the ROM. Some boards, including Heltec V4, ignore the nRF52-style
+	# 1200-baud touch while --before=usb-reset works on the existing application
+	# port. Prefer the selected by-id link so a tty-number change cannot redirect
+	# the reset to another board. The ROM may retain the same tty or re-enumerate
+	# with a different product name and serial punctuation; in either case, match
+	# the captured physical USB identity before allowing any erase or write.
 	if esp32_port_uses_native_usb "$port"; then
 		if raw_esptool_mac_probe --port "$port" --before "$NORESET" \
 			--after "$NORESET" --baud 115200 "$READMAC"; then
@@ -3664,16 +3669,55 @@ prepare_esp32_flash_session() {
 			echo
 			return 0
 		fi
-		echo "Setting device ${device} on ${port} into its ESP32 ROM bootloader via the primary CDC port."
-		if ! trigger_nrf52_1200_touch "$port"; then
-			echo "The primary CDC touch failed; checking for a service holding $port."
-			stop_serial_locking_services "$port" || true
-			trigger_nrf52_1200_touch "$port"
+
+		reset_port="${selected_by_id:-$port}"
+		if [[ -n "$selected_by_id" ]]; then
+			selected_live_port="$(readlink -f "$selected_by_id" 2>/dev/null || true)"
+			if [[ "$selected_live_port" != "$port" ]]; then
+				echo "The selected ESP32 by-id link no longer resolves to $port; refusing to reset another USB device." >&2
+				return 1
+			fi
 		fi
-		if ! bootloader_port="$(wait_for_nrf52_bootloader_port "$port" \
-			"$selected_by_id" "$expected_serial" "$expected_path_stem" \
-			"$original_instance" "ESP32 ROM serial port")"; then
-			return 1
+		echo "Setting device ${device} on ${port} into its ESP32 ROM bootloader with an identity-safe USB reset."
+		if raw_esptool_mac_probe --port "$reset_port" --before "$USBRESET" \
+			--after "$NORESET" --baud 115200 "$READMAC"; then
+			# The successful esptool exchange proves that a reset occurred. Pass an
+			# empty original instance so a V4 that keeps the same tty is accepted,
+			# while the ordinary identity ranking still rejects a different board.
+			if ! bootloader_port="$(wait_for_nrf52_bootloader_port "$port" \
+				"$selected_by_id" "$expected_serial" "$expected_path_stem" \
+				"" "ESP32 ROM serial port")"; then
+				return 1
+			fi
+		else
+			echo "The ESP32 USB reset did not answer; falling back to one 1200-baud touch on the same USB identity."
+			# A timed-out USB-reset command may nevertheless have entered ROM. Find
+			# only the captured identity and probe it before touching the port.
+			candidate_port="$(find_reenumerated_nrf52_port "$port" \
+				"$selected_by_id" "$expected_serial" "$expected_path_stem" \
+				"$original_instance" 2>/dev/null || true)"
+			if [[ -n "$candidate_port" ]] \
+				&& raw_esptool_mac_probe --port "$candidate_port" --before "$NORESET" \
+					--after "$NORESET" --baud 115200 "$READMAC"; then
+				bootloader_port="$candidate_port"
+			else
+				[[ -n "$candidate_port" ]] || {
+					echo "The selected ESP32 USB identity disappeared after the reset attempt; refusing to touch another serial port." >&2
+					return 1
+				}
+				port="$candidate_port"
+				original_instance="$(nrf52_port_instance "$port")"
+				if ! trigger_nrf52_1200_touch "$port"; then
+					echo "The primary CDC touch failed; checking for a service holding $port."
+					stop_serial_locking_services "$port" || true
+					trigger_nrf52_1200_touch "$port"
+				fi
+				if ! bootloader_port="$(wait_for_nrf52_bootloader_port "$port" \
+					"$selected_by_id" "$expected_serial" "$expected_path_stem" \
+					"$original_instance" "ESP32 ROM serial port")"; then
+					return 1
+				fi
+			fi
 		fi
 		echo "Matched ESP32 ROM port: $bootloader_port"
 		if ! raw_esptool_mac_probe --port "$bootloader_port" \

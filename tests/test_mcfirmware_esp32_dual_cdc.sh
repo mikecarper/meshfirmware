@@ -34,12 +34,19 @@ logging_port="${tmp_dir}/ttyACM5"
 primary_port="${tmp_dir}/ttyACM4"
 rom_port="${tmp_dir}/ttyACM6"
 touch "$logging_port" "$primary_port" "$rom_port"
+by_id_dir="${tmp_dir}/by-id"
+mkdir -p "$by_id_dir"
+primary_link="${by_id_dir}/mock-ttyACM4"
+rom_link="${by_id_dir}/mock-ttyACM6"
+ln -s "$primary_port" "$primary_link"
+ln -s "$rom_port" "$rom_link"
 
 DEVICE_PORT_FILE="${tmp_dir}/device-port"
 DEVICE_PORT_NAME_FILE="${tmp_dir}/device-port-name"
 DOWNLOAD_DIR="$tmp_dir"
 ESPTOOL_CMD="esptool"
 NORESET="no-reset"
+USBRESET="usb-reset"
 READMAC="read-mac"
 BOOTLOADER_PROBE_PORT=""
 BOOTLOADER_PROBE_ACTIVE=0
@@ -57,7 +64,11 @@ save_selected_serial_port() {
 }
 
 serial_by_id_link_for_port() {
-	printf '/dev/serial/by-id/mock-%s\n' "$(basename "$1")"
+	case "$1" in
+		"$primary_port") printf '%s\n' "$primary_link" ;;
+		"$rom_port") printf '%s\n' "$rom_link" ;;
+		*) return 1 ;;
+	esac
 }
 
 udev_device_property() {
@@ -78,24 +89,46 @@ serial_port_has_secondary_cdc() { [[ "$1" == "$primary_port" ]]; }
 esp32_port_uses_native_usb() { [[ "$1" == "$primary_port" || "$1" == "$rom_port" ]]; }
 
 touched_port=""
+rom_ready=0
 trigger_nrf52_1200_touch() {
 	touched_port="$1"
+	rom_ready=1
 }
 
+expected_rom_port="$primary_port"
+wait_original_instance_file="${tmp_dir}/wait-original-instance"
 wait_for_nrf52_bootloader_port() {
-	printf '%s\n' "$rom_port"
+	printf '%s' "$5" >"$wait_original_instance_file"
+	printf '%s\n' "$expected_rom_port"
+}
+
+find_reenumerated_nrf52_port() {
+	printf '%s\n' "$primary_port"
 }
 
 probed_port=""
+usb_reset_invocation=""
+usb_reset_succeeds=1
 raw_esptool_mac_probe() {
-	local previous=""
+	local previous="" before=""
 	for arg in "$@"; do
 		if [[ "$previous" == "--port" ]]; then
 			probed_port="$arg"
 		fi
+		if [[ "$previous" == "--before" ]]; then
+			before="$arg"
+		fi
 		previous="$arg"
 	done
-	[[ "$probed_port" == "$rom_port" ]]
+	if [[ "$before" == "$USBRESET" ]]; then
+		usb_reset_invocation="$*"
+		if (( usb_reset_succeeds )); then
+			rom_ready=1
+			return 0
+		fi
+		return 1
+	fi
+	(( rom_ready )) && [[ "$probed_port" == "$expected_rom_port" ]]
 }
 
 stop_serial_locking_services() { return 1; }
@@ -103,20 +136,29 @@ probe_esptool_mac() { return 1; }
 
 prepare_esp32_flash_session "$logging_port" "Heltec V4"
 
-[[ "$touched_port" == "$primary_port" ]] || {
-	echo "FAIL: ESP32 touch used '$touched_port' instead of primary '$primary_port'" >&2
+expected_reset="--port $primary_link --before usb-reset --after no-reset --baud 115200 read-mac"
+[[ "$usb_reset_invocation" == "$expected_reset" ]] || {
+	echo "FAIL: ESP32 USB reset was '$usb_reset_invocation'" >&2
 	exit 1
 }
-[[ "$probed_port" == "$rom_port" ]] || {
-	echo "FAIL: ESP32 ROM probe used '$probed_port' instead of '$rom_port'" >&2
+[[ -z "$touched_port" ]] || {
+	echo "FAIL: successful ESP32 USB reset was followed by a 1200-baud touch" >&2
 	exit 1
 }
-[[ "$DEVICE_PORT" == "$rom_port" && "$(<"$DEVICE_PORT_FILE")" == "$rom_port" ]] || {
-	echo "FAIL: selected ESP32 port was not updated after re-enumeration" >&2
+[[ "$probed_port" == "$primary_port" ]] || {
+	echo "FAIL: same-tty ESP32 ROM probe used '$probed_port' instead of '$primary_port'" >&2
 	exit 1
 }
-[[ "$BOOTLOADER_PROBE_PORT" == "$rom_port" && "$BOOTLOADER_PROBE_ACTIVE" -eq 1 ]] || {
+[[ "$DEVICE_PORT" == "$primary_port" && "$(<"$DEVICE_PORT_FILE")" == "$primary_port" ]] || {
+	echo "FAIL: selected ESP32 port changed after a same-tty USB reset" >&2
+	exit 1
+}
+[[ "$BOOTLOADER_PROBE_PORT" == "$primary_port" && "$BOOTLOADER_PROBE_ACTIVE" -eq 1 ]] || {
 	echo "FAIL: ESP32 bootloader cleanup identity was not updated" >&2
+	exit 1
+}
+[[ ! -s "$wait_original_instance_file" ]] || {
+	echo "FAIL: proven ESP32 USB reset still required a tty instance change" >&2
 	exit 1
 }
 [[ ! -e "${DOWNLOAD_DIR}/CURRENT.BAK" ]] || {
@@ -124,7 +166,35 @@ prepare_esp32_flash_session "$logging_port" "Heltec V4"
 	exit 1
 }
 
-echo "PASS: ESP32 dual CDC flashing follows interface 00 into the ROM tty"
+echo "PASS: ESP32 native USB reset uses the selected interface-00 by-id identity"
+
+# If USB reset is unavailable or does not answer, retain the guarded legacy
+# touch as a fallback, but only after matching the same physical USB identity.
+DEVICE_PORT="$logging_port"
+BOOTLOADER_PROBE_PORT=""
+BOOTLOADER_PROBE_ACTIVE=0
+touched_port=""
+probed_port=""
+usb_reset_succeeds=0
+expected_rom_port="$rom_port"
+rom_ready=0
+touch "${DOWNLOAD_DIR}/CURRENT.BAK"
+
+prepare_esp32_flash_session "$logging_port" "Heltec V4"
+
+[[ "$touched_port" == "$primary_port" ]] || {
+	echo "FAIL: ESP32 fallback touch used '$touched_port' instead of primary '$primary_port'" >&2
+	exit 1
+}
+[[ "$probed_port" == "$rom_port" ]] || {
+	echo "FAIL: fallback ESP32 ROM probe used '$probed_port' instead of '$rom_port'" >&2
+	exit 1
+}
+[[ "$DEVICE_PORT" == "$rom_port" && "$(<"$DEVICE_PORT_FILE")" == "$rom_port" ]] || {
+	echo "FAIL: fallback ESP32 port was not updated after re-enumeration" >&2
+	exit 1
+}
+echo "PASS: ESP32 native USB reset safely falls back to the matched primary CDC port"
 
 esp32_port_is_rom_usb_jtag() { [[ "$1" == "$rom_port" ]]; }
 finish_invocation=""
