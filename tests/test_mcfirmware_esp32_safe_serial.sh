@@ -56,6 +56,16 @@ expect_equal "local serial uses isolated esptool environment" \
 }
 echo "PASS: local serial bootstrap contains idle-line and HUPCL protection"
 
+configure_esptool_invocation --port /dev/serial/by-id/heltec-v4 \
+	--before usb-reset --after no-reset read-mac
+expect_equal "native USB reset lets esptool own its control-line sequence" \
+	"pipx run esptool" "${ESPTOOL_INVOKE_COMMAND[*]}"
+
+configure_esptool_invocation --port=/dev/serial/by-id/heltec-v4 \
+	--before=usb_reset --after=no_reset read_mac
+expect_equal "esptool 4 native USB reset also bypasses the idle-line wrapper" \
+	"pipx run esptool" "${ESPTOOL_INVOKE_COMMAND[*]}"
+
 configure_esptool_invocation image-info firmware.bin
 expect_equal "non-serial command keeps ordinary runner" \
 	"pipx run esptool" "${ESPTOOL_INVOKE_COMMAND[*]}"

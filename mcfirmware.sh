@@ -3304,14 +3304,27 @@ esptool_port_argument() {
 }
 
 configure_esptool_invocation() {
-	local port="" bootstrap=""
+	local port="" before="" previous="" arg bootstrap=""
 	port="$(esptool_port_argument "$@" 2>/dev/null || true)"
 	ESPTOOL_INVOKE_COMMAND=(pipx run esptool)
+	for arg in "$@"; do
+		if [[ "$previous" == "--before" ]]; then
+			before="$arg"
+		fi
+		case "$arg" in
+			--before=*) before="${arg#--before=}" ;;
+		esac
+		previous="$arg"
+	done
 
 	# Image inspection and version checks have no serial port and need no guard.
 	# Restrict the bootstrap to local device paths so socket/RFC2217 behavior is
-	# unchanged.
-	if [[ "$port" == /dev/* ]]; then
+	# unchanged. An explicit ESP32 USB-JTAG reset is the one intentional
+	# exception: esptool must own every DTR/RTS transition across its internal
+	# close/reopen retry. The bootstrap forces idle lines before every reopen and
+	# prevents the V4 USB reset sequence from completing. The caller captures and
+	# verifies the selected by-id USB identity before and after this operation.
+	if [[ "$port" == /dev/* && "$before" != "usb-reset" && "$before" != "usb_reset" ]]; then
 		bootstrap="$(esptool_safe_serial_bootstrap)"
 		ESPTOOL_INVOKE_COMMAND=(
 			pipx run --quiet --spec esptool python -c "$bootstrap"
