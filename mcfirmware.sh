@@ -229,6 +229,7 @@ NORESET="no-reset"
 DEFAULTRESET="default-reset"
 USBRESET="usb-reset"
 ESP32_OPERATION_BEFORE="$NORESET"
+ESP32_SESSION_IS_S3=0
 READMAC="read-mac"
 READFLASH="read-flash"
 WRITEFLASH="write-flash"
@@ -3644,13 +3645,26 @@ run_esp32_session_esptool() {
 		--before "${ESP32_OPERATION_BEFORE:-$NORESET}" "$@"
 }
 
+record_esp32_chip_from_esptool_output() {
+	local output=$1
+	if grep -qiE '(^|[^[:alnum:]])ESP32[-_ ]?S3([^[:alnum:]]|$)' <<<"$output"; then
+		ESP32_SESSION_IS_S3=1
+	fi
+}
+
+esp32_probe_output_has_mac() {
+	local output=$1
+	record_esp32_chip_from_esptool_output "$output"
+	grep -qi -m1 'MAC' <<<"$output"
+}
+
 raw_esptool_mac_probe() {
 	local output
 	if ! output="$(invoke_esptool_timeout "${ESP32_PROBE_TIMEOUT_SECONDS:-8}s" \
 		"$@" 2>&1)"; then
 		return 1
 	fi
-	grep -qi -m1 'MAC' <<<"$output"
+	esp32_probe_output_has_mac "$output"
 }
 
 prepare_esp32_flash_session() {
@@ -3662,6 +3676,7 @@ prepare_esp32_flash_session() {
 	# Native USB remains on the identity-verified ROM port, while an ordinary
 	# UART bridge may need a fresh DTR/RTS bootloader reset for every command.
 	ESP32_OPERATION_BEFORE="$NORESET"
+	ESP32_SESSION_IS_S3=0
 	preferred_port="$(preferred_flash_serial_port "$port")"
 	if [[ "$preferred_port" != "$port" ]]; then
 		echo "Using primary Companion/flashing port $preferred_port instead of secondary logging port $port."
@@ -3789,24 +3804,43 @@ prepare_esp32_flash_session() {
 	return 1
 }
 
+esp32_write_after_mode() {
+	local port=$1
+	if [[ "${ESP32_SESSION_IS_S3:-0}" -eq 1 ]] || esp32_port_is_rom_usb_jtag "$port"; then
+		printf '%s\n' "$NORESET"
+	else
+		printf '%s\n' "$HARDRESET"
+	fi
+}
+
 finish_esp32_flash_session() {
 	local port="${1:-${DEVICE_PORT:-}}"
-	local rom_instance runtime_port
+	local rom_instance="" runtime_port="" native_usb=0
 
 	[[ -n "$port" && -e "$port" ]] || return 0
-	if ! esp32_port_is_rom_usb_jtag "$port"; then
+	if esp32_port_is_rom_usb_jtag "$port"; then
+		native_usb=1
+		rom_instance="$(nrf52_port_instance "$port")"
+	fi
+
+	if [[ "${ESP32_SESSION_IS_S3:-0}" -eq 1 ]]; then
+		echo "ESP32-S3 operation complete; exiting the stub with a watchdog reset."
+		if ! run_esp32_session_esptool "$port" --after "$WATCHDOGRESET" run; then
+			echo "Warning: the ESP32-S3 watchdog run/reset failed; press RESET once to start the application." >&2
+			return 1
+		fi
+	elif (( native_usb )); then
+		echo "ESP32 native USB ROM port is still active; safely hard-resetting into the application."
+		if ! invoke_esptool_timeout "${ESP32_PROBE_TIMEOUT_SECONDS:-12}s" \
+			--port "$port" --before "$NORESET" --after "$HARDRESET" "$READMAC"; then
+			echo "Warning: the ESP32 native USB safe hard reset failed; press RESET once to start the application." >&2
+			return 1
+		fi
+	else
 		return 0
 	fi
 
-	rom_instance="$(nrf52_port_instance "$port")"
-	echo "ESP32-S3 ROM port is still active; safely hard-resetting into the application."
-	if ! invoke_esptool_timeout "${ESP32_PROBE_TIMEOUT_SECONDS:-12}s" \
-		--port "$port" --before "$NORESET" --after "$HARDRESET" "$READMAC"; then
-		echo "Warning: the ESP32-S3 safe hard reset failed; press RESET once to start the application." >&2
-		return 1
-	fi
-
-	if runtime_port="$(wait_for_nrf52_bootloader_port "$port" \
+	if (( native_usb )) && runtime_port="$(wait_for_nrf52_bootloader_port "$port" \
 		"${ESP32_FLASH_SELECTED_BY_ID:-}" \
 		"${ESP32_FLASH_EXPECTED_SERIAL:-}" \
 		"${ESP32_FLASH_EXPECTED_PATH_STEM:-}" "$rom_instance" \
@@ -3899,7 +3933,7 @@ probe_esptool_mac() {
 	done
 
 	if output=$(invoke_esptool "$@" 2>&1); then
-		grep -qi -m1 'MAC' <<<"$output"
+		esp32_probe_output_has_mac "$output"
 		return $?
 	else
 		status=$?
@@ -3911,7 +3945,7 @@ probe_esptool_mac() {
 			return "$status"
 		fi
 		if retry_output=$(invoke_esptool "$@" 2>&1); then
-			grep -qi -m1 'MAC' <<<"$retry_output"
+			esp32_probe_output_has_mac "$retry_output"
 			return $?
 		else
 			status=$?
@@ -3929,7 +3963,7 @@ probe_esptool_mac() {
 			sudo chmod a+rw "$port"
 		fi
 		if retry_output=$(invoke_esptool "$@" 2>&1); then
-			grep -qi -m1 'MAC' <<<"$retry_output"
+			esp32_probe_output_has_mac "$retry_output"
 			return $?
 		else
 			status=$?
@@ -3941,14 +3975,14 @@ probe_esptool_mac() {
 	if [[ -n "$port" ]] && esptool_output_needs_reset "$output"; then
 		if auto_reset_serial_port "$port"; then
 			if retry_output=$(invoke_esptool "$@" 2>&1); then
-				grep -qi -m1 'MAC' <<<"$retry_output"
+				esp32_probe_output_has_mac "$retry_output"
 				return $?
 			else
 				status=$?
 			fi
 			if manual_reboot_choice "$port" "ESP32 MAC probe"; then
 				if retry_output=$(invoke_esptool "$@" 2>&1); then
-					grep -qi -m1 'MAC' <<<"$retry_output"
+					esp32_probe_output_has_mac "$retry_output"
 					return $?
 				else
 					status=$?
@@ -4165,6 +4199,7 @@ autodetect_device() {
 	local ESPTOOL_CMD=""
 	get_espcmd
 	ESP32_OPERATION_BEFORE="$NORESET"
+	ESP32_SESSION_IS_S3=0
 	vendor_id="$(udev_device_property "$DEVICE_PORT" ID_VENDOR_ID)"
 	if [[ "${vendor_id,,}" == "303a" ]]; then
 		if prepare_esp32_flash_session "$DEVICE_PORT" "ESP32 autodetect"; then
@@ -4188,7 +4223,8 @@ autodetect_device() {
 			0x10000 0x70000 "$DOWNLOAD_DIR/CURRENT.BAK"
 
 		AUTODETECT_DEVICE=$( detect_device_from_fw "$DOWNLOAD_DIR/CURRENT.BAK" )
-		if esp32_port_is_rom_usb_jtag "$DEVICE_PORT"; then
+		if [[ "${ESP32_SESSION_IS_S3:-0}" -eq 1 ]] \
+			|| esp32_port_is_rom_usb_jtag "$DEVICE_PORT"; then
 			finish_esp32_flash_session "$DEVICE_PORT"
 		else
 			invoke_esptool_timeout "${ESP32_PROBE_TIMEOUT_SECONDS:-12}s" \
@@ -4399,12 +4435,9 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 		run_esp32_session_esptool "${DEVICE_PORT}" \
 			--after "$NORESET" --baud 115200 "$ERASEFLASH"
 		sleep 1
-		ESP32_WRITE_AFTER="$HARDRESET"
-		if esp32_port_is_rom_usb_jtag "$DEVICE_PORT"; then
-			# Keep the known ROM instance available until the guarded close/reset
-			# path can release DTR/RTS safely and follow runtime re-enumeration.
-			ESP32_WRITE_AFTER="$NORESET"
-		fi
+		# S3 uses an explicit watchdog run/reset after the verified write. Native
+		# USB also keeps the known ROM instance until its guarded finish step.
+		ESP32_WRITE_AFTER="$(esp32_write_after_mode "$DEVICE_PORT")"
 		run_esp32_session_esptool "${DEVICE_PORT}" \
 			--after "$ESP32_WRITE_AFTER" --baud 115200 "$WRITEFLASH" \
 			0x0000 "${DOWNLOADED_FILE}"
@@ -4434,10 +4467,7 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 		for flash_offset in "${ESP32_UPDATE_OFFSETS[@]}"; do
 			ESP32_WRITE_ARGS+=("$flash_offset" "${DOWNLOADED_FILE}")
 		done
-		ESP32_WRITE_AFTER="$HARDRESET"
-		if esp32_port_is_rom_usb_jtag "$DEVICE_PORT"; then
-			ESP32_WRITE_AFTER="$NORESET"
-		fi
+		ESP32_WRITE_AFTER="$(esp32_write_after_mode "$DEVICE_PORT")"
 		printf '%s --port %s --before %s --after %s --baud 115200 %s' \
 			"$ESPTOOL_CMD" "$DEVICE_PORT" "$ESP32_OPERATION_BEFORE" "$ESP32_WRITE_AFTER" "$WRITEFLASH"
 		for ((i=0; i<${#ESP32_WRITE_ARGS[@]}; i+=2)); do
