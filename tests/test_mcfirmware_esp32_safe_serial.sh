@@ -124,9 +124,9 @@ if rg -n 'pipx run esptool .*--port|pipx run esptool --port' "$script_path" >/de
 fi
 echo "PASS: device esptool calls do not bypass the guarded invocation"
 
-if rg -n 'run_esptool --port "\$port" --after "\$NORESET".*"\$READFLASH"|run_esptool --port "\$\{DEVICE_PORT\}" --after' \
+if rg -n 'run_esptool --port "\$port" --before "\$NORESET"|run_esptool --port "\$\{DEVICE_PORT\}" --before "\$NORESET"|run_esptool --port "\$port" --after "\$NORESET".*"\$READFLASH"|run_esptool --port "\$\{DEVICE_PORT\}" --after' \
 	"$script_path" >/dev/null; then
-	echo "FAIL: a prepared ESP32 ROM operation can still request an implicit reset" >&2
+	echo "FAIL: a prepared ESP32 operation bypasses the session reset wrapper" >&2
 	exit 1
 fi
-echo "PASS: prepared ESP32 reads, erases, and writes explicitly use --before no-reset"
+echo "PASS: prepared ESP32 reads, erases, and writes use the session reset wrapper"

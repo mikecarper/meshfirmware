@@ -96,6 +96,7 @@ restore_port_after_bootloader_probe() {
 	local port="${BOOTLOADER_PROBE_PORT:-}"
 	local hard_reset="${HARDRESET:-hard-reset}"
 	local no_reset="${NORESET:-no-reset}"
+	local operation_before="${ESP32_OPERATION_BEFORE:-$no_reset}"
 	local read_mac="${READMAC:-read-mac}"
 	local watchdog_reset="${WATCHDOGRESET:-watchdog-reset}"
 
@@ -103,9 +104,9 @@ restore_port_after_bootloader_probe() {
 	[[ -n "$port" ]] || return 0
 
 	echo "Attempting to return ${port} to normal runtime mode..." >/dev/tty
-	if ! invoke_esptool_timeout 8s --port "$port" --before "$no_reset" \
+	if ! invoke_esptool_timeout 8s --port "$port" --before "$operation_before" \
 		--after "$hard_reset" "$read_mac" >/dev/null 2>&1; then
-		invoke_esptool_timeout 8s --port "$port" --before "$no_reset" \
+		invoke_esptool_timeout 8s --port "$port" --before "$operation_before" \
 			--after "$watchdog_reset" run >/dev/null 2>&1 || true
 	fi
 	BOOTLOADER_PROBE_ACTIVE=0
@@ -227,6 +228,7 @@ RADIOLIST="sx1262|sx126x|sx1276|sx127x"
 NORESET="no-reset"
 DEFAULTRESET="default-reset"
 USBRESET="usb-reset"
+ESP32_OPERATION_BEFORE="$NORESET"
 READMAC="read-mac"
 READFLASH="read-flash"
 WRITEFLASH="write-flash"
@@ -3635,6 +3637,13 @@ run_esptool() {
 	return "$status"
 }
 
+run_esp32_session_esptool() {
+	local port=$1
+	shift
+	run_esptool --port "$port" \
+		--before "${ESP32_OPERATION_BEFORE:-$NORESET}" "$@"
+}
+
 raw_esptool_mac_probe() {
 	local output
 	if ! output="$(invoke_esptool_timeout "${ESP32_PROBE_TIMEOUT_SECONDS:-8}s" \
@@ -3650,6 +3659,9 @@ prepare_esp32_flash_session() {
 	local preferred_port selected_by_id selected_live_port expected_serial expected_path_stem reset_port
 	local original_instance bootloader_port candidate_port
 
+	# Native USB remains on the identity-verified ROM port, while an ordinary
+	# UART bridge may need a fresh DTR/RTS bootloader reset for every command.
+	ESP32_OPERATION_BEFORE="$NORESET"
 	preferred_port="$(preferred_flash_serial_port "$port")"
 	if [[ "$preferred_port" != "$port" ]]; then
 		echo "Using primary Companion/flashing port $preferred_port instead of secondary logging port $port."
@@ -3765,6 +3777,7 @@ prepare_esp32_flash_session() {
 	echo "$ESPTOOL_CMD --port ${port} --before $DEFAULTRESET --after $NORESET --baud 115200 $READMAC"
 	if probe_esptool_mac --port "$port" --before "$DEFAULTRESET" \
 		--after "$NORESET" --baud 115200 "$READMAC"; then
+		ESP32_OPERATION_BEFORE="$DEFAULTRESET"
 		echo "ESP chip responded; skipping existing firmware backup."
 		rm -f "$DOWNLOAD_DIR/CURRENT.BAK"
 		echo
@@ -3988,7 +4001,7 @@ read_esp32_app_partitions() {
 	local partition_file
 
 	partition_file="$(mktemp)"
-	if run_esptool --port "$port" --before "$NORESET" --after "$NORESET" \
+	if run_esp32_session_esptool "$port" --after "$NORESET" \
 		--baud 921600 "$READFLASH" 0x8000 0x1000 "$partition_file" >/dev/null; then
 		parse_esp32_app_partitions "$partition_file"
 	else
@@ -4020,7 +4033,7 @@ esp32_device_image_present_at_offset() {
 	local probe_file magic segs mode segs_dec mode_dec
 
 	probe_file="$(mktemp)"
-	if ! run_esptool --port "$port" --before "$NORESET" --after "$NORESET" \
+	if ! run_esp32_session_esptool "$port" --after "$NORESET" \
 		--baud 921600 "$READFLASH" "$offset" 4 "$probe_file" >/dev/null; then
 		rm -f "$probe_file"
 		return 1
@@ -4151,14 +4164,16 @@ autodetect_device() {
 	# --before=no-reset.
 	local ESPTOOL_CMD=""
 	get_espcmd
+	ESP32_OPERATION_BEFORE="$NORESET"
 	vendor_id="$(udev_device_property "$DEVICE_PORT" ID_VENDOR_ID)"
 	if [[ "${vendor_id,,}" == "303a" ]]; then
 		if prepare_esp32_flash_session "$DEVICE_PORT" "ESP32 autodetect"; then
 			esp32_ready=1
 		fi
-	elif raw_esptool_mac_probe --port "$DEVICE_PORT" \
+	elif raw_esptool_mac_probe --port "$DEVICE_PORT" --before "$DEFAULTRESET" \
 		--after "$NORESET" --baud 115200 "$READMAC"; then
-		# UART bridges retain the tty while esptool's intentional reset enters ROM.
+		# UART bridges keep the same tty but may need this reset before every command.
+		ESP32_OPERATION_BEFORE="$DEFAULTRESET"
 		BOOTLOADER_PROBE_PORT="$DEVICE_PORT"
 		BOOTLOADER_PROBE_ACTIVE=1
 		esp32_ready=1
@@ -4168,7 +4183,7 @@ autodetect_device() {
 
 	if (( esp32_ready )); then
 		echo "ESP chip responded; getting existing firmware"
-		run_esptool --port "$DEVICE_PORT" --before "$NORESET" \
+		run_esp32_session_esptool "$DEVICE_PORT" \
 			--after "$NORESET" --baud 921600 "$READFLASH" \
 			0x10000 0x70000 "$DOWNLOAD_DIR/CURRENT.BAK"
 
@@ -4177,7 +4192,7 @@ autodetect_device() {
 			finish_esp32_flash_session "$DEVICE_PORT"
 		else
 			invoke_esptool_timeout "${ESP32_PROBE_TIMEOUT_SECONDS:-12}s" \
-				--port "$DEVICE_PORT" --before "$NORESET" \
+				--port "$DEVICE_PORT" --before "$ESP32_OPERATION_BEFORE" \
 				--after "$HARDRESET" "$READMAC" >/dev/null
 		fi
 		BOOTLOADER_PROBE_ACTIVE=0
@@ -4371,16 +4386,17 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 	
 	if [[ "$FW_LAYOUT" == "merged" || ( "$FW_LAYOUT" != "app-only" && "$TYPE" == "flash-wipe" ) ]]; then
 
-		echo "  identity-safe serial open and application-to-ROM port handoff"
-		echo "  $ESPTOOL_CMD --port <matching-ROM-port> --before $NORESET --after $NORESET --baud 115200 $ERASEFLASH"
-		echo "  $ESPTOOL_CMD --port <matching-ROM-port> --before $NORESET --after <safe-reset> --baud 115200 $WRITEFLASH 0x0000 \"${DOWNLOADED_FILE}\""
+		echo "  serial preparation and identity-safe native USB handoff"
+		echo "  $ESPTOOL_CMD --port <matching-port> --before <session-reset> --after $NORESET --baud 115200 $ERASEFLASH"
+		echo "  $ESPTOOL_CMD --port <matching-port> --before <session-reset> --after <safe-reset> --baud 115200 $WRITEFLASH 0x0000 \"${DOWNLOADED_FILE}\""
 		EXECUTION_MODE="$(choose_flash_execution_mode "ERASE and INSTALL ${DEVICE} on ${DEVICE_PORT}")"
 		if [[ "$EXECUTION_MODE" == "echo" ]]; then
 			echo "Echo-only selected; no ESP32 flash commands were run."
 			exit 0
 		fi
 		prepare_esp32_flash_session "${DEVICE_PORT}" "${DEVICE}"
-		run_esptool --port "${DEVICE_PORT}" --before "$NORESET" \
+		echo "ESP32 operation reset mode: $ESP32_OPERATION_BEFORE"
+		run_esp32_session_esptool "${DEVICE_PORT}" \
 			--after "$NORESET" --baud 115200 "$ERASEFLASH"
 		sleep 1
 		ESP32_WRITE_AFTER="$HARDRESET"
@@ -4389,13 +4405,13 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 			# path can release DTR/RTS safely and follow runtime re-enumeration.
 			ESP32_WRITE_AFTER="$NORESET"
 		fi
-		run_esptool --port "${DEVICE_PORT}" --before "$NORESET" \
+		run_esp32_session_esptool "${DEVICE_PORT}" \
 			--after "$ESP32_WRITE_AFTER" --baud 115200 "$WRITEFLASH" \
 			0x0000 "${DOWNLOADED_FILE}"
 		finish_esp32_flash_session "${DEVICE_PORT}"
 	else
-		echo "  identity-safe serial open and application-to-ROM port handoff"
-		echo "  $ESPTOOL_CMD --port <matching-ROM-port> --before $NORESET --after <safe-reset> --baud 115200 $WRITEFLASH <device app offset> \"${DOWNLOADED_FILE}\""
+		echo "  serial preparation and identity-safe native USB handoff"
+		echo "  $ESPTOOL_CMD --port <matching-port> --before <session-reset> --after <safe-reset> --baud 115200 $WRITEFLASH <device app offset> \"${DOWNLOADED_FILE}\""
 		echo "The ESP32 partition table will be read from the device. The update will stop if the image does not fit; populated secondary app slots will also be updated."
 		EXECUTION_MODE="$(choose_flash_execution_mode "UPDATE ${DEVICE} on ${DEVICE_PORT}")"
 		if [[ "$EXECUTION_MODE" == "echo" ]]; then
@@ -4404,6 +4420,7 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 			exit 0
 		fi
 		prepare_esp32_flash_session "${DEVICE_PORT}" "${DEVICE}"
+		echo "ESP32 operation reset mode: $ESP32_OPERATION_BEFORE"
 		ESP32_UPDATE_OFFSETS_OUTPUT=""
 		if ! ESP32_UPDATE_OFFSETS_OUTPUT="$(esp32_update_flash_offsets "${DEVICE_PORT}" "${DOWNLOADED_FILE}")"; then
 			exit 1
@@ -4421,12 +4438,13 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 		if esp32_port_is_rom_usb_jtag "$DEVICE_PORT"; then
 			ESP32_WRITE_AFTER="$NORESET"
 		fi
-		printf '%s --port %s --after %s --baud 115200 %s' "$ESPTOOL_CMD" "$DEVICE_PORT" "$ESP32_WRITE_AFTER" "$WRITEFLASH"
+		printf '%s --port %s --before %s --after %s --baud 115200 %s' \
+			"$ESPTOOL_CMD" "$DEVICE_PORT" "$ESP32_OPERATION_BEFORE" "$ESP32_WRITE_AFTER" "$WRITEFLASH"
 		for ((i=0; i<${#ESP32_WRITE_ARGS[@]}; i+=2)); do
 			printf ' %s "%s"' "${ESP32_WRITE_ARGS[i]}" "${ESP32_WRITE_ARGS[i+1]}"
 		done
 		printf '\n'
-		run_esptool --port "${DEVICE_PORT}" --before "$NORESET" \
+		run_esp32_session_esptool "${DEVICE_PORT}" \
 			--after "$ESP32_WRITE_AFTER" --baud 115200 "$WRITEFLASH" \
 			"${ESP32_WRITE_ARGS[@]}"
 		finish_esp32_flash_session "${DEVICE_PORT}"

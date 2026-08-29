@@ -17,7 +17,9 @@ extract_function() {
 	' "$script_path"
 }
 
-for function_name in probe_esptool probe_esptool_mac prepare_esp32_flash_session; do
+for function_name in \
+	probe_esptool probe_esptool_mac prepare_esp32_flash_session \
+	run_esp32_session_esptool; do
 	definition="$(extract_function "$function_name")"
 	[[ "$definition" == "${function_name}() {"* ]] || {
 		echo "failed to extract ${function_name}" >&2
@@ -104,6 +106,7 @@ BOOTLOADER_PROBE_ACTIVE=0
 ESPTOOL_CMD="pipx run esptool"
 NORESET="no-reset"
 DEFAULTRESET="default-reset"
+ESP32_OPERATION_BEFORE="$NORESET"
 READMAC="read-mac"
 
 preferred_flash_serial_port() { printf '%s\n' "$1"; }
@@ -151,3 +154,38 @@ fi
 }
 grep -Fq 'ESP chip did not confirm bootloader mode' "${tmp_dir}/prepare-error"
 echo "PASS: ordinary UART uses default DTR/RTS reset and fails closed"
+
+# A successful UART probe does not guarantee that the bridge remains attached
+# to the ROM after esptool closes it. Every subsequent operation must therefore
+# repeat default-reset, while a native USB handoff stays on no-reset.
+probe_esptool_mac() {
+	uart_probe_args="$*"
+	return 0
+}
+touch "$CURRENT_BAK"
+prepare_esp32_flash_session "$uart_port" "SenseCAP Indicator" \
+	>"${tmp_dir}/prepare-success-output"
+[[ "$ESP32_OPERATION_BEFORE" == "default-reset" ]] || {
+	echo "FAIL: successful UART preparation selected '$ESP32_OPERATION_BEFORE'" >&2
+	exit 1
+}
+
+operation_log="${tmp_dir}/operation-log"
+run_esptool() {
+	printf '%s\n' "$*" >>"$operation_log"
+}
+run_esp32_session_esptool "$uart_port" \
+	--after no-reset --baud 115200 erase-flash
+run_esp32_session_esptool "$uart_port" \
+	--after hard-reset --baud 115200 write-flash 0x0000 firmware.bin
+grep -Fxq -- "--port $uart_port --before default-reset --after no-reset --baud 115200 erase-flash" \
+	"$operation_log"
+grep -Fxq -- "--port $uart_port --before default-reset --after hard-reset --baud 115200 write-flash 0x0000 firmware.bin" \
+	"$operation_log"
+
+ESP32_OPERATION_BEFORE="no-reset"
+run_esp32_session_esptool /dev/ttyACM4 \
+	--after no-reset --baud 921600 read-flash 0x8000 0x1000 partitions.bin
+grep -Fxq -- '--port /dev/ttyACM4 --before no-reset --after no-reset --baud 921600 read-flash 0x8000 0x1000 partitions.bin' \
+	"$operation_log"
+echo "PASS: UART repeats default-reset while native USB remains on no-reset"
