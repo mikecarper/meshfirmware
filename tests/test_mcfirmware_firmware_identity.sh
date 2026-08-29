@@ -62,6 +62,7 @@ devices=(
 	"Heltec v3"
 	"Heltec v4"
 	"Heltec v4 + Expansion Kit (Touch)"
+	"Heltec v4 R8"
 	"A newly inserted board"
 	"UnitEng Station G2"
 )
@@ -69,9 +70,50 @@ pick_matching_device "$(detect_device_from_fw "$esp_image")" devices
 [[ "$MATCH" == "Heltec v4" && "$MATCH_IDX" -eq 2 ]]
 echo "PASS: generic V4 USB product selects the base Heltec v4 entry"
 
+for r8_observer_target in \
+	"heltec_v4_r8_repeater_observer_mqtt" \
+	"heltec_v4_r8_room_server_observer_mqtt" \
+	"heltec_v4_r8_tft_repeater_observer_mqtt" \
+	"heltec_v4_r8_tft_portrait_repeater_observer_mqtt" \
+	"heltec_v4_r8_tft_room_server_observer_mqtt" \
+	"heltec_v4_r8_tft_portrait_room_server_observer_mqtt"; do
+	pick_matching_device "$r8_observer_target" devices
+	[[ "$MATCH" == "Heltec v4 R8" && "$MATCH_IDX" -eq 4 ]]
+done
+echo "PASS: all R8 observer identities outrank the base Heltec v4 entry"
+
 pick_matching_device "usb-Station_G2x" devices
-[[ "$MATCH" == "UnitEng Station G2" && "$MATCH_IDX" -eq 5 ]]
+[[ "$MATCH" == "UnitEng Station G2" && "$MATCH_IDX" -eq 6 ]]
 echo "PASS: Station G2 fallback follows its current menu position"
+
+# These names previously selected an earlier generic menu entry because the
+# matcher returned on its first one-word tail match. Exact names must always
+# select themselves regardless of menu order.
+specific_devices=(
+	"GAT-IoT GAT562 Tracker"
+	"Generic E22"
+	"Heltec MeshSolar / MeshTower"
+	"Heltec MeshTower V2"
+	"Heltec Wireless Tracker"
+	"Heltec Wireless Tracker v1.1"
+	"Heltec Wireless Tracker v2"
+	"Heltec v4"
+	"Heltec v4 + Expansion Kit (Touch)"
+	"Heltec v4 R8"
+	"Ikoka Handheld nRF E22 30 dBm"
+)
+for expected_device in \
+	"Heltec MeshTower V2" \
+	"Heltec Wireless Tracker" \
+	"Heltec Wireless Tracker v1.1" \
+	"Heltec Wireless Tracker v2" \
+	"Heltec v4 + Expansion Kit (Touch)" \
+	"Heltec v4 R8" \
+	"Ikoka Handheld nRF E22 30 dBm"; do
+	pick_matching_device "$expected_device" specific_devices
+	[[ "$MATCH" == "$expected_device" ]]
+done
+echo "PASS: exact board names outrank earlier generic tail matches"
 
 [[ "$(detect_device_from_fw "$unknown_image")" == "unknown" ]]
 echo "PASS: unrelated strings are not presented as a board identity"

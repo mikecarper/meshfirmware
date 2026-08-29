@@ -2010,7 +2010,9 @@ pick_matching_device() {
 	local usb_string="$1"
 	local -n _DEVICES="$2"   # bash 4.3+ nameref to the array
 
-	local usb_slug base core n cand1 cand2 cand3 name
+	local usb_slug base core n cand1 cand2 cand3 name score i
+	local -a toks=()
+	local best_score=0
 	MATCH=""
 	MATCH_IDX=-1
 
@@ -2036,16 +2038,36 @@ pick_matching_device() {
 		(( n>=2 )) && cand2="${toks[n-2]}_${toks[n-1]}"
 		(( n>=1 )) && cand1="${toks[n-1]}"
 
-		if is_good_tail "$cand3" && contains_word "$usb_slug" "$cand3"; then
-			MATCH="${_DEVICES[$i]}"; MATCH_IDX=$((i+1)); return 0
-		elif is_good_tail "$cand2" && contains_word "$usb_slug" "$cand2"; then
-			MATCH="${_DEVICES[$i]}"; MATCH_IDX=$((i+1)); return 0
-		elif is_good_tail "$cand1" && contains_word "$usb_slug" "$cand1"; then
-			MATCH="${_DEVICES[$i]}"; MATCH_IDX=$((i+1)); return 0
+		# Score every candidate before choosing. Returning the first loose tail
+		# match makes a generic entry such as "Heltec v4" shadow the longer
+		# "Heltec v4 R8" identity solely because it sorts first in the menu.
+		# Exact display names are strongest, followed by complete normalized
+		# names, vendor-stripped model names, and progressively shorter tails.
+		score=0
+		if [[ "$usb_slug" == "$base" ]]; then
+			score=$((100000 + ${#base}))
 		elif contains_word "$usb_slug" "$base"; then
-			MATCH="${_DEVICES[$i]}"; MATCH_IDX=$((i+1)); return 0
+			score=$((90000 + ${#base}))
+		elif is_good_tail "$core" && contains_word "$usb_slug" "$core"; then
+			score=$((80000 + ${#core}))
+		elif is_good_tail "$cand3" && contains_word "$usb_slug" "$cand3"; then
+			score=$((30000 + ${#cand3}))
+		elif is_good_tail "$cand2" && contains_word "$usb_slug" "$cand2"; then
+			score=$((20000 + ${#cand2}))
+		elif is_good_tail "$cand1" && contains_word "$usb_slug" "$cand1"; then
+			score=$((10000 + ${#cand1}))
+		fi
+
+		if (( score > best_score )); then
+			best_score=$score
+			MATCH="${_DEVICES[$i]}"
+			MATCH_IDX=$((i+1))
 		fi
 	done
+
+	if (( best_score > 0 )); then
+		return 0
+	fi
 
 	# optional aliases
 	case "$usb_slug" in
