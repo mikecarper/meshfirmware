@@ -225,6 +225,7 @@ KEYMIND_CASCADE_LOGGING_FALLBACK_URL="${KEYMIND_RAW_BASE_URL}/mesh-america/keymi
 VENDORLIST="elecrow|heltec|lilygo|seeed|seed|studio|rak|wireless|wisblock|wismesh|raspberry|pi|pico|waveshare|promicro|uniteng|sensecap|wio|xiao"
 RADIOLIST="sx1262|sx126x|sx1276|sx127x"
 NORESET="no-reset"
+DEFAULTRESET="default-reset"
 USBRESET="usb-reset"
 READMAC="read-mac"
 READFLASH="read-flash"
@@ -3207,6 +3208,7 @@ esptool_set_variables() {
 	if [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 5 )); then
 	  # X: esptool >= 5
 	  NORESET="no-reset"
+	  DEFAULTRESET="default-reset"
 	  USBRESET="usb-reset"
 	  READMAC="read-mac"
 	  READFLASH="read-flash"
@@ -3216,6 +3218,7 @@ esptool_set_variables() {
 	  WATCHDOGRESET="watchdog-reset"
 	else
 	  NORESET="no_reset"
+	  DEFAULTRESET="default_reset"
 	  USBRESET="usb_reset"
 	  READMAC="read_mac"
 	  READFLASH="read_flash"
@@ -3759,9 +3762,9 @@ prepare_esp32_flash_session() {
 	# ordinary DTR/RTS reset sequence. Retain the established recovery flow for
 	# those boards.
 	echo "Setting device ${device} on ${port} into bootloader mode"
-	echo "$ESPTOOL_CMD --port ${port} --after $NORESET --baud 1200 $READMAC"
-	if probe_esptool_mac --port "$port" --after "$NORESET" \
-		--baud 1200 "$READMAC"; then
+	echo "$ESPTOOL_CMD --port ${port} --before $DEFAULTRESET --after $NORESET --baud 115200 $READMAC"
+	if probe_esptool_mac --port "$port" --before "$DEFAULTRESET" \
+		--after "$NORESET" --baud 115200 "$READMAC"; then
 		echo "ESP chip responded; skipping existing firmware backup."
 		rm -f "$DOWNLOAD_DIR/CURRENT.BAK"
 		echo
@@ -3813,9 +3816,10 @@ probe_esptool() {
 
 	if output=$(invoke_esptool "$@" 2>&1); then
 		return 0
+	else
+		status=$?
 	fi
 
-	status=$?
 	if [[ -n "$port" ]] && esptool_output_port_busy "$output"; then
 		if ! recover_busy_serial_port "$port"; then
 			printf '%s\n' "$output" >&2
@@ -3823,8 +3827,9 @@ probe_esptool() {
 		fi
 		if retry_output=$(invoke_esptool "$@" 2>&1); then
 			return 0
+		else
+			status=$?
 		fi
-		status=$?
 		output="$retry_output"
 	fi
 
@@ -3839,30 +3844,34 @@ probe_esptool() {
 		fi
 		if retry_output=$(invoke_esptool "$@" 2>&1); then
 			return 0
+		else
+			status=$?
 		fi
-		status=$?
 		print_esptool_recovery_hint "$retry_output"
-		return $status
+		return "$status"
 	fi
 
 	if [[ -n "$port" ]] && esptool_output_needs_reset "$output"; then
 		if auto_reset_serial_port "$port"; then
 			if retry_output=$(invoke_esptool "$@" 2>&1); then
 				return 0
+			else
+				status=$?
 			fi
 			if manual_reboot_choice "$port" "bootloader probe"; then
 				if retry_output=$(invoke_esptool "$@" 2>&1); then
 					return 0
+				else
+					status=$?
 				fi
-				status=$?
 			fi
 			print_esptool_recovery_hint "$retry_output"
-			return $status
+			return "$status"
 		fi
 	fi
 
 	print_esptool_recovery_hint "$output"
-	return $status
+	return "$status"
 }
 
 probe_esptool_mac() {
@@ -3879,9 +3888,10 @@ probe_esptool_mac() {
 	if output=$(invoke_esptool "$@" 2>&1); then
 		grep -qi -m1 'MAC' <<<"$output"
 		return $?
+	else
+		status=$?
 	fi
 
-	status=$?
 	if [[ -n "$port" ]] && esptool_output_port_busy "$output"; then
 		if ! recover_busy_serial_port "$port"; then
 			printf '%s\n' "$output" >&2
@@ -3890,8 +3900,9 @@ probe_esptool_mac() {
 		if retry_output=$(invoke_esptool "$@" 2>&1); then
 			grep -qi -m1 'MAC' <<<"$retry_output"
 			return $?
+		else
+			status=$?
 		fi
-		status=$?
 		output="$retry_output"
 	fi
 
@@ -3907,10 +3918,11 @@ probe_esptool_mac() {
 		if retry_output=$(invoke_esptool "$@" 2>&1); then
 			grep -qi -m1 'MAC' <<<"$retry_output"
 			return $?
+		else
+			status=$?
 		fi
-		status=$?
 		print_esptool_recovery_hint "$retry_output"
-		return $status
+		return "$status"
 	fi
 
 	if [[ -n "$port" ]] && esptool_output_needs_reset "$output"; then
@@ -3918,21 +3930,24 @@ probe_esptool_mac() {
 			if retry_output=$(invoke_esptool "$@" 2>&1); then
 				grep -qi -m1 'MAC' <<<"$retry_output"
 				return $?
+			else
+				status=$?
 			fi
 			if manual_reboot_choice "$port" "ESP32 MAC probe"; then
 				if retry_output=$(invoke_esptool "$@" 2>&1); then
 					grep -qi -m1 'MAC' <<<"$retry_output"
 					return $?
+				else
+					status=$?
 				fi
-				status=$?
 			fi
 			print_esptool_recovery_hint "$retry_output"
-			return $status
+			return "$status"
 		fi
 	fi
 
 	print_esptool_recovery_hint "$output"
-	return $status
+	return "$status"
 }
 
 parse_esp32_app_partitions() {
