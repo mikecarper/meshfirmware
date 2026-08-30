@@ -155,7 +155,18 @@ expect_status "unrelated nRF52 boards retain their existing automatic path" 0 \
 # shellcheck disable=SC2016
 guard_line="$(grep -n 'nrf52_validate_rak_board_pair "\$DOWNLOADED_FILE"' "$script_path" | tail -n1 | cut -d: -f1)"
 # shellcheck disable=SC2016
+identity_bind_line="$(grep -n 'NRF52_RUNTIME_PORT="\$(selected_flash_serial_port "\$DEVICE_PORT")"' "$script_path" | tail -n1 | cut -d: -f1)"
+# shellcheck disable=SC2016
+identity_apply_line="$(grep -n 'DEVICE_PORT="\$NRF52_RUNTIME_PORT"' "$script_path" | head -n1 | cut -d: -f1)"
+# shellcheck disable=SC2016
 action_line="$(grep -n 'if \[\[ "\$TYPE" == "flash-update"' "$script_path" | tail -n1 | cut -d: -f1)"
+if [[ -z "$identity_bind_line" || -z "$identity_apply_line" || -z "$guard_line" \
+	|| "$identity_bind_line" -ge "$identity_apply_line" \
+	|| "$identity_apply_line" -ge "$guard_line" ]]; then
+	echo "FAIL: nRF52 board validation can run before the saved USB identity is rebound" >&2
+	exit 1
+fi
+echo "PASS: nRF52 board validation uses the live saved USB identity"
 if [[ -z "$guard_line" || -z "$action_line" || "$guard_line" -ge "$action_line" ]]; then
 	echo "FAIL: board guard is not positioned before nRF52 erase/action handling" >&2
 	exit 1

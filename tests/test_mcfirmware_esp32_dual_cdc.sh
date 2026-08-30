@@ -18,7 +18,7 @@ extract_function() {
 }
 
 for function_name in \
-	prepare_esp32_flash_session finish_esp32_flash_session \
+	selected_flash_serial_port prepare_esp32_flash_session finish_esp32_flash_session \
 	auto_reset_serial_port; do
 	definition="$(extract_function "$function_name")"
 	[[ "$definition" == "${function_name}() {"* ]] || {
@@ -213,6 +213,7 @@ prepare_esp32_flash_session "$logging_port" "Heltec V4"
 echo "PASS: ESP32 native USB reset safely falls back to the matched primary CDC port"
 
 esp32_port_is_rom_usb_jtag() { [[ "$1" == "$rom_port" ]]; }
+esp32_verified_destructive_port() { printf '%s\n' "$1"; }
 finish_invocation=""
 invoke_esptool_timeout() {
 	finish_invocation="$*"

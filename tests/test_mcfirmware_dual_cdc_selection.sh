@@ -18,8 +18,10 @@ extract_function() {
 for function_name in \
 	normalize_usb_serial_identity nrf52_usb_path_stem \
 	serial_ports_share_usb_device serial_port_has_secondary_cdc \
+	serial_by_id_link_for_port save_selected_serial_port \
 	preferred_flash_serial_link preferred_flash_serial_port \
-	nrf52_selected_by_id_path nrf52_candidate_identity_rank \
+	nrf52_selected_by_id_path selected_flash_serial_port \
+	nrf52_candidate_identity_rank \
 	trigger_nrf52_1200_touch; do
 	definition="$(extract_function "$function_name")"
 	[[ "$definition" == "${function_name}() {"* ]] || {
@@ -38,7 +40,9 @@ logging_port="${tmp_dir}/ttyACM4"
 other_port="${tmp_dir}/ttyACM7"
 conflict_port="${tmp_dir}/ttyACM8"
 rom_port="${tmp_dir}/ttyACM9"
-touch "$primary_port" "$logging_port" "$other_port" "$conflict_port" "$rom_port"
+untracked_port="${tmp_dir}/ttyACM10"
+touch "$primary_port" "$logging_port" "$other_port" "$conflict_port" "$rom_port" \
+	"$untracked_port"
 
 primary_link="${by_id_dir}/usb-RAK4631_TEST-if00"
 logging_link="${by_id_dir}/usb-RAK4631_TEST-if02"
@@ -114,6 +118,46 @@ basename "$logging_link" > "$DEVICE_PORT_NAME_FILE"
 DEVICE_PORT="$logging_port"
 expect_equal "a cached interface 02 selection is repaired" \
 	"$primary_link" "$(nrf52_selected_by_id_path)"
+expect_equal "a saved USB identity wins over a reused tty argument" \
+	"$primary_port" "$(selected_flash_serial_port "$other_port")"
+
+: > "$DEVICE_PORT_NAME_FILE"
+if selected_flash_serial_port "$untracked_port" \
+	>"${tmp_dir}/missing-id.out" 2>"${tmp_dir}/missing-id.err"; then
+	echo "FAIL: a missing stable identity fell back to a tty number" >&2
+	exit 1
+fi
+grep -Fq 'refusing tty-only fallback' "${tmp_dir}/missing-id.err"
+echo "PASS: a missing stable USB identity cannot use a tty fallback"
+basename "$logging_link" > "$DEVICE_PORT_NAME_FILE"
+
+duplicate_primary_link="${by_id_dir}/usb-DUPLICATE_TEST-if00"
+ln -s "$primary_port" "$duplicate_primary_link"
+printf '%s\n' "$logging_port" > "$DEVICE_PORT_FILE"
+basename "$logging_link" > "$DEVICE_PORT_NAME_FILE"
+if save_selected_serial_port "$primary_port" \
+	>"${tmp_dir}/ambiguous-id.out" 2>"${tmp_dir}/ambiguous-id.err"; then
+	echo "FAIL: duplicate stable identities were cached" >&2
+	exit 1
+fi
+grep -Fq 'Multiple stable USB by-id links' "${tmp_dir}/ambiguous-id.err"
+expect_equal "ambiguous identity leaves the cached tty unchanged" \
+	"$logging_port" "$(<"$DEVICE_PORT_FILE")"
+expect_equal "ambiguous identity leaves the cached by-id unchanged" \
+	"$(basename "$logging_link")" "$(<"$DEVICE_PORT_NAME_FILE")"
+rm -f "$duplicate_primary_link"
+echo "PASS: ambiguous by-id discovery fails without replacing the selection"
+
+printf '%s\n' 'usb-DISCONNECTED-if00' > "$DEVICE_PORT_NAME_FILE"
+if selected_flash_serial_port "$other_port" \
+	>"${tmp_dir}/stale-port.out" 2>"${tmp_dir}/stale-port.err"; then
+	echo "FAIL: a missing saved USB identity fell back to a reused tty" >&2
+	exit 1
+fi
+grep -Fq 'selected serial USB identity is no longer connected' \
+	"${tmp_dir}/stale-port.err"
+echo "PASS: a missing saved USB identity fails closed"
+basename "$logging_link" > "$DEVICE_PORT_NAME_FILE"
 
 primary_rank="$(nrf52_candidate_identity_rank "$primary_port" "$primary_link" \
 	"$logging_link" TEST pci-0000:00:14.0-usb-0:2)"

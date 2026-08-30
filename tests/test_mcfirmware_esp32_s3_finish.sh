@@ -18,7 +18,8 @@ extract_function() {
 }
 
 for function_name in \
-	record_esp32_chip_from_esptool_output esp32_probe_output_has_mac \
+	record_esp32_chip_from_esptool_output esp32_mac_from_esptool_output \
+	esp32_probe_output_has_mac \
 	run_esp32_session_esptool esp32_write_after_mode \
 	finish_esp32_flash_session; do
 	definition="$(extract_function "$function_name")"
@@ -61,6 +62,9 @@ esp32_port_is_rom_usb_jtag() { [[ "$1" == "$native_port" ]]; }
 nrf52_port_instance() { printf 'instance-%s\n' "$(basename "$1")"; }
 wait_for_nrf52_bootloader_port() { printf '%s\n' "$expected_runtime_port"; }
 save_selected_serial_port() { DEVICE_PORT="$1"; }
+selected_flash_serial_port() { printf '%s\n' "$1"; }
+esp32_verified_destructive_port() { printf '%s\n' "$1"; }
+esp32_esptool_args_are_destructive() { return 1; }
 
 operation_log="${tmp_dir}/operation-log"
 run_esptool() { printf '%s\n' "$*" >>"$operation_log"; }
@@ -111,6 +115,25 @@ finish_esp32_flash_session "$native_port" >"${tmp_dir}/native-other-finish-outpu
 grep -Fxq -- "12s --port $native_port --before no-reset --after hard-reset read-mac" \
 	"$invoke_log"
 echo "PASS: non-S3 UART and native USB retain their prior reset behavior"
+
+selected_flash_serial_port() { return 1; }
+if finish_esp32_flash_session "$native_port" \
+	>"${tmp_dir}/missing-identity.out" 2>"${tmp_dir}/missing-identity.err"; then
+	echo "FAIL: ESP32 finish accepted a missing saved USB identity" >&2
+	exit 1
+fi
+grep -Fq 'verified ESP32 USB identity disappeared' "${tmp_dir}/missing-identity.err"
+echo "PASS: ESP32 finish fails when the saved USB identity disappears"
+
+selected_flash_serial_port() { printf '%s\n' "$1"; }
+wait_for_nrf52_bootloader_port() { return 1; }
+if finish_esp32_flash_session "$native_port" \
+	>"${tmp_dir}/missing-runtime.out" 2>"${tmp_dir}/missing-runtime.err"; then
+	echo "FAIL: native ESP32 finish accepted a missing runtime re-enumeration" >&2
+	exit 1
+fi
+grep -Fq 'did not return on its verified USB identity' "${tmp_dir}/missing-runtime.err"
+echo "PASS: native ESP32 finish requires verified runtime re-enumeration"
 
 [[ "$(rg -c 'ESP32_WRITE_AFTER="\$\(esp32_write_after_mode "\$DEVICE_PORT"\)"' "$script_path")" -eq 2 ]] || {
 	echo "FAIL: an ESP32 write/update path bypasses the S3 finish policy" >&2
