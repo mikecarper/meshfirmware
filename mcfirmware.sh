@@ -230,6 +230,7 @@ DEFAULTRESET="default-reset"
 USBRESET="usb-reset"
 ESP32_OPERATION_BEFORE="$NORESET"
 ESP32_SESSION_IS_S3=0
+ESP32_NATIVE_ROM_READY=0
 READMAC="read-mac"
 READFLASH="read-flash"
 WRITEFLASH="write-flash"
@@ -3330,7 +3331,8 @@ configure_esptool_invocation() {
 	# close/reopen retry. The bootstrap forces idle lines before every reopen and
 	# prevents the V4 USB reset sequence from completing. The caller captures and
 	# verifies the selected by-id USB identity before and after this operation.
-	if [[ "$port" == /dev/* && "$before" != "usb-reset" && "$before" != "usb_reset" ]]; then
+	if [[ "$port" == /dev/* && "$before" != "usb-reset" && "$before" != "usb_reset" \
+		&& "${ESP32_NATIVE_ROM_READY:-0}" -ne 1 ]]; then
 		bootstrap="$(esptool_safe_serial_bootstrap)"
 		ESPTOOL_INVOKE_COMMAND=(
 			pipx run --spec esptool python -c "$bootstrap"
@@ -3677,6 +3679,7 @@ prepare_esp32_flash_session() {
 	# UART bridge may need a fresh DTR/RTS bootloader reset for every command.
 	ESP32_OPERATION_BEFORE="$NORESET"
 	ESP32_SESSION_IS_S3=0
+	ESP32_NATIVE_ROM_READY=0
 	preferred_port="$(preferred_flash_serial_port "$port")"
 	if [[ "$preferred_port" != "$port" ]]; then
 		echo "Using primary Companion/flashing port $preferred_port instead of secondary logging port $port."
@@ -3707,6 +3710,7 @@ prepare_esp32_flash_session() {
 	if esp32_port_uses_native_usb "$port"; then
 		if raw_esptool_mac_probe --port "$port" --before "$NORESET" \
 			--after "$NORESET" --baud 115200 "$READMAC"; then
+			ESP32_NATIVE_ROM_READY=1
 			echo "Selected ESP32 native USB port is already in ROM bootloader mode."
 			rm -f "$DOWNLOAD_DIR/CURRENT.BAK"
 			echo
@@ -3724,6 +3728,12 @@ prepare_esp32_flash_session() {
 		echo "Setting device ${device} on ${port} into its ESP32 ROM bootloader with an identity-safe USB reset."
 		if raw_esptool_mac_probe --port "$reset_port" --before "$USBRESET" \
 			--after "$NORESET" --baud 115200 "$READMAC"; then
+			# The selected physical USB identity just completed a real ROM/stub
+			# exchange.  From this point onward, let esptool reopen that proven
+			# session normally.  Forcing idle DTR/RTS on every later no-reset
+			# open makes some ESP32-S3 USB/JTAG ports (including Heltec V4)
+			# stop answering between read-mac and erase/write.
+			ESP32_NATIVE_ROM_READY=1
 			# The successful esptool exchange proves that a reset occurred. Pass an
 			# empty original instance so a V4 that keeps the same tty is accepted,
 			# while the ordinary identity ranking still rejects a different board.
@@ -3739,11 +3749,16 @@ prepare_esp32_flash_session() {
 			candidate_port="$(find_reenumerated_nrf52_port "$port" \
 				"$selected_by_id" "$expected_serial" "$expected_path_stem" \
 				"$original_instance" 2>/dev/null || true)"
+			# A timed-out usb-reset can still have put this exact physical USB
+			# identity in ROM.  Probe that candidate with the normal ROM reopen;
+			# restore the pre-ROM guard if it did not answer.
+			ESP32_NATIVE_ROM_READY=1
 			if [[ -n "$candidate_port" ]] \
 				&& raw_esptool_mac_probe --port "$candidate_port" --before "$NORESET" \
 					--after "$NORESET" --baud 115200 "$READMAC"; then
 				bootloader_port="$candidate_port"
 			else
+				ESP32_NATIVE_ROM_READY=0
 				[[ -n "$candidate_port" ]] || {
 					echo "The selected ESP32 USB identity disappeared after the reset attempt; refusing to touch another serial port." >&2
 					return 1
@@ -3760,6 +3775,7 @@ prepare_esp32_flash_session() {
 					"$original_instance" "ESP32 ROM serial port")"; then
 					return 1
 				fi
+				ESP32_NATIVE_ROM_READY=1
 			fi
 		fi
 		echo "Matched ESP32 ROM port: $bootloader_port"
@@ -3779,6 +3795,7 @@ prepare_esp32_flash_session() {
 	# A manually selected ROM port already answers without another reset.
 	if raw_esptool_mac_probe --port "$port" --before "$NORESET" \
 		--after "$NORESET" --baud 115200 "$READMAC"; then
+		ESP32_NATIVE_ROM_READY=1
 		echo "ESP chip already responds in bootloader mode; skipping existing firmware backup."
 		rm -f "$DOWNLOAD_DIR/CURRENT.BAK"
 		echo

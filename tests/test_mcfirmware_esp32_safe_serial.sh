@@ -60,6 +60,13 @@ expect_equal "local serial uses old-pipx-compatible isolated esptool environment
 }
 echo "PASS: local serial bootstrap contains idle-line and HUPCL protection"
 
+ESP32_NATIVE_ROM_READY=1
+configure_esptool_invocation --port /dev/serial/by-id/heltec-v4 \
+	--before no-reset --after no-reset read-mac
+expect_equal "proven native ROM session reopens without the pre-ROM line guard" \
+	"pipx run esptool" "${ESPTOOL_INVOKE_COMMAND[*]}"
+ESP32_NATIVE_ROM_READY=0
+
 configure_esptool_invocation --port /dev/serial/by-id/heltec-v4 \
 	--before usb-reset --after no-reset read-mac
 expect_equal "native USB reset lets esptool own its control-line sequence" \

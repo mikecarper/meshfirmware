@@ -161,6 +161,10 @@ expected_reset="--port $primary_link --before usb-reset --after no-reset --baud 
 	echo "FAIL: native ESP32 session selected '$ESP32_OPERATION_BEFORE' instead of no-reset" >&2
 	exit 1
 }
+[[ "$ESP32_NATIVE_ROM_READY" -eq 1 ]] || {
+	echo "FAIL: successful native USB reset did not mark the ROM session ready" >&2
+	exit 1
+}
 [[ ! -s "$wait_original_instance_file" ]] || {
 	echo "FAIL: proven ESP32 USB reset still required a tty instance change" >&2
 	exit 1
@@ -200,6 +204,10 @@ prepare_esp32_flash_session "$logging_port" "Heltec V4"
 }
 [[ "$ESP32_OPERATION_BEFORE" == "$NORESET" ]] || {
 	echo "FAIL: re-enumerated native ESP32 session did not retain no-reset" >&2
+	exit 1
+}
+[[ "$ESP32_NATIVE_ROM_READY" -eq 1 ]] || {
+	echo "FAIL: matched fallback ROM session was not marked ready" >&2
 	exit 1
 }
 echo "PASS: ESP32 native USB reset safely falls back to the matched primary CDC port"
