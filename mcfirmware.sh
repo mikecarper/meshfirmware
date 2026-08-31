@@ -35,6 +35,10 @@ cleanup() {
 	if [[ -n "${SUDO_KEEPALIVE_PID:-}" ]]; then
 		kill "$SUDO_KEEPALIVE_PID" >/dev/null 2>&1 || true
 	fi
+	if [[ -n "${ESP32_MERGED_OTA_IMAGE:-}" \
+		&& -f "${ESP32_MERGED_OTA_IMAGE:-}" ]]; then
+		rm -f -- "$ESP32_MERGED_OTA_IMAGE"
+	fi
 }
 error_handler() {
   local lineno=$1
@@ -92,6 +96,7 @@ BOOTLOADER_PROBE_PORT=""
 BOOTLOADER_PROBE_ACTIVE=0
 NRF52_BOARD_GUARD_PASSED=0
 ESP32_FLASH_EXPECTED_MAC=""
+ESP32_MERGED_OTA_IMAGE=""
 # The Indicator's CH340 bridge has repeatedly dropped long reads above this
 # rate.  Identity and partition reads are safety gates, so use the same
 # board-qualified conservative rate as erase/write instead of risking a fast
@@ -4393,13 +4398,86 @@ for i in range(0, min(len(data), 0x1000), 32):
         continue
 
     part_type = entry[2]
+    subtype = entry[3]
     if part_type != 0x00:
         continue
 
     offset, size = struct.unpack_from("<II", entry, 4)
     if offset and offset not in seen:
         seen.add(offset)
-        print(f"0x{offset:x}\t0x{size:x}")
+        print(f"0x{offset:x}\t0x{size:x}\t0x{subtype:x}")
+PY
+}
+
+esp32_prepare_merged_ota_mirror() {
+	local merged_file="$1"
+	local output_file="$2"
+
+	# PlatformIO merged images normally end with the app embedded in ota_0. The
+	# partition table is the authority for both that source range and every
+	# destination slot. Refuse images with later merged data instead of guessing
+	# an app boundary and accidentally copying SPIFFS or another partition.
+	python3 - "$merged_file" "$output_file" <<'PY'
+import struct
+import sys
+
+merged_path, output_path = sys.argv[1:3]
+data = open(merged_path, "rb").read()
+table_offset = 0x8000
+table_size = 0x1000
+
+if len(data) < table_offset + table_size:
+    print("ERROR: merged ESP32 image does not contain a complete partition table.", file=sys.stderr)
+    raise SystemExit(1)
+
+ota = []
+seen = set()
+table = data[table_offset:table_offset + table_size]
+for i in range(0, len(table), 32):
+    entry = table[i:i + 32]
+    if len(entry) < 32 or entry[0:2] == b"\xff\xff":
+        break
+    if entry[0:2] != b"\xaa\x50" or entry[2] != 0x00:
+        continue
+    subtype = entry[3]
+    offset, size = struct.unpack_from("<II", entry, 4)
+    if 0x10 <= subtype <= 0x1F and offset and offset not in seen:
+        seen.add(offset)
+        ota.append((subtype, offset, size))
+
+if len(ota) < 2:
+    raise SystemExit(0)
+
+ota.sort()
+primary = next((part for part in ota if part[0] == 0x10), ota[0])
+_, primary_offset, primary_size = primary
+if len(data) <= primary_offset:
+    print("ERROR: merged ESP32 image does not contain its primary OTA app.", file=sys.stderr)
+    raise SystemExit(1)
+if len(data) > primary_offset + primary_size:
+    print("ERROR: merged ESP32 image contains data after its primary OTA partition; cannot safely mirror it.", file=sys.stderr)
+    raise SystemExit(1)
+
+app = data[primary_offset:]
+if len(app) < 4 or app[0] != 0xE9 or not (1 <= app[1] <= 16) or app[2] > 3:
+    print("ERROR: merged ESP32 primary OTA payload is not a valid app image.", file=sys.stderr)
+    raise SystemExit(1)
+
+for _, offset, size in ota:
+    if len(app) > size:
+        print(
+            f"ERROR: extracted ESP32 app is {len(app)} bytes, but OTA slot "
+            f"at 0x{offset:x} is only {size} bytes (0x{size:x}).",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+with open(output_path, "wb") as output:
+    output.write(app)
+
+for _, offset, _ in ota:
+    if offset != primary_offset:
+        print(f"0x{offset:x}")
 PY
 }
 
@@ -4483,11 +4561,13 @@ esp32_device_image_present_at_offset() {
 esp32_update_flash_offsets() {
 	local port="$1"
 	local firmware_file="$2"
-	local firmware_size partition offset size primary_index=0 i probe_status=0
+	local firmware_size partition offset size subtype primary_index=0 i probe_status=0
+	local subtype_dec=0 has_ota_slots=0
 	local partition_output=""
 	local -a app_partitions=()
 	local -a app_offsets=()
 	local -a app_sizes=()
+	local -a app_subtypes=()
 	local -a update_indices=()
 
 	if [[ ! -f "$firmware_file" ]]; then
@@ -4503,10 +4583,17 @@ esp32_update_flash_offsets() {
 		mapfile -t app_partitions <<< "$partition_output"
 	fi
 	for partition in "${app_partitions[@]}"; do
-		read -r offset size <<< "$partition"
-		[[ "$offset" =~ ^0x[0-9a-fA-F]+$ && "$size" =~ ^0x[0-9a-fA-F]+$ ]] || continue
+		read -r offset size subtype <<< "$partition"
+		[[ "$offset" =~ ^0x[0-9a-fA-F]+$ \
+			&& "$size" =~ ^0x[0-9a-fA-F]+$ \
+			&& "$subtype" =~ ^0x[0-9a-fA-F]+$ ]] || continue
 		app_offsets+=("$offset")
 		app_sizes+=("$size")
+		app_subtypes+=("$subtype")
+		subtype_dec=$((subtype))
+		if (( subtype_dec >= 0x10 && subtype_dec <= 0x1f )); then
+			has_ota_slots=1
+		fi
 	done
 
 	if ((${#app_offsets[@]} == 0)); then
@@ -4514,13 +4601,36 @@ esp32_update_flash_offsets() {
 		return 1
 	fi
 
-	for ((i=0; i<${#app_offsets[@]}; i++)); do
-		if [[ "${app_offsets[i]}" == "0x10000" ]]; then
-			primary_index=$i
-			break
-		fi
-	done
-	if [[ "${app_offsets[primary_index]}" != "0x10000" ]]; then
+	if (( has_ota_slots )); then
+		# Prefer ota_0, but malformed/nonstandard tables with only another OTA
+		# subtype must still choose an OTA partition rather than an unrelated
+		# factory or test application that happened to appear first.
+		for ((i=0; i<${#app_offsets[@]}; i++)); do
+			subtype_dec=$((app_subtypes[i]))
+			if (( subtype_dec >= 0x10 && subtype_dec <= 0x1f )); then
+				primary_index=$i
+				break
+			fi
+		done
+		for ((i=0; i<${#app_offsets[@]}; i++)); do
+			subtype_dec=$((app_subtypes[i]))
+			if (( subtype_dec == 0x10 )); then
+				primary_index=$i
+				break
+			fi
+		done
+	else
+		for ((i=0; i<${#app_offsets[@]}; i++)); do
+			if [[ "${app_offsets[i]}" == "0x10000" ]]; then
+				primary_index=$i
+				break
+			fi
+		done
+	fi
+	subtype_dec=$((app_subtypes[primary_index]))
+	if (( has_ota_slots && subtype_dec != 0x10 )); then
+		echo "ESP32 partition table has OTA slots but no ota_0 subtype; using ${app_offsets[primary_index]}." >&2
+	elif (( ! has_ota_slots )) && [[ "${app_offsets[primary_index]}" != "0x10000" ]]; then
 		echo "ESP32 partition table does not list an app slot at 0x10000; using first app slot at ${app_offsets[primary_index]}." >&2
 	fi
 
@@ -4530,6 +4640,15 @@ esp32_update_flash_offsets() {
 	for ((i=0; i<${#app_offsets[@]}; i++)); do
 		(( i == primary_index )) && continue
 		offset="${app_offsets[i]}"
+		subtype_dec=$((app_subtypes[i]))
+		if (( has_ota_slots )); then
+			if (( subtype_dec >= 0x10 && subtype_dec <= 0x1f )); then
+				esp32_firmware_fits_app_partition "$firmware_size" "$offset" "${app_sizes[i]}" || return 1
+				echo "Adding ESP32 OTA app slot at ${offset}; empty OTA slots are mirrored too." >&2
+				update_indices+=("$i")
+			fi
+			continue
+		fi
 		if esp32_device_image_present_at_offset "$port" "$offset"; then
 			esp32_firmware_fits_app_partition "$firmware_size" "$offset" "${app_sizes[i]}" || return 1
 			echo "Detected existing ESP32 app image at ${offset}; adding that app slot to the update." >&2
@@ -4997,10 +5116,32 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 		echo "  serial preparation and identity-safe native USB handoff"
 		echo "  $ESPTOOL_CMD --port <matching-port> --before <session-reset> --after $NORESET --baud 115200 $ERASEFLASH"
 		echo "  $ESPTOOL_CMD --port <matching-port> --before <session-reset> --after <safe-reset> --baud 115200 $WRITEFLASH 0x0000 \"${DOWNLOADED_FILE}\""
+		if [[ "$FW_LAYOUT" == "merged" ]]; then
+			echo "  dual-OTA layouts also mirror the embedded app into every secondary OTA slot"
+		fi
 		EXECUTION_MODE="$(choose_flash_execution_mode "ERASE and INSTALL ${DEVICE} on ${DEVICE_PORT}")"
 		if [[ "$EXECUTION_MODE" == "echo" ]]; then
 			echo "Echo-only selected; no ESP32 flash commands were run."
 			exit 0
+		fi
+		ESP32_MERGED_WRITE_ARGS=(0x0000 "${DOWNLOADED_FILE}")
+		if [[ "$FW_LAYOUT" == "merged" ]]; then
+			ESP32_MERGED_OTA_IMAGE="$(mktemp)"
+			ESP32_MERGED_OTA_OFFSETS_OUTPUT=""
+			if ! ESP32_MERGED_OTA_OFFSETS_OUTPUT="$(esp32_prepare_merged_ota_mirror \
+				"${DOWNLOADED_FILE}" "$ESP32_MERGED_OTA_IMAGE")"; then
+				exit 1
+			fi
+			if [[ -n "$ESP32_MERGED_OTA_OFFSETS_OUTPUT" ]]; then
+				mapfile -t ESP32_MERGED_OTA_OFFSETS <<< "$ESP32_MERGED_OTA_OFFSETS_OUTPUT"
+				for flash_offset in "${ESP32_MERGED_OTA_OFFSETS[@]}"; do
+					echo "Mirroring merged-image app into ESP32 OTA slot at ${flash_offset}."
+					ESP32_MERGED_WRITE_ARGS+=("$flash_offset" "$ESP32_MERGED_OTA_IMAGE")
+				done
+			else
+				rm -f -- "$ESP32_MERGED_OTA_IMAGE"
+				ESP32_MERGED_OTA_IMAGE=""
+			fi
 		fi
 		prepare_esp32_flash_session "${DEVICE_PORT}" "${DEVICE}"
 		echo "ESP32 operation reset mode: $ESP32_OPERATION_BEFORE"
@@ -5012,12 +5153,16 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 		ESP32_WRITE_AFTER="$(esp32_write_after_mode "$DEVICE_PORT")"
 		run_esp32_session_esptool "${DEVICE_PORT}" \
 			--after "$ESP32_WRITE_AFTER" --baud 115200 "$WRITEFLASH" \
-			0x0000 "${DOWNLOADED_FILE}"
+			"${ESP32_MERGED_WRITE_ARGS[@]}"
 		finish_esp32_flash_session "${DEVICE_PORT}"
+		if [[ -n "$ESP32_MERGED_OTA_IMAGE" ]]; then
+			rm -f -- "$ESP32_MERGED_OTA_IMAGE"
+			ESP32_MERGED_OTA_IMAGE=""
+		fi
 	else
 		echo "  serial preparation and identity-safe native USB handoff"
 		echo "  $ESPTOOL_CMD --port <matching-port> --before <session-reset> --after <safe-reset> --baud 115200 $WRITEFLASH <device app offset> \"${DOWNLOADED_FILE}\""
-		echo "The ESP32 partition table will be read from the device. The update will stop if the image does not fit; populated secondary app slots will also be updated."
+		echo "The ESP32 partition table will be read from the device. The update will stop if the image does not fit; every OTA app slot will be updated, including empty slots."
 		EXECUTION_MODE="$(choose_flash_execution_mode "UPDATE ${DEVICE} on ${DEVICE_PORT}")"
 		if [[ "$EXECUTION_MODE" == "echo" ]]; then
 			echo "Echo-only selected; no ESP32 flash commands were run."
