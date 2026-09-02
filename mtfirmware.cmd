@@ -106,6 +106,23 @@ function FormatSize {
 	return $x
 }
 
+function Get-FileMd5Hash {
+	param([Parameter(Mandatory=$true)][string]$Path)
+
+	$stream = $null
+	$md5 = $null
+	try {
+		$stream = [System.IO.File]::OpenRead($Path)
+		$md5 = [System.Security.Cryptography.MD5]::Create()
+		$hashBytes = $md5.ComputeHash($stream)
+		return ([System.BitConverter]::ToString($hashBytes) -replace '-', '')
+	}
+	finally {
+		if ($null -ne $md5) { $md5.Dispose() }
+		if ($null -ne $stream) { $stream.Dispose() }
+	}
+}
+
 
 function GetPortablePython {
 	$rel    = Invoke-RestMethod -Uri $PORTABLE_PYTHON_URL -Headers @{ 'User-Agent' = 'PowerShell' } -ErrorAction Stop
@@ -706,15 +723,15 @@ function UpdateReleases {
 		Remove-Item $tmpFile
 	} else {
 		# Compare the MD5 hashes of the cached file and the newly filtered file.
-		$oldMd5 = Get-FileHash $RELEASES_FILE -Algorithm MD5
-		$newMd5 = Get-FileHash $filteredTmp -Algorithm MD5
-		if ($oldMd5.Hash -ne $newMd5.Hash) {
-			Write-Progress -Activity "Release data changed. Updating cache and removing cached version lists. $($oldMd5.Hash) $($newMd5.Hash)"
+		$oldMd5 = Get-FileMd5Hash -Path $RELEASES_FILE
+		$newMd5 = Get-FileMd5Hash -Path $filteredTmp
+		if ($oldMd5 -ne $newMd5) {
+			Write-Progress -Activity "Release data changed. Updating cache and removing cached version lists. $oldMd5 $newMd5"
 			Remove-Item $RELEASES_FILE -ErrorAction Ignore | Out-Null
 			Move-Item $filteredTmp $RELEASES_FILE
 			Remove-Item $VERSIONS_TAGS_FILE, $VERSIONS_LABELS_FILE -ErrorAction Ignore | Out-Null
 		} else {
-			Write-Progress -Activity "Release data is unchanged. $($oldMd5.Hash) $($newMd5.Hash)"
+			Write-Progress -Activity "Release data is unchanged. $oldMd5 $newMd5"
 			
 			# Update the LastWriteTime of the RELEASES_FILE to the current time
 			Set-ItemProperty -Path $RELEASES_FILE -Name LastWriteTime -Value (Get-Date)
@@ -1456,8 +1473,8 @@ function UpdateBleOta {
 		if (-not (Test-Path $BleOtaFile)) {
 			Move-Item $tmp $BleOtaFile
 		} else {
-			$oldHash = (Get-FileHash $BleOtaFile -Algorithm MD5).Hash
-			$newHash = (Get-FileHash $tmp         -Algorithm MD5).Hash
+			$oldHash = Get-FileMd5Hash -Path $BleOtaFile
+			$newHash = Get-FileMd5Hash -Path $tmp
 			if ($oldHash -ne $newHash) {
 				Write-Host "Release data changed. Updating cache."
 				Move-Item $tmp $BleOtaFile -Force

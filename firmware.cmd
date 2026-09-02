@@ -57,6 +57,23 @@ $timeoutMeshtastic = 10 # Timeout duration in seconds
 $baud = 1200 # 115200
 $CACHE_TIMEOUT_SECONDS = 6 * 3600 # 6 hours
 
+function Get-FileMd5Hash {
+	param([Parameter(Mandatory=$true)][string]$Path)
+
+	$stream = $null
+	$md5 = $null
+	try {
+		$stream = [System.IO.File]::OpenRead($Path)
+		$md5 = [System.Security.Cryptography.MD5]::Create()
+		$hashBytes = $md5.ComputeHash($stream)
+		return ([System.BitConverter]::ToString($hashBytes) -replace '-', '')
+	}
+	finally {
+		if ($null -ne $md5) { $md5.Dispose() }
+		if ($null -ne $stream) { $stream.Dispose() }
+	}
+}
+
 function SetProjectVars($selectedNodeProject) {
 	if ($selectedNodeProject -eq "MeshCore") {
 		$global:REPO_OWNER           	= "meshcore-dev"
@@ -1125,6 +1142,66 @@ function Invoke-SerialCommandWithRetry {
     return $null
 }
 
+function Enter-MeshCoreTerminalForProbe {
+    param(
+        [Parameter(Mandatory=$true)]$SerialPort,
+        [int]$TotalMs = 1500
+    )
+
+    if (-not $SerialPort -or -not $SerialPort.IsOpen) { return $false }
+
+    try { $SerialPort.DiscardInBuffer() } catch { }
+    try {
+        # A USB Full Companion may already have handed interface 00 to the
+        # framed Binary Companion protocol. Its idle parser recognizes this
+        # line and temporarily returns the same port to the text terminal.
+        $SerialPort.WriteLine("+++MESHCORE-TERM-START")
+    }
+    catch {
+        return $false
+    }
+
+    $terminalBannerSeen = $false
+    try {
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $buffer = New-Object System.Text.StringBuilder
+        while ($sw.ElapsedMilliseconds -lt [Math]::Max(1, $TotalMs)) {
+            try { $chunk = $SerialPort.ReadExisting() } catch { $chunk = "" }
+            if ($chunk) {
+                [void]$buffer.Append($chunk)
+                if ($buffer.ToString() -match '(?i)MeshCore\s+(?:Full\s+)?Companion\s+Terminal') {
+                    $terminalBannerSeen = $true
+                    return $true
+                }
+            }
+            Start-Sleep -Milliseconds 10
+        }
+
+        return $false
+    }
+    finally {
+        # Once START was accepted by the serial API, always balance it with
+        # STOP unless the caller saw the banner and therefore owns cleanup.
+        # A lost banner/read error must not leave a Full Companion in terminal
+        # mode merely because inventory could not confirm the handoff.
+        if (-not $terminalBannerSeen) {
+            Exit-MeshCoreTerminalAfterProbe -SerialPort $SerialPort
+        }
+    }
+}
+
+function Exit-MeshCoreTerminalAfterProbe {
+    param([Parameter(Mandatory=$true)]$SerialPort)
+
+    if (-not $SerialPort -or -not $SerialPort.IsOpen) { return }
+    try {
+        $SerialPort.WriteLine("+++MESHCORE-TERM-STOP")
+        Start-Sleep -Milliseconds 100
+        try { $SerialPort.DiscardInBuffer() } catch { }
+    }
+    catch { }
+}
+
 function getMeshCore {
     param(
         [Parameter(Mandatory=$true)][string]$ComPort,
@@ -1134,6 +1211,7 @@ function getMeshCore {
 
     foreach ($baud in $Bauds) {
         $sp = $null
+        $enteredTerminalForProbe = $false
         try {
             Write-Progress -Id 41 -Activity "Probing serial" -Status "$ComPort @ $baud" -PercentComplete 0
 
@@ -1145,6 +1223,16 @@ function getMeshCore {
 			$hw = Get-UsableSerialResponse `
 				-Text (Invoke-SerialCommandWithRetry -MaxAttempts 3 -SerialPort $sp -Command "board" -TotalMs $CmdTimeoutMs -ProgressId 42 -Activity "Serial") `
 				-Kind Board
+			if ([string]::IsNullOrWhiteSpace($hw)) {
+				$enteredTerminalForProbe = Enter-MeshCoreTerminalForProbe `
+					-SerialPort $sp `
+					-TotalMs ([Math]::Max(1200, $CmdTimeoutMs))
+				if ($enteredTerminalForProbe) {
+					$hw = Get-UsableSerialResponse `
+						-Text (Invoke-SerialCommandWithRetry -MaxAttempts 3 -SerialPort $sp -Command "board" -TotalMs $CmdTimeoutMs -ProgressId 42 -Activity "Serial") `
+						-Kind Board
+				}
+			}
 			if ([string]::IsNullOrWhiteSpace($hw)) {
 				Write-Verbose ("MeshCore probe: no usable board response on {0} @ {1}; skipping remaining serial queries for this probe." -f $ComPort, $baud)
 				continue
@@ -1186,6 +1274,9 @@ function getMeshCore {
         } catch {
             # try next baud
         } finally {
+			if ($enteredTerminalForProbe -and $sp -and $sp.IsOpen) {
+				Exit-MeshCoreTerminalAfterProbe -SerialPort $sp
+			}
             if ($sp -and $sp.IsOpen) { $sp.Close() }
         }
     }
@@ -1215,6 +1306,10 @@ function getUsbComDevices {
 
     foreach ($d in $comDevices) {
         $deviceInfo = $null
+		$usbIdentity = $null
+		if (-not $SkipInfo -and (Test-IsWindowsHost)) {
+			$usbIdentity = Get-UsbComPortIdentity -ComPort $d.drive_letter
+		}
 
         if (-not $SkipInfo) {
             Write-Progress -Status "Checking USB Devices" -Activity "Checking for Meshtastic on $($d.drive_letter)"
@@ -1248,6 +1343,7 @@ function getUsbComDevices {
                 Project         = $d.friendly_name
                 FirmwareVersion = $d.firmware_revision
                 ExtraInfo       = ""
+				UsbIdentity     = $usbIdentity
             }
         }
         else {
@@ -1257,9 +1353,33 @@ function getUsbComDevices {
                 Project         = $deviceInfo.Project
                 FirmwareVersion = $(if ([string]::IsNullOrWhiteSpace($deviceInfo.FWVersion)) { $d.firmware_revision } else { $deviceInfo.FWVersion })
                 ExtraInfo       = $deviceInfo.ExtraInfo
+				UsbIdentity     = $usbIdentity
             }
         }
     }
+
+	if (-not $SkipInfo) {
+		# nRF52 Full Companion's optional interface 02 intentionally ignores
+		# input, so it cannot answer the board/name/version terminal probe. Link
+		# it to the identity-matched interface 00 row instead of presenting an
+		# unexplained generic VID/PID device.
+		foreach ($loggingRow in @($usbComDevices)) {
+			if ((Get-UsbIdentityInterfaceNumber -Identity $loggingRow.UsbIdentity) -ne '02') { continue }
+
+			$primaryRows = @($usbComDevices | Where-Object {
+				(Get-UsbIdentityInterfaceNumber -Identity $_.UsbIdentity) -eq '00' -and
+				(Test-UsbComPortIdentityMatch -Expected $loggingRow.UsbIdentity -Actual $_.UsbIdentity) -and
+				$_.Project -eq 'MeshCore'
+			})
+			if ($primaryRows.Count -ne 1) { continue }
+
+			$primaryRow = $primaryRows[0]
+			$loggingRow.DeviceName = $primaryRow.DeviceName
+			$loggingRow.Project = 'MeshCore'
+			$loggingRow.FirmwareVersion = $primaryRow.FirmwareVersion
+			$loggingRow.ExtraInfo = "USB logging interface 02; flashing uses $($primaryRow.ComPort)"
+		}
+	}
 
     return $usbComDevices
 }
@@ -1518,15 +1638,15 @@ function UpdateReleases {
 		Remove-Item $tmpFile
 	} else {
 		# Compare the MD5 hashes of the cached file and the newly filtered file.
-		$oldMd5 = Get-FileHash $RELEASES_FILE -Algorithm MD5
-		$newMd5 = Get-FileHash $filteredTmp -Algorithm MD5
-		if ($oldMd5.Hash -ne $newMd5.Hash) {
-			Write-Progress -Activity "Release data changed. Updating cache and removing cached version lists. $($oldMd5.Hash) $($newMd5.Hash)"
+		$oldMd5 = Get-FileMd5Hash -Path $RELEASES_FILE
+		$newMd5 = Get-FileMd5Hash -Path $filteredTmp
+		if ($oldMd5 -ne $newMd5) {
+			Write-Progress -Activity "Release data changed. Updating cache and removing cached version lists. $oldMd5 $newMd5"
 			Remove-Item $RELEASES_FILE -ErrorAction Ignore | Out-Null
 			Move-Item $filteredTmp $RELEASES_FILE
 			Remove-Item $VERSIONS_TAGS_FILE, $VERSIONS_LABELS_FILE -ErrorAction Ignore | Out-Null
 		} else {
-			Write-Progress -Activity "Release data is unchanged. $($oldMd5.Hash) $($newMd5.Hash)"
+			Write-Progress -Activity "Release data is unchanged. $oldMd5 $newMd5"
 			
 			# Update the LastWriteTime of the RELEASES_FILE to the current time
 			Set-ItemProperty -Path $RELEASES_FILE -Name LastWriteTime -Value (Get-Date)
@@ -2636,8 +2756,8 @@ function UpdateBleOta {
 		if (-not (Test-Path $BleOtaFile)) {
 			Move-Item $tmp $BleOtaFile
 		} else {
-			$oldHash = (Get-FileHash $BleOtaFile -Algorithm MD5).Hash
-			$newHash = (Get-FileHash $tmp         -Algorithm MD5).Hash
+			$oldHash = Get-FileMd5Hash -Path $BleOtaFile
+			$newHash = Get-FileMd5Hash -Path $tmp
 			if ($oldHash -ne $newHash) {
 				Write-Host "Release data changed. Updating cache."
 				Move-Item $tmp $BleOtaFile -Force
@@ -2790,6 +2910,7 @@ function GetHW() {
 	$hwModelSlug = ""
 	$selectedNodeProject = ""
 	$detectedNodeProject = ""
+	$selectedUsbIdentity = $null
 	if ($DFU_node) {
 		$HWNameShort = $DFU_node
 		$hwModelSlug = $HWNameShort
@@ -2807,6 +2928,15 @@ function GetHW() {
 			$usbComDevices       = $result[3]
 			$selectedNodeProject = $result[4]
 			$detectedNodeProject = $selectedNodeProject
+			if (Test-IsWindowsHost) {
+				# Capture physical identity immediately after the user selects the
+				# radio. A COM number alone may later be reused while firmware menus
+				# and downloads are still in progress.
+				$selectedUsbIdentity = Get-UsbComPortIdentity -ComPort $selectedComPort
+				if ($null -eq $selectedUsbIdentity) {
+					Write-Warning "Could not capture the physical USB identity for $selectedComPort. USB flashing will fail closed."
+				}
+			}
 
 			Write-Host "$selectedComPort. Device: $hwModelSlug. Firmware: $FirmwareVersion."
 			$selectedNodeProject = Select-FlashTarget -MonitorComPort $selectedComPort -CheckIntervalMs 2000
@@ -2846,6 +2976,7 @@ function GetHW() {
 		$hw = GetHardwareInfo -Slug $HWNameFile -ListPath $HARDWARE_LIST -SelectedFirmwareFile $SelectedFirmwareFile -selectedComPort $selectedComPort -HWNameFile $HWNameFile -Version $FirmwareVersion
 		$hw | Add-Member -NotePropertyName Project -NotePropertyValue "Meshtastic" -Force
 		$hw | Add-Member -NotePropertyName DetectedProject -NotePropertyValue $detectedNodeProject -Force
+		$hw | Add-Member -NotePropertyName UsbIdentity -NotePropertyValue $selectedUsbIdentity -Force
 		$hw.FirmwareFile = Resolve-MeshtasticNrf52FirmwareFile -hw $hw
 
 
@@ -2871,6 +3002,7 @@ function GetHW() {
 		$hw = [PSCustomObject]@{
 			ComPort      = $selectedComPort
 			HWNameFile   = $hwModelSlug
+			UsbIdentity  = $selectedUsbIdentity
 		}
 		$null = ChooseMeshCoreFirmware $hw
 		
@@ -2881,7 +3013,13 @@ function GetHW() {
 		$script:Version 		= Read-TextFileIfExists $SELECTED_VERSION_FILE
 		$script:FWType    		= Read-TextFileIfExists $SELECTED_TYPE_FILE
 		$script:URL     		= Read-TextFileIfExists $SELECTED_URL_FILE
-		$script:DownloadedFirmwareFile = Resolve-MeshCoreFirmwareFile -SelectedReference $URL
+		$firmwareDownloadDir = if ($script:Version -eq "custom") {
+			Join-Path $DOWNLOAD_DIR "custom"
+		}
+		else {
+			$DOWNLOAD_DIR
+		}
+		$script:DownloadedFirmwareFile = Resolve-MeshCoreFirmwareFile -SelectedReference $URL -DownloadDir $firmwareDownloadDir
 		
 		$hw = [PSCustomObject]@{
 			ComPort      	= $selectedComPort
@@ -2893,6 +3031,7 @@ function GetHW() {
 			URL				= $URL
 			FirmwareFile	= $DownloadedFirmwareFile
 			Project			= "MeshCore"
+			UsbIdentity	= $selectedUsbIdentity
 		}
 
 		Write-Host "Selected hardware:   $($hw.HWNameFile)"
@@ -3056,8 +3195,16 @@ function Resolve-MeshCoreFirmwareFile {
     }
 
     $cachedFile = Read-TextFileIfExists $CacheFile
+    $cachedDirectoryMatches = $false
+    if (-not [string]::IsNullOrWhiteSpace($cachedFile)) {
+        $cachedDirectory = Split-Path -Path $cachedFile -Parent
+        if (-not [string]::IsNullOrWhiteSpace($cachedDirectory)) {
+            $cachedDirectoryMatches = ([System.IO.Path]::GetFullPath($cachedDirectory) -eq [System.IO.Path]::GetFullPath($DownloadDir))
+        }
+    }
     if ((-not [string]::IsNullOrWhiteSpace($cachedFile)) -and
         (Test-Path $cachedFile) -and
+        $cachedDirectoryMatches -and
         ((Split-Path -Path $cachedFile -Leaf) -eq $leafName) -and
         ((Get-Item $cachedFile).Length -gt 0)) {
         Save-TextFile -Path $CacheFile -Value $cachedFile
@@ -3247,6 +3394,21 @@ function Pick-MatchingDevice {
 # Custom firmware selection
 # -----------------------------
 
+function Get-LatestCustomFirmwareFile {
+    param([Parameter(Mandatory=$true)][string]$RequiredExtension)
+
+    $customDir = Join-Path $DOWNLOAD_DIR "custom"
+    if (-not (Test-Path -LiteralPath $customDir -PathType Container)) {
+        return $null
+    }
+
+    return @(
+        Get-ChildItem -LiteralPath $customDir -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name.EndsWith($RequiredExtension, [System.StringComparison]::OrdinalIgnoreCase) } |
+            Sort-Object LastWriteTimeUtc, FullName -Descending
+    ) | Select-Object -First 1
+}
+
 function Choose-CustomFirmwareFile {
     # Uses globals: $ARCHITECTURE, $ROLE, sets: $CHOSEN_FILE, $VERSION
 	$archLc = ([string]$ARCHITECTURE).ToLowerInvariant()
@@ -3278,9 +3440,32 @@ function Choose-CustomFirmwareFile {
         }
     }
 
+    $customDir = Join-Path $DOWNLOAD_DIR "custom"
+    $latestCustomFirmware = Get-LatestCustomFirmwareFile -RequiredExtension $requiredExt
+    Write-Host "Custom folder: $customDir"
+    if ($null -ne $latestCustomFirmware) {
+        Write-Host "  latest) $($latestCustomFirmware.Name)"
+        Write-Host "          $($latestCustomFirmware.FullName)"
+    }
+    else {
+        Write-Host "  No custom firmware files ending with $requiredExt found."
+    }
+
     while ($true) {
-        $input = Read-Host "Enter full filename or url"
-        if ([string]::IsNullOrWhiteSpace($input)) { Write-Host "Empty input. Try again."; continue }
+        $input = Read-Host "Enter full filename, url, or latest [latest]"
+        if ([string]::IsNullOrWhiteSpace($input)) {
+            $input = "latest"
+        }
+
+        if ($input.Trim().Equals("latest", [System.StringComparison]::OrdinalIgnoreCase)) {
+            $latestCustomFirmware = Get-LatestCustomFirmwareFile -RequiredExtension $requiredExt
+            if ($null -eq $latestCustomFirmware) {
+                Write-Host "ERROR: No custom firmware files ending with $requiredExt found in $customDir"
+                continue
+            }
+            $input = $latestCustomFirmware.FullName
+            Write-Host "Selected latest custom firmware: $input"
+        }
 
         $leafName = Get-LeafNameForSelection $input
         $isValid = $false
@@ -3574,8 +3759,8 @@ function UpdateJsonCache {
                 return $true
             }
 
-            $oldMd5 = (Get-FileHash -Path $OutFile -Algorithm MD5).Hash
-            $newMd5 = (Get-FileHash -Path $tmp -Algorithm MD5).Hash
+            $oldMd5 = Get-FileMd5Hash -Path $OutFile
+            $newMd5 = Get-FileMd5Hash -Path $tmp
 
             if ($oldMd5 -ne $newMd5) {
                 Write-Host "Cache changed: $OutFile"
@@ -4068,6 +4253,12 @@ function updateFlashViaEspTool {
 	
 	$SelectedFirmwareFile = $hw.FirmwareFile
 	$selectedComPort = $hw.ComPort
+	$usbIdentity = Get-SelectedUsbIdentityForFlash -Hardware $hw
+	$selectedComPort = Resolve-EspUsbComPort `
+		-PreferredComPort $selectedComPort `
+		-UsbIdentity $usbIdentity `
+		-TimeoutMs 5000 `
+		-Purpose "ESP32 firmware update"
 	$fi = Get-Item $hw.FirmwareFile
 	$baseName = $fi.Name
 
@@ -4114,8 +4305,11 @@ function updateFlashViaEspTool {
 			}
 			Start-Sleep -Seconds $delaySeconds
 			
-			$devicesAfter = getUSBComPort -SkipInfo
-			$selectedComPort = $devicesAfter[0]
+			$selectedComPort = Resolve-EspUsbComPort `
+				-PreferredComPort $selectedComPort `
+				-UsbIdentity $usbIdentity `
+				-TimeoutMs 5000 `
+				-Purpose "ESP32 firmware update retry"
 			
 			continue
 		}
@@ -4126,14 +4320,18 @@ function updateFlashViaEspTool {
 	}
 
 		
-	$selectedComPortPart2 = Resolve-EspUsbComPort -PreferredComPort $selectedComPort -TimeoutMs 5000
-	if ([string]::IsNullOrWhiteSpace($selectedComPortPart2)) {
-		$selectedComPortPart2 = $selectedComPort
-	}
+	$selectedComPortPart2 = Resolve-EspUsbComPort `
+		-PreferredComPort $selectedComPort `
+		-UsbIdentity $usbIdentity `
+		-TimeoutMs 12000 `
+		-Purpose "ESP32 firmware update after 1200-baud reset"
 	Write-Host "Flashing $SelectedFirmwareFile at 0x10000. Write application firmware."
 	Write-Host "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $WriteFlashCommand 0x10000 $SelectedFirmwareFile"
 	Write-Host ""
-	run_cmd "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $WriteFlashCommand 0x10000 $SelectedFirmwareFile" -Stream
+	$writeExitCode = run_cmd "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $WriteFlashCommand 0x10000 $SelectedFirmwareFile" -Stream
+	if ($writeExitCode -ne 0) {
+		throw "ESP32 application firmware write failed on $selectedComPortPart2 with exit code $writeExitCode."
+	}
 
 	
 	Write-Host ""
@@ -4160,37 +4358,21 @@ function Get-FirstExistingLocalFileName {
 function Resolve-EspUsbComPort {
 	param(
 		[string]$PreferredComPort = "",
-		[int]$TimeoutMs = 5000
+		[AllowNull()][psobject]$UsbIdentity = $null,
+		[int]$TimeoutMs = 5000,
+		[string]$Purpose = "ESP32 flashing"
 	)
 
-	$deadline = (Get-Date).AddMilliseconds($TimeoutMs)
-	do {
-		$ports = @(
-			getallUSBCom |
-				Select-Object -ExpandProperty drive_letter |
-				Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-		)
-
-		if (-not [string]::IsNullOrWhiteSpace($PreferredComPort) -and $ports -contains $PreferredComPort) {
-			return $PreferredComPort
-		}
-
-		if ($ports.Count -eq 1) {
-			return $ports[0]
-		}
-
-		if ($ports.Count -gt 0 -and [string]::IsNullOrWhiteSpace($PreferredComPort)) {
-			return $ports[0]
-		}
-
-		Start-Sleep -Milliseconds 250
-	} while ((Get-Date) -lt $deadline)
-
-	if (-not [string]::IsNullOrWhiteSpace($PreferredComPort)) {
-		return $PreferredComPort
+	if ($null -eq $UsbIdentity) {
+		throw "The physical USB identity for the selected ESP32 was not captured. Refusing to use an unbound COM port for $Purpose."
 	}
 
-	return ""
+	$timeoutSec = [int][Math]::Ceiling([Math]::Max(0, $TimeoutMs) / 1000.0)
+	return (Resolve-LiveUsbComPort `
+		-PreferredComPort $PreferredComPort `
+		-Purpose $Purpose `
+		-UsbIdentity $UsbIdentity `
+		-IdentityTimeoutSec $timeoutSec)
 }
 
 function Get-EspFileNameMode {
@@ -4309,7 +4491,8 @@ function Get-EspFlashStrategy {
 function Install-SimpleMergedEspImage {
 	param(
         [Parameter(Mandatory)][string]$ImagePath,
-        [Parameter(Mandatory)][string]$ComPort
+		[Parameter(Mandatory)][string]$ComPort,
+		[Parameter(Mandatory)][psobject]$UsbIdentity
     )
 
 	$destFolder = Split-Path $ImagePath -Parent
@@ -4322,25 +4505,43 @@ function Install-SimpleMergedEspImage {
 		$ESPTOOL_CMD = get_esptool_cmd
 		$EraseFlashCommand = $script:ESPTOOL_ERASE_FLASH
 		$WriteFlashCommand = $script:ESPTOOL_WRITE_FLASH
+		$ComPort = Resolve-EspUsbComPort `
+			-PreferredComPort $ComPort `
+			-UsbIdentity $UsbIdentity `
+			-TimeoutMs 5000 `
+			-Purpose "ESP32 full-install reset"
 
 		Write-Host ""
 		Write-Host ""
 		Write-Host ""
 		Write-Host "Setting baud to 1200 for firmware update mode. $ESPTOOL_CMD --baud 1200 --port $ComPort chip_id"
 		$null = run_cmd "$ESPTOOL_CMD --baud 1200 --port $ComPort chip_id"
-		Start-Sleep -Seconds 1
-		$devicesAfter = getUSBComPort -SkipInfo
-		$selectedComPortPart2 = $devicesAfter[0]
+		$selectedComPortPart2 = Resolve-EspUsbComPort `
+			-PreferredComPort $ComPort `
+			-UsbIdentity $UsbIdentity `
+			-TimeoutMs 12000 `
+			-Purpose "ESP32 full install after 1200-baud reset"
 
 		Write-Host "Erasing the flash."
 		Write-Host "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $EraseFlashCommand"
-		run_cmd "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $EraseFlashCommand" -Stream
+		$eraseExitCode = run_cmd "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $EraseFlashCommand" -Stream
+		if ($eraseExitCode -ne 0) {
+			throw "ESP32 flash erase failed on $selectedComPortPart2 with exit code $eraseExitCode. Firmware was not written."
+		}
+		$selectedComPortPart2 = Resolve-EspUsbComPort `
+			-PreferredComPort $selectedComPortPart2 `
+			-UsbIdentity $UsbIdentity `
+			-TimeoutMs 12000 `
+			-Purpose "ESP32 merged-image write after erase"
 
 		Write-Host ""
 		Write-Host "Flashing $ImagePath at 0x00. Write merged firmware image."
 		Write-Host "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $WriteFlashCommand 0x00 $ImagePath"
 		Write-Host ""
-		run_cmd "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $WriteFlashCommand 0x00 $ImagePath" -Stream
+		$writeExitCode = run_cmd "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $WriteFlashCommand 0x00 $ImagePath" -Stream
+		if ($writeExitCode -ne 0) {
+			throw "ESP32 merged-image write failed on $selectedComPortPart2 with exit code $writeExitCode."
+		}
 
 		Write-Host ""
 		return $true
@@ -4357,6 +4558,12 @@ function installFlashViaEspTool {
 	
 	$SelectedFirmwareFile = $hw.FirmwareFile
 	$selectedComPort = $hw.ComPort
+	$usbIdentity = Get-SelectedUsbIdentityForFlash -Hardware $hw
+	$selectedComPort = Resolve-EspUsbComPort `
+		-PreferredComPort $selectedComPort `
+		-UsbIdentity $usbIdentity `
+		-TimeoutMs 5000 `
+		-Purpose "ESP32 full install"
 	$fi = Get-Item $SelectedFirmwareFile
 	$baseName = $fi.Name
 	$destFolder = Split-Path $SelectedFirmwareFile -Parent
@@ -4436,7 +4643,10 @@ function installFlashViaEspTool {
 		(-not [string]::IsNullOrWhiteSpace($existingOtaFile)) -or
 		(-not [string]::IsNullOrWhiteSpace($existingSpiffsFile))
 	if (-not $useCompanionImages) {
-		return (Install-SimpleMergedEspImage -ImagePath $installImage -ComPort $selectedComPort)
+		return (Install-SimpleMergedEspImage `
+			-ImagePath $installImage `
+			-ComPort $selectedComPort `
+			-UsbIdentity $usbIdentity)
 	}
 
 	$OTA_FILENAME = $existingOtaFile
@@ -4483,13 +4693,22 @@ function installFlashViaEspTool {
 	Write-Host ""
 	Write-Host "Setting baud to 1200 for firmware update mode. $ESPTOOL_CMD --baud 1200 --port $selectedComPort chip_id"
 	$a = run_cmd "$ESPTOOL_CMD --baud 1200 --port $selectedComPort chip_id"
-	$selectedComPortPart2 = Resolve-EspUsbComPort -PreferredComPort $selectedComPort -TimeoutMs 5000
-	if ([string]::IsNullOrWhiteSpace($selectedComPortPart2)) {
-		$selectedComPortPart2 = $selectedComPort
-	}
+	$selectedComPortPart2 = Resolve-EspUsbComPort `
+		-PreferredComPort $selectedComPort `
+		-UsbIdentity $usbIdentity `
+		-TimeoutMs 12000 `
+		-Purpose "ESP32 full install after 1200-baud reset"
 	Write-Host "Erasing the flash."
 	Write-Host "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $EraseFlashCommand"
-	run_cmd "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $EraseFlashCommand" -Stream
+	$eraseExitCode = run_cmd "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $EraseFlashCommand" -Stream
+	if ($eraseExitCode -ne 0) {
+		throw "ESP32 flash erase failed on $selectedComPortPart2 with exit code $eraseExitCode. Firmware was not written."
+	}
+	$selectedComPortPart2 = Resolve-EspUsbComPort `
+		-PreferredComPort $selectedComPortPart2 `
+		-UsbIdentity $usbIdentity `
+		-TimeoutMs 12000 `
+		-Purpose "ESP32 companion-image write after erase"
 	Write-Host ""
 	$installLeaf = Split-Path -Leaf $installImage
 	$otaLeaf = Split-Path -Leaf $OTA_FILENAME
@@ -4502,7 +4721,10 @@ function installFlashViaEspTool {
 	$combinedWriteCommand = "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $WriteFlashCommand 0x00 `"$installLeaf`" $OTA_OFFSET `"$otaLeaf`" $SPIFFS_OFFSET `"$spiffsLeaf`""
 	Write-Host $combinedWriteCommand
 	Write-Host ""
-	run_cmd $combinedWriteCommand -Stream
+	$writeExitCode = run_cmd $combinedWriteCommand -Stream
+	if ($writeExitCode -ne 0) {
+		throw "ESP32 install-image write failed on $selectedComPortPart2 with exit code $writeExitCode."
+	}
 	
 	
 	Write-Host ""
@@ -4749,11 +4971,414 @@ function Test-IsWindowsHost {
 	return ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT)
 }
 
+function Resolve-UsbParentInstanceId {
+	param(
+		[Parameter(Mandatory)][string]$InitialInstanceId,
+		[Parameter(Mandatory)][scriptblock]$ParentResolver
+	)
+
+	$currentInstanceId = $InitialInstanceId
+	for ($depth = 0; $depth -lt 6; $depth++) {
+		if ($currentInstanceId -match '^USB\\VID_[0-9A-F]{4}&PID_[0-9A-F]{4}\\' -and
+			$currentInstanceId -notmatch '&MI_[0-9A-F]{2}') {
+			return $currentInstanceId
+		}
+
+		$parentInstanceId = [string](& $ParentResolver $currentInstanceId)
+		if ([string]::IsNullOrWhiteSpace($parentInstanceId)) { break }
+		$currentInstanceId = $parentInstanceId
+	}
+
+	return ""
+}
+
+function Get-UsbInterfaceNumberFromInstanceId {
+	param([string]$InstanceId)
+
+	if ([string]$InstanceId -match '(?i)&MI_([0-9A-F]{2})(?:\\|$)') {
+		return ([string]$matches[1]).ToUpperInvariant()
+	}
+	return ""
+}
+
+function Get-UsbIdentityInterfaceNumber {
+	param([psobject]$Identity)
+
+	if ($null -eq $Identity) { return "" }
+	$property = $Identity.PSObject.Properties['InterfaceNumber']
+	if ($null -eq $property) { return "" }
+	return ([string]$property.Value).ToUpperInvariant()
+}
+
+function Get-UsbComPortIdentity {
+	param(
+		[Parameter(Mandatory)][string]$ComPort
+	)
+
+	if (-not (Test-IsWindowsHost)) {
+		return $null
+	}
+
+	$normalizedPort = $ComPort.Trim().ToUpperInvariant()
+	if ($normalizedPort -notmatch '^COM\d+$') {
+		return $null
+	}
+
+	try {
+		if (-not (Get-Command Get-CimInstance -ErrorAction SilentlyContinue)) {
+			Import-Module CimCmdlets -ErrorAction Stop | Out-Null
+		}
+		if (-not (Get-Command Get-PnpDeviceProperty -ErrorAction SilentlyContinue)) {
+			Import-Module PnpDevice -ErrorAction Stop | Out-Null
+		}
+
+		$escapedPort = [regex]::Escape($normalizedPort)
+		$portDevice = Get-CimInstance Win32_PnPEntity -ErrorAction Stop |
+			Where-Object {
+				$_.Name -match ("\({0}\)$" -f $escapedPort) -and
+				$_.Present -ne $false -and
+				($null -eq $_.ConfigManagerErrorCode -or [int]$_.ConfigManagerErrorCode -eq 0)
+			} |
+			Select-Object -First 1
+		if ($null -eq $portDevice -or [string]::IsNullOrWhiteSpace([string]$portDevice.PNPDeviceID)) {
+			return $null
+		}
+
+		$portInstanceId = [string]$portDevice.PNPDeviceID
+		$interfaceNumber = Get-UsbInterfaceNumberFromInstanceId -InstanceId $portInstanceId
+		$usbParentInstanceId = Resolve-UsbParentInstanceId `
+			-InitialInstanceId $portInstanceId `
+			-ParentResolver {
+				param($instanceId)
+				return [string](Get-PnpDeviceProperty -InstanceId $instanceId -KeyName 'DEVPKEY_Device_Parent' -ErrorAction Stop).Data
+			}
+
+		if ([string]::IsNullOrWhiteSpace($usbParentInstanceId)) {
+			return $null
+		}
+
+		$serialNumber = ""
+		if ($usbParentInstanceId -match '^USB\\VID_[0-9A-F]{4}&PID_[0-9A-F]{4}\\(.+)$') {
+			$candidateSerial = [string]$matches[1]
+			# Windows synthesizes instance suffixes containing '&' for USB devices
+			# without a serial descriptor. Those are not stable across USB modes.
+			if ($candidateSerial -notmatch '&') {
+				$serialNumber = $candidateSerial
+			}
+		}
+
+		$locationPath = ""
+		try {
+			$locationData = (Get-PnpDeviceProperty -InstanceId $usbParentInstanceId -KeyName 'DEVPKEY_Device_LocationPaths' -ErrorAction Stop).Data
+			$locationPath = [string](@($locationData) | Select-Object -First 1)
+		}
+		catch {
+			$locationPath = ""
+		}
+
+		$busReportedDescription = ""
+		try {
+			$busReportedDescription = [string](Get-PnpDeviceProperty -InstanceId $usbParentInstanceId -KeyName 'DEVPKEY_Device_BusReportedDeviceDesc' -ErrorAction Stop).Data
+		}
+		catch {
+			$busReportedDescription = ""
+		}
+
+		if ([string]::IsNullOrWhiteSpace($serialNumber) -and [string]::IsNullOrWhiteSpace($locationPath)) {
+			return $null
+		}
+
+		return [pscustomobject]@{
+			SerialNumber          = $serialNumber
+			LocationPath          = $locationPath
+			ParentInstanceId      = $usbParentInstanceId
+			BusReportedDescription = $busReportedDescription
+			InterfaceNumber       = $interfaceNumber
+		}
+	}
+	catch {
+		return $null
+	}
+}
+
+function Test-UsbIdentityIsNrf52Dfu {
+	param([Parameter(Mandatory)][psobject]$Identity)
+
+	$description = [string]$Identity.BusReportedDescription
+	if ($description -match '(?i)(?:^|[_ -])(DFU|UF2)(?:$|[_ -])') {
+		return $true
+	}
+
+	# Adafruit nRF52 bootloaders use the 0x00xx PID range, while their
+	# application firmware uses 0x80xx. This is a mode hint only; physical
+	# identity was already verified independently above.
+	return ([string]$Identity.ParentInstanceId -match '(?i)^USB\\VID_239A&PID_00[0-9A-F]{2}\\')
+}
+
+function Assert-UsbIdentityIsNrf52Dfu {
+	param(
+		[Parameter(Mandatory)][psobject]$Identity,
+		[Parameter(Mandatory)][string]$ComPort
+	)
+
+	if (-not (Test-UsbIdentityIsNrf52Dfu -Identity $Identity)) {
+		throw "$ComPort is the selected USB device, but it is not confirmed to be in nRF52 DFU mode. Refusing a no-touch DFU upload."
+	}
+}
+
+function Test-UsbComPortIdentityMatch {
+	param(
+		[Parameter(Mandatory)][psobject]$Expected,
+		[Parameter(Mandatory)][psobject]$Actual
+	)
+
+	$expectedSerial = [string]$Expected.SerialNumber
+	$actualSerial = [string]$Actual.SerialNumber
+	if (-not [string]::IsNullOrWhiteSpace($expectedSerial) -and
+		-not [string]::IsNullOrWhiteSpace($actualSerial)) {
+		# Two explicitly reported but different serial numbers are an identity
+		# conflict. Do not override that conflict with a matching USB location;
+		# doing so could flash a different radio swapped into the same socket.
+		return $expectedSerial.Equals($actualSerial, [System.StringComparison]::OrdinalIgnoreCase)
+	}
+
+	$expectedLocation = [string]$Expected.LocationPath
+	$actualLocation = [string]$Actual.LocationPath
+	if (-not [string]::IsNullOrWhiteSpace($expectedLocation) -and
+		-not [string]::IsNullOrWhiteSpace($actualLocation)) {
+		return $expectedLocation.Equals($actualLocation, [System.StringComparison]::OrdinalIgnoreCase)
+	}
+
+	return $false
+}
+
+function Get-SelectedUsbIdentityForFlash {
+	param(
+		[Parameter(Mandatory)][psobject]$Hardware
+	)
+
+	if (-not (Test-IsWindowsHost)) {
+		return $null
+	}
+
+	$selectedComPort = [string]$Hardware.ComPort
+	$capturedProperty = $Hardware.PSObject.Properties['UsbIdentity']
+	$capturedIdentity = if ($null -ne $capturedProperty) { $capturedProperty.Value } else { $null }
+	$currentIdentity = Get-UsbComPortIdentity -ComPort $selectedComPort
+
+	if ($null -ne $capturedProperty) {
+		if ($null -eq $capturedIdentity) {
+			throw "The physical USB identity for $selectedComPort was not captured when the radio was selected. Refusing to substitute a different radio."
+		}
+
+		# A missing old COM number is allowed: Resolve-LiveUsbComPort will locate
+		# the captured physical identity on its new runtime/DFU COM number. If the
+		# old number exists, however, it must not have been reused by another node.
+		if ($null -ne $currentIdentity -and
+			-not (Test-UsbComPortIdentityMatch -Expected $capturedIdentity -Actual $currentIdentity)) {
+			$expectedText = Get-UsbIdentityDisplayText -Identity $capturedIdentity
+			$actualText = Get-UsbIdentityDisplayText -Identity $currentIdentity
+			throw "$selectedComPort was reused by $actualText after selecting $expectedText. Refusing to flash a different radio."
+		}
+
+		return $capturedIdentity
+	}
+
+	# Backward-compatible path for callers that construct a hardware object
+	# directly instead of going through GetHW. It is still bound to the exact
+	# requested COM port and never falls back to a different port first.
+	if ($null -eq $currentIdentity) {
+		throw "Could not determine the physical USB identity for $selectedComPort. Refusing to substitute a different radio."
+	}
+	return $currentIdentity
+}
+
+function Set-HardwareUsbComPortSelection {
+	param(
+		[Parameter(Mandatory)][pscustomobject]$Hardware,
+		[Parameter(Mandatory)][string]$ComPort
+	)
+
+	$normalizedPort = $ComPort.Trim().ToUpperInvariant()
+	if ($normalizedPort -notmatch '^COM\d+$') {
+		throw "Invalid USB COM port '$ComPort'. Enter a value such as COM7."
+	}
+
+	# Resolve the complete new selection before changing either field. Keeping a
+	# previous identity beside a newly typed COM number could otherwise relocate
+	# a retry back to the old radio when the new port is absent.
+	$newIdentity = Get-UsbComPortIdentity -ComPort $normalizedPort
+	if ($null -eq $newIdentity) {
+		throw "Could not capture a physical USB identity for $normalizedPort. The existing radio selection was not changed."
+	}
+
+	if ($null -eq $Hardware.PSObject.Properties['ComPort'] -or
+		$null -eq $Hardware.PSObject.Properties['UsbIdentity']) {
+		throw "The hardware selection cannot store both COM port and USB identity. The existing radio selection was not changed."
+	}
+
+	$Hardware.ComPort = $normalizedPort
+	$Hardware.UsbIdentity = $newIdentity
+	return $newIdentity
+}
+
+function Test-ShouldRetryNrfutilSerialPort {
+	param(
+		[bool]$TouchWasRequested,
+		[bool]$SerialOpenFailure
+	)
+
+	return ($TouchWasRequested -and $SerialOpenFailure)
+}
+
+function Get-UsbIdentityDisplayText {
+	param([Parameter(Mandatory)][psobject]$Identity)
+
+	if (-not [string]::IsNullOrWhiteSpace([string]$Identity.SerialNumber)) {
+		return "USB serial $($Identity.SerialNumber)"
+	}
+	if (-not [string]::IsNullOrWhiteSpace([string]$Identity.LocationPath)) {
+		return "USB location $($Identity.LocationPath)"
+	}
+	return "unknown USB identity"
+}
+
+function Resolve-UsbComPortForIdentity {
+	param(
+		[Parameter(Mandatory)][psobject]$Identity,
+		[string]$PreferredComPort = "",
+		[int]$TimeoutSec = 0,
+		[int]$PollIntervalMs = 200
+	)
+
+	$deadline = (Get-Date).AddSeconds([Math]::Max(0, $TimeoutSec))
+	do {
+		$matchingDevices = @()
+		foreach ($candidatePort in @(Get-AvailableComPorts)) {
+			$candidateIdentity = Get-UsbComPortIdentity -ComPort $candidatePort
+			if ($null -ne $candidateIdentity -and
+				(Test-UsbComPortIdentityMatch -Expected $Identity -Actual $candidateIdentity)) {
+				$matchingDevices += [pscustomobject]@{
+					ComPort = [string]$candidatePort
+					Identity = $candidateIdentity
+				}
+			}
+		}
+
+		$matchingDevices = @($matchingDevices | Sort-Object ComPort -Unique)
+		if ($matchingDevices.Count -gt 1) {
+			$expectedInterface = Get-UsbIdentityInterfaceNumber -Identity $Identity
+
+			$interfaceMatches = @()
+			if (-not [string]::IsNullOrWhiteSpace($expectedInterface)) {
+				$interfaceMatches = @($matchingDevices | Where-Object {
+					$candidateInterface = Get-UsbIdentityInterfaceNumber -Identity $_.Identity
+					$expectedInterface.Equals($candidateInterface, [System.StringComparison]::OrdinalIgnoreCase)
+				})
+			}
+			else {
+				# A captured DFU identity has no composite interface number. If it
+				# later returns with both Full Companion ports, interface 00 is the
+				# control/flash port and interface 02 is output-only logging.
+				$interfaceMatches = @($matchingDevices | Where-Object {
+					(Get-UsbIdentityInterfaceNumber -Identity $_.Identity) -eq '00'
+				})
+			}
+
+			if ($interfaceMatches.Count -gt 0) {
+				$matchingDevices = $interfaceMatches
+			}
+		}
+
+		$matchingPorts = @($matchingDevices | Select-Object -ExpandProperty ComPort -Unique)
+		if (-not [string]::IsNullOrWhiteSpace($PreferredComPort) -and $matchingPorts -contains $PreferredComPort) {
+			return $PreferredComPort
+		}
+		if ($matchingPorts.Count -eq 1) {
+			return [string]$matchingPorts[0]
+		}
+		if ($matchingPorts.Count -gt 1) {
+			$identityText = Get-UsbIdentityDisplayText -Identity $Identity
+			throw "Multiple COM ports matched $identityText`: $($matchingPorts -join ', ')"
+		}
+
+		if ((Get-Date) -ge $deadline) { break }
+		Start-Sleep -Milliseconds ([Math]::Max(1, $PollIntervalMs))
+	} while ($true)
+
+	return ""
+}
+
+function Resolve-Nrf52PrimaryUsbSelection {
+	param(
+		[Parameter(Mandatory)][string]$SelectedComPort,
+		[psobject]$UsbIdentity = $null,
+		[int]$TimeoutSec = 3,
+		[int]$PollIntervalMs = 200
+	)
+
+	if (-not (Test-IsWindowsHost) -or $null -eq $UsbIdentity -or
+		(Get-UsbIdentityInterfaceNumber -Identity $UsbIdentity) -ne '02') {
+		return [pscustomobject]@{
+			ComPort = $SelectedComPort
+			UsbIdentity = $UsbIdentity
+		}
+	}
+
+	$deadline = (Get-Date).AddSeconds([Math]::Max(0, $TimeoutSec))
+	do {
+		$primaryMatches = @()
+		foreach ($candidatePort in @(Get-AvailableComPorts)) {
+			$candidateIdentity = Get-UsbComPortIdentity -ComPort $candidatePort
+			if ($null -eq $candidateIdentity -or
+				(Get-UsbIdentityInterfaceNumber -Identity $candidateIdentity) -ne '00' -or
+				-not (Test-UsbComPortIdentityMatch -Expected $UsbIdentity -Actual $candidateIdentity)) {
+				continue
+			}
+			$primaryMatches += [pscustomobject]@{
+				ComPort = [string]$candidatePort
+				UsbIdentity = $candidateIdentity
+			}
+		}
+
+		$primaryMatches = @($primaryMatches | Sort-Object ComPort -Unique)
+		if ($primaryMatches.Count -eq 1) {
+			$primary = $primaryMatches[0]
+			Write-Host "$SelectedComPort is USB logging interface 02; using primary interface 00 on $($primary.ComPort) for nRF52 flashing."
+			return $primary
+		}
+		if ($primaryMatches.Count -gt 1) {
+			$ports = @($primaryMatches | Select-Object -ExpandProperty ComPort)
+			throw "Multiple primary interface 00 COM ports matched the radio selected on logging interface 02 $SelectedComPort`: $($ports -join ', '). Refusing nRF52 flashing."
+		}
+
+		if ((Get-Date) -ge $deadline) { break }
+		Start-Sleep -Milliseconds ([Math]::Max(1, $PollIntervalMs))
+	} while ($true)
+
+	$identityText = Get-UsbIdentityDisplayText -Identity $UsbIdentity
+	throw "$SelectedComPort is USB logging interface 02 for $identityText, but its primary interface 00 did not enumerate. Refusing to issue a 1200-baud touch on the logging port."
+}
+
 function Resolve-LiveUsbComPort {
 	param(
 		[string]$PreferredComPort = "",
-		[string]$Purpose = "operation"
+		[string]$Purpose = "operation",
+		[psobject]$UsbIdentity = $null,
+		[int]$IdentityTimeoutSec = 0
 	)
+
+	if ($null -ne $UsbIdentity) {
+		$identityText = Get-UsbIdentityDisplayText -Identity $UsbIdentity
+		$matchedComPort = Resolve-UsbComPortForIdentity -Identity $UsbIdentity -PreferredComPort $PreferredComPort -TimeoutSec $IdentityTimeoutSec
+		if ([string]::IsNullOrWhiteSpace($matchedComPort)) {
+			throw "$identityText did not enumerate a COM port while preparing for $Purpose. Refusing to use a different USB radio."
+		}
+		if (-not [string]::IsNullOrWhiteSpace($PreferredComPort) -and $matchedComPort -ne $PreferredComPort) {
+			Write-Host "Detected $identityText on $matchedComPort instead of stale port $PreferredComPort."
+		}
+		return $matchedComPort
+	}
 
 	$activeComPorts = @(Get-AvailableComPorts)
 	if ($activeComPorts.Count -eq 0) {
@@ -4808,13 +5433,23 @@ function Resolve-NrfutilFallbackComPort {
 	param(
 		[string[]]$BeforePorts,
 		[string]$OriginalComPort,
-		[int]$TimeoutSec = 12
+		[int]$TimeoutSec = 12,
+		[psobject]$UsbIdentity = $null
 	)
 
 	$before = @($BeforePorts | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 	$deadline = (Get-Date).AddSeconds($TimeoutSec)
 	while ((Get-Date) -lt $deadline) {
 		$current = @(Get-AvailableComPorts)
+		if ($null -ne $UsbIdentity) {
+			$matchingPort = Resolve-UsbComPortForIdentity -Identity $UsbIdentity -PreferredComPort $OriginalComPort
+			if (-not [string]::IsNullOrWhiteSpace($matchingPort)) {
+				return $matchingPort
+			}
+			Start-Sleep -Milliseconds 200
+			continue
+		}
+
 		$newPorts = @($current | Where-Object { $_ -notin $before })
 		if ($newPorts.Count -eq 1) {
 			return $newPorts[0]
@@ -4884,11 +5519,86 @@ print("\n--- Operation complete. The device should now be in DFU mode. ---")
 	return $LASTEXITCODE
 }
 
-function Touch-ComPort1200 {
+function Wait-Nrf52DfuTransitionAfterFailedTouch {
 	param(
-		[Parameter(Mandatory)][string]$ComPort
+		[Parameter(Mandatory)][string]$ComPort,
+		[string[]]$BeforePorts = @(),
+		[psobject]$UsbIdentity = $null,
+		[int]$TimeoutMs = 2000,
+		[int]$PollIntervalMs = 100
 	)
 
+	$before = @($BeforePorts | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+	$deadline = (Get-Date).AddMilliseconds([Math]::Max(0, $TimeoutMs))
+	do {
+		$current = @(Get-AvailableComPorts)
+		if ($current -notcontains $ComPort) {
+			return $true
+		}
+
+		# Windows can retain the old COM devnode briefly after the close which
+		# triggered reset, even though the selected radio has already appeared on
+		# its new DFU port. Look only at newly enumerated ports so a pre-existing
+		# second CDC interface from the same Full Companion is not mistaken for a
+		# transition.
+		if ($null -ne $UsbIdentity) {
+			foreach ($candidatePort in @($current | Where-Object {
+					$_ -ne $ComPort -and $_ -notin $before
+			})) {
+				$candidateIdentity = Get-UsbComPortIdentity -ComPort $candidatePort
+				if ($null -ne $candidateIdentity -and
+					(Test-UsbComPortIdentityMatch -Expected $UsbIdentity -Actual $candidateIdentity)) {
+					return $true
+				}
+			}
+		}
+
+		if ((Get-Date) -ge $deadline) { break }
+		Start-Sleep -Milliseconds ([Math]::Max(1, $PollIntervalMs))
+	} while ($true)
+
+	return $false
+}
+
+function Assert-UsbComPortIdentityFor1200Touch {
+	param(
+		[Parameter(Mandatory)][string]$ComPort,
+		[Parameter(Mandatory)][psobject]$ExpectedIdentity,
+		[string]$Stage = "1200-baud touch"
+	)
+
+	$actualIdentity = Get-UsbComPortIdentity -ComPort $ComPort
+	if ($null -eq $actualIdentity) {
+		$expectedText = Get-UsbIdentityDisplayText -Identity $ExpectedIdentity
+		throw "Could not revalidate $ComPort as $expectedText immediately before $Stage. Refusing to touch an unverified COM port."
+	}
+
+	$identityMatches = Test-UsbComPortIdentityMatch -Expected $ExpectedIdentity -Actual $actualIdentity
+	$expectedInterface = Get-UsbIdentityInterfaceNumber -Identity $ExpectedIdentity
+	$actualInterface = Get-UsbIdentityInterfaceNumber -Identity $actualIdentity
+	$interfaceMatches = [string]::IsNullOrWhiteSpace($expectedInterface) -or
+		$expectedInterface.Equals($actualInterface, [System.StringComparison]::OrdinalIgnoreCase)
+	if (-not $identityMatches -or -not $interfaceMatches) {
+		$expectedText = Get-UsbIdentityDisplayText -Identity $ExpectedIdentity
+		$actualText = Get-UsbIdentityDisplayText -Identity $actualIdentity
+		if (-not $interfaceMatches) {
+			$actualText = "$actualText interface $actualInterface"
+			$expectedText = "$expectedText interface $expectedInterface"
+		}
+		throw "$ComPort now belongs to $actualText, not the selected $expectedText. Refusing $Stage."
+	}
+
+	return $actualIdentity
+}
+
+function Touch-ComPort1200 {
+	param(
+		[Parameter(Mandatory)][string]$ComPort,
+		[psobject]$UsbIdentity = $null
+	)
+
+	$portsBeforeTouch = @(Get-AvailableComPorts)
+	$identityRevalidationInProgress = $false
 	try {
 		$sp = New-Object System.IO.Ports.SerialPort $ComPort, 1200, "None", 8, "One"
 		$sp.ReadTimeout = 300
@@ -4897,6 +5607,17 @@ function Touch-ComPort1200 {
 		$sp.DtrEnable = $true
 		$sp.RtsEnable = $true
 		try {
+			# Open/close at 1200 baud is the destructive reset trigger. Resolve the
+			# COM devnode again at the last possible moment so a number reused after
+			# selection cannot be touched.
+			if ($null -ne $UsbIdentity) {
+				$identityRevalidationInProgress = $true
+				$null = Assert-UsbComPortIdentityFor1200Touch `
+					-ComPort $ComPort `
+					-ExpectedIdentity $UsbIdentity `
+					-Stage "direct 1200-baud touch"
+				$identityRevalidationInProgress = $false
+			}
 			$sp.Open()
 			Start-Sleep -Milliseconds 150
 		}
@@ -4910,13 +5631,27 @@ function Touch-ComPort1200 {
 		}
 	}
 	catch {
-		$portsAfterFailure = @(Get-AvailableComPorts)
-		if ($portsAfterFailure -notcontains $ComPort) {
+		if ($identityRevalidationInProgress) {
+			throw
+		}
+		$transitionObserved = Wait-Nrf52DfuTransitionAfterFailedTouch `
+			-ComPort $ComPort `
+			-BeforePorts $portsBeforeTouch `
+			-UsbIdentity $UsbIdentity
+		if ($transitionObserved) {
 			Write-Host "1200-baud touch on $ComPort triggered a reset; waiting for the device to re-enumerate."
 		}
 		else {
+			# The failed open may have raced a disconnect/re-enumeration or COM
+			# reuse. Revalidate again before handing the same name to Python.
+			Write-Warning "Direct 1200-baud touch on $ComPort failed; trying python fallback."
+			if ($null -ne $UsbIdentity) {
+				$null = Assert-UsbComPortIdentityFor1200Touch `
+					-ComPort $ComPort `
+					-ExpectedIdentity $UsbIdentity `
+					-Stage "Python 1200-baud fallback"
+			}
 			try {
-				Write-Warning "Direct 1200-baud touch on $ComPort failed; trying python fallback."
 				$exitCode = Invoke-PythonSerialTouch1200 -ComPort $ComPort
 				if ($exitCode -ne 0) {
 					Write-Warning "Python fallback touch failed on $ComPort with exit code $exitCode."
@@ -4935,7 +5670,8 @@ function Resolve-Nrf52DfuComPort {
 	param(
 		[string]$PreferredComPort,
 		[string]$TouchComPort = "",
-		[int]$TimeoutSec = 45
+		[int]$TimeoutSec = 45,
+		[psobject]$UsbIdentity = $null
 	)
 
 	$before = @(Get-AvailableComPorts)
@@ -4944,7 +5680,7 @@ function Resolve-Nrf52DfuComPort {
 	$lastObservedPorts = $before
 	if ($requestedTouch -and ($before -contains $TouchComPort)) {
 		Write-Host "Putting device into DFU mode via 1200 baud touch on $TouchComPort"
-		Touch-ComPort1200 -ComPort $TouchComPort
+		Touch-ComPort1200 -ComPort $TouchComPort -UsbIdentity $UsbIdentity
 	}
 	elseif ($requestedTouch) {
 		Write-Warning "Runtime COM port $TouchComPort was not present before DFU touch; watching for DFU port anyway."
@@ -4954,10 +5690,54 @@ function Resolve-Nrf52DfuComPort {
 	while ((Get-Date) -lt $deadline) {
 		$current = @(Get-AvailableComPorts)
 		$lastObservedPorts = $current
-		$newPorts = @($current | Where-Object { $_ -notin $before })
 		if ($requestedTouch -and ($current -notcontains $TouchComPort)) {
 			$sawTouchPortDisappear = $true
 		}
+
+		if ($null -ne $UsbIdentity) {
+			$matchingPorts = @()
+			foreach ($candidatePort in $current) {
+				$candidateIdentity = Get-UsbComPortIdentity -ComPort $candidatePort
+				if ($null -eq $candidateIdentity -or
+					-not (Test-UsbComPortIdentityMatch -Expected $UsbIdentity -Actual $candidateIdentity)) {
+					continue
+				}
+
+				if (-not $requestedTouch) {
+					$matchingPorts += $candidatePort
+					continue
+				}
+				if (-not (Test-UsbIdentityIsNrf52Dfu -Identity $candidateIdentity)) {
+					# A dual-CDC Full Companion exposes a pre-existing interface 02
+					# which shares the selected radio's serial/location. It is a
+					# plaintext logging port, not evidence that DFU completed.
+					continue
+				}
+
+				$parentChanged = -not [string]::IsNullOrWhiteSpace([string]$UsbIdentity.ParentInstanceId) -and
+					-not ([string]$UsbIdentity.ParentInstanceId).Equals([string]$candidateIdentity.ParentInstanceId, [System.StringComparison]::OrdinalIgnoreCase)
+				if ($candidatePort -ne $TouchComPort -or $sawTouchPortDisappear -or $parentChanged) {
+					$matchingPorts += $candidatePort
+				}
+			}
+
+			$matchingPorts = @($matchingPorts | Select-Object -Unique)
+			if (-not [string]::IsNullOrWhiteSpace($PreferredComPort) -and $matchingPorts -contains $PreferredComPort) {
+				return $PreferredComPort
+			}
+			if ($matchingPorts.Count -eq 1) {
+				return [string]$matchingPorts[0]
+			}
+			if ($matchingPorts.Count -gt 1) {
+				$identityText = Get-UsbIdentityDisplayText -Identity $UsbIdentity
+				throw "Multiple DFU COM ports matched ${identityText}: $($matchingPorts -join ', ')"
+			}
+
+			Start-Sleep -Milliseconds 300
+			continue
+		}
+
+		$newPorts = @($current | Where-Object { $_ -notin $before })
 
 		if ($newPorts.Count -eq 1) {
 			return $newPorts[0]
@@ -4986,6 +5766,20 @@ function Resolve-Nrf52DfuComPort {
 	if ($requestedTouch) {
 		$current = @(Get-AvailableComPorts)
 		$lastObservedPorts = $current
+		if ($null -ne $UsbIdentity) {
+			$matchingPort = Resolve-UsbComPortForIdentity -Identity $UsbIdentity -PreferredComPort $TouchComPort
+			if (-not [string]::IsNullOrWhiteSpace($matchingPort)) {
+				Write-Warning "DFU transition was not observable; retrying the same USB device on $matchingPort."
+				return $matchingPort
+			}
+
+			# Once a physical identity is known, never fall through to the legacy
+			# COM-number-only retry below. The old number may already belong to a
+			# different radio after the selected device re-enumerates.
+			$observed = if ($lastObservedPorts.Count -gt 0) { $lastObservedPorts -join ', ' } else { '<none>' }
+			Write-Warning "The selected USB identity was not found after DFU touch. Observed COM ports: $observed"
+			return ""
+		}
 		if ($sawTouchPortDisappear -and ($current -contains $TouchComPort)) {
 			return $TouchComPort
 		}
@@ -5033,7 +5827,8 @@ function Invoke-NrfutilSerialDfu {
 		[int]$NrfutilTouchBaud = 0,
 		[string]$TouchComPort = "",
 		[int]$TimeoutSec = 45,
-		[string]$ProgressActivity = "nRF52 DFU"
+		[string]$ProgressActivity = "nRF52 DFU",
+		[psobject]$UsbIdentity = $null
 	)
 
 	if (-not (Test-Path $PackageFile)) {
@@ -5042,6 +5837,51 @@ function Invoke-NrfutilSerialDfu {
 
 	$nrfutilCommand = Get-NrfutilCommand
 	$dfuComPort = $ComPort
+	$touchWasRequested = ($NrfutilTouchBaud -gt 0)
+	if (Test-IsWindowsHost) {
+		$currentPortIdentity = Get-UsbComPortIdentity -ComPort $ComPort
+		if ($null -eq $currentPortIdentity -and $null -ne $UsbIdentity) {
+			$relocatedComPort = Resolve-UsbComPortForIdentity `
+				-Identity $UsbIdentity `
+				-PreferredComPort $ComPort `
+				-TimeoutSec $TimeoutSec
+			if (-not [string]::IsNullOrWhiteSpace($relocatedComPort)) {
+				$ComPort = $relocatedComPort
+				$dfuComPort = $relocatedComPort
+				$currentPortIdentity = Get-UsbComPortIdentity -ComPort $relocatedComPort
+			}
+		}
+		if ($null -eq $currentPortIdentity) {
+			throw "Could not determine the physical USB identity for $ComPort. Refusing nRF52 DFU while another radio could be selected."
+		}
+		if ($null -eq $UsbIdentity) {
+			$UsbIdentity = $currentPortIdentity
+		}
+		elseif (-not (Test-UsbComPortIdentityMatch -Expected $UsbIdentity -Actual $currentPortIdentity)) {
+			$identityText = Get-UsbIdentityDisplayText -Identity $UsbIdentity
+			$currentIdentityText = Get-UsbIdentityDisplayText -Identity $currentPortIdentity
+			throw "$ComPort belongs to $currentIdentityText, not the selected $identityText. Refusing nRF52 DFU."
+		}
+		if ((Get-UsbIdentityInterfaceNumber -Identity $currentPortIdentity) -eq '02') {
+			$primarySelection = Resolve-Nrf52PrimaryUsbSelection `
+				-SelectedComPort $ComPort `
+				-UsbIdentity $currentPortIdentity
+			$ComPort = $primarySelection.ComPort
+			$dfuComPort = $primarySelection.ComPort
+			$UsbIdentity = $primarySelection.UsbIdentity
+			$currentPortIdentity = $primarySelection.UsbIdentity
+		}
+
+		$currentPortIsDfu = Test-UsbIdentityIsNrf52Dfu -Identity $currentPortIdentity
+		if ($touchWasRequested -and $currentPortIsDfu) {
+			Write-Host "$ComPort is already in nRF52 DFU mode; skipping the 1200-baud touch."
+			$NrfutilTouchBaud = 0
+		}
+		elseif (-not $touchWasRequested) {
+			Assert-UsbIdentityIsNrf52Dfu -Identity $currentPortIdentity -ComPort $ComPort
+		}
+	}
+
 	$portsBeforeTouch = @()
 	if ($NrfutilTouchBaud -gt 0) {
 		$portsBeforeTouch = @(Get-AvailableComPorts)
@@ -5050,7 +5890,7 @@ function Invoke-NrfutilSerialDfu {
 			throw "COM port $dfuComPort was not present before DFU upload. Observed ports: $observed"
 		}
 		if (Test-IsWindowsHost) {
-			$resolvedDfuComPort = Resolve-Nrf52DfuComPort -PreferredComPort $dfuComPort -TouchComPort $dfuComPort -TimeoutSec $TimeoutSec
+			$resolvedDfuComPort = Resolve-Nrf52DfuComPort -PreferredComPort $dfuComPort -TouchComPort $dfuComPort -TimeoutSec $TimeoutSec -UsbIdentity $UsbIdentity
 			if ([string]::IsNullOrWhiteSpace($resolvedDfuComPort)) {
 				$observed = @(Get-AvailableComPorts)
 				$observedText = if ($observed.Count -gt 0) { $observed -join ', ' } else { '<none>' }
@@ -5064,10 +5904,22 @@ function Invoke-NrfutilSerialDfu {
 		}
 	}
 	else {
-		$dfuComPort = Resolve-Nrf52DfuComPort -PreferredComPort $ComPort -TouchComPort $TouchComPort -TimeoutSec $TimeoutSec
+		$dfuComPort = Resolve-Nrf52DfuComPort -PreferredComPort $ComPort -TouchComPort $TouchComPort -TimeoutSec $TimeoutSec -UsbIdentity $UsbIdentity
 		if ([string]::IsNullOrWhiteSpace($dfuComPort)) {
 			throw "Could not find a DFU serial port after requesting bootloader mode. Last known runtime port: $TouchComPort"
 		}
+	}
+
+	if (Test-IsWindowsHost) {
+		# Re-check immediately before spawning nrfutil. Enumeration can change
+		# between the initial mode check and port resolution, especially after an
+		# erase activation reset.
+		$resolvedDfuIdentity = Get-UsbComPortIdentity -ComPort $dfuComPort
+		if ($null -eq $resolvedDfuIdentity -or
+			-not (Test-UsbComPortIdentityMatch -Expected $UsbIdentity -Actual $resolvedDfuIdentity)) {
+			throw "Could not verify that DFU COM port $dfuComPort belongs to the selected USB radio."
+		}
+		Assert-UsbIdentityIsNrf52Dfu -Identity $resolvedDfuIdentity -ComPort $dfuComPort
 	}
 
 	$dfuArgs = @(
@@ -5289,11 +6141,11 @@ function Invoke-NrfutilSerialDfu {
 	$sawDfuStart = $outputText -match '(?im)^Upgrading target on '
 	$sawDeviceProgrammed = $outputText -match '(?im)^Device programmed\.'
 	$serialOpenFailure = $outputText -match ('(?im)Serial port could not be opened on {0}\.' -f [regex]::Escape($dfuComPort))
-	if ($NrfutilTouchBaud -gt 0 -and $serialOpenFailure) {
-		$fallbackComPort = Resolve-NrfutilFallbackComPort -BeforePorts $portsBeforeTouch -OriginalComPort $dfuComPort -TimeoutSec $TimeoutSec
+	if (Test-ShouldRetryNrfutilSerialPort -TouchWasRequested $touchWasRequested -SerialOpenFailure $serialOpenFailure) {
+		$fallbackComPort = Resolve-NrfutilFallbackComPort -BeforePorts $portsBeforeTouch -OriginalComPort $dfuComPort -TimeoutSec $TimeoutSec -UsbIdentity $UsbIdentity
 		if (-not [string]::IsNullOrWhiteSpace($fallbackComPort) -and $fallbackComPort -ne $dfuComPort) {
 			Write-Warning "nrfutil could not reopen $dfuComPort after 1200-baud touch; detected $fallbackComPort. Retrying on the new COM port."
-			return (Invoke-NrfutilSerialDfu -PackageFile $PackageFile -ComPort $fallbackComPort -ProgressActivity $ProgressActivity -TimeoutSec $TimeoutSec)
+			return (Invoke-NrfutilSerialDfu -PackageFile $PackageFile -ComPort $fallbackComPort -ProgressActivity $ProgressActivity -TimeoutSec $TimeoutSec -UsbIdentity $UsbIdentity)
 		}
 	}
 	if ($exitCode -ne 0 -or
@@ -5314,6 +6166,7 @@ function Invoke-NrfutilSerialDfu {
 	return [pscustomobject]@{
 		Success = $true
 		ComPort = $dfuComPort
+		UsbIdentity = $UsbIdentity
 	}
 }
 
@@ -5323,7 +6176,10 @@ function flashMeshtasticNrf52 {
 	)
 
 	$selectedFirmwareFile = Resolve-MeshtasticNrf52FirmwareFile -hw $hw
-	$selectedComPort = Resolve-LiveUsbComPort -PreferredComPort $hw.ComPort -Purpose "Meshtastic nRF52 flash"
+	$usbIdentity = Get-SelectedUsbIdentityForFlash -Hardware $hw
+	$primarySelection = Resolve-Nrf52PrimaryUsbSelection -SelectedComPort $hw.ComPort -UsbIdentity $usbIdentity
+	$usbIdentity = $primarySelection.UsbIdentity
+	$selectedComPort = Resolve-LiveUsbComPort -PreferredComPort $primarySelection.ComPort -Purpose "Meshtastic nRF52 flash" -UsbIdentity $usbIdentity -IdentityTimeoutSec 45
 	$hw.ComPort = $selectedComPort
 	$hw.FirmwareFile = $selectedFirmwareFile
 	$action = Get-MeshtasticNrf52FlashAction -hw $hw
@@ -5350,7 +6206,7 @@ function flashMeshtasticNrf52 {
 			Write-Host "Erasing UF2 area using $erasePackage"
 			Start-Sleep -Seconds 1
 			try {
-				$eraseResult = Invoke-NrfutilSerialDfu -PackageFile $erasePackage -ComPort $runtimeComPort -NrfutilTouchBaud 1200 -ProgressActivity "nRF52 Erase"
+				$eraseResult = Invoke-NrfutilSerialDfu -PackageFile $erasePackage -ComPort $runtimeComPort -NrfutilTouchBaud 1200 -ProgressActivity "nRF52 Erase" -UsbIdentity $usbIdentity
 				$runtimeComPort = $eraseResult.ComPort
 				$eraseSucceeded = $true
 				Write-Host "Erase done."
@@ -5362,6 +6218,13 @@ function flashMeshtasticNrf52 {
 				$canTryAlternate = ($i + 1) -lt $eraseCandidates.Count -and $lastEraseError -match 'Selected Bootloader version does not match|Please upgrade the Bootloader'
 				if ($canTryAlternate) {
 					Write-Warning "Erase package $(Split-Path -Path $candidate.FilePath -Leaf) did not match the current bootloader. Trying the alternate Meshtastic erase image."
+					# The failed package negotiation may already have moved the selected
+					# device from its runtime COM port into DFU on a new COM number.
+					$runtimeComPort = Resolve-LiveUsbComPort `
+						-PreferredComPort $runtimeComPort `
+						-Purpose "alternate Meshtastic nRF52 erase" `
+						-UsbIdentity $usbIdentity `
+						-IdentityTimeoutSec 45
 					continue
 				}
 				throw
@@ -5373,12 +6236,15 @@ function flashMeshtasticNrf52 {
 		}
 	}
 
-	$runtimeComPort = Resolve-LiveUsbComPort -PreferredComPort $runtimeComPort -Purpose "Meshtastic nRF52 firmware flash"
+	$runtimeComPort = Resolve-LiveUsbComPort -PreferredComPort $runtimeComPort -Purpose "Meshtastic nRF52 firmware flash" -UsbIdentity $usbIdentity -IdentityTimeoutSec 45
 	$hw.ComPort = $runtimeComPort
 	$appPackage = Resolve-MeshtasticNrf52AppPackage -FirmwareFile $selectedFirmwareFile
 	Write-Host "Flashing firmware file $appPackage"
 	Start-Sleep -Seconds 1
-	$flashResult = Invoke-NrfutilSerialDfu -PackageFile $appPackage -ComPort $runtimeComPort -NrfutilTouchBaud 1200 -ProgressActivity "nRF52 Flash"
+	# The erase payload normally leaves the node in DFU, but some bootloader or
+	# erase combinations return to runtime first. Request a touch in both cases;
+	# Invoke-NrfutilSerialDfu verifies the mode and skips it when already in DFU.
+	$flashResult = Invoke-NrfutilSerialDfu -PackageFile $appPackage -ComPort $runtimeComPort -NrfutilTouchBaud 1200 -ProgressActivity "nRF52 Flash" -UsbIdentity $usbIdentity
 	if ($flashResult.ComPort) {
 		$hw.ComPort = $flashResult.ComPort
 	}
@@ -5391,7 +6257,10 @@ function flashMeshCoreNrf52 {
 	)
 
 	$selectedFirmwareFile = $hw.FirmwareFile
-	$selectedComPort = Resolve-LiveUsbComPort -PreferredComPort $hw.ComPort -Purpose "MeshCore nRF52 flash"
+	$usbIdentity = Get-SelectedUsbIdentityForFlash -Hardware $hw
+	$primarySelection = Resolve-Nrf52PrimaryUsbSelection -SelectedComPort $hw.ComPort -UsbIdentity $usbIdentity
+	$usbIdentity = $primarySelection.UsbIdentity
+	$selectedComPort = Resolve-LiveUsbComPort -PreferredComPort $primarySelection.ComPort -Purpose "MeshCore nRF52 flash" -UsbIdentity $usbIdentity -IdentityTimeoutSec 45
 	$hw.ComPort = $selectedComPort
 	if (-not (Test-Path $selectedFirmwareFile)) {
 		throw "Firmware file does not exist: $selectedFirmwareFile"
@@ -5412,7 +6281,7 @@ function flashMeshCoreNrf52 {
 		Write-Host "Erasing UF2 area using $eraseFile"
 		Start-Sleep -Seconds 1
 		try {
-			$eraseResult = Invoke-NrfutilSerialDfu -PackageFile $eraseFile -ComPort $runtimeComPort -NrfutilTouchBaud 1200 -ProgressActivity "nRF52 Erase"
+			$eraseResult = Invoke-NrfutilSerialDfu -PackageFile $eraseFile -ComPort $runtimeComPort -NrfutilTouchBaud 1200 -ProgressActivity "nRF52 Erase" -UsbIdentity $usbIdentity
 		}
 		catch {
 			$message = $_.Exception.Message
@@ -5427,12 +6296,15 @@ function flashMeshCoreNrf52 {
 		Write-Host ""
 	}
 
-	$runtimeComPort = Resolve-LiveUsbComPort -PreferredComPort $runtimeComPort -Purpose "MeshCore nRF52 firmware flash"
+	$runtimeComPort = Resolve-LiveUsbComPort -PreferredComPort $runtimeComPort -Purpose "MeshCore nRF52 firmware flash" -UsbIdentity $usbIdentity -IdentityTimeoutSec 45
 	$hw.ComPort = $runtimeComPort
 	Write-Host "Flashing firmware file $selectedFirmwareFile"
 	Start-Sleep -Seconds 1
 	try {
-		$flashResult = Invoke-NrfutilSerialDfu -PackageFile $selectedFirmwareFile -ComPort $runtimeComPort -NrfutilTouchBaud 1200 -ProgressActivity "nRF52 Flash"
+		# The erase payload normally leaves the node in DFU, but some bootloader or
+		# erase combinations return to runtime first. Request a touch in both cases;
+		# Invoke-NrfutilSerialDfu verifies the mode and skips it when already in DFU.
+		$flashResult = Invoke-NrfutilSerialDfu -PackageFile $selectedFirmwareFile -ComPort $runtimeComPort -NrfutilTouchBaud 1200 -ProgressActivity "nRF52 Flash" -UsbIdentity $usbIdentity
 	}
 	catch {
 		$message = $_.Exception.Message
@@ -5504,8 +6376,16 @@ while ($again) {
 			'R' { }                             # loop again with same port
 			'C' { 
 				getallUSBCom | Write-Host
-			
-				$hw.ComPort = Read-Host 'Enter new COM port (e.g. COM7)'; 
+
+				$newComPort = Read-Host 'Enter new COM port (e.g. COM7)'
+				try {
+					$null = Set-HardwareUsbComPortSelection -Hardware $hw -ComPort $newComPort
+				}
+				catch {
+					Write-Warning "COM-port selection failed: $_"
+					Write-Warning "Aborting this retry so the previously selected radio is not flashed by mistake."
+					$again = $false
+				}
 			}
 			default { $again = $false }
 		}
