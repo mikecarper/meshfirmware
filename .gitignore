@@ -15,6 +15,10 @@
 /*.serial-dfu.hex
 /*.serial-dfu.zip
 
+# Python helper and test caches
+__pycache__/
+*.py[cod]
+
 # Local device configuration and backups (may contain credentials)
 /config.yaml
 /config_backup.*.yaml*

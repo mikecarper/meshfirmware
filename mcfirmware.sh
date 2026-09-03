@@ -161,6 +161,9 @@ KEYMIND_GITHUB_TREE_URL="https://api.github.com/repos/mikecarper/MeshCore/git/tr
 KEYMIND_RAW_BASE_URL="https://raw.githubusercontent.com/mikecarper/MeshCore/keymindCascade"
 KEYMIND_CASCADE_FALLBACK_URL="${KEYMIND_RAW_BASE_URL}/mesh-america/keymind-cascade-v1.16.0-provider.json"
 KEYMIND_CASCADE_LOGGING_FALLBACK_URL="${KEYMIND_RAW_BASE_URL}/mesh-america/keymind-cascade-logging-v1.16.0-provider.json"
+MESHCORE_BACKUP_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_backup.py"
+MESHCORE_BACKUP_TOOL_VERSION="0.2.0"
+MESHCORE_BACKUP_TOOL_SHA256="742008038ea7d636ded1a746152be5748578f93fd7619dbbe16bf40df2560559"
 VENDORLIST="elecrow|heltec|lilygo|seeed|seed|studio|rak|wireless|wisblock|wismesh|raspberry|pi|pico|waveshare|promicro|uniteng|sensecap|wio|xiao"
 RADIOLIST="sx1262|sx126x|sx1276|sx127x"
 NORESET="no-reset"
@@ -704,6 +707,311 @@ choose_flash_execution_mode() {
 				;;
 		esac
 	done
+}
+
+meshcore_backup_role_hint() {
+	local role="${1,,}"
+	case "$role" in
+		companion*) printf '%s\n' companion ;;
+		repeater*)  printf '%s\n' repeater ;;
+		room*)      printf '%s\n' room-server ;;
+		sensor*)    printf '%s\n' sensor ;;
+		kiss*)      printf '%s\n' kiss ;;
+		*)          printf '%s\n' auto ;;
+	esac
+}
+
+meshcore_backup_tool_version_matches() {
+	local tool="$1"
+	local output="" actual_hash=""
+	[[ -f "$tool" ]] || return 1
+	command -v python3 >/dev/null 2>&1 || return 1
+	actual_hash="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$tool" 2>/dev/null)" || return 1
+	[[ "$actual_hash" == "$MESHCORE_BACKUP_TOOL_SHA256" ]] || return 1
+	output="$(python3 "$tool" version 2>/dev/null)" || return 1
+	grep -Fq -- '"ok": true' <<<"$output" \
+		&& grep -Fq -- "\"tool_version\": \"${MESHCORE_BACKUP_TOOL_VERSION}\"" <<<"$output" \
+		&& grep -Fq -- '"schema": "org.meshfirmware.meshcore-backup/v1"' <<<"$output"
+}
+
+resolve_meshcore_backup_tool() {
+	local local_tool="${PWD_SCRIPT}/tools/meshcore_backup.py"
+	local tool_dir="${FIRMWARE_ROOT}/tools"
+	local cached_tool="${tool_dir}/meshcore_backup.py"
+	local partial_tool="${cached_tool}.partial"
+
+	if [[ -f "$local_tool" ]]; then
+		if meshcore_backup_tool_version_matches "$local_tool"; then
+			printf '%s\n' "$local_tool"
+			return 0
+		fi
+		echo "The bundled MeshCore backup helper does not match required version ${MESHCORE_BACKUP_TOOL_VERSION}." >&2
+		return 1
+	fi
+	if meshcore_backup_tool_version_matches "$cached_tool"; then
+		printf '%s\n' "$cached_tool"
+		return 0
+	fi
+
+	mkdir -p "$tool_dir"
+	echo "Downloading the MeshCore logical-backup helper..." >&2
+	if ! curl -fL --retry 2 --connect-timeout 10 -o "$partial_tool" "$MESHCORE_BACKUP_TOOL_URL"; then
+		rm -f "$partial_tool"
+		return 1
+	fi
+	if [[ ! -s "$partial_tool" ]] || (( $(wc -c < "$partial_tool") < 1024 )); then
+		echo "The downloaded MeshCore backup helper is missing or unexpectedly small." >&2
+		rm -f "$partial_tool"
+		return 1
+	fi
+	if ! meshcore_backup_tool_version_matches "$partial_tool"; then
+		echo "The downloaded MeshCore backup helper did not match required version ${MESHCORE_BACKUP_TOOL_VERSION}." >&2
+		rm -f "$partial_tool"
+		return 1
+	fi
+	mv -f "$partial_tool" "$cached_tool"
+	printf '%s\n' "$cached_tool"
+}
+
+ensure_meshcore_backup_python() {
+	local venv_dir="${FIRMWARE_ROOT}/tools/meshcore-backup-venv"
+	local venv_python="${venv_dir}/bin/python"
+	local dependency_probe='import re; from importlib.metadata import version; v=lambda n: tuple((list(map(int, re.findall(r"\d+", version(n))[:3])) + [0, 0, 0])[:3]); raise SystemExit(0 if (1, 6, 3) <= v("meshcore-cli") < (2, 0, 0) and (2, 3, 9) <= v("meshcore") < (3, 0, 0) and (1, 5, 0) <= v("PyNaCl") < (2, 0, 0) else 1)'
+
+	ensure_command python3 python3
+	if ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
+		echo "MeshCore USB backup requires Python 3.10 or newer." >&2
+		return 1
+	fi
+	if [[ ! -x "$venv_python" ]]; then
+		mkdir -p "$(dirname "$venv_dir")"
+		if ! python3 -m venv "$venv_dir" >/dev/null 2>&1; then
+			echo "Installing Python venv support for the MeshCore backup helper..." >&2
+			install_packages python3-venv
+			python3 -m venv "$venv_dir"
+		fi
+	fi
+
+	if ! "$venv_python" -c "$dependency_probe" >/dev/null 2>&1; then
+		echo "Installing the existing MeshCore Python API and CLI used by USB backup..." >&2
+		"$venv_python" -m pip install --upgrade 'meshcore>=2.3.9,<3' 'meshcore-cli>=1.6.3,<2' 'PyNaCl>=1.5,<2' >&2
+	fi
+	if ! "$venv_python" -c "$dependency_probe" >/dev/null 2>&1; then
+		echo "The installed MeshCore Python API versions are outside the supported range." >&2
+		return 1
+	fi
+
+	printf '%s\n' "$venv_python"
+}
+
+meshcore_linux_usb_identity_args() {
+	local port="$1"
+	local by_id_name="${2:-}"
+	local properties="" serial="" location="" interface=""
+
+	if command -v udevadm >/dev/null 2>&1; then
+		properties="$(udevadm info --query=property --name="$port" 2>/dev/null || true)"
+		serial="$(sed -n 's/^ID_SERIAL_SHORT=//p' <<<"$properties" | head -n1)"
+		location="$(sed -n 's/^ID_PATH=//p' <<<"$properties" | head -n1)"
+		interface="$(sed -n 's/^ID_USB_INTERFACE_NUM=//p' <<<"$properties" | head -n1)"
+	fi
+	if [[ -z "$interface" && "$by_id_name" =~ -if([0-9A-Fa-f]{2})(-port[0-9]+)?$ ]]; then
+		interface="${BASH_REMATCH[1]}"
+	fi
+
+	[[ -n "$serial" ]] && printf '%s\0%s\0' --usb-serial "$serial"
+	[[ -n "$location" ]] && printf '%s\0%s\0' --usb-location "$location"
+	[[ -n "$by_id_name" ]] && printf '%s\0%s\0' --usb-parent "by-id:${by_id_name}"
+	[[ -n "$interface" ]] && printf '%s\0%s\0' --usb-interface "$interface"
+}
+
+canonicalize_meshcore_primary_usb_selection() {
+	local port="$1"
+	local by_id_name="${2:-}"
+	local selected_link="" selected_port=""
+	local properties="" interface="" serial="" sibling_name="" sibling_path=""
+	local candidate candidate_properties candidate_interface candidate_serial
+
+	# The /dev/tty* number can be reused after an unplug. Re-resolve the exact
+	# stable by-id selection immediately before reading secrets or touching DFU.
+	if [[ -z "$by_id_name" || "$by_id_name" == */* || "$by_id_name" == "." || "$by_id_name" == ".." ]]; then
+		echo "The selected radio has no valid stable /dev/serial/by-id identity." >&2
+		return 1
+	fi
+	selected_link="/dev/serial/by-id/${by_id_name}"
+	if [[ ! -L "$selected_link" ]]; then
+		echo "The selected radio is no longer present at ${selected_link}." >&2
+		return 1
+	fi
+	selected_port="$(readlink -f -- "$selected_link")"
+	if [[ -z "$selected_port" || ! -c "$selected_port" ]]; then
+		echo "The selected radio by-id link does not resolve to a serial device." >&2
+		return 1
+	fi
+	if [[ "$selected_port" != "$port" ]]; then
+		echo "The selected radio re-enumerated from ${port} to ${selected_port}; using its stable by-id identity." >&2
+	fi
+	DEVICE_PORT="$selected_port"
+	port="$selected_port"
+
+	if command -v udevadm >/dev/null 2>&1; then
+		properties="$(udevadm info --query=property --name="$port" 2>/dev/null || true)"
+		interface="$(sed -n 's/^ID_USB_INTERFACE_NUM=//p' <<<"$properties" | head -n1)"
+		serial="$(sed -n 's/^ID_SERIAL_SHORT=//p' <<<"$properties" | head -n1)"
+	fi
+	if [[ -z "$interface" && "$by_id_name" =~ -if([0-9A-Fa-f]{2})(-port[0-9]+)?$ ]]; then
+		interface="${BASH_REMATCH[1]}"
+	fi
+	interface="${interface^^}"
+	[[ "$interface" == "02" ]] || return 0
+
+	# Dual-CDC nRF52 builds expose interface 00 for the MeshCore API and 02
+	# for logs only. Prefer the exact sibling symlink from the same by-id name.
+	if [[ "$by_id_name" =~ ^(.*)-if02(-port[0-9]+)?$ ]]; then
+		sibling_name="${BASH_REMATCH[1]}-if00${BASH_REMATCH[2]:-}"
+		sibling_path="/dev/serial/by-id/${sibling_name}"
+		if [[ -L "$sibling_path" ]]; then
+			DEVICE_PORT="$(readlink -f "$sibling_path")"
+			DEVICE_BY_ID_NAME="$sibling_name"
+			echo "${port} is USB logging interface 02; using primary interface 00 on ${DEVICE_PORT}." >&2
+			return 0
+		fi
+	fi
+
+	# Fall back to udev identity matching when distributions format by-id names
+	# differently. A missing serial is not safe for sibling substitution.
+	if [[ -n "$serial" && -d /dev/serial/by-id ]]; then
+		shopt -s nullglob
+		for candidate in /dev/serial/by-id/*; do
+			candidate_properties="$(udevadm info --query=property --name="$(readlink -f "$candidate")" 2>/dev/null || true)"
+			candidate_interface="$(sed -n 's/^ID_USB_INTERFACE_NUM=//p' <<<"$candidate_properties" | head -n1)"
+			candidate_serial="$(sed -n 's/^ID_SERIAL_SHORT=//p' <<<"$candidate_properties" | head -n1)"
+			if [[ "${candidate_interface^^}" == "00" && "$candidate_serial" == "$serial" ]]; then
+				DEVICE_PORT="$(readlink -f "$candidate")"
+				DEVICE_BY_ID_NAME="$(basename "$candidate")"
+				shopt -u nullglob
+				echo "${port} is USB logging interface 02; using primary interface 00 on ${DEVICE_PORT}." >&2
+				return 0
+			fi
+		done
+		shopt -u nullglob
+	fi
+
+	echo "${port} is USB logging interface 02, but its primary interface 00 did not enumerate." >&2
+	echo "Refusing to back up or flash through the logging-only port." >&2
+	return 1
+}
+
+request_meshcore_usb_backup_before_flash() {
+	local action="$1"
+	local port="$2"
+	local device_hint="$3"
+	local role="$4"
+	local by_id_name="${5:-}"
+	local choice="" override="" continue_choice=""
+	local helper="" backup_python="" role_hint=""
+	local backup_output="" backup_rc=0 backup_requested=1
+	local summary_line="" summary_exit="" archive_path=""
+	local verify_output="" safe_verify_output=""
+	local archive_verified=0 wipe_safe=0
+	local -a identity_args=()
+
+	echo >&2
+	echo "The nRF52 backup uses the existing MeshCore USB APIs." >&2
+	echo "It includes private identity and channel secrets when exposed by the current role and firmware." >&2
+	echo "The archive is stored in a current-user backup directory." >&2
+	while true; do
+		if ! read -r -p "Create and verify a logical USB backup before flashing? [Y/n] " choice </dev/tty; then
+			echo "No backup choice was read; aborting." >&2
+			return 1
+		fi
+		case "$choice" in
+			""|[Yy]|[Yy][Ee][Ss]) backup_requested=1; break ;;
+			[Nn]|[Nn][Oo]) backup_requested=0; backup_rc=1; break ;;
+			*) echo "Please enter Y or N." >&2 ;;
+		esac
+	done
+	if (( backup_requested )); then
+		if ! backup_python="$(ensure_meshcore_backup_python)"; then
+			backup_rc=10
+		elif ! helper="$(resolve_meshcore_backup_tool)"; then
+			backup_rc=32
+		else
+			# ROLE describes the firmware selected for installation, which may
+			# differ from the role currently running on this node. Let the helper
+			# probe the current USB API instead of forcing the target role.
+			role_hint="auto"
+			while IFS= read -r -d '' value; do
+				identity_args+=("$value")
+			done < <(meshcore_linux_usb_identity_args "$port" "$by_id_name")
+
+			if backup_output="$("$backup_python" "$helper" backup \
+				--port "$port" \
+				--role-hint "$role_hint" \
+				--device-hint "$device_hint" \
+				"${identity_args[@]}" 2>&1)"; then
+				backup_rc=0
+			else
+				backup_rc=$?
+			fi
+			[[ -n "$backup_output" ]] && printf '%s\n' "$backup_output" >&2
+		fi
+	fi
+
+	# Exit status is not enough: require the documented JSON summary, a real
+	# archive, and an independent integrity/schema verification. Generated Linux
+	# backup paths contain no JSON escapes; an unusual path fails closed here.
+	if (( backup_requested && (backup_rc == 0 || backup_rc == 31) )); then
+		summary_line="$(printf '%s\n' "$backup_output" | awk 'NF { line=$0 } END { print line }')"
+		summary_exit="$(sed -n 's/.*"exit_code": \([0-9][0-9]*\).*/\1/p' <<<"$summary_line")"
+		archive_path="$(sed -n 's/.*"path": "\([^"]*\)".*/\1/p' <<<"$summary_line")"
+		if [[ "$summary_exit" == "$backup_rc" && -n "$archive_path" && -f "$archive_path" ]] \
+			&& grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' <<<"$summary_line"; then
+			if verify_output="$("$backup_python" "$helper" verify --input "$archive_path" 2>&1)" \
+				&& grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' <<<"$verify_output"; then
+				archive_verified=1
+				echo "Verified MeshCore logical backup: ${archive_path}" >&2
+				if safe_verify_output="$("$backup_python" "$helper" verify \
+					--input "$archive_path" --require-safe-for-wipe 2>&1)" \
+					&& grep -Eq '"safe_for_wipe"[[:space:]]*:[[:space:]]*true' <<<"$safe_verify_output"; then
+					wipe_safe=1
+				fi
+			else
+				backup_rc=40
+			fi
+		else
+			backup_rc=40
+		fi
+	fi
+
+	if (( archive_verified )); then
+		if [[ "$action" != "flash-wipe" ]] || (( wipe_safe )); then
+			return 0
+		fi
+	fi
+
+	if [[ "$action" == "flash-wipe" ]]; then
+		if (( archive_verified )); then
+			echo "WARNING: the logical backup is verified, but the current MeshCore APIs do not expose all stored state and messages." >&2
+		fi
+		echo "WARNING: a wipe will erase node identity and stored data without a full wipe-safe backup." >&2
+		read -r -p "Type WIPE WITHOUT BACKUP to continue, or press Enter to abort: " override </dev/tty
+		if [[ "$override" != "WIPE WITHOUT BACKUP" ]]; then
+			echo "MeshCore flash-wipe aborted because no complete verified backup is available." >&2
+			return 1
+		fi
+		return 0
+	fi
+
+	# A deliberate 'no' to the first prompt is enough authorization to skip a
+	# backup for a write-only update. A failed requested backup gets a separate
+	# fail-closed confirmation.
+	if (( backup_requested )); then
+		echo "WARNING: MeshCore USB backup did not produce a usable archive (exit code ${backup_rc})." >&2
+		read -r -p "Continue the write-only update without a complete backup? [y/N] " continue_choice </dev/tty
+		[[ "$continue_choice" =~ ^[Yy]([Ee][Ss])?$ ]] || return 1
+	fi
+	return 0
 }
 
 print_nrfutil_dfu_command() {
@@ -1523,13 +1831,17 @@ choose_meshcore_firmware() {
 
 				if [[ "$choice" == 0 ]]; then
 					echo "Auto-detection requested."
-					autodetect_device
-					
-					[[ -f "$AUTODETECT_DEVICE_FILE" ]] && device_port_name="$(<"$AUTODETECT_DEVICE_FILE")"
-					if pick_matching_device "$device_port_name" DEVICES; then
-						match="$MATCH"
-						match_idx="$MATCH_IDX"
+					if autodetect_device; then
+						[[ -f "$AUTODETECT_DEVICE_FILE" ]] && device_port_name="$(<"$AUTODETECT_DEVICE_FILE")"
+						if pick_matching_device "$device_port_name" DEVICES; then
+							match="$MATCH"
+							match_idx="$MATCH_IDX"
+						else
+							match=""
+							match_idx=-1
+						fi
 					else
+						echo "Auto-detection did not change or flash the selected radio." >&2
 						match=""
 						match_idx=-1
 					fi
@@ -2501,7 +2813,7 @@ run_esptool() {
 		return "$status"
 	fi
 
-	if [[ -n "$port" ]] && esptool_output_needs_reset "$output"; then
+	if [[ "${MESH_DISABLE_1200_RECOVERY:-0}" != "1" && -n "$port" ]] && esptool_output_needs_reset "$output"; then
 		if auto_reset_serial_port "$port"; then
 			if tmpfile=$(mktemp); then
 				if pipx run esptool "$@" 2>&1 | tee "$tmpfile"; then
@@ -2614,7 +2926,7 @@ probe_esptool() {
 		return $status
 	fi
 
-	if [[ -n "$port" ]] && esptool_output_needs_reset "$output"; then
+	if [[ "${MESH_DISABLE_1200_RECOVERY:-0}" != "1" && -n "$port" ]] && esptool_output_needs_reset "$output"; then
 		if auto_reset_serial_port "$port"; then
 			if retry_output=$(pipx run esptool "$@" 2>&1); then
 				return 0
@@ -2675,7 +2987,7 @@ probe_esptool_mac() {
 		return $status
 	fi
 
-	if [[ -n "$port" ]] && esptool_output_needs_reset "$output"; then
+	if [[ "${MESH_DISABLE_1200_RECOVERY:-0}" != "1" && -n "$port" ]] && esptool_output_needs_reset "$output"; then
 		if auto_reset_serial_port "$port"; then
 			if retry_output=$(pipx run esptool "$@" 2>&1); then
 				grep -qi -m1 'MAC' <<<"$retry_output"
@@ -2879,27 +3191,35 @@ scan_and_maybe_mount() {
 
 autodetect_device() {
 	local -a DEVICES=()
+	local DEVICE_BY_ID_NAME=""
 	mapfile -t DEVICES < <(_jq1 '.device[].name' 2>/dev/null | sort -u)
 	
 	choose_serial
 	local DEVICE_PORT=""
 	[[ -f "$DEVICE_PORT_FILE"     ]] && DEVICE_PORT="$(<"$DEVICE_PORT_FILE")"
+	[[ -f "$DEVICE_PORT_NAME_FILE" ]] && DEVICE_BY_ID_NAME="$(<"$DEVICE_PORT_NAME_FILE")"
+	if ! canonicalize_meshcore_primary_usb_selection "$DEVICE_PORT" "$DEVICE_BY_ID_NAME"; then
+		echo "Auto-detection aborted because the selected USB radio could not be revalidated." >&2
+		return 1
+	fi
+	printf '%s\n' "$DEVICE_PORT" > "$DEVICE_PORT_FILE"
+	printf '%s\n' "$DEVICE_BY_ID_NAME" > "$DEVICE_PORT_NAME_FILE"
 	
 	# Probe for ESP32
 	local ESPTOOL_CMD=""
 	get_espcmd
 
-	echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $NORESET --baud 1200 $READMAC"
-	if ! probe_esptool --port "${DEVICE_PORT}" --after "$NORESET" --baud 1200 "$READMAC"; then
+	echo "$ESPTOOL_CMD --port ${DEVICE_PORT} --after $NORESET --baud 115200 $READMAC"
+	if ! MESH_DISABLE_1200_RECOVERY=1 probe_esptool --port "${DEVICE_PORT}" --after "$NORESET" --baud 115200 "$READMAC"; then
 		echo "esptool failed, checking if a service has the port locked"
 		if stop_serial_locking_services "$DEVICE_PORT"; then
-			probe_esptool --port "${DEVICE_PORT}" --after "$NORESET" --baud 1200 "$READMAC" || true
+			MESH_DISABLE_1200_RECOVERY=1 probe_esptool --port "${DEVICE_PORT}" --after "$NORESET" --baud 115200 "$READMAC" || true
 		fi
 	fi
 
 	[[ -f "$DEVICE_PORT_FILE"     ]] && DEVICE_PORT="$(<"$DEVICE_PORT_FILE")"
 
-	if probe_esptool_mac --port "$DEVICE_PORT" --after "$NORESET" --baud 1200 "$READMAC"; then
+	if MESH_DISABLE_1200_RECOVERY=1 probe_esptool_mac --port "$DEVICE_PORT" --after "$NORESET" --baud 115200 "$READMAC"; then
 		echo "ESP chip responded; getting existing firmware"
 		sleep 1
 		run_esptool --port "$DEVICE_PORT" --after "$NORESET" --baud 921600 "$READFLASH" 0x10000 0x70000 "$DOWNLOAD_DIR/CURRENT.BAK"
@@ -2912,8 +3232,14 @@ autodetect_device() {
 		list_usb_block_devs
 		
 		if ! scan_and_maybe_mount; then
-			echo "No USB mass-storage device found, sending 1200-baud reset..."
-			sudo bash -c "exec 3<> \"$DEVICE_PORT\"; stty -F \"$DEVICE_PORT\" 1200; sleep 1.5"
+			prepare_serial_port_for_flash "$DEVICE_PORT"
+			if ! request_meshcore_usb_backup_before_flash \
+				"flash-update" "$DEVICE_PORT" "auto-detect nRF52" "auto" "$DEVICE_BY_ID_NAME"; then
+				echo "Auto-detection stopped before entering nRF52 DFU." >&2
+				return 1
+			fi
+			echo "No USB mass-storage device found. Automatic detection will not issue a pre-backup 1200-baud reset."
+			echo "Put the nRF52 into DFU from the app, or unplug/re-plug quickly twice."
 		fi
 		
 		sleep 8
@@ -2928,7 +3254,11 @@ autodetect_device() {
 					break
 				fi
 				sleep 1
-			done
+				done
+		fi
+		if ! scan_and_maybe_mount; then
+			echo "Could not identify the nRF52 because it did not enter DFU." >&2
+			return 1
 		fi
 		AUTODETECT_DEVICE=$( detect_device_from_fw "$MOUNT_FOLDER/CURRENT.UF2" )
 		
@@ -3173,7 +3503,22 @@ else
 		echo "Echo-only selected; no nRF52 DFU commands were run."
 		exit 0
 	fi
+	CURRENT_ROLE="${ROLE:-auto}"
+	[[ -f "$SELECTED_ROLE_FILE" ]] && CURRENT_ROLE="$(<"$SELECTED_ROLE_FILE")"
+	DEVICE_BY_ID_NAME=""
+	[[ -f "$DEVICE_PORT_NAME_FILE" ]] && DEVICE_BY_ID_NAME="$(<"$DEVICE_PORT_NAME_FILE")"
+	if ! canonicalize_meshcore_primary_usb_selection "$DEVICE_PORT" "$DEVICE_BY_ID_NAME"; then
+		echo "No nRF52 DFU command was run." >&2
+		exit 1
+	fi
+	printf '%s\n' "$DEVICE_PORT" > "$DEVICE_PORT_FILE"
+	printf '%s\n' "$DEVICE_BY_ID_NAME" > "$DEVICE_PORT_NAME_FILE"
 	prepare_serial_port_for_flash "$DEVICE_PORT"
+	if ! request_meshcore_usb_backup_before_flash \
+		"$ACTION" "$DEVICE_PORT" "$DEVICE" "$CURRENT_ROLE" "$DEVICE_BY_ID_NAME"; then
+		echo "No nRF52 DFU command was run." >&2
+		exit 1
+	fi
 
 	echo "Getting the latest version of adafruit-nrfutil"
 	pipx run adafruit-nrfutil version

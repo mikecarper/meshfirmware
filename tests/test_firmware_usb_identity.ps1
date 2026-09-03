@@ -59,6 +59,8 @@ foreach ($functionName in @(
 	'Assert-UsbComPortIdentityFor1200Touch',
 	'Touch-ComPort1200',
 	'Resolve-Nrf52DfuComPort',
+	'Test-CachedMeshCoreUsbBackup',
+	'Request-MeshCoreUsbBackupBeforeFlash',
 	'flashMeshtasticNrf52',
 	'flashMeshCoreNrf52'
 )) {
@@ -1091,6 +1093,85 @@ catch {
 Assert-True -Condition $wrongInterfaceRejected -Message 'Logging interface 02 passed the final direct-touch identity check.'
 Assert-Equal -Expected 0 -Actual $script:pythonTouchCalls -Message 'Wrong-interface identity still reached Python fallback.'
 
+# The backup gate must validate the archive independently, re-prompt invalid
+# answers, and never let an API-limited snapshot silently authorize a wipe.
+$gateArchive = [System.IO.Path]::GetTempFileName()
+try {
+	$script:gateMode = 'unsafe'
+	$script:gateAnswers = @()
+	$script:gateAnswerIndex = 0
+	$script:gateBackupCalls = 0
+	function Read-Host {
+		param([string]$Prompt)
+		if ($script:gateAnswerIndex -ge $script:gateAnswers.Count) { return '' }
+		$answer = $script:gateAnswers[$script:gateAnswerIndex]
+		$script:gateAnswerIndex++
+		return $answer
+	}
+	function Test-CachedMeshCoreUsbBackup {
+		param($Hardware, $UsbIdentity, [switch]$RequireSafeForWipe)
+		return $false
+	}
+	function Invoke-MeshCoreUsbBackup {
+		param($ComPort, $UsbIdentity, $DeviceHint, $RoleHint)
+		$script:gateBackupCalls++
+		$exitCode = if ($script:gateMode -eq 'partial') { 31 } else { 0 }
+		return [pscustomobject]@{
+			ExitCode = $exitCode
+			Summary = [pscustomobject]@{
+				ok = $true
+				exit_code = $exitCode
+				path = $gateArchive
+				safe_for_wipe = $false
+			}
+		}
+	}
+	function Invoke-MeshCoreBackupHelper {
+		param([string[]]$Arguments, [switch]$Quiet)
+		if ($Arguments -contains '--require-safe-for-wipe') {
+			return [pscustomobject]@{ ExitCode = 40; Summary = [pscustomobject]@{ ok = $false } }
+		}
+		return [pscustomobject]@{ ExitCode = 0; Summary = [pscustomobject]@{ ok = $true } }
+	}
+
+	$gateHw = [pscustomobject]@{ HWNameFile = 'Test nRF52' }
+	$script:gateAnswers = @('Y', '')
+	$unsafeWipeBlocked = $false
+	try {
+		Request-MeshCoreUsbBackupBeforeFlash -Hardware $gateHw -ComPort 'COM9' -UsbIdentity $t096Runtime -Action 'flash-wipe'
+	}
+	catch {
+		$unsafeWipeBlocked = $_.Exception.Message -match 'no complete verified backup'
+	}
+	Assert-True -Condition $unsafeWipeBlocked -Message 'A verified but API-limited logical backup silently authorized a wipe.'
+
+	$script:gateMode = 'partial'
+	$script:gateAnswers = @('Y')
+	$script:gateAnswerIndex = 0
+	$partialUpdateAccepted = Request-MeshCoreUsbBackupBeforeFlash `
+		-Hardware ([pscustomobject]@{ HWNameFile = 'Test nRF52' }) `
+		-ComPort 'COM9' `
+		-UsbIdentity $t096Runtime `
+		-Action 'flash-update'
+	Assert-True -Condition $partialUpdateAccepted -Message 'A verified logical snapshot did not satisfy the non-destructive update backup gate.'
+
+	$script:gateMode = 'unsafe'
+	$script:gateAnswers = @('not-an-answer', 'N')
+	$script:gateAnswerIndex = 0
+	$script:gateBackupCalls = 0
+	$skippedUpdate = Request-MeshCoreUsbBackupBeforeFlash `
+		-Hardware ([pscustomobject]@{ HWNameFile = 'Test nRF52' }) `
+		-ComPort 'COM9' `
+		-UsbIdentity $t096Runtime `
+		-Action 'flash-update'
+	Assert-True -Condition (-not $skippedUpdate) -Message 'An explicit N response unexpectedly reported a completed backup.'
+	Assert-Equal -Expected 2 -Actual $script:gateAnswerIndex -Message 'Invalid Y/N input did not cause a re-prompt.'
+	Assert-Equal -Expected 0 -Actual $script:gateBackupCalls -Message 'Explicitly declining a backup still invoked the helper.'
+}
+finally {
+	Remove-Item -LiteralPath $gateArchive -Force -ErrorAction SilentlyContinue
+}
+
 # End-to-end orchestration guard: even when GetHW carries COM21/MI_02, the
 # MeshCore nRF52 path must hand COM9/MI_00 to the first and only 1200-touch
 # uploader call.
@@ -1116,9 +1197,22 @@ function Resolve-LiveUsbComPort {
 }
 function Get-MeshCoreNrf52FlashAction { param($hw) return 'flash-update' }
 function Get-MeshCoreBootloaderHintText { param($hw) return '' }
+$script:meshFlashOrder = @()
+$script:meshBackupCalls = @()
+function Request-MeshCoreUsbBackupBeforeFlash {
+	param($Hardware, $ComPort, $UsbIdentity, $Action)
+	$script:meshFlashOrder += 'backup'
+	$script:meshBackupCalls += [pscustomobject]@{
+		ComPort = $ComPort
+		UsbIdentity = $UsbIdentity
+		Action = $Action
+	}
+	return $true
+}
 $script:meshFlashDfuCalls = @()
 function Invoke-NrfutilSerialDfu {
 	param($PackageFile, $ComPort, $NrfutilTouchBaud, $TouchComPort, $TimeoutSec, $ProgressActivity, $UsbIdentity)
+	$script:meshFlashOrder += 'dfu'
 	$script:meshFlashDfuCalls += [pscustomobject]@{
 		ComPort = $ComPort
 		TouchBaud = $NrfutilTouchBaud
@@ -1134,6 +1228,11 @@ $loggingSelectedHw = [pscustomobject]@{
 $null = flashMeshCoreNrf52 -hw $loggingSelectedHw
 Assert-Equal -Expected 1 -Actual $script:primarySelectionInputs.Count -Message 'MeshCore flash did not canonicalize the selected logging interface exactly once.'
 Assert-Equal -Expected 'COM21' -Actual $script:primarySelectionInputs[0].ComPort -Message 'MeshCore flash lost the originally selected logging COM.'
+Assert-Equal -Expected 1 -Actual $script:meshBackupCalls.Count -Message 'MeshCore flash did not request exactly one USB backup.'
+Assert-Equal -Expected 'COM9' -Actual $script:meshBackupCalls[0].ComPort -Message 'MeshCore backup did not use the canonical primary interface.'
+Assert-Equal -Expected 'flash-update' -Actual $script:meshBackupCalls[0].Action -Message 'MeshCore backup did not receive the selected flash action.'
+Assert-Equal -Expected 'backup' -Actual $script:meshFlashOrder[0] -Message 'MeshCore entered DFU before requesting its USB backup.'
+Assert-Equal -Expected 'dfu' -Actual $script:meshFlashOrder[1] -Message 'MeshCore DFU did not follow its USB backup.'
 Assert-Equal -Expected 1 -Actual $script:meshFlashDfuCalls.Count -Message 'Unexpected MeshCore DFU call count for flash-update.'
 Assert-Equal -Expected 'COM9' -Actual $script:meshFlashDfuCalls[0].ComPort -Message 'MeshCore attempted its 1200 touch on logging interface 02.'
 Assert-Equal -Expected 1200 -Actual $script:meshFlashDfuCalls[0].TouchBaud -Message 'MeshCore flash-update lost its expected touch request.'

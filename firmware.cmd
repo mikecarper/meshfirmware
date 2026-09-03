@@ -52,6 +52,9 @@ $KEYMIND_GITHUB_TREE_URL = "https://api.github.com/repos/mikecarper/MeshCore/git
 $KEYMIND_RAW_BASE_URL = "https://raw.githubusercontent.com/mikecarper/MeshCore/keymindCascade"
 $KEYMIND_CASCADE_FALLBACK_URL = "$KEYMIND_RAW_BASE_URL/mesh-america/keymind-cascade-v1.16.0-provider.json"
 $KEYMIND_CASCADE_LOGGING_FALLBACK_URL = "$KEYMIND_RAW_BASE_URL/mesh-america/keymind-cascade-logging-v1.16.0-provider.json"
+$MESHCORE_BACKUP_TOOL_URL = "https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_backup.py"
+$MESHCORE_BACKUP_TOOL_VERSION = '0.2.0'
+$MESHCORE_BACKUP_TOOL_SHA256 = '742008038ea7d636ded1a746152be5748578f93fd7619dbbe16bf40df2560559'
 
 $timeoutMeshtastic = 10 # Timeout duration in seconds
 $baud = 1200 # 115200
@@ -3024,6 +3027,7 @@ function GetHW() {
 		$hw = [PSCustomObject]@{
 			ComPort      	= $selectedComPort
 			HWNameFile   	= $Device
+			Role            = $Role
 			Architecture 	= $Architecture
 			EraseUrl 		= $EraseUrl
 			Version 		= $Version
@@ -5228,6 +5232,15 @@ function Set-HardwareUsbComPortSelection {
 
 	$Hardware.ComPort = $normalizedPort
 	$Hardware.UsbIdentity = $newIdentity
+	# A backup is bound to the physical USB radio selected when it was made.
+	# Never carry it across an explicit COM-port change, even when the new node
+	# happens to use the same board model.
+	foreach ($propertyName in @('MeshCoreBackupPath', 'MeshCoreBackupUsbIdentity')) {
+		$property = $Hardware.PSObject.Properties[$propertyName]
+		if ($null -ne $property) {
+			$property.Value = $null
+		}
+	}
 	return $newIdentity
 }
 
@@ -6260,6 +6273,321 @@ function flashMeshtasticNrf52 {
 	return $true
 }
 
+function Test-MeshCoreBackupToolVersion {
+	param([Parameter(Mandatory)][string]$Path)
+
+	if ([string]::IsNullOrWhiteSpace([string]$pythonCommand) -or
+		-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+		return $false
+	}
+	try {
+		$actualHash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+		if ($actualHash -cne $MESHCORE_BACKUP_TOOL_SHA256) {
+			return $false
+		}
+	}
+	catch {
+		return $false
+	}
+	$output = @(& $pythonCommand $Path version 2>$null)
+	if ($LASTEXITCODE -ne 0 -or $output.Count -eq 0) {
+		return $false
+	}
+	try {
+		$summary = ([string]$output[-1]) | ConvertFrom-Json -ErrorAction Stop
+		return $summary.ok -eq $true -and
+			[string]$summary.tool_version -eq $MESHCORE_BACKUP_TOOL_VERSION -and
+			[string]$summary.schema -eq 'org.meshfirmware.meshcore-backup/v1'
+	}
+	catch {
+		return $false
+	}
+}
+
+function Resolve-MeshCoreBackupTool {
+	$localTool = Join-Path $ScriptPath 'tools\meshcore_backup.py'
+	if (Test-Path -LiteralPath $localTool -PathType Leaf) {
+		if (Test-MeshCoreBackupToolVersion -Path $localTool) {
+			return $localTool
+		}
+		throw "The bundled MeshCore backup helper does not match required version $MESHCORE_BACKUP_TOOL_VERSION."
+	}
+
+	if ([string]::IsNullOrWhiteSpace([string]$FIRMWARE_ROOT)) {
+		throw 'MeshCore backup tool is not present beside firmware.cmd and no firmware cache directory is configured.'
+	}
+
+	$toolDir = Join-Path $FIRMWARE_ROOT 'tools'
+	$cachedTool = Join-Path $toolDir 'meshcore_backup.py'
+	if (Test-MeshCoreBackupToolVersion -Path $cachedTool) {
+		return $cachedTool
+	}
+
+	New-Item -ItemType Directory -Path $toolDir -Force | Out-Null
+	$partialTool = "$cachedTool.partial"
+	try {
+		Write-Host 'Downloading the MeshCore logical-backup helper...'
+		Invoke-WebRequest -Uri $MESHCORE_BACKUP_TOOL_URL -OutFile $partialTool -UseBasicParsing
+		if (-not (Test-Path -LiteralPath $partialTool -PathType Leaf) -or (Get-Item -LiteralPath $partialTool).Length -lt 1024) {
+			throw 'The downloaded backup helper is missing or unexpectedly small.'
+		}
+		if (-not (Test-MeshCoreBackupToolVersion -Path $partialTool)) {
+			throw "The downloaded MeshCore backup helper did not match required version $MESHCORE_BACKUP_TOOL_VERSION."
+		}
+		Move-Item -LiteralPath $partialTool -Destination $cachedTool -Force
+	}
+	finally {
+		if (Test-Path -LiteralPath $partialTool) {
+			Remove-Item -LiteralPath $partialTool -Force -ErrorAction SilentlyContinue
+		}
+	}
+
+	return $cachedTool
+}
+
+function Ensure-MeshCoreBackupDependencies {
+	if ([string]::IsNullOrWhiteSpace([string]$pythonCommand)) {
+		throw 'Python is not available for the MeshCore USB backup.'
+	}
+
+	& $pythonCommand -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' *> $null
+	if ($LASTEXITCODE -ne 0) {
+		throw 'MeshCore USB backup requires Python 3.10 or newer.'
+	}
+
+	$dependencyProbe = 'import re; from importlib.metadata import version; v=lambda n: tuple((list(map(int, re.findall(r"\d+", version(n))[:3])) + [0, 0, 0])[:3]); raise SystemExit(0 if (1, 6, 3) <= v("meshcore-cli") < (2, 0, 0) and (2, 3, 9) <= v("meshcore") < (3, 0, 0) and (1, 5, 0) <= v("PyNaCl") < (2, 0, 0) else 1)'
+	& $pythonCommand -c $dependencyProbe *> $null
+	if ($LASTEXITCODE -eq 0) {
+		return
+	}
+
+	Write-Host 'Installing the existing MeshCore Python API and CLI used by USB backup...'
+	& $pythonCommand -m pip install --upgrade --no-warn-script-location 'meshcore>=2.3.9,<3' 'meshcore-cli>=1.6.3,<2' 'PyNaCl>=1.5,<2'
+	if ($LASTEXITCODE -ne 0) {
+		throw 'Could not install meshcore-cli, which provides the supported MeshCore USB APIs.'
+	}
+
+	& $pythonCommand -c $dependencyProbe *> $null
+	if ($LASTEXITCODE -ne 0) {
+		throw 'The installed MeshCore Python API versions are outside the supported range.'
+	}
+}
+
+function Get-MeshCoreBackupRoleHint {
+	param([string]$Role)
+
+	$normalized = ([string]$Role).Trim().ToLowerInvariant()
+	switch -Wildcard ($normalized) {
+		'companion*' { return 'companion' }
+		'repeater*'  { return 'repeater' }
+		'room*'      { return 'room-server' }
+		'sensor*'    { return 'sensor' }
+		'kiss*'      { return 'kiss' }
+		default      { return 'auto' }
+	}
+}
+
+function Invoke-MeshCoreBackupHelper {
+	param(
+		[Parameter(Mandatory)][string[]]$Arguments,
+		[switch]$Quiet
+	)
+
+	Ensure-MeshCoreBackupDependencies
+	$tool = Resolve-MeshCoreBackupTool
+	$output = @(& $pythonCommand $tool @Arguments 2>&1)
+	$exitCode = $LASTEXITCODE
+	$lines = @($output | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+	if (-not $Quiet) {
+		$lines | ForEach-Object { Write-Host $_ }
+	}
+
+	$summary = $null
+	if ($lines.Count -gt 0) {
+		try {
+			$summary = $lines[-1] | ConvertFrom-Json -ErrorAction Stop
+		}
+		catch {
+			$summary = $null
+		}
+	}
+
+	return [pscustomobject]@{
+		ExitCode = $exitCode
+		Summary  = $summary
+		Output   = $lines
+	}
+}
+
+function Invoke-MeshCoreUsbBackup {
+	param(
+		[Parameter(Mandatory)][string]$ComPort,
+		[Parameter(Mandatory)][psobject]$UsbIdentity,
+		[string]$DeviceHint = '',
+		[string]$RoleHint = 'auto'
+	)
+
+	$actualIdentity = Get-UsbComPortIdentity -ComPort $ComPort
+	if ($null -eq $actualIdentity -or
+		-not (Test-UsbComPortIdentityMatch -Expected $UsbIdentity -Actual $actualIdentity)) {
+		throw "Could not revalidate that $ComPort belongs to the selected USB radio before backup."
+	}
+	if ((Get-UsbIdentityInterfaceNumber -Identity $actualIdentity) -eq '02') {
+		throw "$ComPort is the logging interface. MeshCore backup must use the primary interface 00."
+	}
+
+	$args = @('backup', '--port', $ComPort, '--role-hint', (Get-MeshCoreBackupRoleHint -Role $RoleHint))
+	foreach ($pair in @(
+		@('--usb-serial', [string]$actualIdentity.SerialNumber),
+		@('--usb-location', [string]$actualIdentity.LocationPath),
+		@('--usb-parent', [string]$actualIdentity.ParentInstanceId),
+		@('--usb-interface', (Get-UsbIdentityInterfaceNumber -Identity $actualIdentity)),
+		@('--device-hint', [string]$DeviceHint)
+	)) {
+		if (-not [string]::IsNullOrWhiteSpace([string]$pair[1])) {
+			$args += @([string]$pair[0], [string]$pair[1])
+		}
+	}
+
+	return Invoke-MeshCoreBackupHelper -Arguments $args
+}
+
+function Test-CachedMeshCoreUsbBackup {
+	param(
+		[Parameter(Mandatory)][pscustomobject]$Hardware,
+		[Parameter(Mandatory)][psobject]$UsbIdentity,
+		[switch]$RequireSafeForWipe
+	)
+
+	$pathProperty = $Hardware.PSObject.Properties['MeshCoreBackupPath']
+	$identityProperty = $Hardware.PSObject.Properties['MeshCoreBackupUsbIdentity']
+	if ($null -eq $pathProperty -or $null -eq $identityProperty -or
+		[string]::IsNullOrWhiteSpace([string]$pathProperty.Value) -or
+		$null -eq $identityProperty.Value -or
+		-not (Test-Path -LiteralPath ([string]$pathProperty.Value) -PathType Leaf) -or
+		-not (Test-UsbComPortIdentityMatch -Expected $identityProperty.Value -Actual $UsbIdentity)) {
+		return $false
+	}
+
+	$verifyArgs = @('verify', '--input', [string]$pathProperty.Value)
+	if ($RequireSafeForWipe) {
+		$verifyArgs += '--require-safe-for-wipe'
+	}
+	$verification = Invoke-MeshCoreBackupHelper -Arguments $verifyArgs -Quiet
+	if ($verification.ExitCode -ne 0 -or $null -eq $verification.Summary -or
+		$verification.Summary.ok -ne $true) {
+		Write-Warning 'The cached MeshCore backup no longer passes integrity/completeness verification; a new backup is required.'
+		return $false
+	}
+
+	Write-Host "Reusing verified MeshCore USB backup: $($pathProperty.Value)" -ForegroundColor Green
+	return $true
+}
+
+function Request-MeshCoreUsbBackupBeforeFlash {
+	param(
+		[Parameter(Mandatory)][pscustomobject]$Hardware,
+		[Parameter(Mandatory)][string]$ComPort,
+		[Parameter(Mandatory)][psobject]$UsbIdentity,
+		[Parameter(Mandatory)][ValidateSet('flash-update', 'flash-wipe')][string]$Action
+	)
+
+	if (Test-CachedMeshCoreUsbBackup `
+		-Hardware $Hardware `
+		-UsbIdentity $UsbIdentity `
+		-RequireSafeForWipe:($Action -eq 'flash-wipe')) {
+		return $true
+	}
+
+	Write-Host ''
+	Write-Host 'The nRF52 backup uses the existing MeshCore USB APIs.'
+	Write-Host 'It includes private identity and channel secrets when exposed by the current role and firmware.' -ForegroundColor Yellow
+	Write-Host 'The archive is stored in a current-user backup directory.' -ForegroundColor Yellow
+	do {
+		$choice = Read-Host 'Create and verify a logical USB backup before flashing? [Y/n]'
+		$normalizedChoice = ([string]$choice).Trim()
+		$validChoice = [string]::IsNullOrWhiteSpace($normalizedChoice) -or
+			$normalizedChoice -match '^(?i:y(?:es)?|n(?:o)?)$'
+		if (-not $validChoice) {
+			Write-Host 'Please enter Y or N.' -ForegroundColor Yellow
+		}
+	} while (-not $validChoice)
+	$makeBackup = [string]::IsNullOrWhiteSpace($normalizedChoice) -or
+		$normalizedChoice -match '^(?i:y(?:es)?)$'
+	$backup = $null
+	$verifiedArchive = $false
+	if ($makeBackup) {
+		try {
+			$backup = Invoke-MeshCoreUsbBackup `
+				-ComPort $ComPort `
+				-UsbIdentity $UsbIdentity `
+				-DeviceHint ([string]$Hardware.HWNameFile) `
+				-RoleHint 'auto'
+		}
+		catch {
+			Write-Warning "MeshCore USB backup failed: $($_.Exception.Message)"
+		}
+	}
+
+	if ($null -ne $backup -and $backup.ExitCode -in @(0, 31) -and $null -ne $backup.Summary -and
+		$backup.Summary.ok -eq $true -and
+		$null -ne $backup.Summary.PSObject.Properties['exit_code'] -and
+		[int]$backup.Summary.exit_code -eq $backup.ExitCode) {
+		$backupPath = [string]$backup.Summary.path
+		if ([string]::IsNullOrWhiteSpace($backupPath)) {
+			$backupPath = [string]$backup.Summary.archive
+		}
+		if (-not [string]::IsNullOrWhiteSpace($backupPath) -and (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
+			$verification = Invoke-MeshCoreBackupHelper `
+				-Arguments @('verify', '--input', $backupPath) `
+				-Quiet
+			if ($verification.ExitCode -eq 0 -and $null -ne $verification.Summary -and
+				$verification.Summary.ok -eq $true) {
+				$Hardware | Add-Member -NotePropertyName MeshCoreBackupPath -NotePropertyValue $backupPath -Force
+				$Hardware | Add-Member -NotePropertyName MeshCoreBackupUsbIdentity -NotePropertyValue $UsbIdentity -Force
+				$verifiedArchive = $true
+				Write-Host "Verified MeshCore logical backup: $backupPath" -ForegroundColor Green
+				if ($Action -eq 'flash-update') {
+					return $true
+				}
+
+				$safeVerification = Invoke-MeshCoreBackupHelper `
+					-Arguments @('verify', '--input', $backupPath, '--require-safe-for-wipe') `
+					-Quiet
+				if ($safeVerification.ExitCode -eq 0 -and $null -ne $safeVerification.Summary -and
+					$safeVerification.Summary.ok -eq $true) {
+					return $true
+				}
+			}
+		}
+		if (-not $verifiedArchive) {
+			Write-Warning 'The backup helper reported an archive that could not be independently verified.'
+		}
+	}
+	elseif ($null -ne $backup) {
+		Write-Warning "MeshCore USB backup did not produce a usable archive (exit code $($backup.ExitCode))."
+	}
+
+	if ($Action -eq 'flash-wipe') {
+		if ($verifiedArchive) {
+			Write-Warning 'The logical backup is verified, but the current MeshCore APIs do not expose all stored state and messages.'
+		}
+		Write-Warning 'A wipe will erase node identity and stored data without a full wipe-safe backup.'
+		$override = Read-Host 'Type WIPE WITHOUT BACKUP to continue, or press Enter to abort'
+		if ($override -cne 'WIPE WITHOUT BACKUP') {
+			throw 'MeshCore flash-wipe aborted because no complete verified backup is available.'
+		}
+	}
+	elseif ($makeBackup) {
+		$continue = Read-Host 'Continue the write-only update without a complete backup? [y/N]'
+		if ($continue.Trim() -notmatch '^y(?:es)?$') {
+			throw 'MeshCore flash-update aborted because the requested backup did not complete.'
+		}
+	}
+
+	return $false
+}
+
 function flashMeshCoreNrf52 {
 	param(
 		[Parameter(Mandatory)][pscustomobject]$hw
@@ -6283,6 +6611,11 @@ function flashMeshCoreNrf52 {
 	Write-Host "Running $action..."
 	$runtimeComPort = $selectedComPort
 	$bootloaderHint = Get-MeshCoreBootloaderHintText -hw $hw
+	$null = Request-MeshCoreUsbBackupBeforeFlash `
+		-Hardware $hw `
+		-ComPort $runtimeComPort `
+		-UsbIdentity $usbIdentity `
+		-Action $action
 
 	if ($action -eq 'flash-wipe') {
 		$eraseUrl = Select-MeshCoreEraseUrl -hw $hw
