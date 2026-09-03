@@ -98,6 +98,27 @@ $pocketDfuChangedSerial = [pscustomobject]@{
 	BusReportedDescription = 'MeshPocket_DFU'
 	InterfaceNumber = ''
 }
+$t1000eDfu = [pscustomobject]@{
+	SerialNumber = '34A9141999729D5D'
+	LocationPath = 'PCIROOT(0)#USBROOT(0)#USB(8)'
+	ParentInstanceId = 'USB\VID_2886&PID_0057\34A9141999729D5D'
+	BusReportedDescription = 'T1000-E'
+	InterfaceNumber = ''
+}
+$t1000eWrongPid = [pscustomobject]@{
+	SerialNumber = '34A9141999729D5D'
+	LocationPath = 'PCIROOT(0)#USBROOT(0)#USB(8)'
+	ParentInstanceId = 'USB\VID_2886&PID_0058\34A9141999729D5D'
+	BusReportedDescription = 'T1000-E'
+	InterfaceNumber = ''
+}
+$t1000eRuntime = [pscustomobject]@{
+	SerialNumber = '34A9141999729D5D'
+	LocationPath = 'PCIROOT(0)#USBROOT(0)#USB(8)'
+	ParentInstanceId = 'USB\VID_239A&PID_8029\34A9141999729D5D'
+	BusReportedDescription = 'MeshCore T1000-E'
+	InterfaceNumber = '00'
+}
 $t096Runtime = [pscustomobject]@{
 	SerialNumber = '651F8E496197F882'
 	LocationPath = 'PCIROOT(0)#USBROOT(0)#USB(13)#USB(3)'
@@ -165,6 +186,9 @@ Assert-True `
 	-Condition (Test-UsbComPortIdentityMatch -Expected $pocketRuntime -Actual $pocketDfu) `
 	-Message 'The same physical device must match after its VID/PID and COM port change.'
 Assert-True `
+	-Condition (Test-UsbComPortIdentityMatch -Expected $t1000eRuntime -Actual $t1000eDfu) `
+	-Message 'The same T1000-E must match across its 239A:8029 runtime and 2886:0057 DFU identities.'
+Assert-True `
 	-Condition (-not (Test-UsbComPortIdentityMatch -Expected $pocketRuntime -Actual $t096Runtime)) `
 	-Message 'A second radio must never match the selected device.'
 # Explicit policy: when both modes report a serial, a mismatch is a hard
@@ -174,6 +198,9 @@ Assert-True `
 	-Condition (-not (Test-UsbComPortIdentityMatch -Expected $pocketRuntime -Actual $pocketDfuChangedSerial)) `
 	-Message 'Different explicit serials incorrectly matched by USB location.'
 Assert-True -Condition (Test-UsbIdentityIsNrf52Dfu -Identity $pocketDfu) -Message 'DFU mode was not recognized.'
+Assert-True -Condition (Test-UsbIdentityIsNrf52Dfu -Identity $t1000eDfu) -Message 'T1000-E 2886:0057 DFU mode was not recognized.'
+Assert-True -Condition (-not (Test-UsbIdentityIsNrf52Dfu -Identity $t1000eWrongPid)) -Message 'An unlisted Seeed USB PID was misidentified as T1000-E DFU mode.'
+Assert-True -Condition (-not (Test-UsbIdentityIsNrf52Dfu -Identity $t1000eRuntime)) -Message 'T1000-E runtime firmware was misidentified as DFU mode.'
 Assert-True -Condition (-not (Test-UsbIdentityIsNrf52Dfu -Identity $t096Runtime)) -Message 'Runtime firmware was misidentified as DFU mode.'
 
 $noTouchRuntimeRejected = $false
@@ -185,6 +212,7 @@ catch {
 }
 Assert-True -Condition $noTouchRuntimeRejected -Message 'A no-touch upload did not reject runtime mode.'
 Assert-UsbIdentityIsNrf52Dfu -Identity $pocketDfu -ComPort 'COM18'
+Assert-UsbIdentityIsNrf52Dfu -Identity $t1000eDfu -ComPort 'COM24'
 
 Assert-True `
 	-Condition (Test-ShouldRetryNrfutilSerialPort -TouchWasRequested $true -SerialOpenFailure $true) `

@@ -5112,7 +5112,16 @@ function Test-UsbIdentityIsNrf52Dfu {
 	# Adafruit nRF52 bootloaders use the 0x00xx PID range, while their
 	# application firmware uses 0x80xx. This is a mode hint only; physical
 	# identity was already verified independently above.
-	return ([string]$Identity.ParentInstanceId -match '(?i)^USB\\VID_239A&PID_00[0-9A-F]{2}\\')
+	$parentInstanceId = [string]$Identity.ParentInstanceId
+	if ($parentInstanceId -match '(?i)^USB\\VID_239A&PID_00[0-9A-F]{2}\\') {
+		return $true
+	}
+
+	# Seeed's T1000-E OTAFIX bootloader uses its own non-Adafruit USB VID/PID
+	# and reports the plain product name "T1000-E", without a DFU/UF2 suffix.
+	# Keep this allow-list exact so a normal Seeed runtime device cannot be
+	# mistaken for a no-touch DFU target.
+	return ($parentInstanceId -match '(?i)^USB\\VID_2886&PID_0057\\')
 }
 
 function Assert-UsbIdentityIsNrf52Dfu {
