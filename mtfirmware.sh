@@ -14,9 +14,29 @@ set -euo pipefail
 
 # Ensure we always restore on exit
 cleanup() {
-	USB_AUTOSUSPEND_END=$(cat /sys/module/usbcore/parameters/autosuspend)
-	if [[ "$USB_AUTOSUSPEND_END" != "$USB_AUTOSUSPEND" ]]; then
-		echo "$USB_AUTOSUSPEND" | sudo tee /sys/module/usbcore/parameters/autosuspend >/dev/null
+	local usb_autosuspend_end
+
+	# These helpers are defined later in the file, but are available for every
+	# normal exit after main execution begins. Keep cleanup idempotent because an
+	# ERR path invokes it before the EXIT trap invokes it again.
+	if declare -F release_nrf52_owned_mount >/dev/null 2>&1; then
+		release_nrf52_owned_mount || true
+	fi
+	if declare -F release_all_nrf52_flash_locks >/dev/null 2>&1; then
+		release_all_nrf52_flash_locks || true
+	fi
+	if declare -F restart_locked_service_if_needed >/dev/null 2>&1; then
+		restart_locked_service_if_needed || true
+	fi
+
+	usb_autosuspend_end=$(cat /sys/module/usbcore/parameters/autosuspend 2>/dev/null || true)
+	if [[ -n "${USB_AUTOSUSPEND:-}" && -n "$usb_autosuspend_end" \
+		&& "$usb_autosuspend_end" != "$USB_AUTOSUSPEND" ]]; then
+		echo "$USB_AUTOSUSPEND" | sudo tee /sys/module/usbcore/parameters/autosuspend >/dev/null || true
+	fi
+	if [[ -n "${NRF52_MOUNT_STATE_FILE:-}" && -e "$NRF52_MOUNT_STATE_FILE" \
+		&& ! -s "$NRF52_MOUNT_STATE_FILE" ]]; then
+		rm -f -- "$NRF52_MOUNT_STATE_FILE"
 	fi
 }
 error_handler() {
@@ -58,9 +78,21 @@ REPO_NAME="firmware"
 REPO_NAME_ALT="meshtastic.github.io"
 CACHE_TIMEOUT_SECONDS=$((6 * 3600)) # 6 hours
 MOUNT_FOLDER="/mnt/meshDeviceSD"
+NRF52_MOUNT_FOLDER="${MOUNT_FOLDER}.nrf52.${UID}.${BASHPID}"
 NRF52_DFU_TIMEOUT_SECONDS=180
 NRF52_MANUAL_DFU_PROMPT_SECONDS=20
 NRF52_POST_FLASH_CHECK_TIMEOUT_SECONDS=60
+NRF52_SELECTED_SERIAL=""
+NRF52_SELECTED_PATH_STEM=""
+NRF52_SELECTED_VENDOR_ID=""
+NRF52_EXPECTED_VERSION=""
+NRF52_FLASH_PRE_KIND=""
+NRF52_FLASH_PRE_PATH=""
+NRF52_FLASH_PRE_INSTANCE=""
+NRF52_MOUNT_STATE_FILE="$(mktemp)"
+NRF52_FLASH_LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/mtfirmware-nrf52-${UID}.lock"
+NRF52_FLASH_LOCK_FD=""
+NRF52_FLASH_LOCK_DEPTH=0
 USB_AUTOSUSPEND=$(cat /sys/module/usbcore/parameters/autosuspend)
 if [[ "$USB_AUTOSUSPEND" -ne -1 ]]; then
 	# Only disable (-1) if it isn't already
@@ -851,11 +883,36 @@ unzip_assets() {
 }
 
 # Detect the connected USB device.
+serial_port_from_detection() {
+	local detection="${1:-}"
+	local port
+
+	if [[ "$detection" == *"-> "* ]]; then
+		port="${detection##*-> }"
+	else
+		port="$detection"
+	fi
+	printf '%s' "$port" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
 detect_device() {
 	# /dev/ttyACM0
-	detected_dev=$( pick_serial_port )
+	local selected_port
+
+	detected_dev=$(pick_serial_port)
 	echo "$detected_dev" >"${DEVICE_INFO_FILE}"
 	normalize "$detected_dev" >"${DETECTED_PRODUCT_FILE}"
+
+	# Save the physical USB identity at the same moment the user chooses the
+	# device. A tty number can be reused while releases download or menus are
+	# open, so discovering identity later could bind flashing to another board.
+	NRF52_SELECTED_SERIAL=""
+	NRF52_SELECTED_PATH_STEM=""
+	NRF52_SELECTED_VENDOR_ID=""
+	selected_port="$(serial_port_from_detection "$detected_dev")"
+	if [[ -n "$selected_port" && -e "$selected_port" ]]; then
+		capture_nrf52_selected_identity "$selected_port" >/dev/null 2>&1 || true
+	fi
 }
 
 pick_serial_port() {
@@ -903,21 +960,9 @@ pick_serial_port() {
 		  [[ -L "$link" && "$(readlink -f "$link")" == "$p" ]] || continue
 
 			devdevice="$(readlink -f "$link")"
-			lockedService=$(get_locked_service "$devdevice")
-			spinner
-			if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
-				spinner
-				#echo "Stopping $lockedService"
-				sudo systemctl stop "$lockedService"
-			fi
 			spinner
 			spinner
-			metadata="$(timeout 12 pipx run meshtastic --port "$devdevice" --device-metadata 2>/dev/null || true)"
-			if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
-				spinner
-				#echo "Starting $lockedService"
-				sudo systemctl start "$lockedService"
-			fi
+			metadata="$(probe_meshtastic_metadata "$devdevice" 2>/dev/null || true)"
 			spinner
 
 		  version="$(echo "$metadata" | awk -F': ' '/^firmware_version:/ {print $2; exit}')"
@@ -1369,7 +1414,7 @@ prepare_script() {
 	operation=$(cat "${OPERATION_FILE}")
 	chosen_tag=$(cat "${CHOSEN_TAG_FILE}")
 	detected_dev=$(cat "${DEVICE_INFO_FILE}")
-	device_port_name=$(echo "$detected_dev" | awk -F'-> ' '{print $2}')
+	device_port_name="$(serial_port_from_detection "$detected_dev")"
 	architecture=$(cat "${ARCHITECTURE_FILE}")
 	
 	script_to_run=""
@@ -1584,8 +1629,116 @@ detect_esp() {
 	fi
 }
 
-list_block_devs() {
-	lsblk -nrpo NAME | sort; 
+udev_device_property() {
+	local device=$1
+	local property=$2
+
+	command -v udevadm >/dev/null 2>&1 || return 0
+	udevadm info --query=property --name="$device" 2>/dev/null \
+		| sed -n "s/^${property}=//p" \
+		| head -n1
+}
+
+normalize_usb_serial_identity() {
+	local serial="${1:-}"
+	printf '%s' "${serial,,}" | tr -cd '[:alnum:]'
+}
+
+nrf52_usb_path_stem() {
+	local path="${1:-}"
+	local prefix usb_path interface_path interface_component
+
+	# Match the same physical USB device across its CDC and mass-storage
+	# interfaces. Keep the PCI portion intact and remove only the final USB
+	# interface component (for example, :1.0) after the -usb- marker.
+	if [[ "$path" != *-usb-* ]]; then
+		printf '%s' "$path"
+		return 0
+	fi
+	prefix="${path%%-usb-*}"
+	usb_path="${path#*-usb-}"
+	interface_path="${usb_path%%-*}"
+	interface_component="${interface_path##*:}"
+	if [[ "$interface_path" == *:* \
+		&& "$interface_component" =~ ^[0-9]+\.[0-9]+$ ]]; then
+		printf '%s-usb-%s' "$prefix" "${interface_path%:*}"
+	else
+		printf '%s' "$path"
+	fi
+}
+
+nrf52_device_identity_rank() {
+	local candidate=$1
+	local expected_serial="${2:-}"
+	local expected_path_stem="${3:-}"
+	local expected_vendor_id="${4:-}"
+	local candidate_bus candidate_serial candidate_path_stem candidate_interface
+	local candidate_vendor_id
+	local interface_bonus=0
+
+	candidate_bus="$(udev_device_property "$candidate" ID_BUS)"
+	if [[ "$candidate_bus" != "usb" ]]; then
+		printf '%s\n' 0
+		return 0
+	fi
+	candidate_serial="$(normalize_usb_serial_identity \
+		"$(udev_device_property "$candidate" ID_SERIAL_SHORT)")"
+	expected_serial="$(normalize_usb_serial_identity "$expected_serial")"
+	candidate_vendor_id="$(normalize_usb_serial_identity \
+		"$(udev_device_property "$candidate" ID_VENDOR_ID)")"
+	expected_vendor_id="$(normalize_usb_serial_identity "$expected_vendor_id")"
+	candidate_path_stem="$(nrf52_usb_path_stem \
+		"$(udev_device_property "$candidate" ID_PATH)")"
+	if [[ -z "$candidate_path_stem" || -z "$expected_vendor_id" \
+		|| "$candidate_vendor_id" != "$expected_vendor_id" ]]; then
+		printf '%s\n' 0
+		return 0
+	fi
+	candidate_interface="$(udev_device_property "$candidate" ID_USB_INTERFACE_NUM)"
+	if [[ "$candidate_interface" =~ ^0+$ ]]; then
+		interface_bonus=10
+	fi
+
+	# The physical USB path is the strongest match across re-enumeration. Require
+	# the selected USB vendor even when a bootloader omits its serial, and reject
+	# a conflicting published serial. Serial plus vendor and a real USB path is
+	# the fallback for VMs that move a device to another virtual USB path.
+	if [[ -n "$expected_path_stem" \
+		&& "$candidate_path_stem" == "$expected_path_stem" ]]; then
+		if [[ -n "$expected_serial" && -n "$candidate_serial" \
+			&& "$candidate_serial" != "$expected_serial" ]]; then
+			printf '%s\n' 0
+			return 0
+		fi
+		printf '%s\n' $((300 + interface_bonus))
+		return 0
+	fi
+	if [[ -n "$expected_serial" && "$candidate_serial" == "$expected_serial" ]]; then
+		printf '%s\n' $((200 + interface_bonus))
+	else
+		printf '%s\n' 0
+	fi
+}
+
+capture_nrf52_selected_identity() {
+	local port=$1
+	local live_port
+
+	live_port="$(readlink -f "$port" 2>/dev/null || true)"
+	[[ -n "$live_port" && -e "$live_port" ]] || {
+		echo "The selected nRF52 serial port is no longer present: $port" >&2
+		return 1
+	}
+	NRF52_SELECTED_SERIAL="$(normalize_usb_serial_identity \
+		"$(udev_device_property "$live_port" ID_SERIAL_SHORT)")"
+	NRF52_SELECTED_PATH_STEM="$(nrf52_usb_path_stem \
+		"$(udev_device_property "$live_port" ID_PATH)")"
+	NRF52_SELECTED_VENDOR_ID="$(normalize_usb_serial_identity \
+		"$(udev_device_property "$live_port" ID_VENDOR_ID)")"
+	if [[ -z "$NRF52_SELECTED_PATH_STEM" || -z "$NRF52_SELECTED_VENDOR_ID" ]]; then
+		echo "Cannot preserve a stable USB identity for $port; refusing nRF52 flashing." >&2
+		return 1
+	fi
 }
 
 is_uf2_mount_dir() {
@@ -1595,59 +1748,153 @@ is_uf2_mount_dir() {
 	[[ -f "$mount_dir/INFO_UF2.TXT" || -f "$mount_dir/CURRENT.UF2" || -f "$mount_dir/INDEX.HTM" ]]
 }
 
+nrf52_uf2_mount_source() {
+	local mount_dir=$1
+	local source
+
+	source="$(findmnt -rn -o SOURCE --target "$mount_dir" 2>/dev/null | head -n1)"
+	[[ -n "$source" ]] || return 1
+	printf '%s\n' "$source"
+}
+
+record_nrf52_owned_mount() {
+	local source=$1
+	local mount_dir=$2
+
+	[[ -n "${NRF52_MOUNT_STATE_FILE:-}" ]] || return 1
+	printf '%s\t%s\n' "$source" "$mount_dir" >"$NRF52_MOUNT_STATE_FILE"
+}
+
+release_nrf52_owned_mount() {
+	local source mount_dir current_source
+	local source_resolved current_resolved
+
+	[[ -n "${NRF52_MOUNT_STATE_FILE:-}" && -s "$NRF52_MOUNT_STATE_FILE" ]] || return 1
+	IFS=$'\t' read -r source mount_dir <"$NRF52_MOUNT_STATE_FILE"
+	[[ -n "$source" && -n "$mount_dir" ]] || return 1
+
+	if ! mountpoint -q "$mount_dir"; then
+		rm -f -- "$NRF52_MOUNT_STATE_FILE"
+		return 0
+	fi
+	current_source="$(nrf52_uf2_mount_source "$mount_dir" || true)"
+	source_resolved="$(readlink -f "$source" 2>/dev/null || true)"
+	current_resolved="$(readlink -f "$current_source" 2>/dev/null || true)"
+	if [[ "$current_source" != "$source" \
+		&& ( -z "$source_resolved" || "$current_resolved" != "$source_resolved" ) ]]; then
+		echo "Refusing to unmount $mount_dir because its source changed from $source to ${current_source:-unknown}." >&2
+		return 1
+	fi
+	if ! sudo umount -- "$mount_dir"; then
+		echo "Could not unmount script-owned nRF52 UF2 volume at $mount_dir." >&2
+		return 1
+	fi
+	rm -f -- "$NRF52_MOUNT_STATE_FILE"
+	sudo rmdir -- "$mount_dir" 2>/dev/null || true
+}
+
 find_mounted_uf2_dir() {
-	local mount_dir
+	local expected_serial=$1
+	local expected_path_stem=$2
+	local expected_vendor_id=$3
+	local source mount_dir rank best_rank=0
+	local -a matches=()
+	local -A seen_sources=()
 
-	while IFS= read -r mount_dir; do
-		[[ -n "$mount_dir" ]] || continue
-		if is_uf2_mount_dir "$mount_dir"; then
-			printf '%s\n' "$mount_dir"
-			return 0
+	while read -r source mount_dir; do
+		[[ -n "$source" && -n "$mount_dir" && -e "$source" ]] || continue
+		is_uf2_mount_dir "$mount_dir" || continue
+		rank="$(nrf52_device_identity_rank "$source" \
+			"$expected_serial" "$expected_path_stem" "$expected_vendor_id")"
+		[[ "$rank" =~ ^[0-9]+$ ]] || continue
+		(( rank > 0 )) || continue
+		if (( rank > best_rank )); then
+			best_rank=$rank
+			matches=("$mount_dir")
+			seen_sources=(["$source"]=1)
+		elif (( rank == best_rank )) && [[ -z "${seen_sources[$source]+x}" ]]; then
+			matches+=("$mount_dir")
+			seen_sources["$source"]=1
 		fi
-	done < <(findmnt -rn -o TARGET 2>/dev/null | sort -u)
+	done < <(findmnt -rn -o SOURCE,TARGET 2>/dev/null)
 
-	for mount_dir in "$MOUNT_FOLDER" /media/"$USER"/* /run/media/"$USER"/*; do
-		[[ -d "$mount_dir" ]] || continue
-		if is_uf2_mount_dir "$mount_dir"; then
-			printf '%s\n' "$mount_dir"
-			return 0
-		fi
-	done
-
+	if ((${#matches[@]} == 1)); then
+		printf '%s\n' "${matches[0]}"
+		return 0
+	fi
+	if ((${#matches[@]} > 1)); then
+		echo "Refusing ambiguous UF2 mounts for the selected nRF52: ${matches[*]}" >&2
+		return 2
+	fi
 	return 1
 }
 
 find_uf2_mount_dir() {
-	local device_name type fstype mountpoint
+	local expected_serial=$1
+	local expected_path_stem=$2
+	local expected_vendor_id=$3
+	local mounted_dir mounted_status=0
+	local device_name type fstype rank best_rank=0
+	local -a matches=()
 
-	if find_mounted_uf2_dir; then
+	if [[ -z "$expected_path_stem" || -z "$expected_vendor_id" ]]; then
+		echo "A stable selected nRF52 identity is required before searching for UF2 storage." >&2
+		return 1
+	fi
+	if mounted_dir="$(find_mounted_uf2_dir \
+		"$expected_serial" "$expected_path_stem" "$expected_vendor_id")"; then
+		printf '%s\n' "$mounted_dir"
 		return 0
+	else
+		mounted_status=$?
+		(( mounted_status == 2 )) && return 2
 	fi
 
-	while read -r device_name type fstype mountpoint; do
+	while read -r device_name type fstype; do
 		[[ -n "$device_name" ]] || continue
 		[[ "$type" == "disk" || "$type" == "part" ]] || continue
 		[[ "$fstype" == "vfat" || "$fstype" == "msdos" || "$fstype" == "exfat" ]] || continue
-		[[ -z "${mountpoint:-}" ]] || continue
-
-		if mountpoint -q "$MOUNT_FOLDER"; then
-			if is_uf2_mount_dir "$MOUNT_FOLDER"; then
-				printf '%s\n' "$MOUNT_FOLDER"
-				return 0
-			fi
-			continue
+		rank="$(nrf52_device_identity_rank "$device_name" \
+			"$expected_serial" "$expected_path_stem" "$expected_vendor_id")"
+		[[ "$rank" =~ ^[0-9]+$ ]] || continue
+		(( rank > 0 )) || continue
+		if (( rank > best_rank )); then
+			best_rank=$rank
+			matches=("$device_name")
+		elif (( rank == best_rank )); then
+			matches+=("$device_name")
 		fi
+	done < <(lsblk -nrpo NAME,TYPE,FSTYPE 2>/dev/null)
 
-		sudo mkdir -p "$MOUNT_FOLDER"
-		if sudo mount "$device_name" "$MOUNT_FOLDER" 2>/dev/null; then
-			if is_uf2_mount_dir "$MOUNT_FOLDER"; then
-				printf '%s\n' "$MOUNT_FOLDER"
-				return 0
-			fi
-			sudo umount "$MOUNT_FOLDER" 2>/dev/null || true
+	if ((${#matches[@]} != 1)); then
+		if ((${#matches[@]} > 1)); then
+			echo "Refusing ambiguous UF2 block devices for the selected nRF52: ${matches[*]}" >&2
 		fi
-	done < <(lsblk -nrpo NAME,TYPE,FSTYPE,MOUNTPOINT 2>/dev/null)
+		return 1
+	fi
+	if mountpoint -q "$NRF52_MOUNT_FOLDER"; then
+		if ! release_nrf52_owned_mount; then
+			echo "$NRF52_MOUNT_FOLDER is already mounted but is not a script-owned nRF52 UF2 volume." >&2
+			return 1
+		fi
+	fi
 
+	sudo mkdir -p "$NRF52_MOUNT_FOLDER"
+	if ! sudo mount "${matches[0]}" "$NRF52_MOUNT_FOLDER" 2>/dev/null; then
+		echo "Could not mount the selected nRF52 UF2 device ${matches[0]}." >&2
+		return 1
+	fi
+	if ! record_nrf52_owned_mount "${matches[0]}" "$NRF52_MOUNT_FOLDER"; then
+		sudo umount -- "$NRF52_MOUNT_FOLDER" 2>/dev/null || true
+		echo "Could not record ownership of the selected nRF52 UF2 mount." >&2
+		return 1
+	fi
+	if is_uf2_mount_dir "$NRF52_MOUNT_FOLDER"; then
+		printf '%s\n' "$NRF52_MOUNT_FOLDER"
+		return 0
+	fi
+	echo "The selected USB block device did not contain a UF2 bootloader volume." >&2
+	release_nrf52_owned_mount || true
 	return 1
 }
 
@@ -1657,6 +1904,51 @@ list_serial_devs() {
 	for path in /dev/ttyACM* /dev/ttyUSB*; do
 		[[ -e "$path" ]] && printf '%s\n' "$path"
 	done | sort -V
+}
+
+find_nrf52_serial_port_by_identity() {
+	local expected_serial=$1
+	local expected_path_stem=$2
+	local expected_vendor_id=$3
+	local preferred_port="${4:-}"
+	local candidate live_candidate rank best_rank=0
+	local -a candidates=() matches=()
+	local -A seen_candidates=()
+
+	if [[ -z "$expected_path_stem" || -z "$expected_vendor_id" ]]; then
+		return 1
+	fi
+	[[ -n "$preferred_port" ]] && candidates+=("$preferred_port")
+	while IFS= read -r candidate; do
+		[[ -n "$candidate" ]] && candidates+=("$candidate")
+	done < <(list_serial_devs)
+
+	for candidate in "${candidates[@]}"; do
+		live_candidate="$(readlink -f "$candidate" 2>/dev/null || true)"
+		[[ -n "$live_candidate" && -e "$live_candidate" ]] || continue
+		[[ -z "${seen_candidates[$live_candidate]+x}" ]] || continue
+		seen_candidates["$live_candidate"]=1
+		rank="$(nrf52_device_identity_rank "$live_candidate" \
+			"$expected_serial" "$expected_path_stem" "$expected_vendor_id")"
+		[[ "$rank" =~ ^[0-9]+$ ]] || continue
+		(( rank > 0 )) || continue
+		if (( rank > best_rank )); then
+			best_rank=$rank
+			matches=("$live_candidate")
+		elif (( rank == best_rank )); then
+			matches+=("$live_candidate")
+		fi
+	done
+
+	if ((${#matches[@]} == 1)); then
+		printf '%s\n' "${matches[0]}"
+		return 0
+	fi
+	if ((${#matches[@]} > 1)); then
+		echo "Refusing ambiguous serial ports for the selected nRF52: ${matches[*]}" >&2
+		return 2
+	fi
+	return 1
 }
 
 is_nrf52_arch() {
@@ -1706,6 +1998,260 @@ get_firmware_metadata_display_name() {
 	if [[ -f "$metadata_file" ]]; then
 		sed -nE 's/.*"displayName"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$metadata_file" | head -n 1
 	fi
+}
+
+nrf52_firmware_version_from_artifact() {
+	local firmware_file=$1
+
+	if [[ ! -f "$firmware_file" ]]; then
+		echo "Cannot inspect the selected nRF52 firmware artifact: $firmware_file" >&2
+		return 1
+	fi
+	if [[ -z "${PYTHON:-}" || ! -x "$PYTHON" ]]; then
+		echo "A Python interpreter is required to inspect the selected nRF52 firmware artifact." >&2
+		return 1
+	fi
+
+	"$PYTHON" - "$firmware_file" <<'PY'
+import json
+import pathlib
+import re
+import struct
+import sys
+import zipfile
+
+
+MAX_IMAGE_SIZE = 16 * 1024 * 1024
+UF2_BLOCK_SIZE = 512
+UF2_MAGIC_START0 = 0x0A324655
+UF2_MAGIC_START1 = 0x9E5D5157
+UF2_MAGIC_END = 0x0AB16F30
+UF2_FLAG_NOFLASH = 0x00000001
+
+
+def fail(message):
+    print(f"Cannot derive the selected nRF52 firmware version: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def checked_size(data, description):
+    if not data:
+        fail(f"{description} is empty")
+    if len(data) > MAX_IMAGE_SIZE:
+        fail(f"{description} is larger than {MAX_IMAGE_SIZE} bytes")
+    return data
+
+
+def decode_uf2(data):
+    if len(data) % UF2_BLOCK_SIZE:
+        fail("the UF2 length is not a whole number of 512-byte blocks")
+
+    records = {}
+    advertised_counts = set()
+    block_count = len(data) // UF2_BLOCK_SIZE
+    for offset in range(0, len(data), UF2_BLOCK_SIZE):
+        block = data[offset : offset + UF2_BLOCK_SIZE]
+        start0, start1, flags, target, payload_size, block_number, total_blocks = struct.unpack_from(
+            "<7I", block, 0
+        )
+        end_magic = struct.unpack_from("<I", block, 508)[0]
+        if (start0, start1, end_magic) != (
+            UF2_MAGIC_START0,
+            UF2_MAGIC_START1,
+            UF2_MAGIC_END,
+        ):
+            fail(f"invalid UF2 magic in block {offset // UF2_BLOCK_SIZE}")
+        if payload_size == 0 or payload_size > 476:
+            fail(f"invalid UF2 payload size {payload_size}")
+        if total_blocks:
+            advertised_counts.add(total_blocks)
+        if block_number in records:
+            fail(f"duplicate UF2 block number {block_number}")
+        records[block_number] = (flags, target, block[32 : 32 + payload_size])
+
+    if len(advertised_counts) > 1:
+        fail("UF2 blocks disagree about the total block count")
+    if advertised_counts and next(iter(advertised_counts)) != block_count:
+        fail("UF2 advertised block count does not match its file length")
+    if set(records) != set(range(block_count)):
+        fail("UF2 block numbers are incomplete")
+
+    flash_records = sorted(
+        (target, payload)
+        for flags, target, payload in records.values()
+        if not (flags & UF2_FLAG_NOFLASH)
+    )
+    if not flash_records:
+        fail("UF2 contains no flash payload")
+
+    image = bytearray()
+    previous_end = None
+    for target, payload in flash_records:
+        if previous_end is not None:
+            if target < previous_end:
+                fail("UF2 flash payloads overlap")
+            if target > previous_end:
+                image.append(0)
+        image.extend(payload)
+        previous_end = target + len(payload)
+    return checked_size(bytes(image), "decoded UF2 image")
+
+
+def decode_intel_hex(data):
+    memory = {}
+    address_base = 0
+    saw_eof = False
+    try:
+        text = data.decode("ascii")
+    except UnicodeDecodeError:
+        fail("Intel HEX is not ASCII")
+
+    for line_number, raw_line in enumerate(text.splitlines(), 1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        if saw_eof:
+            fail(f"Intel HEX contains data after EOF on line {line_number}")
+        if not line.startswith(":"):
+            fail(f"Intel HEX line {line_number} has no record marker")
+        try:
+            record = bytes.fromhex(line[1:])
+        except ValueError:
+            fail(f"Intel HEX line {line_number} is not hexadecimal")
+        if len(record) < 5 or len(record) != record[0] + 5 or sum(record) & 0xFF:
+            fail(f"Intel HEX line {line_number} has an invalid length or checksum")
+        count = record[0]
+        address = (record[1] << 8) | record[2]
+        record_type = record[3]
+        payload = record[4 : 4 + count]
+        if record_type == 0x00:
+            absolute = address_base + address
+            for index, value in enumerate(payload):
+                location = absolute + index
+                if location in memory and memory[location] != value:
+                    fail(f"Intel HEX has conflicting data at address 0x{location:X}")
+                memory[location] = value
+        elif record_type == 0x01:
+            if count or address:
+                fail("Intel HEX EOF record is malformed")
+            saw_eof = True
+        elif record_type == 0x02:
+            if count != 2 or address:
+                fail("Intel HEX extended-segment record is malformed")
+            address_base = int.from_bytes(payload, "big") << 4
+        elif record_type == 0x04:
+            if count != 2 or address:
+                fail("Intel HEX extended-linear record is malformed")
+            address_base = int.from_bytes(payload, "big") << 16
+        elif record_type not in (0x03, 0x05):
+            fail(f"Intel HEX uses unsupported record type 0x{record_type:02X}")
+
+    if not saw_eof or not memory:
+        fail("Intel HEX has no complete application image")
+
+    image = bytearray()
+    previous = None
+    for address in sorted(memory):
+        if previous is not None and address != previous + 1:
+            image.append(0)
+        image.append(memory[address])
+        previous = address
+    return checked_size(bytes(image), "decoded Intel HEX image")
+
+
+def image_from_zip(path):
+    try:
+        with zipfile.ZipFile(path) as archive:
+            manifests = [entry for entry in archive.infolist() if entry.filename == "manifest.json"]
+            if len(manifests) != 1 or manifests[0].file_size > 1024 * 1024:
+                fail("DFU ZIP must contain one reasonably sized manifest.json")
+            try:
+                manifest = json.loads(archive.read(manifests[0]))
+                image_name = manifest["manifest"]["application"]["bin_file"]
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                fail("DFU ZIP manifest has no valid application bin_file")
+            if not isinstance(image_name, str):
+                fail("DFU ZIP application bin_file is not a string")
+            image_path = pathlib.PurePosixPath(image_name)
+            if image_path.is_absolute() or ".." in image_path.parts:
+                fail("DFU ZIP application bin_file has an unsafe path")
+            images = [entry for entry in archive.infolist() if entry.filename == image_name]
+            if len(images) != 1 or images[0].is_dir():
+                fail("DFU ZIP does not contain exactly one declared application image")
+            if images[0].file_size > MAX_IMAGE_SIZE:
+                fail("DFU ZIP application image is unreasonably large")
+            return checked_size(archive.read(images[0]), "DFU application image")
+    except zipfile.BadZipFile:
+        fail("selected ZIP is not a valid DFU archive")
+
+
+artifact = pathlib.Path(sys.argv[1])
+try:
+    raw = checked_size(artifact.read_bytes(), "selected artifact")
+except OSError as error:
+    fail(f"could not read {artifact}: {error}")
+
+suffix = artifact.suffix.lower()
+if suffix == ".uf2":
+    image = decode_uf2(raw)
+elif suffix == ".hex":
+    image = decode_intel_hex(raw)
+elif suffix == ".zip":
+    image = image_from_zip(artifact)
+elif suffix == ".bin":
+    image = raw
+else:
+    fail(f"unsupported artifact type {suffix or '<none>'}")
+
+stem = artifact.name[: -len(artifact.suffix)] if artifact.suffix else artifact.name
+for ending in ("-serial-dfu", "-ota", "-update", ".factory"):
+    if stem.lower().endswith(ending):
+        stem = stem[: -len(ending)]
+filename_match = re.search(
+    r"-(v?[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9A-Za-z][0-9A-Za-z._+-]{0,31})?)$",
+    stem,
+)
+filename_version = filename_match.group(1).lstrip("vV") if filename_match else ""
+
+boundary_left = rb"(?<![0-9A-Za-z])"
+boundary_right = rb"(?![0-9A-Za-z])"
+if filename_version and re.search(
+    boundary_left + re.escape(filename_version.encode("ascii")) + boundary_right,
+    image,
+    re.IGNORECASE,
+):
+    print(filename_version)
+    raise SystemExit(0)
+
+# Normal Meshtastic builds embed APP_VERSION as major.minor.patch plus a git
+# identifier. A fourth component of at least four characters excludes ordinary
+# library versions and IPv4 literals. If a renamed custom artifact disagrees
+# with its filename, this embedded value is the only truthful runtime version.
+full_pattern = re.compile(
+    boundary_left
+    + rb"v?([0-9]+\.[0-9]+\.[0-9]+\.[0-9A-Za-z][0-9A-Za-z_-]{3,31})"
+    + boundary_right,
+    re.IGNORECASE,
+)
+embedded_versions = sorted(
+    {match.group(1).decode("ascii") for match in full_pattern.finditer(image)},
+    key=str.lower,
+)
+if len(embedded_versions) != 1:
+    if not embedded_versions:
+        fail("no corroborated Meshtastic APP_VERSION was found in the application image")
+    fail("multiple possible APP_VERSION strings were found: " + ", ".join(embedded_versions))
+
+embedded_version = embedded_versions[0]
+if filename_version and embedded_version.lower() != filename_version.lower():
+    print(
+        f"Warning: selected artifact name says {filename_version}, but its application "
+        f"image embeds {embedded_version}; verifying the flashed runtime against the "
+        "embedded version.",
+        file=sys.stderr,
+    )
+print(embedded_version)
+PY
 }
 
 choose_nrf52_flash_action() {
@@ -2039,103 +2585,351 @@ ensure_serial_port_rw() {
 	sudo chmod a+rw "$device_port_name"
 }
 
+nrf52_endpoint_instance() {
+	local path=$1
+
+	[[ -e "$path" ]] || return 1
+	stat -Lc '%d:%i' "$path" 2>/dev/null
+}
+
+capture_nrf52_pre_flash_endpoint() {
+	local kind=$1
+	local path=$2
+	local instance
+
+	instance="$(nrf52_endpoint_instance "$path")" || {
+		echo "Cannot snapshot the selected nRF52 ${kind} endpoint before flashing: $path" >&2
+		return 1
+	}
+	NRF52_FLASH_PRE_KIND="$kind"
+	NRF52_FLASH_PRE_PATH="$path"
+	NRF52_FLASH_PRE_INSTANCE="$instance"
+}
+
+nrf52_pre_flash_endpoint_changed() {
+	local current_instance
+
+	[[ -n "$NRF52_FLASH_PRE_KIND" && -n "$NRF52_FLASH_PRE_PATH" \
+		&& -n "$NRF52_FLASH_PRE_INSTANCE" ]] || return 1
+	current_instance="$(nrf52_endpoint_instance "$NRF52_FLASH_PRE_PATH" || true)"
+	[[ -z "$current_instance" || "$current_instance" != "$NRF52_FLASH_PRE_INSTANCE" ]]
+}
+
+nrf52_candidate_proves_transition() {
+	local kind=$1
+	local path=$2
+	local instance
+
+	instance="$(nrf52_endpoint_instance "$path" || true)"
+	[[ -n "$instance" ]] || return 1
+	[[ "$kind" != "$NRF52_FLASH_PRE_KIND" \
+		|| "$path" != "$NRF52_FLASH_PRE_PATH" \
+		|| "$instance" != "$NRF52_FLASH_PRE_INSTANCE" ]]
+}
+
+nrf52_runtime_version_from_port() {
+	local port=$1
+	local metadata
+
+	command -v timeout >/dev/null 2>&1 || return 1
+	metadata="$(timeout 8s pipx run meshtastic --port "$port" \
+		--device-metadata 2>/dev/null || true)"
+	printf '%s\n' "$metadata" | awk -F': *' '
+		/^[[:space:]]*firmware_version:/ {
+			value=$2
+			gsub(/^[[:space:]"]+|[[:space:]"]+$/, "", value)
+			print value
+			exit
+		}'
+}
+
+nrf52_versions_match() {
+	local actual="${1,,}"
+	local expected="${2,,}"
+
+	actual="${actual#v}"
+	expected="${expected#v}"
+	[[ -n "$actual" && -n "$expected" ]] || return 1
+	[[ "$actual" == "$expected" \
+		|| "$actual" == "$expected".* || "$actual" == "$expected"-* \
+		|| "$actual" == "$expected"_* ]]
+}
+
 resolve_nrf52_runtime_serial_port() {
 	local preferred_port=$1
 	local timeout_sec=${2:-20}
-	local current_ports deadline
+	local expected_serial=$3
+	local expected_path_stem=$4
+	local expected_vendor_id=$5
+	local deadline matched_port
 
 	deadline=$((SECONDS + timeout_sec))
 	while (( SECONDS < deadline )); do
-		if [[ -n "$preferred_port" && -e "$preferred_port" ]]; then
-			printf '%s\n' "$preferred_port"
+		if matched_port="$(find_nrf52_serial_port_by_identity \
+			"$expected_serial" "$expected_path_stem" "$expected_vendor_id" \
+			"$preferred_port")"; then
+			printf '%s\n' "$matched_port"
 			return 0
 		fi
-
-		current_ports="$(list_serial_devs)"
-		if [[ "$(printf '%s\n' "$current_ports" | sed '/^$/d' | wc -l)" -eq 1 ]]; then
-			printf '%s\n' "$current_ports"
-			return 0
-		fi
-
 		sleep 0.25
 	done
 
-	if [[ -n "$preferred_port" ]]; then
-		printf '%s\n' "$preferred_port"
-	else
-		list_serial_devs | tail -n 1
-	fi
+	echo "Timed out waiting for the selected nRF52 USB identity to return as a serial port." >&2
+	return 1
 }
 
 check_nrf52_after_flash() {
 	local stage=$1
 	local preferred_port=${2:-}
-	local timeout_sec=${3:-$NRF52_POST_FLASH_CHECK_TIMEOUT_SECONDS}
-	local deadline uf2_mount current_ports serial_port
+	local expected_serial=$3
+	local expected_path_stem=$4
+	local expected_vendor_id=$5
+	local timeout_sec=${6:-$NRF52_POST_FLASH_CHECK_TIMEOUT_SECONDS}
+	local deadline uf2_mount serial_port source actual_version="" last_version=""
+	local transitioned=false saw_uf2=false
 
 	echo "Checking device after ${stage}..."
+	if [[ -z "$NRF52_FLASH_PRE_KIND" || -z "$NRF52_FLASH_PRE_PATH" \
+		|| -z "$NRF52_FLASH_PRE_INSTANCE" ]]; then
+		echo "Post-${stage} check has no pre-flash endpoint snapshot; refusing an unproven success." >&2
+		return 1
+	fi
 	deadline=$((SECONDS + timeout_sec))
 	while (( SECONDS < deadline )); do
-		uf2_mount="$(find_uf2_mount_dir || true)"
-		if [[ -n "$uf2_mount" ]]; then
-			echo "Post-${stage} check: UF2 storage mode detected at $uf2_mount."
-			return 0
+		if nrf52_pre_flash_endpoint_changed; then
+			transitioned=true
 		fi
-
+		if serial_port="$(find_nrf52_serial_port_by_identity \
+			"$expected_serial" "$expected_path_stem" "$expected_vendor_id" \
+			"$preferred_port")"; then
+			if nrf52_candidate_proves_transition serial "$serial_port"; then
+				transitioned=true
+			fi
+			if $transitioned; then
+				if [[ "$stage" != "firmware" ]]; then
+					echo "Post-${stage} check: matching serial endpoint re-enumerated at $serial_port."
+					return 0
+				fi
+				actual_version="$(nrf52_runtime_version_from_port "$serial_port" || true)"
+				[[ -z "$actual_version" ]] || last_version="$actual_version"
+				if nrf52_versions_match "$actual_version" "$NRF52_EXPECTED_VERSION"; then
+					echo "Post-${stage} check: application ${actual_version} is running at $serial_port."
+					return 0
+				fi
+			fi
+		fi
+		if uf2_mount="$(find_uf2_mount_dir \
+			"$expected_serial" "$expected_path_stem" "$expected_vendor_id")"; then
+			saw_uf2=true
+			source="$(nrf52_uf2_mount_source "$uf2_mount" || true)"
+			if [[ -n "$source" ]] && nrf52_candidate_proves_transition block "$source"; then
+				transitioned=true
+			fi
+			if $transitioned && [[ "$stage" != "firmware" ]]; then
+				echo "Post-${stage} check: UF2 endpoint re-enumerated at $uf2_mount."
+				return 0
+			fi
+		fi
 		sleep 1
 	done
 
-	if [[ -n "$preferred_port" && -e "$preferred_port" ]]; then
-		echo "Post-${stage} check: UF2 storage was not detected; serial port is present at $preferred_port."
-		return 0
+	if ! $transitioned; then
+		echo "Post-${stage} check: the selected nRF52 endpoint never re-enumerated after ${timeout_sec}s." >&2
+	elif [[ "$stage" == "firmware" && -n "$last_version" ]]; then
+		echo "Post-${stage} check: application version '$last_version' did not match expected '${NRF52_EXPECTED_VERSION:-unknown}'." >&2
+	elif [[ "$stage" == "firmware" && "$saw_uf2" == true ]]; then
+		echo "Post-${stage} check: the device returned only to UF2 bootloader mode, not a verified application." >&2
+	else
+		echo "Post-${stage} check: no verified application response was received after ${timeout_sec}s." >&2
 	fi
-
-	current_ports="$(list_serial_devs)"
-	serial_port="$(printf '%s\n' "$current_ports" | sed '/^$/d' | head -n 1)"
-	if [[ -n "$serial_port" ]]; then
-		echo "Post-${stage} check: UF2 storage was not detected; serial port is present at $serial_port."
-		return 0
-	fi
-
-	echo "Post-${stage} check: no UF2 storage or serial port detected after ${timeout_sec}s." >&2
 	return 1
+}
+
+nrf52_validate_uf2_mount_identity() {
+	local mount_dir=$1
+	local expected_serial=$2
+	local expected_path_stem=$3
+	local expected_vendor_id=$4
+	local source rank
+
+	mountpoint -q "$mount_dir" || return 1
+	is_uf2_mount_dir "$mount_dir" || return 1
+	source="$(nrf52_uf2_mount_source "$mount_dir")" || return 1
+	[[ -e "$source" ]] || return 1
+	rank="$(nrf52_device_identity_rank "$source" \
+		"$expected_serial" "$expected_path_stem" "$expected_vendor_id")"
+	[[ "$rank" =~ ^[0-9]+$ ]] && (( rank > 0 )) || return 1
+	printf '%s\n' "$source"
+}
+
+ensure_nrf52_flash_lock_file() {
+	if [[ ! -e "$NRF52_FLASH_LOCK_FILE" ]]; then
+		(umask 077; set -o noclobber; : >"$NRF52_FLASH_LOCK_FILE") 2>/dev/null || true
+	fi
+	if [[ ! -f "$NRF52_FLASH_LOCK_FILE" || -L "$NRF52_FLASH_LOCK_FILE" \
+		|| ! -O "$NRF52_FLASH_LOCK_FILE" ]]; then
+		echo "Refusing unsafe nRF52 flash lock path: $NRF52_FLASH_LOCK_FILE" >&2
+		return 1
+	fi
+}
+
+acquire_nrf52_flash_lock() {
+	if (( ${NRF52_FLASH_LOCK_DEPTH:-0} > 0 )); then
+		NRF52_FLASH_LOCK_DEPTH=$((NRF52_FLASH_LOCK_DEPTH + 1))
+		return 0
+	fi
+
+	ensure_nrf52_flash_lock_file || return 1
+	NRF52_FLASH_LOCK_FD=""
+	exec {NRF52_FLASH_LOCK_FD}>>"$NRF52_FLASH_LOCK_FILE" || return 1
+	if ! flock -w 30 "$NRF52_FLASH_LOCK_FD"; then
+		echo "Timed out waiting for another nRF52 flash operation to finish." >&2
+		exec {NRF52_FLASH_LOCK_FD}>&-
+		NRF52_FLASH_LOCK_FD=""
+		return 1
+	fi
+	NRF52_FLASH_LOCK_DEPTH=1
+}
+
+release_nrf52_flash_lock() {
+	if (( ${NRF52_FLASH_LOCK_DEPTH:-0} <= 0 )); then
+		NRF52_FLASH_LOCK_DEPTH=0
+		return 0
+	fi
+
+	NRF52_FLASH_LOCK_DEPTH=$((NRF52_FLASH_LOCK_DEPTH - 1))
+	if (( NRF52_FLASH_LOCK_DEPTH > 0 )); then
+		return 0
+	fi
+	if [[ -n "${NRF52_FLASH_LOCK_FD:-}" ]]; then
+		flock -u "$NRF52_FLASH_LOCK_FD" || true
+		exec {NRF52_FLASH_LOCK_FD}>&-
+		NRF52_FLASH_LOCK_FD=""
+	fi
+}
+
+release_all_nrf52_flash_locks() {
+	if (( ${NRF52_FLASH_LOCK_DEPTH:-0} > 0 )); then
+		NRF52_FLASH_LOCK_DEPTH=1
+		release_nrf52_flash_lock
+	else
+		NRF52_FLASH_LOCK_DEPTH=0
+	fi
+}
+
+prepare_meshtastic_cli_for_verification() {
+	echo "Preparing the Meshtastic CLI for post-flash verification..."
+	if command -v timeout >/dev/null 2>&1; then
+		if ! timeout --foreground 180s pipx run meshtastic --version >/dev/null; then
+			echo "Could not prepare the Meshtastic CLI before flashing." >&2
+			return 1
+		fi
+	elif ! pipx run meshtastic --version >/dev/null; then
+		echo "Could not prepare the Meshtastic CLI before flashing." >&2
+		return 1
+	fi
+}
+
+begin_nrf52_flash_operation() {
+	local expected_version=$1
+
+	if [[ -z "$expected_version" ]]; then
+		echo "Cannot verify the flashed application because the selected firmware version is empty." >&2
+		return 1
+	fi
+	prepare_meshtastic_cli_for_verification || return 1
+	acquire_nrf52_flash_lock || return 1
+	NRF52_EXPECTED_VERSION="$expected_version"
+}
+
+end_nrf52_flash_operation() {
+	release_nrf52_flash_lock
 }
 
 copy_nrf52_uf2_to_storage() {
 	local uf2_file=$1
 	local stage=$2
-	local mount_dir
+	local expected_serial=$3
+	local expected_path_stem=$4
+	local expected_vendor_id=$5
+	local mount_dir source
 
-	if [[ ! -f "$uf2_file" || "$uf2_file" != *.uf2 ]]; then
+	if [[ ! -f "$uf2_file" || "${uf2_file,,}" != *.uf2 ]]; then
 		echo "UF2 storage flashing requires a .uf2 file: $uf2_file" >&2
 		return 1
 	fi
 
-	mount_dir="$(find_uf2_mount_dir || true)"
-	if [[ -z "$mount_dir" ]]; then
+	# The main workflow holds this lock from identity re-resolution through
+	# post-flash verification. Keep this helper safe when called independently,
+	# and nest without releasing an operation-wide lock owned by its caller.
+	acquire_nrf52_flash_lock || return 1
+
+	if ! mount_dir="$(find_uf2_mount_dir \
+		"$expected_serial" "$expected_path_stem" "$expected_vendor_id")"; then
 		echo "No UF2 USB storage volume was found for ${stage}." >&2
+		release_nrf52_flash_lock || true
+		return 1
+	fi
+	if ! source="$(nrf52_validate_uf2_mount_identity "$mount_dir" \
+		"$expected_serial" "$expected_path_stem" "$expected_vendor_id")"; then
+		echo "The selected UF2 mount changed identity before ${stage}; refusing the copy." >&2
+		release_nrf52_flash_lock || true
+		return 1
+	fi
+	if ! capture_nrf52_pre_flash_endpoint block "$source"; then
+		release_nrf52_flash_lock || true
 		return 1
 	fi
 
 	echo "Using UF2 storage device at $mount_dir"
 	echo "Copying $(basename "$uf2_file") for ${stage}..."
-	sudo cp -v "$uf2_file" "$mount_dir/"
-	sync
+	if ! sudo cp -v -- "$uf2_file" "$mount_dir/"; then
+		echo "Copying the ${stage} UF2 to the selected device failed." >&2
+		release_nrf52_flash_lock || true
+		return 1
+	fi
+	if ! sync -f "$mount_dir"; then
+		echo "The selected UF2 volume reported an error while flushing ${stage} data." >&2
+		release_nrf52_flash_lock || true
+		return 1
+	fi
+	release_nrf52_flash_lock
+}
+
+nrf52_dfu_output_confirms_success() {
+	local output_file=$1
+	local exit_code=$2
+	local terminal_line
+
+	(( exit_code == 0 )) || return 1
+	# adafruit-nrfutil 0.5.x can catch a transport exception, print a traceback,
+	# and still exit zero. Require its exact terminal success line and reject
+	# every fatal marker observed from that false-success path.
+	terminal_line="$(LC_ALL=C awk 'NF { line=$0 } END { sub(/\r$/, "", line); print line }' \
+		"$output_file")"
+	[[ "$terminal_line" == "Device programmed." ]] || return 1
+	if grep -Eiq \
+		'Failed to upgrade target|Traceback \(most recent call last\)|Timed out waiting for acknowledgement|No data received' \
+		"$output_file"; then
+		return 1
+	fi
 }
 
 run_nrf52_dfu_attempt() {
 	local package_file=$1
 	local device_port_name=$2
-	local exit_code prompt_done_file prompt_pid
+	local exit_code prompt_done_file prompt_pid output_file
 
 	if [[ ! -e "$device_port_name" ]]; then
 		echo "Serial port $device_port_name is not present." >&2
 		return 1
 	fi
 
-	ensure_serial_port_rw "$device_port_name"
+	ensure_serial_port_rw "$device_port_name" || return 1
+	capture_nrf52_pre_flash_endpoint serial "$device_port_name" || return 1
 	echo "pipx run adafruit-nrfutil dfu serial --package $package_file --touch 1200 -p $device_port_name -b 115200"
 	prompt_done_file="$(mktemp)"
+	output_file="$(mktemp)"
 	rm -f "$prompt_done_file"
 	(
 		sleep "$NRF52_MANUAL_DFU_PROMPT_SECONDS"
@@ -2150,11 +2944,17 @@ run_nrf52_dfu_attempt() {
 
 	set +e
 	if command -v timeout >/dev/null 2>&1; then
-		timeout --foreground "${NRF52_DFU_TIMEOUT_SECONDS}s" pipx run adafruit-nrfutil dfu serial --package "$package_file" --touch 1200 -p "$device_port_name" -b 115200
+		timeout --foreground "${NRF52_DFU_TIMEOUT_SECONDS}s" \
+			pipx run adafruit-nrfutil dfu serial --package "$package_file" \
+			--touch 1200 -p "$device_port_name" -b 115200 \
+			2>&1 | tee "$output_file"
+		exit_code=${PIPESTATUS[0]}
 	else
-		pipx run adafruit-nrfutil dfu serial --package "$package_file" --touch 1200 -p "$device_port_name" -b 115200
+		pipx run adafruit-nrfutil dfu serial --package "$package_file" \
+			--touch 1200 -p "$device_port_name" -b 115200 \
+			2>&1 | tee "$output_file"
+		exit_code=${PIPESTATUS[0]}
 	fi
-	exit_code=$?
 	touch "$prompt_done_file"
 	kill "$prompt_pid" 2>/dev/null || true
 	wait "$prompt_pid" 2>/dev/null || true
@@ -2163,14 +2963,21 @@ run_nrf52_dfu_attempt() {
 
 	if (( exit_code == 124 )); then
 		echo "nRF52 serial DFU timed out after ${NRF52_DFU_TIMEOUT_SECONDS}s on $device_port_name with package $package_file." >&2
+		rm -f "$output_file"
 		return 1
 	fi
 
-	if (( exit_code != 0 )); then
-		echo "nRF52 serial DFU failed on $device_port_name with package $package_file." >&2
+	if ! nrf52_dfu_output_confirms_success "$output_file" "$exit_code"; then
+		if (( exit_code == 0 )); then
+			echo "adafruit-nrfutil did not confirm that the selected nRF52 was programmed." >&2
+		else
+			echo "nRF52 serial DFU failed with status $exit_code on $device_port_name with package $package_file." >&2
+		fi
+		rm -f "$output_file"
 		return 1
 	fi
 
+	rm -f "$output_file"
 	NRF52_LAST_DFU_PORT="$device_port_name"
 	return 0
 }
@@ -2178,8 +2985,21 @@ run_nrf52_dfu_attempt() {
 run_nrf52_serial_dfu() {
 	local package_file=$1
 	local device_port_name=$2
+	local matched_port result=0
 
-	run_nrf52_dfu_attempt "$package_file" "$device_port_name"
+	acquire_nrf52_flash_lock || return 1
+	if ! matched_port="$(find_nrf52_serial_port_by_identity \
+		"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+		"$NRF52_SELECTED_VENDOR_ID" "$device_port_name")"; then
+		echo "The selected nRF52 USB identity is not available as a serial DFU port." >&2
+		release_nrf52_flash_lock || true
+		return 1
+	fi
+	if ! run_nrf52_dfu_attempt "$package_file" "$matched_port"; then
+		result=1
+	fi
+	release_nrf52_flash_lock || true
+	return "$result"
 }
 
 record_stopped_service() {
@@ -2200,11 +3020,42 @@ stop_service_names() {
 	read -r -a service_list <<< "$services"
 	((${#service_list[@]})) || return 0
 
-	echo "Stopping service $services..."
-	sudo systemctl stop "${service_list[@]}"
+	# Record the services before asking systemd to stop them. systemctl can stop
+	# one unit and still return failure for another; recording only after the
+	# command succeeds would leave the already-stopped unit out of EXIT cleanup.
 	for service in "${service_list[@]}"; do
 		record_stopped_service "$service"
 	done
+	echo "Stopping service $services..."
+	sudo systemctl stop "${service_list[@]}"
+}
+
+probe_meshtastic_metadata() {
+	(
+		local device=$1
+		local probe_services=""
+		local probe_status=0
+		# These service helpers use dynamic scope. Keeping lockedService local
+		# makes each chooser probe independent and lets its EXIT trap restore
+		# only the services stopped for this port. The explicit subshell also
+		# prevents this local trap from replacing the script-wide EXIT cleanup.
+		local lockedService=""
+
+		probe_services="$(get_locked_service "$device")"
+		if [[ -n "$probe_services" && "$probe_services" != "None" ]]; then
+			lockedService="$probe_services"
+			trap 'restart_locked_service_if_needed >/dev/null 2>&1 || true' EXIT
+			stop_service_names "$probe_services" >/dev/null 2>&1 || return 1
+		fi
+
+		timeout 12 pipx run meshtastic --port "$device" --device-metadata \
+			2>/dev/null || probe_status=$?
+		if [[ -n "$lockedService" && "$lockedService" != "None" ]]; then
+			restart_locked_service_if_needed >/dev/null 2>&1 || return 1
+		fi
+		trap - EXIT
+		return "$probe_status"
+	)
 }
 
 stop_nrf52_serial_probe_services() {
@@ -2215,6 +3066,21 @@ stop_nrf52_serial_probe_services() {
 			stop_service_names "$service"
 		fi
 	done
+}
+
+stop_services_for_selected_port() {
+	local selected_port=$1
+	local stop_nrf52_probers=${2:-false}
+	local selected_locked_services=""
+
+	selected_locked_services="$(get_locked_service "$selected_port")"
+	lockedService="$selected_locked_services"
+	if [[ -n "$lockedService" && "$lockedService" != "None" ]]; then
+		stop_service_names "$lockedService"
+	fi
+	if $stop_nrf52_probers; then
+		stop_nrf52_serial_probe_services
+	fi
 }
 
 restart_locked_service_if_needed() {
@@ -2254,7 +3120,9 @@ prompt_nrf52_reboot_retry() {
 # Run the firmware update/install script.
 run_update_script() {
 	local cmd user_choice PYTHON ESPTOOL_CMD device_name metadata_display_name nrf52_action nrf52_serial_dfu
-	local app_package erase_package app_uf2 erase_uf2 nrf52_uf2_mount
+	local app_package erase_package app_uf2 erase_uf2 nrf52_uf2_mount matched_nrf52_port
+	local picked_detection nrf52_selected_at_run=false nrf52_identity_flash=false
+	local selected_firmware_version=""
 	mapfile -t cmd_array <"$CMD_FILE"
 	abs_script="${cmd_array[0]}"
 	abs_selected="${cmd_array[1]}"
@@ -2265,11 +3133,14 @@ run_update_script() {
 	architecture=$(cat "${ARCHITECTURE_FILE}")
 	operation=$(cat "${OPERATION_FILE}")
 	basename_selected="$(basename "$abs_selected")"
-	device_port_name=$(echo "$detected_dev" | awk -F'-> ' '{print $2}')
+	device_port_name="$(serial_port_from_detection "$detected_dev")"
 	if is_nrf52_serial_dfu_candidate "$architecture" "$abs_selected"; then
 		nrf52_serial_dfu=true
 	else
 		nrf52_serial_dfu=false
+	fi
+	if ! echo "$architecture" | grep -qi "esp32"; then
+		nrf52_identity_flash=true
 	fi
 	metadata_display_name="$(get_firmware_metadata_display_name "$abs_selected")"
 	if [[ -n "$metadata_display_name" && (-z "$device_name" || "$device_name" == "$device_port_name" || "$device_name" == /dev/*) ]]; then
@@ -2277,7 +3148,8 @@ run_update_script() {
 	fi
 	
 	if [[ -z "${device_port_name:-}" ]]; then
-		device_port_name="$(pick_serial_port)"
+		picked_detection="$(pick_serial_port)"
+		device_port_name="$(serial_port_from_detection "$picked_detection")"
 		while [[ -z "${device_port_name:-}" ]]; do
 			read -r -p "No serial port selected. Enter to pick, Q to quit, or type a device path: " reply
 
@@ -2287,7 +3159,8 @@ run_update_script() {
 					return 1
 					;;
 				"")
-					device_port_name="$(pick_serial_port)"
+					picked_detection="$(pick_serial_port)"
+					device_port_name="$(serial_port_from_detection "$picked_detection")"
 					;;
 				*)
 					if [[ -c "$reply" ]]; then
@@ -2298,8 +3171,9 @@ run_update_script() {
 						echo "Path does not exist: $reply"
 					fi
 					;;
-			esac
+				esac
 		done
+		nrf52_selected_at_run=true
 	fi
 
 	if echo "$architecture" | grep -qi "esp32"; then
@@ -2324,7 +3198,6 @@ run_update_script() {
 		echo "Script done. Firmware was NOT UPDATED"
 		exit 0
 	fi
-	
 		# Ensure pipx & meshtastic are installed.
 		ensure_command pipx
 
@@ -2349,16 +3222,49 @@ run_update_script() {
 	if echo "$architecture" | grep -qi "esp32"; then
 		ESPTOOL_CMD="pipx run esptool"
 	fi
+	if $nrf52_identity_flash; then
+		# Usually detect_device() captured this identity before release selection
+		# and downloads. If no port existed then, capture only at the later explicit
+		# selection above, never by silently rebinding a stale tty number here.
+		if $nrf52_selected_at_run; then
+			if ! capture_nrf52_selected_identity "$device_port_name"; then
+				return 1
+			fi
+		fi
+		if [[ -z "$NRF52_SELECTED_PATH_STEM" || -z "$NRF52_SELECTED_VENDOR_ID" ]]; then
+			echo "No stable USB identity was saved when the device was selected; refusing flashing." >&2
+			return 1
+		fi
+		if ! selected_firmware_version="$(
+			nrf52_firmware_version_from_artifact "$abs_selected"
+		)"; then
+			echo "Refusing nRF52 flashing without an application version proven by the selected artifact." >&2
+			return 1
+		fi
+		# Do all potentially slow pipx setup before taking the destructive-operation
+		# lock. Once held, keep the lock through identity re-resolution, flashing,
+		# and post-flash application verification.
+		if ! begin_nrf52_flash_operation "$selected_firmware_version"; then
+			return 1
+		fi
+		if matched_nrf52_port="$(find_nrf52_serial_port_by_identity \
+			"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+			"$NRF52_SELECTED_VENDOR_ID" "$device_port_name")"; then
+			device_port_name="$matched_nrf52_port"
+		elif nrf52_uf2_mount="$(find_uf2_mount_dir \
+			"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+			"$NRF52_SELECTED_VENDOR_ID")"; then
+			echo "The selected USB identity is present as UF2 storage at $nrf52_uf2_mount."
+		else
+			echo "The device selected before release download is no longer present on its saved USB identity." >&2
+			end_nrf52_flash_operation || true
+			return 1
+		fi
+	fi
 
 	# Check if any services are locking up the device
 	echo "$detected_dev"
-	lockedService=$(get_locked_service "$detected_dev")
-	if [ -n "$lockedService" ] && [ "$lockedService" != "None" ]; then
-		stop_service_names "$lockedService"
-	fi
-	if $nrf52_serial_dfu; then
-		stop_nrf52_serial_probe_services
-	fi
+	stop_services_for_selected_port "$device_port_name" "$nrf52_identity_flash"
 
 	
 	# Optionally make a backup of the config.
@@ -2419,9 +3325,16 @@ run_update_script() {
 
 	elif $nrf52_serial_dfu; then
 		while true; do
+		if matched_nrf52_port="$(find_nrf52_serial_port_by_identity \
+			"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+			"$NRF52_SELECTED_VENDOR_ID" "$device_port_name")"; then
+			device_port_name="$matched_nrf52_port"
+		fi
 		NRF52_LAST_DFU_PORT="$device_port_name"
 		app_uf2="$(resolve_nrf52_uf2_file "$abs_selected" || true)"
-		nrf52_uf2_mount="$(find_uf2_mount_dir || true)"
+		nrf52_uf2_mount="$(find_uf2_mount_dir \
+			"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+			"$NRF52_SELECTED_VENDOR_ID" || true)"
 
 		if [[ -n "$nrf52_uf2_mount" && -n "$app_uf2" ]]; then
 			echo "nRF52 USB storage mode detected at $nrf52_uf2_mount; using UF2 copy."
@@ -2435,26 +3348,36 @@ run_update_script() {
 
 				echo "Erasing UF2 area using $erase_uf2"
 				sleep 1
-				if ! copy_nrf52_uf2_to_storage "$erase_uf2" "erase"; then
+				if ! copy_nrf52_uf2_to_storage "$erase_uf2" "erase" \
+					"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+					"$NRF52_SELECTED_VENDOR_ID"; then
 					echo "Failed to erase ${device_name} using UF2 storage." >&2
 					exit 1
 				fi
-				if ! check_nrf52_after_flash "erase" "$device_port_name"; then
+				if ! check_nrf52_after_flash "erase" "$device_port_name" \
+					"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+					"$NRF52_SELECTED_VENDOR_ID"; then
 					exit 1
 				fi
 				echo "Erase done."
 				echo
 			fi
 
-			nrf52_uf2_mount="$(find_uf2_mount_dir || true)"
+			nrf52_uf2_mount="$(find_uf2_mount_dir \
+				"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+				"$NRF52_SELECTED_VENDOR_ID" || true)"
 			if [[ -n "$nrf52_uf2_mount" ]]; then
 				echo "Flashing firmware file $app_uf2"
 				sleep 1
-				if ! copy_nrf52_uf2_to_storage "$app_uf2" "firmware"; then
+				if ! copy_nrf52_uf2_to_storage "$app_uf2" "firmware" \
+					"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+					"$NRF52_SELECTED_VENDOR_ID"; then
 					echo "Firmware ${nrf52_action} failed for ${device_name} using UF2 storage." >&2
 					exit 1
 				fi
-				if ! check_nrf52_after_flash "firmware" "$device_port_name"; then
+				if ! check_nrf52_after_flash "firmware" "$device_port_name" \
+					"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+					"$NRF52_SELECTED_VENDOR_ID"; then
 					exit 1
 				fi
 				echo
@@ -2471,7 +3394,9 @@ run_update_script() {
 					fi
 					exit 1
 				fi
-				if ! check_nrf52_after_flash "firmware" "$device_port_name"; then
+					if ! check_nrf52_after_flash "firmware" "$device_port_name" \
+						"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+						"$NRF52_SELECTED_VENDOR_ID"; then
 					exit 1
 				fi
 				echo
@@ -2483,6 +3408,7 @@ run_update_script() {
 				echo "pipx run meshtastic --configure \"${backup_config_name_sanitized}\""
 			fi
 			restart_locked_service_if_needed
+			end_nrf52_flash_operation
 			return 0
 		fi
 
@@ -2503,11 +3429,15 @@ run_update_script() {
 			echo "Erasing UF2 area using $erase_package"
 			sleep 1
 			if ! run_nrf52_serial_dfu "$erase_package" "$device_port_name"; then
-				nrf52_uf2_mount="$(find_uf2_mount_dir || true)"
+				nrf52_uf2_mount="$(find_uf2_mount_dir \
+					"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+					"$NRF52_SELECTED_VENDOR_ID" || true)"
 				erase_uf2="$(find_nrf52_erase_uf2 "$abs_selected" "$abs_selected" || true)"
 				if [[ -n "$nrf52_uf2_mount" && -n "$erase_uf2" ]]; then
 					echo "nrfutil failed, but UF2 storage is available; retrying erase with UF2 copy."
-					if ! copy_nrf52_uf2_to_storage "$erase_uf2" "erase"; then
+					if ! copy_nrf52_uf2_to_storage "$erase_uf2" "erase" \
+						"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+						"$NRF52_SELECTED_VENDOR_ID"; then
 						echo "Failed to erase ${device_name} using UF2 storage." >&2
 						exit 1
 					fi
@@ -2519,21 +3449,34 @@ run_update_script() {
 					exit 1
 				fi
 			fi
-			if ! check_nrf52_after_flash "erase" "$device_port_name"; then
+			if ! check_nrf52_after_flash "erase" "$device_port_name" \
+				"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+				"$NRF52_SELECTED_VENDOR_ID"; then
 				exit 1
 			fi
 			echo "Erase done."
-			device_port_name="$(resolve_nrf52_runtime_serial_port "${NRF52_LAST_DFU_PORT:-$device_port_name}" 20)"
-			nrf52_uf2_mount="$(find_uf2_mount_dir || true)"
+			if matched_nrf52_port="$(resolve_nrf52_runtime_serial_port \
+				"${NRF52_LAST_DFU_PORT:-$device_port_name}" 20 \
+				"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+				"$NRF52_SELECTED_VENDOR_ID")"; then
+				device_port_name="$matched_nrf52_port"
+			fi
+			nrf52_uf2_mount="$(find_uf2_mount_dir \
+				"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+				"$NRF52_SELECTED_VENDOR_ID" || true)"
 			if [[ -n "$nrf52_uf2_mount" && -n "$app_uf2" ]]; then
 				echo "UF2 storage mode detected after erase; using UF2 copy for firmware flash."
 				echo "Flashing firmware file $app_uf2"
 				sleep 1
-				if ! copy_nrf52_uf2_to_storage "$app_uf2" "firmware"; then
+				if ! copy_nrf52_uf2_to_storage "$app_uf2" "firmware" \
+					"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+					"$NRF52_SELECTED_VENDOR_ID"; then
 					echo "Firmware ${nrf52_action} failed for ${device_name} using UF2 storage." >&2
 					exit 1
 				fi
-				if ! check_nrf52_after_flash "firmware" "$device_port_name"; then
+				if ! check_nrf52_after_flash "firmware" "$device_port_name" \
+					"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+					"$NRF52_SELECTED_VENDOR_ID"; then
 					exit 1
 				fi
 				echo
@@ -2543,6 +3486,7 @@ run_update_script() {
 					echo "pipx run meshtastic --configure \"${backup_config_name_sanitized}\""
 				fi
 				restart_locked_service_if_needed
+				end_nrf52_flash_operation
 				return 0
 			fi
 			echo "Using serial port ${device_port_name} for firmware flash after erase."
@@ -2552,10 +3496,14 @@ run_update_script() {
 		echo "Flashing firmware file $app_package"
 		sleep 1
 		if ! run_nrf52_serial_dfu "$app_package" "$device_port_name"; then
-			nrf52_uf2_mount="$(find_uf2_mount_dir || true)"
+			nrf52_uf2_mount="$(find_uf2_mount_dir \
+				"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+				"$NRF52_SELECTED_VENDOR_ID" || true)"
 			if [[ -n "$nrf52_uf2_mount" && -n "$app_uf2" ]]; then
 				echo "nrfutil failed, but UF2 storage is available; retrying firmware flash with UF2 copy."
-				if ! copy_nrf52_uf2_to_storage "$app_uf2" "firmware"; then
+				if ! copy_nrf52_uf2_to_storage "$app_uf2" "firmware" \
+					"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+					"$NRF52_SELECTED_VENDOR_ID"; then
 					echo "Firmware ${nrf52_action} failed for ${device_name} using UF2 storage." >&2
 					exit 1
 				fi
@@ -2567,7 +3515,9 @@ run_update_script() {
 				exit 1
 			fi
 		fi
-		if ! check_nrf52_after_flash "firmware" "$device_port_name"; then
+		if ! check_nrf52_after_flash "firmware" "$device_port_name" \
+			"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+			"$NRF52_SELECTED_VENDOR_ID"; then
 			exit 1
 		fi
 		echo
@@ -2582,24 +3532,43 @@ run_update_script() {
 	else
 		attempt=0
 		max_attempts=3
-		device_id=""
+		nrf52_uf2_mount=""
+		if [[ -z "$NRF52_SELECTED_PATH_STEM" || -z "$NRF52_SELECTED_VENDOR_ID" ]]; then
+			echo "No stable USB identity was saved when the UF2 device was selected; refusing flashing." >&2
+			exit 1
+		fi
+		if [[ "${abs_selected,,}" != *.uf2 ]]; then
+			echo "This USB-storage flash path requires a .uf2 firmware file: $abs_selected" >&2
+			exit 1
+		fi
 
 		while [ $attempt -lt $max_attempts ]; do
+			if nrf52_uf2_mount="$(find_uf2_mount_dir \
+				"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+				"$NRF52_SELECTED_VENDOR_ID")"; then
+				break
+			fi
+			if ! matched_nrf52_port="$(find_nrf52_serial_port_by_identity \
+				"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+				"$NRF52_SELECTED_VENDOR_ID" "$device_port_name")"; then
+				echo "The selected USB identity is not available as serial or UF2 storage." >&2
+				attempt=$((attempt + 1))
+				[[ $attempt -ge $max_attempts ]] || sleep 5
+				continue
+			fi
+			device_port_name="$matched_nrf52_port"
 			echo "Setting device into bootloader mode via pipx run meshtastic --enter-dfu --port ${device_port_name}"
-			old_output=$(list_block_devs)
-
-			pipx run meshtastic --enter-dfu --port "${device_port_name}" || true
+			if ! pipx run meshtastic --enter-dfu --port "${device_port_name}"; then
+				echo "The selected device did not accept the enter-DFU command." >&2
+			fi
 			sleep 5
-
-			new_output=$(list_block_devs)
-
-			device_id=$(comm -13 <(echo "$old_output") <(echo "$new_output") | head -n 1)
-
-			if [ -n "$device_id" ]; then
-				break # New block device found, exit the loop.
+			if nrf52_uf2_mount="$(find_uf2_mount_dir \
+				"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+				"$NRF52_SELECTED_VENDOR_ID")"; then
+				break
 			fi
 
-			echo "Error: Device failed to enter DFU mode (no new block devices detected)."
+			echo "Error: The selected device did not appear as matching UF2 storage."
 			attempt=$((attempt + 1))
 			if [ $attempt -lt $max_attempts ]; then
 				echo "Retrying ($attempt/$max_attempts)..."
@@ -2607,26 +3576,25 @@ run_update_script() {
 			fi
 		done
 
-		if [ -z "$device_id" ]; then
-			echo "Error: Device failed to enter DFU mode after $max_attempts attempts."
+		if [ -z "$nrf52_uf2_mount" ]; then
+			echo "Error: The selected device failed to enter UF2 mode after $max_attempts attempts."
 			exit 1
 		fi
 
-		# Check if the device is already mounted by looking in /proc/mounts.
-		if grep -q "^$device_id " /proc/mounts; then
-			echo "$device_id is already mounted."
-		else
-			echo "$device_id is not mounted. Mounting now..."
-			sudo mkdir -p "$MOUNT_FOLDER"
-			sudo mount "$device_id" "$MOUNT_FOLDER"
+		echo "Matched the selected UF2 device at $nrf52_uf2_mount."
+		if ! copy_nrf52_uf2_to_storage "$abs_selected" "firmware" \
+			"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+			"$NRF52_SELECTED_VENDOR_ID"; then
+			echo "Firmware $operation failed for ${device_name} using UF2 storage." >&2
+			exit 1
 		fi
-
-		echo "Contents of $MOUNT_FOLDER:"
-		ls "$MOUNT_FOLDER"
-
-		sudo cp -v "$abs_selected" "$MOUNT_FOLDER/"
+		if ! check_nrf52_after_flash "firmware" "$device_port_name" \
+			"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \
+			"$NRF52_SELECTED_VENDOR_ID"; then
+			exit 1
+		fi
 		echo ""
-		echo "Firmware $operation for ESP32 device ${device_name} completed on port ${device_port_name}."
+		echo "Firmware $operation for ${device_name} completed using verified UF2 storage."
 		if [ -f "${backup_config_name_sanitized}" ]; then
 			echo "Configuration can be restored using this if it was wiped out"
 			echo "pipx run meshtastic --configure \"${backup_config_name_sanitized}\""
@@ -2636,6 +3604,9 @@ run_update_script() {
 
 	# Restart the stopped service.
 	restart_locked_service_if_needed
+	if $nrf52_identity_flash; then
+		end_nrf52_flash_operation
+	fi
 }
 
 ##################

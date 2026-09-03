@@ -73,6 +73,10 @@ foreach ($functionName in @(
 	Invoke-Expression $definition.Extent.Text
 }
 
+# These fixtures exercise the Windows-only USB identity path even when the
+# test runner itself is PowerShell Core on Linux.
+function Test-IsWindowsHost { return $true }
+
 $pocketRuntime = [pscustomobject]@{
 	SerialNumber = '93DA83ADF7B2092B'
 	LocationPath = 'PCIROOT(0)#USBROOT(0)#USB(8)'
@@ -891,6 +895,7 @@ function Invoke-SerialCommandWithRetry {
 		default { return '' }
 	}
 }
+function Get-MeshCoreCompanionInfo { return $null }
 $meshProbeResult = getMeshCore -ComPort 'COM9' -CmdTimeoutMs 1
 Assert-True -Condition $meshProbeResult.Success -Message 'Binary-mode Full Companion remained a generic USB inventory row.'
 Assert-Equal -Expected 'Heltec T096' -Actual $meshProbeResult.HWName -Message 'Inventory lost the Full Companion hardware name.'

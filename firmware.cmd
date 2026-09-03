@@ -59,6 +59,27 @@ $MESHCORE_BACKUP_TOOL_SHA256 = '742008038ea7d636ded1a746152be5748578f93fd7619dbb
 $timeoutMeshtastic = 10 # Timeout duration in seconds
 $baud = 1200 # 115200
 $CACHE_TIMEOUT_SECONDS = 6 * 3600 # 6 hours
+$script:DetectedMeshCoreBoard = ""
+$script:DetectedMeshCoreVersion = ""
+
+function Format-DetectedMeshCoreIdentity {
+	param(
+		[string]$Board = $script:DetectedMeshCoreBoard,
+		[string]$Version = $script:DetectedMeshCoreVersion
+	)
+
+	$Board = if ($Board) { $Board.Trim() } else { "" }
+	$Version = if ($Version) { $Version.Trim() } else { "" }
+	if (-not $Board -and -not $Version) { return "" }
+	if ($Board -and $Version) { return "Detected: $Board. $Version" }
+	if ($Board) { return "Detected: $Board" }
+	return "Detected: $Version"
+}
+
+function Write-DetectedMeshCoreIdentity {
+	$summary = Format-DetectedMeshCoreIdentity
+	if ($summary) { Write-Host $summary }
+}
 
 function Get-FileMd5Hash {
 	param([Parameter(Mandatory=$true)][string]$Path)
@@ -1116,6 +1137,108 @@ function Open-SerialPort {
     return $sp
 }
 
+function Invoke-MeshCoreBinaryCommand {
+	param(
+		[Parameter(Mandatory=$true)]$SerialPort,
+		[Parameter(Mandatory=$true)][byte[]]$Payload,
+		[Parameter(Mandatory=$true)][byte]$ExpectedResponseCode,
+		[int]$TotalMs = 1500
+	)
+
+	if (-not $SerialPort -or -not $SerialPort.IsOpen) { return $null }
+
+	try {
+		$SerialPort.DiscardInBuffer()
+		[byte[]]$frame = New-Object byte[] (3 + $Payload.Length)
+		$frame[0] = 0x3c
+		$frame[1] = [byte]($Payload.Length -band 0xff)
+		$frame[2] = [byte](($Payload.Length -shr 8) -band 0xff)
+		[Array]::Copy($Payload, 0, $frame, 3, $Payload.Length)
+		$SerialPort.Write($frame, 0, $frame.Length)
+
+		$received = New-Object 'System.Collections.Generic.List[byte]'
+		$stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+		while ($stopwatch.ElapsedMilliseconds -lt $TotalMs) {
+			$available = $SerialPort.BytesToRead
+			if ($available -gt 0) {
+				[byte[]]$chunk = New-Object byte[] $available
+				$count = $SerialPort.Read($chunk, 0, $chunk.Length)
+				for ($j = 0; $j -lt $count; $j++) {
+					$received.Add($chunk[$j])
+				}
+			}
+
+			[byte[]]$bytes = $received.ToArray()
+			for ($i = 0; $i + 3 -le $bytes.Length; $i++) {
+				if ($bytes[$i] -ne 0x3e) { continue }
+				$length = [int]$bytes[$i + 1] -bor ([int]$bytes[$i + 2] -shl 8)
+				if ($length -lt 1 -or $length -gt 2048) { continue }
+				if ($i + 3 + $length -gt $bytes.Length) { break }
+
+				[byte[]]$response = New-Object byte[] $length
+				[Array]::Copy($bytes, $i + 3, $response, 0, $length)
+				if ($response[0] -eq $ExpectedResponseCode) {
+					return ,$response
+				}
+			}
+			Start-Sleep -Milliseconds 10
+		}
+	}
+	catch {
+		Write-Verbose ("MeshCore binary command failed: {0}" -f $_.Exception.Message)
+	}
+
+	return $null
+}
+
+function Get-MeshCoreCompanionInfo {
+	param(
+		[Parameter(Mandatory=$true)]$SerialPort,
+		[int]$TotalMs = 1500
+	)
+
+	[byte[]]$deviceQuery = @(0x16, 0x0e)
+	[byte[]]$deviceInfo = Invoke-MeshCoreBinaryCommand `
+		-SerialPort $SerialPort `
+		-Payload $deviceQuery `
+		-ExpectedResponseCode 0x0d `
+		-TotalMs $TotalMs
+	if (-not $deviceInfo -or $deviceInfo.Length -lt 80) { return $null }
+
+	$ascii = [System.Text.Encoding]::ASCII
+	$board = $ascii.GetString($deviceInfo, 20, 40).Split([char]0)[0].Trim()
+	$version = $ascii.GetString($deviceInfo, 60, 20).Split([char]0)[0].Trim()
+	$protocol = [int]$deviceInfo[1]
+
+	if ($protocol -ge 14) {
+		[byte[]]$command = $ascii.GetBytes("version")
+		[byte[]]$cliPayload = New-Object byte[] (1 + $command.Length)
+		$cliPayload[0] = 0x42
+		[Array]::Copy($command, 0, $cliPayload, 1, $command.Length)
+		[byte[]]$cliReply = Invoke-MeshCoreBinaryCommand `
+			-SerialPort $SerialPort `
+			-Payload $cliPayload `
+			-ExpectedResponseCode 0x1d `
+			-TotalMs $TotalMs
+		if ($cliReply -and $cliReply.Length -gt 1) {
+			$replyText = $ascii.GetString($cliReply, 1, $cliReply.Length - 1).Split([char]0)[0].Trim()
+			if ($replyText -match '^Companion\s+(.+?)\s+\(protocol\s+') {
+				$version = $matches[1]
+			}
+		}
+	}
+
+	$board = Get-UsableSerialResponse -Text $board -Kind Board -MaxLength 120
+	$version = Get-UsableSerialResponse -Text $version -Kind Version -MaxLength 120
+	if (-not $board -and -not $version) { return $null }
+
+	return [pscustomobject]@{
+		Board = $board
+		Version = $version
+		Protocol = $protocol
+	}
+}
+
 function Invoke-SerialCommandWithRetry {
     [CmdletBinding()]
     param(
@@ -1220,6 +1343,22 @@ function getMeshCore {
 
             $sp = Open-SerialPort -ComPort $ComPort -Baud $baud -ReadTimeoutMs 1000 -WriteTimeoutMs 1000 -Dtr $true -Rts $true
 			$VersionCmdTimeoutMs = [Math]::Max($CmdTimeoutMs, 1500)
+			$companionInfo = Get-MeshCoreCompanionInfo -SerialPort $sp -TotalMs $VersionCmdTimeoutMs
+			if ($companionInfo) {
+				Write-Verbose ("MeshCore Companion probe: hw='{0}' version='{1}' protocol={2}" -f `
+					$companionInfo.Board, $companionInfo.Version, $companionInfo.Protocol)
+				Write-Progress -Id 41 -Activity "Probing serial" -Completed
+				return [pscustomobject]@{
+					Success      = $true
+					ComPort      = $ComPort
+					Baud         = $baud
+					Project      = "MeshCore"
+					ExtraInfo    = "Baud: $baud"
+					HWName       = $companionInfo.Board
+					HWNameShort  = $companionInfo.Board
+					FWVersion    = $companionInfo.Version
+				}
+			}
 			
 			$null = Invoke-SerialCommandWithRetry -MaxAttempts 1 -SerialPort $sp -Command "board" -TotalMs $CmdTimeoutMs -ProgressId 42 -Activity "Serial" # clear buffer
 			
@@ -1245,11 +1384,11 @@ function getMeshCore {
 				-Kind Name
 			$ver = Get-UsableSerialResponse `
 				-Text (Invoke-SerialCommandWithRetry -MaxAttempts 1 -SerialPort $sp -Command "ver" -TotalMs $VersionCmdTimeoutMs -ProgressId 42 -Activity "Serial") `
-				-Kind Version
+				-Kind Version -MaxLength 120
 				
 			$version = Get-UsableSerialResponse `
 				-Text (Invoke-SerialCommandWithRetry -MaxAttempts 1 -SerialPort $sp -Command "version" -TotalMs $VersionCmdTimeoutMs -ProgressId 42 -Activity "Serial") `
-				-Kind Version
+				-Kind Version -MaxLength 120
 			$fwVersion = if ($ver) { $ver } elseif ($version) { $version } else { "" }
 				
 			Write-Verbose ("MeshCore probe: hw='{0}' name='{1}' ver='{2}' version='{3}' chosen='{4}'" -f $hw, $name, $ver, $version, $fwVersion)
@@ -1552,6 +1691,7 @@ function Select-FlashTarget {
         Write-Host "  1) MeshCore"
         Write-Host "  2) Meshtastic"
         # Write-Host "  3) Reticulum"
+		Write-DetectedMeshCoreIdentity
 
         $response = Read-HostWithConnectionMonitor -Prompt "Enter choice (1-2)" -MonitorComPort $MonitorComPort -CheckIntervalMs $CheckIntervalMs
         if (-not $response.Connected) {
@@ -2940,6 +3080,13 @@ function GetHW() {
 					Write-Warning "Could not capture the physical USB identity for $selectedComPort. USB flashing will fail closed."
 				}
 			}
+			if ($detectedNodeProject -eq "MeshCore") {
+				$script:DetectedMeshCoreBoard = $hwModelSlug
+				$script:DetectedMeshCoreVersion = $FirmwareVersion
+			} else {
+				$script:DetectedMeshCoreBoard = ""
+				$script:DetectedMeshCoreVersion = ""
+			}
 
 			Write-Host "$selectedComPort. Device: $hwModelSlug. Firmware: $FirmwareVersion."
 			$selectedNodeProject = Select-FlashTarget -MonitorComPort $selectedComPort -CheckIntervalMs 2000
@@ -2953,6 +3100,13 @@ function GetHW() {
 	if ($DFU_node) {
 		Write-Host "$selectedComPort. Device: $hwModelSlug. Firmware: $FirmwareVersion."
 		$selectedNodeProject = Select-FlashTarget
+	}
+	if ($detectedNodeProject -eq "MeshCore") {
+		$script:DetectedMeshCoreBoard = $hwModelSlug
+		$script:DetectedMeshCoreVersion = $FirmwareVersion
+	} else {
+		$script:DetectedMeshCoreBoard = ""
+		$script:DetectedMeshCoreVersion = ""
 	}
 	Write-Host "Selected target: $selectedNodeProject" -ForegroundColor Green
 
@@ -3003,9 +3157,11 @@ function GetHW() {
 	}
 	if ($selectedNodeProject -eq "MeshCore") {
 		$hw = [PSCustomObject]@{
-			ComPort      = $selectedComPort
-			HWNameFile   = $hwModelSlug
-			UsbIdentity  = $selectedUsbIdentity
+			ComPort         = $selectedComPort
+			HWNameFile      = $hwModelSlug
+			UsbIdentity     = $selectedUsbIdentity
+			DetectedBoard   = $script:DetectedMeshCoreBoard
+			DetectedVersion = $script:DetectedMeshCoreVersion
 		}
 		$null = ChooseMeshCoreFirmware $hw
 		
@@ -3873,6 +4029,13 @@ function ChooseMeshCoreFirmware {
         if ($Hw.PSObject.Properties['HWNameFile'] -and -not [string]::IsNullOrWhiteSpace($Hw.HWNameFile)) {
             $script:DEVICE = $Hw.HWNameFile
         }
+
+		if ($Hw.PSObject.Properties['DetectedBoard'] -and -not [string]::IsNullOrWhiteSpace($Hw.DetectedBoard)) {
+			$script:DetectedMeshCoreBoard = $Hw.DetectedBoard
+		}
+		if ($Hw.PSObject.Properties['DetectedVersion'] -and -not [string]::IsNullOrWhiteSpace($Hw.DetectedVersion)) {
+			$script:DetectedMeshCoreVersion = $Hw.DetectedVersion
+		}
     }
 	
 	$global:CONFIG_FILE = $DEFAULT_CONFIG_FILE
@@ -3942,7 +4105,8 @@ function ChooseMeshCoreFirmware {
             Write-Host "Auto-selected device: $($script:DEVICE)"
         } else {
 
-
+			$devicePortName = $script:DetectedMeshCoreBoard
+			$deviceName = $script:COM_PORT
             $match = $null
             if (-not [string]::IsNullOrWhiteSpace($devicePortName)) {
                 $match = Pick-MatchingDevice -UsbString $devicePortName -Devices $devices -VENDORLIST $VENDORLIST -RADIOLIST $RADIOLIST
@@ -3962,6 +4126,7 @@ function ChooseMeshCoreFirmware {
 				Write-Host ("  {0}) Keymind Cascade Logging" -f $keymindLoggingIndex)
                 Write-Host ("  {0}) Custom" -f $customIndex)
                 Write-Host ""
+				Write-DetectedMeshCoreIdentity
 
                 if ($match) {
                     $choice = Read-Host ("Choice (Detected {0} on {1}, Enter will pick {2})" -f $match.Match, $deviceName, $match.MatchIdx)
