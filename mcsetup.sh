@@ -207,6 +207,8 @@ force_time_sync() {
 }
 
 DEVICE_NAME=""
+DETECTED_NODE_BOARD=""
+DETECTED_NODE_VERSION=""
 
 ensure_command jq
 ensure_command curl
@@ -463,6 +465,7 @@ select_suggested_radio_setting() {
 
   local choice sel
   while :; do
+    print_detected_node_summary
     read -rp "Choice (0-${#_RADIO_TITLES[@]}, Enter for $guess_title, or q to quit): " choice
     case "$choice" in
       q|Q)
@@ -581,7 +584,6 @@ choose_serial() {
         echo "Invalid selection - please try again."
     done
 }
-choose_serial || true
 
 ensure_serial_access() {
   local device="${1:-$DEVICE_NAME}"
@@ -741,6 +743,161 @@ trim() {
     # Trim data from stdin
     sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
   fi
+}
+
+clean_node_info_field() {
+  local value="${1:-}"
+
+  value="$(printf '%s' "$value" \
+    | LC_ALL=C tr -cd '\11\12\15\40-\176' \
+    | tr '\r\n' '  ' \
+    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/[[:space:]]+/ /g')"
+  if (( ${#value} > 120 )) \
+    || [[ ! "$value" =~ ^[[:alnum:]][[:alnum:][:space:].,_+:/()#-]*$ ]]; then
+    value=""
+  fi
+  printf '%s' "$value"
+}
+
+normalize_firmware_version() {
+  local version
+  version="$(clean_node_info_field "${1:-}")"
+  version="${version#Companion }"
+  version="${version%% (Build:*}"
+  version="${version%% (protocol *}"
+  trim "$version"
+}
+
+format_detected_node_summary() {
+  local board="${1:-}" version="${2:-}"
+
+  [[ -n "$board" || -n "$version" ]] || return 1
+  printf 'Detected:'
+  [[ -n "$board" ]] && printf ' %s' "$board"
+  if [[ -n "$version" ]]; then
+    [[ -n "$board" ]] && printf '.'
+    printf ' %s' "$version"
+  fi
+}
+
+print_detected_node_summary() {
+  local summary=''
+  summary="$(format_detected_node_summary \
+    "$DETECTED_NODE_BOARD" "$DETECTED_NODE_VERSION" 2>/dev/null || true)"
+  [[ -n "$summary" ]] && echo "$summary"
+}
+
+query_companion_device_info() {
+  local device="$1"
+  local total_timeout="${MCSETUP_INFO_TOTAL_TIMEOUT:-1.2s}"
+  local idle_timeout="${MCSETUP_INFO_IDLE_TIMEOUT:-0.35}"
+
+  [[ -e "$device" ]] || return 1
+  ensure_command socat || return 1
+  ensure_command perl || return 1
+
+  # shellcheck disable=SC2016
+  timeout -s KILL "$total_timeout" \
+    bash -o pipefail -c '
+      device=$1
+      idle=$2
+      printf "\x3c\x02\x00\x16\x0e" \
+        | socat -T "$idle" - "OPEN:${device},raw,echo=0,b115200" 2>/dev/null
+    ' _ "$device" "$idle_timeout" \
+    | LC_ALL=C perl -0777 -ne '
+      my $buf = $_;
+      my $pos = 0;
+      while (($pos = index($buf, ">", $pos)) >= 0) {
+        last if $pos + 3 > length($buf);
+        my $len = unpack("v", substr($buf, $pos + 1, 2));
+        my $end = $pos + 3 + $len;
+        if ($len >= 80 && $len <= 300 && $end <= length($buf)) {
+          my $payload = substr($buf, $pos + 3, $len);
+          if (ord(substr($payload, 0, 1)) == 13) {
+            my $model = substr($payload, 20, 40);
+            $model =~ s/\x00.*//s;
+            $model =~ s/^\s+|\s+$//g;
+            my $version = substr($payload, 60, 20);
+            $version =~ s/\x00.*//s;
+            $version =~ s/^\s+|\s+$//g;
+            my $protocol = ord(substr($payload, 1, 1));
+            print $model, "\t", $version, "\t", $protocol;
+            exit;
+          }
+        }
+        $pos++;
+      }
+    '
+}
+
+query_companion_full_version() {
+  local device="$1"
+  local total_timeout="${MCSETUP_INFO_TOTAL_TIMEOUT:-1.2s}"
+  local idle_timeout="${MCSETUP_INFO_IDLE_TIMEOUT:-0.35}"
+
+  [[ -e "$device" ]] || return 1
+  ensure_command socat || return 1
+  ensure_command perl || return 1
+
+  # Protocol v14 framed CLI commands return the complete version rather than
+  # RESP_CODE_DEVICE_INFO's legacy 20-byte value.
+  # shellcheck disable=SC2016
+  timeout -s KILL "$total_timeout" \
+    bash -o pipefail -c '
+      device=$1
+      idle=$2
+      printf "\x3c\x08\x00\x42version" \
+        | socat -T "$idle" - "OPEN:${device},raw,echo=0,b115200" 2>/dev/null
+    ' _ "$device" "$idle_timeout" \
+    | LC_ALL=C perl -0777 -ne '
+      my $buf = $_;
+      my $pos = 0;
+      while (($pos = index($buf, ">", $pos)) >= 0) {
+        last if $pos + 3 > length($buf);
+        my $len = unpack("v", substr($buf, $pos + 1, 2));
+        my $end = $pos + 3 + $len;
+        if ($len >= 2 && $len <= 300 && $end <= length($buf)) {
+          my $payload = substr($buf, $pos + 3, $len);
+          if (ord(substr($payload, 0, 1)) == 29) {
+            my $reply = substr($payload, 1);
+            $reply =~ s/\x00.*//s;
+            if ($reply =~ /^Companion\s+(.+?)\s+\(protocol\s+/) {
+              print $1;
+              exit;
+            }
+          }
+        }
+        $pos++;
+      }
+    '
+}
+
+refresh_detected_node_info() {
+  local info=''
+  local board=''
+  local version=''
+  local protocol=''
+  local full_version=''
+
+  info="$(query_companion_device_info "$DEVICE_NAME" 2>/dev/null || true)"
+  IFS=$'\t' read -r board version protocol <<< "$info"
+  board="$(clean_node_info_field "$board")"
+  version="$(normalize_firmware_version "$version")"
+
+  if [[ "$protocol" =~ ^[0-9]+$ ]] && (( protocol >= 14 )); then
+    full_version="$(normalize_firmware_version \
+      "$(query_companion_full_version "$DEVICE_NAME" 2>/dev/null || true)")"
+    [[ -z "$full_version" ]] || version="$full_version"
+  fi
+
+  [[ -n "$board" ]] \
+    || board="$(clean_node_info_field "$(serial_cmd "board")")"
+  [[ -n "$version" ]] \
+    || version="$(normalize_firmware_version "$(serial_cmd "ver")")"
+
+  DETECTED_NODE_BOARD="$board"
+  DETECTED_NODE_VERSION="$version"
+  [[ -n "$board" || -n "$version" ]]
 }
 
 # Compare numbers safely (ints/floats); returns 0 if equal
@@ -1014,6 +1171,7 @@ edit_repeater_settings_menu() {
 	echo " Q) Quit"
     echo
     echo "Choose an item to edit, an action, or q to finish."
+    print_detected_node_summary
     read -rp "Choice: " choice
 
     case "$choice" in
@@ -1413,6 +1571,12 @@ prompt_clock_reset_and_retry_time_sync() {
 
 
 # Sync Time
+choose_serial || true
+if [[ -n "$DEVICE_NAME" ]]; then
+  refresh_detected_node_info || true
+  print_detected_node_summary
+fi
+
 force_time_sync
 
 # Read clock from device
@@ -1466,12 +1630,6 @@ else
 fi
 
 if [[ -n "${device_epoch:-}" ]]; then
-
-	board=$(serial_cmd "board" )
-	ver=$(serial_cmd "ver" )
-
-	echo "$board - $ver"
-
 	load_repeater_settings
 	snapshot_radio_baseline
 else
@@ -1481,11 +1639,8 @@ else
 		device_epoch="$(read_device_clock_epoch)"
 	fi
 	if [[ -n "${device_epoch:-}" ]]; then
-		board=$(serial_cmd "board" )
-		ver=$(serial_cmd "ver" )
-
-		echo "$board - $ver"
-
+		refresh_detected_node_info || true
+		print_detected_node_summary
 		load_repeater_settings
 		snapshot_radio_baseline
 	else

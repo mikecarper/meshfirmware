@@ -97,6 +97,9 @@ BOOTLOADER_PROBE_ACTIVE=0
 NRF52_BOARD_GUARD_PASSED=0
 ESP32_FLASH_EXPECTED_MAC=""
 ESP32_MERGED_OTA_IMAGE=""
+FAST_IDENTITY_ATTEMPTED_PORT=""
+DETECTED_NODE_BOARD=""
+DETECTED_NODE_VERSION=""
 # The Indicator's CH340 bridge has repeatedly dropped long reads above this
 # rate.  Identity and partition reads are safety gates, so use the same
 # board-qualified conservative rate as erase/write instead of risking a fast
@@ -1692,6 +1695,72 @@ activate_keymind_provider() {
     printf '%s\n' "$provider_file" > "$CONFIG_SOURCE_FILE"
 }
 
+preserve_selection_for_active_provider() {
+    local device="$1"
+    local role="$2"
+    local title="${3:-}"
+    local subtitle="${4:-}"
+    local firmware_entry=''
+    local role_count=0
+    local preserved_role=''
+    local preserved_title=''
+    local preserved_subtitle=''
+
+    # Provider changes invalidate all derived values. Keep the user's device
+    # and role only when the new manifest contains compatible entries.
+    rm -f "$SELECTED_DEVICE_FILE" "$ARCHITECTURE_FILE" "$ERASE_URL_FILE" \
+        "$SELECTED_ROLE_FILE" "$SELECTED_TITLE_FILE" "$SELECTED_SUBTITLE_FILE" \
+        "$SELECTED_VERSION_FILE" "$SELECTED_TYPE_FILE" "$SELECTED_URL_FILE"
+
+    # shellcheck disable=SC2016
+    if [[ -z "$device" ]] || ! _jq1 --arg d "$device" \
+        'any(.device[]; .name == $d)' | grep -qx true; then
+        [[ -n "$device" ]] && echo "The Keymind provider does not support $device; select a device again."
+        return 0
+    fi
+
+    printf '%s\n' "$device" > "$SELECTED_DEVICE_FILE"
+    echo "Keeping previous device: $device"
+    [[ -n "$role" ]] || return 0
+
+    # Prefer the exact menu entry. This matters when one role has several
+    # Keymind variants distinguished by title or subtitle.
+    # shellcheck disable=SC2016
+    firmware_entry="$(_jq1 --arg d "$device" --arg r "$role" \
+        --arg t "$title" --arg s "$subtitle" '
+        [.device[] | select(.name == $d) | .firmware[]
+          | select(.role == $r)
+          | select((.title // "") == $t)
+          | select((.subTitle // "") == $s)][0]
+        | select(. != null)
+        | [(.role // ""), (.title // ""), (.subTitle // "")] | @tsv'
+    )"
+
+    if [[ -z "$firmware_entry" ]]; then
+        # shellcheck disable=SC2016
+        role_count="$(_jq1 --arg d "$device" --arg r "$role" \
+            '[.device[] | select(.name == $d) | .firmware[] | select(.role == $r)] | length')"
+        if [[ "$role_count" == 1 ]]; then
+            # shellcheck disable=SC2016
+            firmware_entry="$(_jq1 --arg d "$device" --arg r "$role" '
+                [.device[] | select(.name == $d) | .firmware[] | select(.role == $r)][0]
+                | [(.role // ""), (.title // ""), (.subTitle // "")] | @tsv'
+            )"
+        fi
+    fi
+
+    if [[ -z "$firmware_entry" ]]; then
+        echo "The previous role is not an exact Keymind option; select a role again."
+        return 0
+    fi
+
+    IFS=$'\t' read -r preserved_role preserved_title preserved_subtitle <<< "$firmware_entry"
+    printf '%s\n' "$preserved_role" > "$SELECTED_ROLE_FILE"
+    printf '%s\n' "$preserved_title" > "$SELECTED_TITLE_FILE"
+    printf '%s\n' "$preserved_subtitle" > "$SELECTED_SUBTITLE_FILE"
+    echo "Keeping previous role: $preserved_role (${preserved_title:-$preserved_role})"
+}
+
 normalize_id() {
   # 1) drop parentheses content, 2) lower, 3) non-alnum -> _, 4) squeeze _.
   local s="$1"
@@ -2034,9 +2103,8 @@ choose_version_from_releases() {
 							  local provider_variant="cascade"
 							  [[ "$CHOICE" == "Keymind Cascade Logging" ]] && provider_variant="logging"
 							  if activate_keymind_provider "$provider_variant"; then
-								rm -f "$SELECTED_DEVICE_FILE" "$ARCHITECTURE_FILE" "$ERASE_URL_FILE" \
-								  "$SELECTED_ROLE_FILE" "$SELECTED_TITLE_FILE" "$SELECTED_SUBTITLE_FILE" "$SELECTED_VERSION_FILE" "$SELECTED_TYPE_FILE" \
-								  "$SELECTED_URL_FILE"
+								preserve_selection_for_active_provider \
+								  "$DEVICE" "$ROLE" "$TITLE" "${SUBTITLE:-}"
 								CHOSEN_FILE=""
 								choose_meshcore_firmware
 								return
@@ -2299,15 +2367,27 @@ choose_meshcore_firmware() {
 			local choice=''
 			local device_port_name=''
 			local device_name=''
+			local detected_identity=''
 			[[ -f "$DEVICE_PORT_NAME_FILE" ]] && device_port_name="$(<"$DEVICE_PORT_NAME_FILE")"
 			[[ -f "$DEVICE_PORT_FILE" ]] && device_name="$(<"$DEVICE_PORT_FILE")"
+			[[ -s "$AUTODETECT_DEVICE_FILE" ]] && detected_identity="$(<"$AUTODETECT_DEVICE_FILE")"
 			
 			match=""
 			match_idx=-1
 			
-			if pick_matching_device "$device_port_name" DEVICES; then
+			if pick_matching_device "$detected_identity $device_port_name" DEVICES; then
 				match="$MATCH"
 				match_idx="$MATCH_IDX"
+			elif [[ -n "$device_name" \
+				&& "$FAST_IDENTITY_ATTEMPTED_PORT" != "$device_name" ]]; then
+				FAST_IDENTITY_ATTEMPTED_PORT="$device_name"
+				if fast_detect_esp32_meshcore_identity "$device_name"; then
+					detected_identity="$FAST_DETECTED_ENVIRONMENT"
+					if pick_matching_device "$detected_identity" DEVICES; then
+						match="$MATCH"
+						match_idx="$MATCH_IDX"
+					fi
+				fi
 			else
 				match=""
 				match_idx=-1
@@ -2328,7 +2408,10 @@ choose_meshcore_firmware() {
 				printf '  %d) Custom\n' "$custom_index"
 				echo ""
 
-
+				local detected_summary=''
+				detected_summary="$(format_detected_node_summary \
+					"$DETECTED_NODE_BOARD" "$DETECTED_NODE_VERSION" 2>/dev/null || true)"
+				[[ -n "$detected_summary" ]] && echo "$detected_summary"
 				if [[ -n "$match" ]]; then
 					read -r -p "Choice (Detected $match on $device_name, Enter will pick $match_idx): " choice </dev/tty
 				else
@@ -2794,6 +2877,18 @@ format_node_info_summary() {
 	printf '%s' "$summary"
 }
 
+format_detected_node_summary() {
+	local board="${1:-}" version="${2:-}"
+
+	[[ -n "$board" || -n "$version" ]] || return 1
+	printf 'Detected:'
+	[[ -n "$board" ]] && printf ' %s' "$board"
+	if [[ -n "$version" ]]; then
+		[[ -n "$board" ]] && printf '.'
+		printf ' %s' "$version"
+	fi
+}
+
 quick_node_info_cmd() {
 	local device="$1"
 	shift
@@ -2829,7 +2924,7 @@ read_board_with_retry() {
 	printf '%s' "$board"
 }
 
-query_companion_board_model() {
+query_companion_device_info() {
 	local device="$1"
 	local total_timeout="${SERIAL_INFO_TOTAL_TIMEOUT:-1.2s}"
 	local idle_timeout="${SERIAL_INFO_IDLE_TIMEOUT:-0.35}"
@@ -2860,13 +2955,88 @@ query_companion_board_model() {
 						my $model = substr($payload, 20, 40);
 						$model =~ s/\x00.*//s;
 						$model =~ s/^\s+|\s+$//g;
-						print $model;
+						my $version = substr($payload, 60, 20);
+						$version =~ s/\x00.*//s;
+						$version =~ s/^\s+|\s+$//g;
+						my $protocol = ord(substr($payload, 1, 1));
+						print $model, "\t", $version, "\t", $protocol;
 						exit;
 					}
 				}
 				$pos++;
 			}
 		'
+}
+
+query_companion_full_version() {
+	local device="$1"
+	local total_timeout="${SERIAL_INFO_TOTAL_TIMEOUT:-1.2s}"
+	local idle_timeout="${SERIAL_INFO_IDLE_TIMEOUT:-0.35}"
+
+	[[ -e "$device" ]] || return 1
+	ensure_command socat || return 1
+	ensure_command perl || return 1
+
+	# Protocol v14 added framed CLI commands. Unlike RESP_CODE_DEVICE_INFO's
+	# legacy 20-byte field, `version` returns the complete build identity.
+	# shellcheck disable=SC2016
+	timeout -s KILL "$total_timeout" \
+		bash -o pipefail -c '
+			device=$1
+			idle=$2
+			printf "\x3c\x08\x00\x42version" \
+				| socat -T "$idle" - "OPEN:${device},raw,echo=0,b115200" 2>/dev/null
+		' _ "$device" "$idle_timeout" \
+		| LC_ALL=C perl -0777 -ne '
+			my $buf = $_;
+			my $pos = 0;
+			while (($pos = index($buf, ">", $pos)) >= 0) {
+				last if $pos + 3 > length($buf);
+				my $len = unpack("v", substr($buf, $pos + 1, 2));
+				my $end = $pos + 3 + $len;
+				if ($len >= 2 && $len <= 300 && $end <= length($buf)) {
+					my $payload = substr($buf, $pos + 3, $len);
+					if (ord(substr($payload, 0, 1)) == 29) {
+						my $reply = substr($payload, 1);
+						$reply =~ s/\x00.*//s;
+						if ($reply =~ /^Companion\s+(.+?)\s+\(protocol\s+/) {
+							print $1;
+							exit;
+						}
+					}
+				}
+				$pos++;
+			}
+		'
+}
+
+query_companion_board_model() {
+	local info=''
+	info="$(query_companion_device_info "$1")" || return 1
+	printf '%s' "${info%%$'\t'*}"
+}
+
+read_node_info_with_retry() {
+	local device="$1"
+	local info=''
+	local board=''
+	local version=''
+	local protocol=''
+	local full_version=''
+
+	info="$(query_companion_device_info "$device" 2>/dev/null || true)"
+	IFS=$'\t' read -r board version protocol <<< "$info"
+	board="$(clean_node_info_field "$board")"
+	version="$(clean_node_info_field "$version")"
+	if [[ "$protocol" =~ ^[0-9]+$ ]] && (( protocol >= 14 )); then
+		full_version="$(clean_node_info_field \
+			"$(query_companion_full_version "$device" 2>/dev/null || true)")"
+		[[ -z "$full_version" ]] || version="$full_version"
+	fi
+	[[ -n "$board" ]] || board="$(read_board_with_retry "$device")"
+	[[ -n "$version" ]] \
+		|| version="$(clean_node_info_field "$(quick_node_info_cmd "$device" "ver")")"
+	printf '%s\t%s' "$board" "$version"
 }
 
 rak_board_family_from_text() {
@@ -3074,6 +3244,9 @@ choose_serial() {
 	local detected_dev
 	local devs labels               # arrays that hold paths and friendly names
 	local choice
+	local node_info=''
+	local board=''
+	local version=''
 
     scan() {                        # fill devs[] / labels[]
         local flash_link detected_path
@@ -3108,19 +3281,22 @@ choose_serial() {
         if ((${#devs[@]} == 1)); then
 			detected_dev="${devs[0]}"
 			echo "Trying to get meshcore info from the node"
-			board=$(read_board_with_retry "${detected_dev}")
-			version=$(clean_node_info_field "$(quick_node_info_cmd "${detected_dev}" "ver")")
+			node_info="$(read_node_info_with_retry "$detected_dev")"
+			IFS=$'\t' read -r board version <<< "$node_info"
+			DETECTED_NODE_BOARD="$board"
+			DETECTED_NODE_VERSION="$version"
             echo "Only one device detected - selecting it automatically: $detected_dev - $(format_node_info_summary "${labels[0]}" "$board" "$version")"
 			echo "$detected_dev" > "$DEVICE_PORT_FILE"
 			echo "${labels[0]}" > "$DEVICE_PORT_NAME_FILE"
-			return
+			[[ -n "$board" ]] && printf '%s\n' "$board" > "$AUTODETECT_DEVICE_FILE"
+			return 0
         fi
 
         # -------------------------- menu --------------------------
         echo "Select a serial device:"
         for i in "${!devs[@]}"; do
-			board=$(read_board_with_retry "${devs[$i]}")
-			version=$(clean_node_info_field "$(quick_node_info_cmd "${devs[$i]}" "ver")")
+			node_info="$(read_node_info_with_retry "${devs[$i]}")"
+			IFS=$'\t' read -r board version <<< "$node_info"
             printf " %2d) %s  (%s)\n" $((i+1)) "${devs[$i]}" "$(format_node_info_summary "${labels[$i]}" "$board" "$version")"
         done
         echo "  0)  Scan again"
@@ -3133,7 +3309,12 @@ choose_serial() {
 				echo "$detected_dev"
 				echo "$detected_dev" > "$DEVICE_PORT_FILE"
 				echo "${labels[choice-1]}" > "$DEVICE_PORT_NAME_FILE"
-				return
+				node_info="$(read_node_info_with_retry "$detected_dev")"
+				IFS=$'\t' read -r board version <<< "$node_info"
+				DETECTED_NODE_BOARD="$board"
+				DETECTED_NODE_VERSION="$version"
+				[[ -n "$board" ]] && printf '%s\n' "$board" > "$AUTODETECT_DEVICE_FILE"
+				return 0
             fi
         fi
         echo "Invalid selection - please try again."
@@ -4765,6 +4946,135 @@ scan_and_maybe_mount() {
     done
 
     return 2                     # USB present but no UF2
+}
+
+
+parse_esp32_meshcore_identity() {
+	local image_file="$1"
+
+	python3 - "$image_file" <<'PY'
+import struct
+import sys
+
+path = sys.argv[1]
+data = open(path, "rb").read()
+record_offset = 0x120
+record_format = "<8sHH96s96sI"
+record_size = struct.calcsize(record_format)
+
+if len(data) < record_offset + record_size:
+    raise SystemExit(1)
+
+magic, schema, declared_size, environment, version, end_magic = struct.unpack_from(
+    record_format, data, record_offset
+)
+if (
+    magic != b"MCFWID01"
+    or schema != 1
+    or declared_size != record_size
+    or end_magic != 0x3144494D
+):
+    raise SystemExit(1)
+
+def decode_field(raw):
+    value = raw.split(b"\0", 1)[0]
+    if not value or any(byte < 0x20 or byte > 0x7E for byte in value):
+        raise ValueError
+    return value.decode("ascii")
+
+try:
+    environment = decode_field(environment)
+    version = decode_field(version)
+except (UnicodeDecodeError, ValueError):
+    raise SystemExit(1)
+
+print(f"{environment}\t{version}")
+PY
+}
+
+fast_detect_esp32_meshcore_identity() {
+	local requested_port="$1"
+	local requested_vendor_id=''
+	local selected_port=''
+	local partition_output=''
+	local partition=''
+	local offset=''
+	local size=''
+	local subtype=''
+	local identity=''
+	local probe_file=''
+	local probe_size=''
+	local finish_status=0
+	local ESPTOOL_CMD=''
+
+	FAST_DETECTED_ENVIRONMENT=''
+	FAST_DETECTED_VERSION=''
+
+	# An automatic reset is appropriate only for the native Espressif USB/JTAG
+	# device. Generic UART and nRF52 ports remain opt-in through full detection.
+	requested_vendor_id="$(udev_device_property "$requested_port" ID_VENDOR_ID)"
+	[[ "${requested_vendor_id,,}" == "303a" ]] || return 1
+	ensure_command python3 || return 1
+
+	if ! selected_port="$(selected_flash_serial_port "$requested_port")"; then
+		return 1
+	fi
+	if [[ "$selected_port" != "$requested_port" ]] \
+		&& ! save_selected_serial_port "$selected_port"; then
+		return 1
+	fi
+	if ! get_espcmd; then
+		echo "Could not prepare esptool for the fast firmware identity read." >&2
+		return 1
+	fi
+
+	ESP32_OPERATION_BEFORE="$NORESET"
+	ESP32_SESSION_IS_S3=0
+	ESP32_FLASH_EXPECTED_MAC=''
+	if ! prepare_esp32_flash_session "$selected_port" "fast MeshCore identity read"; then
+		echo "Fast firmware identity read could not enter the ESP32 bootloader." >&2
+		return 1
+	fi
+	if ! selected_port="$(selected_flash_serial_port "$selected_port")"; then
+		restore_port_after_bootloader_probe
+		return 1
+	fi
+
+	if partition_output="$(read_esp32_app_partitions "$selected_port")"; then
+		while read -r offset size subtype; do
+			[[ -n "$offset" ]] || continue
+			probe_file="$(mktemp)"
+			if run_esp32_session_esptool "$selected_port" --after "$NORESET" \
+				--baud "${ESP32_SAFE_BAUD:-115200}" "$READFLASH" \
+				"$offset" 0x200 "$probe_file" >/dev/null; then
+				probe_size="$(stat -c '%s' "$probe_file" 2>/dev/null || true)"
+				if [[ "$probe_size" == 512 ]]; then
+					identity="$(parse_esp32_meshcore_identity "$probe_file" 2>/dev/null || true)"
+				fi
+			fi
+			rm -f -- "$probe_file"
+			probe_file=''
+			[[ -n "$identity" ]] && break
+		done <<< "$partition_output"
+	fi
+
+	if ! finish_esp32_flash_session "$selected_port"; then
+		finish_status=1
+	fi
+	BOOTLOADER_PROBE_ACTIVE=0
+	BOOTLOADER_PROBE_PORT=''
+	(( finish_status == 0 )) || return 1
+	[[ -n "$identity" ]] || {
+		echo "No fixed MeshCore identity found; use 0 for full firmware detection."
+		return 1
+	}
+
+	IFS=$'\t' read -r FAST_DETECTED_ENVIRONMENT FAST_DETECTED_VERSION <<< "$identity"
+	DETECTED_NODE_BOARD="$FAST_DETECTED_ENVIRONMENT"
+	DETECTED_NODE_VERSION="$FAST_DETECTED_VERSION"
+	printf '%s\n' "$FAST_DETECTED_ENVIRONMENT" > "$AUTODETECT_DEVICE_FILE"
+	echo "Fast firmware identity: $FAST_DETECTED_ENVIRONMENT ($FAST_DETECTED_VERSION)"
+	return 0
 }
 
 
