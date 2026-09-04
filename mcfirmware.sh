@@ -4088,9 +4088,17 @@ prepare_serial_port_for_flash() {
 
 
 esptool_set_variables() {
+	local version_output="" ver="" major=""
 
 	echo "Checking the esptool version"
-	ver="$( pipx run esptool version | grep -m1 -Eo '[0-9]+(\.[0-9]+)+' )"
+	# esptool 5 prints both a banner and a bare version. With pipefail enabled,
+	# grep -m1 can close that producer early and abort the entire flasher with a
+	# SIGPIPE before any device operation. Capture the small response first and
+	# extract its first version without a producer/consumer pipeline.
+	version_output="$(pipx run esptool version)"
+	if [[ "$version_output" =~ ([0-9]+(\.[0-9]+)+) ]]; then
+		ver="${BASH_REMATCH[1]}"
+	fi
 	major="${ver%%.*}"
 	
 	if [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 5 )); then
