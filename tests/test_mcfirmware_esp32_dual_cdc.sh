@@ -109,6 +109,8 @@ find_reenumerated_nrf52_port() {
 probed_port=""
 usb_reset_invocation=""
 usb_reset_succeeds=1
+drop_matched_probe_once=0
+matched_probe_dropped=0
 raw_esptool_mac_probe() {
 	local previous="" before=""
 	for arg in "$@"; do
@@ -128,7 +130,18 @@ raw_esptool_mac_probe() {
 		fi
 		return 1
 	fi
+	if (( drop_matched_probe_once && rom_ready && ! matched_probe_dropped )) \
+		&& [[ "$probed_port" == "$expected_rom_port" ]]; then
+		matched_probe_dropped=1
+		return 1
+	fi
 	(( rom_ready )) && [[ "$probed_port" == "$expected_rom_port" ]]
+}
+
+recovery_called=0
+esp32_recover_interrupted_transport() {
+	recovery_called=$((recovery_called + 1))
+	DEVICE_PORT="$1"
 }
 
 stop_serial_locking_services() { return 1; }
@@ -212,6 +225,31 @@ prepare_esp32_flash_session "$logging_port" "Heltec V4"
 	exit 1
 }
 echo "PASS: ESP32 native USB reset safely falls back to the matched primary CDC port"
+
+# A native USB session can disappear between its successful reset and the
+# mandatory matched-ROM MAC probe. Recover only the saved identity and retain
+# that recovered live port instead of making the user restart the flasher.
+DEVICE_PORT="$logging_port"
+BOOTLOADER_PROBE_PORT=""
+BOOTLOADER_PROBE_ACTIVE=0
+usb_reset_succeeds=1
+expected_rom_port="$primary_port"
+rom_ready=0
+drop_matched_probe_once=1
+matched_probe_dropped=0
+recovery_called=0
+
+prepare_esp32_flash_session "$logging_port" "Heltec V4"
+
+[[ "$matched_probe_dropped" -eq 1 && "$recovery_called" -eq 1 ]] || {
+	echo "FAIL: dropped matched-ROM probe did not run one identity recovery" >&2
+	exit 1
+}
+[[ "$DEVICE_PORT" == "$primary_port" && "$BOOTLOADER_PROBE_PORT" == "$primary_port" ]] || {
+	echo "FAIL: recovered matched-ROM port was not retained" >&2
+	exit 1
+}
+echo "PASS: a dropped matched-ROM probe recovers the same USB identity"
 
 esp32_port_is_rom_usb_jtag() { [[ "$1" == "$rom_port" ]]; }
 esp32_verified_destructive_port() { printf '%s\n' "$1"; }

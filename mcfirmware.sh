@@ -5134,8 +5134,12 @@ prepare_esp32_flash_session() {
 		echo "Matched ESP32 ROM port: $bootloader_port"
 		if ! raw_esptool_mac_probe --port "$bootloader_port" \
 			--before "$NORESET" --after "$NORESET" --baud 115200 "$READMAC"; then
-			echo "The matched ESP32 ROM port did not answer an identity probe." >&2
-			return 1
+			echo "The matched ESP32 ROM port dropped its identity probe; recovering the same USB identity." >&2
+			if ! esp32_recover_interrupted_transport "$bootloader_port"; then
+				echo "The matched ESP32 ROM port did not answer an identity probe." >&2
+				return 1
+			fi
+			bootloader_port="$DEVICE_PORT"
 		fi
 		if ! save_selected_serial_port "$bootloader_port"; then
 			return 1
