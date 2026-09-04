@@ -4848,6 +4848,21 @@ run_esptool() {
 	fi
 
 	if [[ -n "$port" ]] && esptool_output_transport_interrupted "$output" \
+		&& ! esp32_esptool_args_are_destructive "$@"; then
+		echo "The ESP32 read lost its serial transport; recovering the verified device and retrying."
+		if esp32_recover_interrupted_transport "$port" \
+			&& esp32_prepare_esptool_attempt attempt_args port "$@"; then
+			if retry_output="$(invoke_esptool "${attempt_args[@]}" 2>&1)"; then
+				printf '%s\n' "$retry_output"
+				return 0
+			else
+				status=$?
+				output="$retry_output"
+			fi
+		fi
+	fi
+
+	if [[ -n "$port" ]] && esptool_output_transport_interrupted "$output" \
 		&& esp32_run_chunked_write_recovery "$port" "$@"; then
 		return 0
 	fi

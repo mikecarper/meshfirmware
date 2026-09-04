@@ -39,6 +39,7 @@ truncate -s 50000 "$source_image"
 operation_log="${tmp_dir}/operations.log"
 recovery_log="${tmp_dir}/recoveries.log"
 chunk_retry_marker="${tmp_dir}/chunk-retry.marker"
+read_retry_marker="${tmp_dir}/read-retry.marker"
 live_port="${tmp_dir}/ttyACM4"
 fixture_live_port="$live_port"
 touch "$live_port"
@@ -63,6 +64,15 @@ esp32_verified_destructive_port() { printf '%s\n' "$fixture_live_port"; }
 
 invoke_esptool() {
 	local previous="" arg after="" offset="" file="" command_seen=0
+	if [[ " $* " == *' read-flash '* ]]; then
+		if [[ ! -e "$read_retry_marker" ]]; then
+			: >"$read_retry_marker"
+			printf '%s\n' 'A serial exception error occurred: device disconnected'
+			return 39
+		fi
+		printf '%s\n' 'Read 4096 bytes from 0x00008000.'
+		return 0
+	fi
 	for arg in "$@"; do
 		if [[ "$previous" == "--after" ]]; then
 			after="$arg"
@@ -101,6 +111,14 @@ no_sudo_mode() { return 0; }
 auto_reset_serial_port() { return 1; }
 manual_reboot_choice() { return 1; }
 print_esptool_recovery_hint() { return 0; }
+
+run_esptool --port "$live_port" --before no-reset --after no-reset \
+	--baud 115200 read-flash 0x8000 0x1000 "${tmp_dir}/partitions.bin" \
+	>"${tmp_dir}/read-recovery.out" 2>"${tmp_dir}/read-recovery.err"
+grep -Fq 'read lost its serial transport' "${tmp_dir}/read-recovery.out"
+grep -Fq 'Read 4096 bytes' "${tmp_dir}/read-recovery.out"
+[[ "$(wc -l <"$recovery_log")" -eq 1 ]]
+: >"$recovery_log"
 
 run_esptool --port "$live_port" --before no-reset --after watchdog-reset \
 	--baud 115200 write-flash 0x10000 "$source_image" \
