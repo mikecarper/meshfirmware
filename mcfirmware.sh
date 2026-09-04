@@ -4488,7 +4488,7 @@ esp32_prepare_esptool_attempt() {
 esptool_output_transport_interrupted() {
 	local output=$1
 
-	grep -qiE 'No more data to read from the serial port|device reports readiness to read but returned no data|serial exception error occurred|serial data stream stopped|device disconnected|write timeout|timed out waiting for packet header|invalid head of packet|lost connection to' <<<"$output"
+	grep -qiE 'No more data to read from the serial port|device reports readiness to read but returned no data|serial exception error occurred|serial data stream stopped|packet (content )?transfer stopped|device disconnected|write timeout|timed out waiting for packet header|invalid head of packet|lost connection to' <<<"$output"
 }
 
 esp32_replace_after_mode() {
