@@ -4731,8 +4731,11 @@ esp32_run_chunked_write_recovery() {
 					break
 				fi
 				status=1
-				if ! esptool_output_transport_interrupted "$output" \
-					|| (( attempt == attempts )) \
+				# Once the flasher is in identity-bound chunk mode, every rejected
+				# chunk is safe to retry a bounded number of times. Acceptance still
+				# requires the expected MAC and esptool's hash-verification marker, so
+				# new esptool transport wording cannot strand a partial image.
+				if (( attempt == attempts )) \
 					|| ! esp32_recover_interrupted_transport "$requested_port"; then
 					printf '%s\n' "$output" >&2
 					break

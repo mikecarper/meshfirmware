@@ -104,7 +104,7 @@ invoke_esptool() {
 	printf '%s|%s|%s\n' "$offset" "$(stat -c %s "$file")" "$after" >>"$operation_log"
 	if [[ "$offset" == "0x10000" && ! -e "$chunk_retry_marker" ]]; then
 		: >"$chunk_retry_marker"
-		printf '%s\n' 'A fatal error occurred: device reports readiness to read but returned no data'
+		printf '%s\n' 'A fatal error occurred: previously unknown chunk failure wording'
 		return 38
 	fi
 	printf '%s\n' 'MAC: 44:1b:f6:6a:e8:44'
