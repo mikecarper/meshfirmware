@@ -4589,7 +4589,8 @@ esp32_run_chunked_write_recovery() {
 	local base_offset byte_offset chunk_number chunk_offset chunk_bytes
 	local chunk_dir chunk_file output status attempt port=""
 	local is_final=0
-	local -a prefix=() operands=() chunk_prefix=() chunk_args=() prepared_args=()
+	local -a prefix=() operands=() chunk_prefix=() chunk_args=()
+	local -a chunk_prepared_args=()
 
 	if [[ ! "$chunk_size" =~ ^[0-9]+$ ]] \
 		|| (( chunk_size < 4096 || chunk_size > 262144 || chunk_size % 4096 != 0 )); then
@@ -4661,7 +4662,7 @@ esp32_run_chunked_write_recovery() {
 			chunk_args=("${chunk_prefix[@]}" "$write_command" "$chunk_offset" "$chunk_file")
 			status=1
 			for ((attempt=1; attempt<=attempts; attempt++)); do
-				if ! esp32_prepare_esptool_attempt prepared_args port "${chunk_args[@]}"; then
+				if ! esp32_prepare_esptool_attempt chunk_prepared_args port "${chunk_args[@]}"; then
 					if (( attempt < attempts )) \
 						&& esp32_recover_interrupted_transport "$requested_port"; then
 						continue
@@ -4669,7 +4670,7 @@ esp32_run_chunked_write_recovery() {
 					break
 				fi
 
-				if output="$(invoke_esptool "${prepared_args[@]}" 2>&1)"; then
+				if output="$(invoke_esptool "${chunk_prepared_args[@]}" 2>&1)"; then
 					status=0
 				else
 					status=$?

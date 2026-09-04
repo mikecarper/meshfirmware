@@ -19,6 +19,7 @@ extract_function() {
 }
 
 for function_name in esptool_port_argument \
+	esp32_esptool_args_are_destructive esp32_prepare_esptool_attempt \
 	esp32_esptool_output_confirms_destructive_success \
 	esptool_output_transport_interrupted esp32_replace_after_mode \
 	esp32_recover_interrupted_transport esp32_run_chunked_write_recovery \
@@ -57,15 +58,8 @@ raw_esptool_mac_probe() {
 	printf '%s\n' "$*" >>"$recovery_log"
 	return 0
 }
-esp32_prepare_esptool_attempt() {
-	local args_name=$1
-	local port_name=$2
-	shift 2
-	local -n prepared_args_ref="$args_name"
-	local -n prepared_port_ref="$port_name"
-	prepared_args_ref=("$@")
-	prepared_port_ref="$(esptool_port_argument "$@")"
-}
+refresh_usb_recovered_esptool_args() { return 1; }
+esp32_verified_destructive_port() { printf '%s\n' "$fixture_live_port"; }
 
 invoke_esptool() {
 	local previous="" arg after="" offset="" file="" command_seen=0
