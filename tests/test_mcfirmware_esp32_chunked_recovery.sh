@@ -20,6 +20,7 @@ extract_function() {
 
 for function_name in esptool_port_argument \
 	esp32_esptool_args_are_destructive esp32_prepare_esptool_attempt \
+	esp32_prepare_chunk_write_attempt \
 	esp32_esptool_output_confirms_destructive_success \
 	esptool_output_transport_interrupted esp32_replace_after_mode \
 	esp32_recover_interrupted_transport esp32_run_chunked_write_recovery \
@@ -49,7 +50,8 @@ USBRESET="usb-reset"
 READMAC="read-mac"
 DEVICE_PORT="$live_port"
 ESP32_NATIVE_ROM_READY=1
-ESP32_FLASH_SELECTED_BY_ID=""
+ESP32_FLASH_SELECTED_BY_ID="$live_port"
+ESP32_FLASH_EXPECTED_MAC="441bf66ae844"
 ESP32_FLASH_RECOVERY_ATTEMPTS=3
 ESP32_FLASH_RECOVERY_CHUNK_BYTES=16384
 
@@ -61,6 +63,9 @@ raw_esptool_mac_probe() {
 }
 refresh_usb_recovered_esptool_args() { return 1; }
 esp32_verified_destructive_port() { printf '%s\n' "$fixture_live_port"; }
+esp32_record_and_verify_probe_output() {
+	[[ "$1" == *'MAC: 44:1b:f6:6a:e8:44'* ]]
+}
 
 invoke_esptool() {
 	local previous="" arg after="" offset="" file="" command_seen=0
@@ -102,6 +107,7 @@ invoke_esptool() {
 		printf '%s\n' 'A fatal error occurred: device reports readiness to read but returned no data'
 		return 38
 	fi
+	printf '%s\n' 'MAC: 44:1b:f6:6a:e8:44'
 	printf '%s\n' 'Hash of data verified.'
 }
 

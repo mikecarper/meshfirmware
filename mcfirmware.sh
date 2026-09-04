@@ -4576,6 +4576,55 @@ esp32_recover_interrupted_transport() {
 	return 1
 }
 
+esp32_prepare_chunk_write_attempt() {
+	local args_name=$1
+	local port_name=$2
+	local requested_port=$3
+	shift 3
+	local -n chunk_attempt_args="$args_name"
+	# Assigned through the caller's requested output nameref.
+	# shellcheck disable=SC2034
+	local -n chunk_attempt_port="$port_name"
+	local selected_by_id="${ESP32_FLASH_SELECTED_BY_ID:-}"
+	local live_port="" resolved_selected="" arg="" previous=""
+	local i
+
+	# UART bridges do not suffer the native-USB reopen failure and retain the
+	# ordinary pre-write MAC gate. This single-session exception requires the
+	# exact stable by-id identity captured by prepare_esp32_flash_session.
+	if [[ -z "$selected_by_id" ]]; then
+		esp32_prepare_esptool_attempt "$args_name" "$port_name" "$@"
+		return
+	fi
+	if [[ ! "${ESP32_FLASH_EXPECTED_MAC:-}" =~ ^[0-9a-f]{12}$ ]]; then
+		echo "No verified ESP32 chip MAC is bound; refusing chunk write." >&2
+		return 1
+	fi
+	live_port="$(selected_flash_serial_port "$requested_port")" || return 1
+	resolved_selected="$(readlink -f "$selected_by_id" 2>/dev/null || true)"
+	if [[ -z "$resolved_selected" || "$resolved_selected" != "$live_port" ]]; then
+		echo "The selected ESP32 by-id identity changed before a chunk write." >&2
+		return 1
+	fi
+
+	chunk_attempt_args=("$@")
+	chunk_attempt_port="$live_port"
+	[[ "$chunk_attempt_port" == "$live_port" ]] || return 1
+	for ((i=0; i<${#chunk_attempt_args[@]}; i++)); do
+		arg="${chunk_attempt_args[i]}"
+		if [[ "$previous" == "--port" || "$previous" == "-p" ]]; then
+			chunk_attempt_args[i]="$live_port"
+			return 0
+		fi
+		case "$arg" in
+			--port=*) chunk_attempt_args[i]="--port=$live_port"; return 0 ;;
+		esac
+		previous="$arg"
+	done
+	echo "A chunked ESP32 write has no serial port; refusing it." >&2
+	return 1
+}
+
 esp32_run_chunked_write_recovery() {
 	local requested_port=$1
 	shift
@@ -4662,7 +4711,8 @@ esp32_run_chunked_write_recovery() {
 			chunk_args=("${chunk_prefix[@]}" "$write_command" "$chunk_offset" "$chunk_file")
 			status=1
 			for ((attempt=1; attempt<=attempts; attempt++)); do
-				if ! esp32_prepare_esptool_attempt chunk_prepared_args port "${chunk_args[@]}"; then
+				if ! esp32_prepare_chunk_write_attempt chunk_prepared_args port \
+					"$requested_port" "${chunk_args[@]}"; then
 					if (( attempt < attempts )) \
 						&& esp32_recover_interrupted_transport "$requested_port"; then
 						continue
@@ -4676,6 +4726,7 @@ esp32_run_chunked_write_recovery() {
 					status=$?
 				fi
 				if (( status == 0 )) \
+					&& esp32_record_and_verify_probe_output "$output" \
 					&& esp32_esptool_output_confirms_destructive_success "$output" "${chunk_args[@]}"; then
 					break
 				fi
