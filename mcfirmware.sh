@@ -4477,6 +4477,221 @@ esp32_prepare_esptool_attempt() {
 	DEVICE_PORT="$prepared_port"
 }
 
+esptool_output_transport_interrupted() {
+	local output=$1
+
+	grep -qiE 'No more data to read from the serial port|device reports readiness to read but returned no data|serial exception error occurred|device disconnected|write timeout|timed out waiting for packet header|invalid head of packet|lost connection to' <<<"$output"
+}
+
+esp32_replace_after_mode() {
+	local args_name=$1
+	local mode=$2
+	local -n args_ref="$args_name"
+	local i arg previous=""
+
+	for ((i=0; i<${#args_ref[@]}; i++)); do
+		arg="${args_ref[i]}"
+		if [[ "$previous" == "--after" ]]; then
+			args_ref[i]="$mode"
+			return 0
+		fi
+		case "$arg" in
+			--after=*)
+				args_ref[i]="--after=$mode"
+				return 0
+				;;
+		esac
+		previous="$arg"
+	done
+
+	args_ref+=(--after "$mode")
+}
+
+esp32_recover_interrupted_transport() {
+	local requested_port=$1
+	local live_port="" reset_port="" candidate_port=""
+	local attempts="${ESP32_FLASH_RECOVERY_ATTEMPTS:-3}"
+	local attempt
+
+	if [[ ! "$attempts" =~ ^[1-5]$ ]]; then
+		echo "ESP32_FLASH_RECOVERY_ATTEMPTS must be between 1 and 5." >&2
+		return 1
+	fi
+
+	for ((attempt=1; attempt<=attempts; attempt++)); do
+		live_port="$(selected_flash_serial_port "$requested_port" 2>/dev/null || true)"
+		if [[ -z "$live_port" ]]; then
+			sleep 1
+			continue
+		fi
+
+		if ! esp32_port_uses_native_usb "$live_port"; then
+			# An external UART bridge repeats its configured default-reset during
+			# esp32_prepare_esptool_attempt. Waiting here is enough to let the
+			# bridge and ROM settle before that identity-gated retry.
+			sleep 2
+			return 0
+		fi
+
+		reset_port="${ESP32_FLASH_SELECTED_BY_ID:-$live_port}"
+		if [[ -n "${ESP32_FLASH_SELECTED_BY_ID:-}" \
+			&& "$(readlink -f "$reset_port" 2>/dev/null || true)" != "$live_port" ]]; then
+			echo "The selected ESP32 by-id identity no longer resolves to its verified port." >&2
+			return 1
+		fi
+
+		echo "Recovering the verified ESP32 native USB transport (attempt ${attempt}/${attempts})..."
+		ESP32_NATIVE_ROM_READY=0
+		if raw_esptool_mac_probe --port "$reset_port" --before "$USBRESET" \
+			--after "$NORESET" --baud 115200 "$READMAC"; then
+			ESP32_NATIVE_ROM_READY=1
+			DEVICE_PORT="$live_port"
+			return 0
+		fi
+
+		# A USB-reset probe may time out after it has already put the exact
+		# physical device in ROM. Re-resolve only the saved USB identity, then
+		# require the original chip MAC before permitting another write.
+		ESP32_NATIVE_ROM_READY=1
+		candidate_port="$(selected_flash_serial_port "$live_port" 2>/dev/null || true)"
+		if [[ -n "$candidate_port" ]] \
+			&& raw_esptool_mac_probe --port "$candidate_port" --before "$NORESET" \
+				--after "$NORESET" --baud 115200 "$READMAC"; then
+			DEVICE_PORT="$candidate_port"
+			return 0
+		fi
+		ESP32_NATIVE_ROM_READY=0
+		sleep 2
+	done
+
+	echo "The verified ESP32 USB transport did not recover; refusing to continue the partial write." >&2
+	return 1
+}
+
+esp32_run_chunked_write_recovery() {
+	local requested_port=$1
+	shift
+	# One 16 KiB chunk fits a single esptool transfer block. This keeps the
+	# recovery transaction below the disconnect point seen on unstable native
+	# USB hubs while avoiding sector overlap between independently retried writes.
+	local chunk_size="${ESP32_FLASH_RECOVERY_CHUNK_BYTES:-16384}"
+	local attempts="${ESP32_FLASH_RECOVERY_ATTEMPTS:-3}"
+	local command_seen=0 write_command="" arg
+	local pair_count pair_index image_offset image_file image_size
+	local base_offset byte_offset chunk_number chunk_offset chunk_bytes
+	local chunk_dir chunk_file output status attempt port=""
+	local is_final=0
+	local -a prefix=() operands=() chunk_prefix=() chunk_args=() prepared_args=()
+
+	if [[ ! "$chunk_size" =~ ^[0-9]+$ ]] \
+		|| (( chunk_size < 4096 || chunk_size > 262144 || chunk_size % 4096 != 0 )); then
+		echo "ESP32_FLASH_RECOVERY_CHUNK_BYTES must be a 4096-byte multiple from 4096 through 262144." >&2
+		return 1
+	fi
+	if [[ ! "$attempts" =~ ^[1-5]$ ]]; then
+		echo "ESP32_FLASH_RECOVERY_ATTEMPTS must be between 1 and 5." >&2
+		return 1
+	fi
+
+	for arg in "$@"; do
+		if (( ! command_seen )); then
+			case "$arg" in
+				write-flash|write_flash)
+					command_seen=1
+					write_command="$arg"
+					;;
+				*) prefix+=("$arg") ;;
+			esac
+		else
+			operands+=("$arg")
+		fi
+	done
+	if (( ! command_seen || ${#operands[@]} < 2 || ${#operands[@]} % 2 != 0 )); then
+		return 1
+	fi
+	for ((pair_index=0; pair_index<${#operands[@]}; pair_index+=2)); do
+		image_offset="${operands[pair_index]}"
+		image_file="${operands[pair_index + 1]}"
+		if [[ ! "$image_offset" =~ ^(0[xX][0-9a-fA-F]+|[0-9]+)$ || ! -r "$image_file" ]]; then
+			return 1
+		fi
+	done
+
+	chunk_dir="$(mktemp -d)" || return 1
+	pair_count=$((${#operands[@]} / 2))
+	echo "The monolithic ESP32 write lost its serial transport; retrying in ${chunk_size}-byte verified chunks."
+	if ! esp32_recover_interrupted_transport "$requested_port"; then
+		rm -rf -- "$chunk_dir"
+		return 1
+	fi
+
+	for ((pair_index=0; pair_index<pair_count; pair_index++)); do
+		image_offset="${operands[pair_index * 2]}"
+		image_file="${operands[pair_index * 2 + 1]}"
+		image_size="$(stat -c %s "$image_file")"
+		if [[ ! "$image_size" =~ ^[0-9]+$ || "$image_size" -eq 0 ]]; then
+			rm -rf -- "$chunk_dir"
+			return 1
+		fi
+		base_offset=$((image_offset))
+		chunk_number=0
+		for ((byte_offset=0; byte_offset<image_size; byte_offset+=chunk_size)); do
+			chunk_file="${chunk_dir}/chunk-${pair_index}-${chunk_number}.bin"
+			command dd if="$image_file" of="$chunk_file" bs="$chunk_size" \
+				skip="$chunk_number" count=1 status=none
+			chunk_bytes="$(stat -c %s "$chunk_file")"
+			chunk_offset="$(printf '0x%x' "$((base_offset + byte_offset))")"
+			is_final=0
+			if (( pair_index + 1 == pair_count && byte_offset + chunk_bytes >= image_size )); then
+				is_final=1
+			fi
+
+			chunk_prefix=("${prefix[@]}")
+			if (( ! is_final )); then
+				esp32_replace_after_mode chunk_prefix "$NORESET"
+			fi
+			chunk_args=("${chunk_prefix[@]}" "$write_command" "$chunk_offset" "$chunk_file")
+			status=1
+			for ((attempt=1; attempt<=attempts; attempt++)); do
+				if ! esp32_prepare_esptool_attempt prepared_args port "${chunk_args[@]}"; then
+					if (( attempt < attempts )) \
+						&& esp32_recover_interrupted_transport "$requested_port"; then
+						continue
+					fi
+					break
+				fi
+
+				if output="$(invoke_esptool "${prepared_args[@]}" 2>&1)"; then
+					status=0
+				else
+					status=$?
+				fi
+				if (( status == 0 )) \
+					&& esp32_esptool_output_confirms_destructive_success "$output" "${chunk_args[@]}"; then
+					break
+				fi
+				status=1
+				if ! esptool_output_transport_interrupted "$output" \
+					|| (( attempt == attempts )) \
+					|| ! esp32_recover_interrupted_transport "$requested_port"; then
+					printf '%s\n' "$output" >&2
+					break
+				fi
+			done
+			if (( status != 0 )); then
+				echo "ESP32 chunk recovery stopped at ${chunk_offset}; the device remains in its verified ROM session." >&2
+				rm -rf -- "$chunk_dir"
+				return 1
+			fi
+			chunk_number=$((chunk_number + 1))
+		done
+	done
+
+	rm -rf -- "$chunk_dir"
+	echo "ESP32 chunked recovery completed with esptool verification for every chunk."
+	return 0
+}
+
 run_esptool() {
 	local output status retry_output port="" tmpfile=""
 	local -a attempt_args=()
@@ -4621,6 +4836,11 @@ run_esptool() {
 			print_esptool_recovery_hint "$retry_output"
 			return "$status"
 		fi
+	fi
+
+	if [[ -n "$port" ]] && esptool_output_transport_interrupted "$output" \
+		&& esp32_run_chunked_write_recovery "$port" "$@"; then
+		return 0
 	fi
 
 	printf '%s\n' "$output" >&2
