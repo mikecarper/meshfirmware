@@ -264,6 +264,10 @@ force_time_sync() {
 DEVICE_NAME=""
 DETECTED_NODE_BOARD=""
 DETECTED_NODE_VERSION=""
+SETUP_USB_IDENTITY=""
+SETUP_USB_RESET_HELPER=""
+SETUP_USB_SELECTED_LINK=""
+MESHCORE_USB_RESET_TOOL_SHA256="091bade7b7960e3686a83fd37e1d2cabc7639724c51bbdb53b1729081e904c69"
 
 ensure_command jq
 ensure_command curl
@@ -616,6 +620,7 @@ choose_serial() {
 				detected_dev="${devs[0]}"
 	            #echo "Only one device detected - selecting it automatically: $detected_dev - ${labels[0]}"
 				DEVICE_NAME="$detected_dev"
+				SETUP_USB_SELECTED_LINK="/dev/serial/by-id/${labels[0]}"
 				return
 	        fi
 
@@ -633,11 +638,96 @@ choose_serial() {
 					detected_dev="${devs[choice-1]}"
 					echo "$detected_dev"
 					DEVICE_NAME="$detected_dev"
+					SETUP_USB_SELECTED_LINK="/dev/serial/by-id/${labels[choice-1]}"
 					return
 	            fi
         fi
         echo "Invalid selection - please try again."
     done
+}
+
+setup_usb_reset_helper_matches() {
+  local helper="$1" actual_hash
+  [[ -f "$helper" ]] || return 1
+  actual_hash="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read().replace(b"\r\n", b"\n")).hexdigest())' "$helper")" || return 1
+  [[ "$actual_hash" == "$MESHCORE_USB_RESET_TOOL_SHA256" ]]
+}
+
+resolve_setup_usb_reset_helper() {
+  local bundled="${PWD_SCRIPT}/tools/meshcore_usb_reset.py"
+  local cache_dir="${FIRMWARE_ROOT}/tools" cached partial
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "USB connection recovery requires Python 3; normal setup remains available." >&2
+    return 1
+  fi
+  if [[ -f "$bundled" ]]; then
+    setup_usb_reset_helper_matches "$bundled" || {
+      echo "Bundled USB reset helper does not match this mcsetup version." >&2
+      return 1
+    }
+    printf '%s\n' "$bundled"
+    return 0
+  fi
+  cached="${cache_dir}/meshcore_usb_reset.py"
+  if setup_usb_reset_helper_matches "$cached"; then
+    printf '%s\n' "$cached"
+    return 0
+  fi
+  mkdir -p "$cache_dir" || return 1
+  partial="$(mktemp "${cache_dir}/.usb-reset.XXXXXX")" || return 1
+  echo "Downloading the verified USB connection recovery helper..." >&2
+  if ! curl -fsSL --connect-timeout 10 --max-time 30 \
+    'https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_usb_reset.py' -o "$partial" \
+    || ! setup_usb_reset_helper_matches "$partial"; then
+    rm -f -- "$partial"
+    echo "USB reset helper unavailable or checksum mismatch; recovery is disabled." >&2
+    return 1
+  fi
+  if ! mv -f -- "$partial" "$cached"; then
+    rm -f -- "$partial"
+    return 1
+  fi
+  printf '%s\n' "$cached"
+}
+
+# Capture before any serial probes, not after an unresponsive tty has been reused.
+remember_setup_usb_identity() {
+  SETUP_USB_IDENTITY=""
+  SETUP_USB_RESET_HELPER=""
+  [[ -n "${DEVICE_NAME:-}" ]] || return 1
+  SETUP_USB_RESET_HELPER="$(resolve_setup_usb_reset_helper)" || return 1
+  SETUP_USB_IDENTITY="$(python3 "$SETUP_USB_RESET_HELPER" --inspect --port "${SETUP_USB_SELECTED_LINK:-$DEVICE_NAME}")" || return 1
+  [[ -n "$SETUP_USB_IDENTITY" ]]
+}
+
+# Return 1 for declined/unavailable; 2 after an attempted recovery fails. A caller
+# must stop on 2, since a reset may have happened without a verified tty returning.
+confirm_setup_usb_reset() {
+  local answer result fresh_port
+  if [[ -z "${SETUP_USB_IDENTITY:-}" || -z "${SETUP_USB_RESET_HELPER:-}" ]]; then
+    echo "USB identity was not captured at selection. Exit and select the radio again." >&2
+    return 1
+  fi
+  echo "Reset only the USB connection for ${DEVICE_NAME} (not a radio reboot)."
+  echo "This does not erase settings or enter the bootloader. Close other serial programs first."
+  read -rp "Reset this USB connection now? [y/N]: " answer || return 1
+  [[ "$answer" =~ ^[Yy]$ ]] || return 1
+  setup_usb_reset_helper_matches "$SETUP_USB_RESET_HELPER" || {
+    echo "USB reset helper changed; recovery cancelled." >&2
+    return 1
+  }
+  ensure_sudo_session || return 1
+  if ! result="$(timeout --kill-after=2 20 sudo -n python3 "$SETUP_USB_RESET_HELPER" --port "$DEVICE_NAME" \
+      --expected-identity "$SETUP_USB_IDENTITY" --timeout 10)"; then
+    echo "USB recovery failed. Setup stopped; check the connection and select the radio again." >&2
+    return 2
+  fi
+  fresh_port="$(jq -er --argjson expected "$SETUP_USB_IDENTITY" \
+    'select(.status == "reset" and .identity == ($expected.identity // $expected))
+     | .port | select(type == "string" and test("^/dev/tty[A-Za-z0-9]+$"))' <<<"$result")" || return 2
+  DEVICE_NAME="$fresh_port"
+  SETUP_USB_IDENTITY="$result"
+  echo "USB connection restored on ${DEVICE_NAME}."
 }
 
 ensure_serial_access() {
@@ -1235,6 +1325,7 @@ load_repeater_settings() {
 }
 
 edit_repeater_settings_menu() {
+  local reset_status
   while :; do
     echo
     echo "Current settings:"
@@ -1275,6 +1366,7 @@ edit_repeater_settings_menu() {
     echo " X) Remove neighbor by pubkey"
     echo " O) Start OTA"
     echo " K) Clock-reset reboot"
+    echo " U) Reset USB connection (not a radio reboot)"
     echo " C) Clear stats"
 	echo " Q) Quit"
     echo
@@ -1289,6 +1381,22 @@ edit_repeater_settings_menu() {
         echo "Reloading settings from device..."
         load_repeater_settings
 		snapshot_radio_baseline
+        ;;
+
+      u|U)
+        if confirm_setup_usb_reset; then
+          refresh_detected_node_info || true
+          device_epoch="$(read_device_clock_epoch)"
+          if [[ -n "$device_epoch" ]]; then
+            load_repeater_settings
+            snapshot_radio_baseline
+          else
+            echo "USB reset completed, but the radio still did not answer the clock query."
+          fi
+        else
+          reset_status=$?
+          if (( reset_status == 2 )); then return 2; fi
+        fi
         ;;
 
 		0)
@@ -1685,6 +1793,7 @@ prompt_clock_reset_and_retry_time_sync() {
 # Sync Time
 choose_serial || true
 if [[ -n "$DEVICE_NAME" ]]; then
+  remember_setup_usb_identity || true
   refresh_detected_node_info || true
   print_detected_node_summary
 fi
@@ -1693,6 +1802,18 @@ force_time_sync
 
 # Read clock from device
 device_epoch="$(read_device_clock_epoch)"
+
+if [[ -z "$device_epoch" && -n "$SETUP_USB_IDENTITY" ]]; then
+  echo "The radio did not answer. USB connection recovery may help a stalled USB interface."
+  if confirm_setup_usb_reset; then
+    refresh_detected_node_info || true
+    print_detected_node_summary
+    device_epoch="$(read_device_clock_epoch)"
+  else
+    reset_status=$?
+    if (( reset_status == 2 )); then exit 1; fi
+  fi
+fi
 
 # Current host UNIX time (seconds since epoch)
 host_epoch=$(date +%s)

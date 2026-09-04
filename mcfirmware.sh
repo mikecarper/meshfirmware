@@ -255,6 +255,11 @@ KEYMIND_CASCADE_LOGGING_FALLBACK_URL="${KEYMIND_RAW_BASE_URL}/mesh-america/keymi
 MESHCORE_BACKUP_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_backup.py"
 MESHCORE_BACKUP_TOOL_VERSION="0.2.0"
 MESHCORE_BACKUP_TOOL_SHA256="742008038ea7d636ded1a746152be5748578f93fd7619dbbe16bf40df2560559"
+MESHCORE_USB_RESET_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_usb_reset.py"
+MESHCORE_USB_RESET_TOOL_SHA256="091bade7b7960e3686a83fd37e1d2cabc7639724c51bbdb53b1729081e904c69"
+USB_RESET_EXPECTED_IDENTITY=""
+USB_RESET_FAILED=0
+USB_RESET_RECOVERED_PORT=""
 VENDORLIST="elecrow|heltec|lilygo|seeed|seed|studio|rak|wireless|wisblock|wismesh|raspberry|pi|pico|waveshare|promicro|uniteng|sensecap|wio|xiao"
 RADIOLIST="sx1262|sx126x|sx1276|sx127x"
 NORESET="no-reset"
@@ -974,6 +979,150 @@ resolve_meshcore_backup_tool() {
 	printf '%s\n' "$cached_tool"
 }
 
+meshcore_usb_reset_tool_hash_matches() {
+	local tool=$1 actual_hash=""
+	[[ -f "$tool" ]] || return 1
+	actual_hash="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read().replace(b"\r\n", b"\n")).hexdigest())' "$tool" 2>/dev/null)" || return 1
+	[[ "$actual_hash" == "$MESHCORE_USB_RESET_TOOL_SHA256" ]]
+}
+
+resolve_meshcore_usb_reset_tool() {
+	local local_tool="${PWD_SCRIPT}/tools/meshcore_usb_reset.py"
+	local tool_dir="${FIRMWARE_ROOT}/tools"
+	local cached_tool="${tool_dir}/meshcore_usb_reset.py" partial_tool=""
+	command -v python3 >/dev/null 2>&1 || {
+		echo "USB connection recovery needs Python 3." >&2
+		return 1
+	}
+	if [[ -f "$local_tool" ]]; then
+		if meshcore_usb_reset_tool_hash_matches "$local_tool"; then
+			printf '%s\n' "$local_tool"
+			return 0
+		fi
+		echo "The bundled USB recovery helper does not match this script; refusing to run it." >&2
+		return 1
+	fi
+	if meshcore_usb_reset_tool_hash_matches "$cached_tool"; then
+		printf '%s\n' "$cached_tool"
+		return 0
+	fi
+	mkdir -p "$tool_dir" || return 1
+	partial_tool="$(mktemp "${cached_tool}.partial.XXXXXX")" || return 1
+	echo "Downloading the USB connection recovery helper..." >&2
+	if ! curl -fL --retry 2 --connect-timeout 10 --max-time 30 \
+		-o "$partial_tool" "$MESHCORE_USB_RESET_TOOL_URL" \
+		|| ! meshcore_usb_reset_tool_hash_matches "$partial_tool"; then
+		echo "The USB recovery helper could not be downloaded and verified." >&2
+		rm -f -- "$partial_tool"
+		return 1
+	fi
+	if ! mv -f -- "$partial_tool" "$cached_tool"; then
+		rm -f -- "$partial_tool"
+		return 1
+	fi
+	printf '%s\n' "$cached_tool"
+}
+
+capture_selected_usb_reset_identity() {
+	local helper="" selected_link="" inspected_port=""
+	USB_RESET_EXPECTED_IDENTITY=""
+	[[ "$(uname -s)" == Linux ]] || return 1
+	helper="$(resolve_meshcore_usb_reset_tool)" || return 1
+	selected_link="$(nrf52_selected_by_id_path)"
+	[[ -n "$selected_link" ]] || return 1
+	# Inspect the saved by-id link, not a tty number that another radio may reuse.
+	USB_RESET_EXPECTED_IDENTITY="$(python3 "$helper" --port "$selected_link" --inspect)" || return 1
+	[[ -n "$USB_RESET_EXPECTED_IDENTITY" ]] || return 1
+	inspected_port="$(python3 -c '
+import json, sys
+result = json.loads(sys.argv[1])
+port = result.get("port", "")
+if result.get("status") != "inspected" or not isinstance(result.get("identity"), dict):
+    raise SystemExit(1)
+if not isinstance(port, str) or not port.startswith("/dev/tty") or any(c.isspace() for c in port):
+    raise SystemExit(1)
+print(port)
+' "$USB_RESET_EXPECTED_IDENTITY")" || return 1
+	[[ "$inspected_port" == "$(readlink -f "$selected_link")" && -e "$inspected_port" ]] || return 1
+	DEVICE_PORT="$inspected_port"
+}
+
+reset_selected_usb_connection() {
+	local port=$1 helper="" live_port="" output="" restored_port="" confirmed_port=""
+	if no_sudo_mode; then
+		echo "MCFIRMWARE_NO_SUDO=1: privileged USB connection recovery is disabled." >&2
+		return 1
+	fi
+	if [[ "$(uname -s)" != Linux || -z "${USB_RESET_EXPECTED_IDENTITY:-}" ]]; then
+		echo "No verified Linux USB identity was saved; reselect the radio before recovery." >&2
+		return 1
+	fi
+	live_port="$(selected_flash_serial_port "$port")" || return 1
+	helper="$(resolve_meshcore_usb_reset_tool)" || return 1
+	echo "Resetting only the selected radio's USB connection. No reboot, flash erase, or GPIO operation." >&2
+	# Fail closed once an attempt starts: a timeout may occur after the ioctl.
+	# Never continue flashing through the old tty after an uncertain reset.
+	USB_RESET_FAILED=1
+	USB_RESET_RECOVERED_PORT=""
+	if ! output="$(timeout --kill-after=2 20 sudo -n python3 "$helper" \
+		--port "$live_port" --timeout 10 --expected-identity "$USB_RESET_EXPECTED_IDENTITY")"; then
+		echo "USB recovery did not complete. Reselect the radio before flashing; no services were stopped." >&2
+		return 1
+	fi
+	if ! restored_port="$(python3 -c '
+import json, sys
+result = json.loads(sys.argv[1])
+expected = json.loads(sys.argv[2])
+expected = expected.get("identity", expected)
+port = result.get("port", "")
+if result.get("status") != "reset" or result.get("identity") != expected:
+    raise SystemExit(1)
+if not isinstance(port, str) or not port.startswith("/dev/tty") or any(c.isspace() for c in port):
+    raise SystemExit(1)
+print(port)
+' "$output" "$USB_RESET_EXPECTED_IDENTITY")"; then
+		echo "USB recovery returned an unverified device; flashing remains blocked." >&2
+		return 1
+	fi
+	# The original stable name must still resolve to the helper's exact result.
+	# Keep that name unchanged rather than replacing it from a new tty scan.
+	confirmed_port="$(readlink -f "$(nrf52_selected_by_id_path)" 2>/dev/null || true)"
+	if [[ "$restored_port" != "$confirmed_port" || ! -e "$confirmed_port" ]]; then
+		echo "The selected USB identity did not return on the verified port; flashing remains blocked." >&2
+		return 1
+	fi
+	printf '%s\n' "$restored_port" > "$DEVICE_PORT_FILE" || return 1
+	DEVICE_PORT="$restored_port"
+	DEVICE_NAME="$restored_port"
+	USB_RESET_FAILED=0
+	USB_RESET_RECOVERED_PORT="$restored_port"
+	echo "USB connection recovered on $restored_port; retrying the selected radio." >&2
+}
+
+prepare_selected_usb_connection() {
+	local port=$1 answer=""
+	USB_RESET_FAILED=0
+	USB_RESET_RECOVERED_PORT=""
+	DEVICE_PORT="$port"
+	if ! capture_selected_usb_reset_identity "$port"; then
+		USB_RESET_EXPECTED_IDENTITY=""
+		echo "USB connection reset is unavailable for this selection; ordinary probing can continue." >&2
+		return 0
+	fi
+	printf '%s\n' "$DEVICE_PORT" > "$DEVICE_PORT_FILE" || return 1
+	if no_sudo_mode; then
+		return 0
+	fi
+	if ! read -r -p "Reset USB connection before probing (not a radio reboot)? [y/N] " answer </dev/tty; then
+		return 0
+	fi
+	[[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]] || return 0
+	reset_selected_usb_connection "$DEVICE_PORT" || return 1
+	# Selection callers reload DEVICE_PORT immediately; no old argument remains.
+	# Do not carry an application USB recovery into a later ROM handoff.
+	USB_RESET_RECOVERED_PORT=""
+}
+
 ensure_meshcore_backup_python() {
 	local venv_dir="${FIRMWARE_ROOT}/tools/meshcore-backup-venv"
 	local venv_python="${venv_dir}/bin/python"
@@ -1554,6 +1703,10 @@ preferred_flash_serial_port() {
 selected_flash_serial_port() {
 	local fallback_port=$1
 	local selected_by_id="" live_port=""
+	if [[ "${USB_RESET_FAILED:-0}" -ne 0 ]]; then
+		echo "An incomplete USB recovery requires reselecting the radio; refusing the cached port." >&2
+		return 1
+	fi
 
 	# Device selection can be followed by several interactive/download steps.
 	# Never let a tty-number reuse during that interval replace the USB device the
@@ -3680,6 +3833,10 @@ choose_serial() {
         # -------------------------- single device --------------------------
         if ((${#devs[@]} == 1)); then
 			detected_dev="${devs[0]}"
+			echo "$detected_dev" > "$DEVICE_PORT_FILE"
+			echo "${labels[0]}" > "$DEVICE_PORT_NAME_FILE"
+			prepare_selected_usb_connection "$detected_dev" || return 1
+			detected_dev="$DEVICE_PORT"
 			echo "Trying to get meshcore info from the node"
 			node_info="$(read_node_info_with_retry "$detected_dev")"
 			IFS=$'\t' read -r board version <<< "$node_info"
@@ -3709,6 +3866,8 @@ choose_serial() {
 				echo "$detected_dev"
 				echo "$detected_dev" > "$DEVICE_PORT_FILE"
 				echo "${labels[choice-1]}" > "$DEVICE_PORT_NAME_FILE"
+				prepare_selected_usb_connection "$detected_dev" || return 1
+				detected_dev="$DEVICE_PORT"
 				node_info="$(read_node_info_with_retry "$detected_dev")"
 				IFS=$'\t' read -r board version <<< "$node_info"
 				DETECTED_NODE_BOARD="$board"
@@ -4223,8 +4382,9 @@ manual_reboot_choice() {
 	echo "Reboot the node connected to ${port:-the serial port}, wait 10 seconds, then choose:"
 	echo "  1) retry this step"
 	echo "  2) move on"
+	echo "  3) reset USB connection (not a radio reboot), then retry"
 	while :; do
-		read -r -p "Recovery choice [1/2]: " choice < /dev/tty
+		read -r -p "Recovery choice [1/2/3]: " choice < /dev/tty || return 1
 		case "$choice" in
 			1)
 				echo "Retrying ${step:-step} after manual reboot..."
@@ -4235,11 +4395,39 @@ manual_reboot_choice() {
 				echo "Moving on without retrying ${step:-this step}."
 				return 1
 				;;
+			3)
+				reset_selected_usb_connection "$port" || return 1
+				return 0
+				;;
 			*)
-				echo "Please enter 1 or 2."
+				echo "Please enter 1, 2, or 3."
 				;;
 		esac
 	done
+}
+
+refresh_usb_recovered_esptool_args() {
+	local -n reset_args=$1
+	local i=0 live_port=""
+	[[ -n "${USB_RESET_RECOVERED_PORT:-}" ]] || return 0
+	live_port="$(selected_flash_serial_port "$USB_RESET_RECOVERED_PORT")" || return 1
+	for ((i=0; i<${#reset_args[@]}; i++)); do
+		case "${reset_args[i]}" in
+			--port|-p)
+				(( i + 1 < ${#reset_args[@]} )) || return 1
+				reset_args[i+1]="$live_port"
+				USB_RESET_RECOVERED_PORT=""
+				return 0
+				;;
+			--port=*)
+				reset_args[i]="--port=$live_port"
+				USB_RESET_RECOVERED_PORT=""
+				return 0
+				;;
+		esac
+	done
+	echo "Cannot retry esptool after USB recovery without an explicit selected port." >&2
+	return 1
 }
 
 esp32_prepare_esptool_attempt() {
@@ -4252,7 +4440,10 @@ esp32_prepare_esptool_attempt() {
 	local i
 
 	prepared_args=("$@")
-	prepared_port="$(esptool_port_argument "$@" 2>/dev/null || true)"
+	if [[ -n "${USB_RESET_RECOVERED_PORT:-}" ]]; then
+		refresh_usb_recovered_esptool_args "$args_name" || return 1
+	fi
+	prepared_port="$(esptool_port_argument "${prepared_args[@]}" 2>/dev/null || true)"
 	if ! esp32_esptool_args_are_destructive "$@"; then
 		return 0
 	fi
@@ -4829,16 +5020,21 @@ finish_esp32_flash_session() {
 
 probe_esptool() {
 	local output status port="" retry_output
+	local -a attempt_args=("$@")
+	if [[ -n "${USB_RESET_RECOVERED_PORT:-}" ]]; then
+		refresh_usb_recovered_esptool_args attempt_args || return 1
+	fi
 
-	for ((i=1; i<=$#; i++)); do
-		if [[ "${!i}" == "--port" ]] && (( i < $# )); then
-			j=$((i + 1))
-			port="${!j}"
+	for ((i=0; i<${#attempt_args[@]}; i++)); do
+		if [[ "${attempt_args[i]}" == "--port" || "${attempt_args[i]}" == "-p" ]] \
+			&& (( i + 1 < ${#attempt_args[@]} )); then
+			port="${attempt_args[i+1]}"
 			break
 		fi
+		[[ "${attempt_args[i]}" != --port=* ]] || port="${attempt_args[i]#--port=}"
 	done
 
-	if output=$(invoke_esptool "$@" 2>&1); then
+	if output=$(invoke_esptool "${attempt_args[@]}" 2>&1); then
 		return 0
 	else
 		status=$?
@@ -4849,7 +5045,7 @@ probe_esptool() {
 			printf '%s\n' "$output" >&2
 			return "$status"
 		fi
-		if retry_output=$(invoke_esptool "$@" 2>&1); then
+		if retry_output=$(invoke_esptool "${attempt_args[@]}" 2>&1); then
 			return 0
 		else
 			status=$?
@@ -4866,7 +5062,7 @@ probe_esptool() {
 		if [[ -n "$port" ]]; then
 			sudo chmod a+rw "$port"
 		fi
-		if retry_output=$(invoke_esptool "$@" 2>&1); then
+		if retry_output=$(invoke_esptool "${attempt_args[@]}" 2>&1); then
 			return 0
 		else
 			status=$?
@@ -4877,13 +5073,16 @@ probe_esptool() {
 
 	if [[ "${MESH_DISABLE_1200_RECOVERY:-0}" != "1" && -n "$port" ]] && esptool_output_needs_reset "$output"; then
 		if auto_reset_serial_port "$port"; then
-			if retry_output=$(invoke_esptool "$@" 2>&1); then
+			if retry_output=$(invoke_esptool "${attempt_args[@]}" 2>&1); then
 				return 0
 			else
 				status=$?
 			fi
 			if manual_reboot_choice "$port" "bootloader probe"; then
-				if retry_output=$(invoke_esptool "$@" 2>&1); then
+				if [[ -n "${USB_RESET_RECOVERED_PORT:-}" ]]; then
+					refresh_usb_recovered_esptool_args attempt_args || return 1
+				fi
+				if retry_output=$(invoke_esptool "${attempt_args[@]}" 2>&1); then
 					return 0
 				else
 					status=$?
@@ -4900,16 +5099,21 @@ probe_esptool() {
 
 probe_esptool_mac() {
 	local output status port="" retry_output
+	local -a attempt_args=("$@")
+	if [[ -n "${USB_RESET_RECOVERED_PORT:-}" ]]; then
+		refresh_usb_recovered_esptool_args attempt_args || return 1
+	fi
 
-	for ((i=1; i<=$#; i++)); do
-		if [[ "${!i}" == "--port" ]] && (( i < $# )); then
-			j=$((i + 1))
-			port="${!j}"
+	for ((i=0; i<${#attempt_args[@]}; i++)); do
+		if [[ "${attempt_args[i]}" == "--port" || "${attempt_args[i]}" == "-p" ]] \
+			&& (( i + 1 < ${#attempt_args[@]} )); then
+			port="${attempt_args[i+1]}"
 			break
 		fi
+		[[ "${attempt_args[i]}" != --port=* ]] || port="${attempt_args[i]#--port=}"
 	done
 
-	if output=$(invoke_esptool "$@" 2>&1); then
+	if output=$(invoke_esptool "${attempt_args[@]}" 2>&1); then
 		esp32_record_and_verify_probe_output "$output"
 		return $?
 	else
@@ -4921,7 +5125,7 @@ probe_esptool_mac() {
 			printf '%s\n' "$output" >&2
 			return "$status"
 		fi
-		if retry_output=$(invoke_esptool "$@" 2>&1); then
+		if retry_output=$(invoke_esptool "${attempt_args[@]}" 2>&1); then
 			esp32_record_and_verify_probe_output "$retry_output"
 			return $?
 		else
@@ -4939,7 +5143,7 @@ probe_esptool_mac() {
 		if [[ -n "$port" ]]; then
 			sudo chmod a+rw "$port"
 		fi
-		if retry_output=$(invoke_esptool "$@" 2>&1); then
+		if retry_output=$(invoke_esptool "${attempt_args[@]}" 2>&1); then
 			esp32_record_and_verify_probe_output "$retry_output"
 			return $?
 		else
@@ -4951,14 +5155,17 @@ probe_esptool_mac() {
 
 	if [[ "${MESH_DISABLE_1200_RECOVERY:-0}" != "1" && -n "$port" ]] && esptool_output_needs_reset "$output"; then
 		if auto_reset_serial_port "$port"; then
-			if retry_output=$(invoke_esptool "$@" 2>&1); then
+			if retry_output=$(invoke_esptool "${attempt_args[@]}" 2>&1); then
 				esp32_record_and_verify_probe_output "$retry_output"
 				return $?
 			else
 				status=$?
 			fi
 			if manual_reboot_choice "$port" "ESP32 MAC probe"; then
-				if retry_output=$(invoke_esptool "$@" 2>&1); then
+				if [[ -n "${USB_RESET_RECOVERED_PORT:-}" ]]; then
+					refresh_usb_recovered_esptool_args attempt_args || return 1
+				fi
+				if retry_output=$(invoke_esptool "${attempt_args[@]}" 2>&1); then
 					esp32_record_and_verify_probe_output "$retry_output"
 					return $?
 				else

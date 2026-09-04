@@ -35,6 +35,32 @@ cd meshfirmware
 
 </details>
 
+### Recover a stalled USB connection (Linux)
+
+`mcsetup.sh` has a **U) Reset USB connection** action and offers recovery when
+the radio does not answer its initial clock query. The MeshCore flasher,
+`mcfirmware.sh`, offers USB connection recovery before probing the selected
+radio and in its manual recovery menu.
+
+This is the device-only USB reset used to recover a stalled Station G2 USB
+interface. It reconnects USB; it does **not** reboot the radio CPU, enter the
+bootloader, erase flash, change settings, or toggle a GPIO relay. It is
+separate from the firmware's `reboot` command and the flasher's bootloader-entry
+sequence. It cannot repair a radio whose firmware itself is hung.
+
+Recovery is optional (default **No**) and requires Linux and `sudo`. Close any
+serial terminal or stop the service using that radio first; recovery refuses
+busy ports rather than stopping programs. The tools save the selected USB
+identity before probing, reject hubs or a different/replaced device, and only
+continue with a verified returning port. If recovery fails, select the radio
+again instead of retrying a possibly reused tty number. The flasher's
+`MCFIRMWARE_NO_SUDO=1` mode does not perform USB resets.
+
+The shared Python helper is included in a checkout. Single-script downloads
+fetch a copy with a checksum pinned by the script; a missing or mismatched
+helper disables recovery. This Linux feature does not change `mcsetup.cmd`
+or `firmware.cmd` on Windows.
+
 ### nRF52 RAK board safety check
 
 `mcfirmware.sh` checks RAK3401 and RAK4631/WisMesh Tag firmware before any
