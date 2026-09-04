@@ -147,6 +147,8 @@ esptool_output_transport_interrupted \
 	'A fatal error occurred: No more data to read from the serial port.'
 esptool_output_transport_interrupted \
 	'A serial exception error occurred: device reports readiness to read but returned no data'
+esptool_output_transport_interrupted \
+	'A fatal error occurred: Serial data stream stopped: Possible serial noise or corruption.'
 if esptool_output_transport_interrupted 'A fatal error occurred: invalid image header'; then
 	echo "FAIL: a non-transport flash error was classified as recoverable" >&2
 	exit 1
