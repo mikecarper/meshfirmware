@@ -21,7 +21,8 @@ extract_function() {
 
 for function_name in no_sudo_mode reset_selected_usb_connection \
 	selected_flash_serial_port refresh_usb_recovered_esptool_args \
-	capture_selected_usb_reset_identity; do
+	capture_selected_usb_reset_identity usb_reset_host_controller \
+	require_safe_usb_reset_host; do
 	definition="$(extract_function "$function_name")"
 	[[ "$definition" == "$function_name() {"* ]]
 	eval "$definition"
@@ -77,6 +78,12 @@ USB_RESET_EXPECTED_IDENTITY=""
 expect_failure reset_selected_usb_connection "$DEVICE_PORT"
 [[ ! -s "$sudo_log" ]]
 echo 'PASS: missing pre-probe identity refuses reset'
+
+fresh_selection
+USB_RESET_EXPECTED_IDENTITY='{"status":"inspected","host_controller":"dwc_otg","identity":{"usb_serial":"ABC","usb_path":"1-1"}}'
+expect_failure reset_selected_usb_connection "$DEVICE_PORT"
+[[ ! -s "$sudo_log" && "$USB_RESET_FAILED" == 0 ]]
+echo 'PASS: unsafe Raspberry Pi controller is rejected before sudo or USB I/O'
 
 fresh_selection
 reset_selected_usb_connection "$DEVICE_PORT" > "$tmp_dir/stdout"

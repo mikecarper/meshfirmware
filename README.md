@@ -56,6 +56,14 @@ continue with a verified returning port. If recovery fails, select the radio
 again instead of retrying a possibly reused tty number. The flasher's
 `MCFIRMWARE_NO_SUDO=1` mode does not perform USB resets.
 
+On Raspberry Pi, the reset helper also resolves the live host-controller
+driver from sysfs. It refuses to issue `USBDEVFS_RESET` through the legacy
+`dwc_otg` driver because cancelling an active USB request can freeze the Pi.
+Use the radio's normal bootloader entry or physically reconnect only that
+radio, then reselect it. The script does not offer to replace `dwc_otg` with
+`dwc2`: live testing on a Zero 2 W with nested hubs found repeated whole-tree
+disconnects under `dwc2`.
+
 The shared Python helper is included in a checkout. Single-script downloads
 fetch a copy with a checksum pinned by the script; a missing or mismatched
 helper disables recovery. This Linux feature does not change `mcsetup.cmd`

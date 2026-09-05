@@ -256,7 +256,7 @@ MESHCORE_BACKUP_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfirmw
 MESHCORE_BACKUP_TOOL_VERSION="0.2.0"
 MESHCORE_BACKUP_TOOL_SHA256="742008038ea7d636ded1a746152be5748578f93fd7619dbbe16bf40df2560559"
 MESHCORE_USB_RESET_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_usb_reset.py"
-MESHCORE_USB_RESET_TOOL_SHA256="091bade7b7960e3686a83fd37e1d2cabc7639724c51bbdb53b1729081e904c69"
+MESHCORE_USB_RESET_TOOL_SHA256="364de4c2e100df3ec2be795fc6079722ce1790416ba5a2d04d0c53e6c87c7083"
 USB_RESET_EXPECTED_IDENTITY=""
 USB_RESET_FAILED=0
 USB_RESET_RECOVERED_PORT=""
@@ -1047,6 +1047,31 @@ print(port)
 	DEVICE_PORT="$inspected_port"
 }
 
+usb_reset_host_controller() {
+	python3 -c '
+import json, re, sys
+result = json.loads(sys.argv[1])
+driver = result.get("host_controller", "unknown")
+if not isinstance(driver, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", driver):
+    raise SystemExit(1)
+print(driver)
+' "${USB_RESET_EXPECTED_IDENTITY:-}" 2>/dev/null
+}
+
+require_safe_usb_reset_host() {
+	local controller=""
+	controller="$(usb_reset_host_controller)" || {
+		echo "The USB host controller could not be verified; USB reset is unavailable." >&2
+		return 1
+	}
+	[[ "$controller" == "dwc_otg" ]] || return 0
+
+	echo "USB reset is unsafe on the active Raspberry Pi dwc_otg host driver." >&2
+	echo "That legacy driver can freeze the whole Pi while cancelling USB requests." >&2
+	echo "Physically reconnect only the selected radio, or use its normal bootloader entry, then reselect it." >&2
+	return 1
+}
+
 reset_selected_usb_connection() {
 	local port=$1 helper="" live_port="" output="" restored_port="" confirmed_port=""
 	if no_sudo_mode; then
@@ -1057,6 +1082,7 @@ reset_selected_usb_connection() {
 		echo "No verified Linux USB identity was saved; reselect the radio before recovery." >&2
 		return 1
 	fi
+	require_safe_usb_reset_host || return 1
 	live_port="$(selected_flash_serial_port "$port")" || return 1
 	helper="$(resolve_meshcore_usb_reset_tool)" || return 1
 	echo "Resetting only the selected radio's USB connection. No reboot, flash erase, or GPIO operation." >&2

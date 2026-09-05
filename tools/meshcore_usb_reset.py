@@ -27,6 +27,7 @@ from typing import Any
 
 USBDEVFS_RESET = 0x5514
 IDENTITY_FIELDS = ("usb_path", "usb_serial", "vendor_id", "product_id", "interface")
+UNSAFE_HOST_CONTROLLERS = {"dwc_otg"}
 
 
 class ResetError(RuntimeError):
@@ -162,6 +163,32 @@ def verify_identity(port: UsbPort, expected: dict[str, str]) -> None:
         raise ResetError("USB identity changed since selection; reselect the intended radio before resetting.")
 
 
+def host_controller_driver(port: UsbPort) -> str:
+    """Return the platform host driver above this USB device, if identifiable."""
+    for ancestor in (port.usb_path, *port.usb_path.parents):
+        driver_link = ancestor / "driver"
+        try:
+            if not driver_link.is_symlink():
+                continue
+            driver = driver_link.resolve(strict=True).name
+        except OSError:
+            continue
+        if driver in {"dwc_otg", "dwc2"} or driver.startswith(("xhci", "ehci", "ohci")):
+            return driver
+    return "unknown"
+
+
+def require_safe_host_controller(port: UsbPort) -> None:
+    driver = host_controller_driver(port)
+    if driver in UNSAFE_HOST_CONTROLLERS:
+        raise ResetError(
+            "Refusing USB reset on the legacy Raspberry Pi dwc_otg host driver; "
+            "it can freeze the host while dequeuing USB requests. Physically "
+            "reconnect the selected radio or use its normal bootloader entry, "
+            "then reselect it."
+        )
+
+
 def serial_owners(ports: list[UsbPort], proc_root: Path = Path("/proc")) -> list[int]:
     """Fail closed when any process's tty ownership cannot be checked."""
     try:
@@ -252,6 +279,7 @@ def reset_port(port: str | Path, expected: dict[str, str], timeout: float = 10,
 
     selected = inspect_port(port, sys_root, dev_root)
     verify_identity(selected, expected)
+    require_safe_host_controller(selected)
     ports = sibling_ports(selected, sys_root, dev_root)
     require_primary_port(selected, ports)
     require_unused(ports, proc_root)
@@ -304,6 +332,7 @@ def main(argv: list[str] | None = None) -> int:
             selected = inspect_port(args.port)
             require_primary_port(selected, sibling_ports(selected))
             result = selected.result("inspected")
+            result["host_controller"] = host_controller_driver(selected)
         else:
             if not args.expected_identity:
                 raise ResetError("Capture --inspect before resetting and provide its --expected-identity JSON.")

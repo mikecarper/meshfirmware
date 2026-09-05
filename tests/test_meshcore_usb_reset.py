@@ -70,6 +70,11 @@ class FakeSysfs(unittest.TestCase):
         self.device_numbers[port] = rdev
         return port
 
+    def set_host_controller(self, name):
+        driver = self.sys / "bus" / "platform" / "drivers" / name
+        driver.mkdir(parents=True)
+        (self.physical.parent / "driver").symlink_to(driver)
+
     def inspect(self, port=None):
         return usb.inspect_port(port or self.port, self.sys, self.dev)
 
@@ -143,6 +148,15 @@ class FakeSysfs(unittest.TestCase):
             changed = dict(selected.identity(), **{field: "different"})
             with self.subTest(field=field), self.assertRaisesRegex(usb.ResetError, "identity changed"):
                 usb.verify_identity(selected, changed)
+
+    def test_host_controller_is_resolved_from_device_ancestors(self):
+        self.set_host_controller("dwc2")
+        self.assertEqual(usb.host_controller_driver(self.inspect()), "dwc2")
+
+    def test_legacy_raspberry_pi_host_controller_is_rejected(self):
+        self.set_host_controller("dwc_otg")
+        with self.assertRaisesRegex(usb.ResetError, "can freeze the host"):
+            usb.require_safe_host_controller(self.inspect())
 
     def test_identity_parser_accepts_inspection_or_inner_identity(self):
         selected = self.inspect()
@@ -249,6 +263,16 @@ class ResetExecutionTests(unittest.TestCase):
         self.assertEqual(self.unused.call_count, 2)
         self.assertEqual(self.inspect.call_count, 3)
 
+    def test_unsafe_host_controller_never_opens_device(self):
+        self.patch.object(
+            usb, "require_safe_host_controller",
+            side_effect=usb.ResetError("unsafe host controller"),
+        )
+        with self.assertRaisesRegex(usb.ResetError, "unsafe host controller"):
+            self.reset()
+        self.open.assert_not_called()
+        self.fake_fcntl.ioctl.assert_not_called()
+
     def test_requires_root(self):
         self.uid.return_value = 1000
         with self.assertRaisesRegex(usb.ResetError, "sudo/root"):
@@ -320,7 +344,10 @@ class ResetExecutionTests(unittest.TestCase):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             self.assertEqual(usb.main(["--port", "/dev/ttyACM0", "--inspect"]), 0)
-        self.assertEqual(json.loads(output.getvalue()), self.selected.result("inspected"))
+        self.assertEqual(json.loads(output.getvalue()), {
+            **self.selected.result("inspected"),
+            "host_controller": "unknown",
+        })
         self.open.assert_not_called()
         self.uid.assert_not_called()
 
