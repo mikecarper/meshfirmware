@@ -19,6 +19,7 @@ extract_function() {
 }
 
 for function_name in parse_esp32_app_partitions \
+	parse_esp32_ota_data_partition parse_esp32_active_ota_offset \
 	esp32_prepare_merged_ota_mirror read_esp32_app_partitions \
 	esp32_firmware_fits_app_partition esp32_device_image_present_at_offset \
 	esp32_update_flash_offsets; do
@@ -44,7 +45,8 @@ import sys
 
 output = bytearray(b"\xff" * 0x1000)
 entries = [
-    (0x01, 0x02, 0x9000, 0x5000, "nvs"),
+	(0x01, 0x02, 0xb000, 0x5000, "nvs"),
+	(0x01, 0x00, 0x9000, 0x2000, "otadata"),
     (0x00, 0x10, 0x10000, 0x280000, "app0"),
     (0x00, 0x11, 0x400000, 0x280000, "app1"),
     (0x00, 0x20, 0x680000, 0x10000, "test"),
@@ -60,6 +62,35 @@ PY
 parsed_partitions="$(parse_esp32_app_partitions "$partition_fixture")"
 [[ "$parsed_partitions" == $'0x10000\t0x280000\t0x10\n0x400000\t0x280000\t0x11\n0x680000\t0x10000\t0x20' ]]
 echo "PASS: ESP32 partition parsing preserves OTA subtypes"
+
+ota_layout="$(parse_esp32_ota_data_partition "$partition_fixture")"
+[[ "$ota_layout" == $'0x9000\t0x2000' ]]
+
+otadata_fixture="${tmp_dir}/otadata.bin"
+python3 - "$otadata_fixture" <<'PY'
+import struct
+import sys
+import zlib
+
+output = bytearray(b"\xff" * 0x2000)
+for sector, seq, state in ((0, 1, 0xffffffff), (0x1000, 2, 0x2)):
+    crc = zlib.crc32(struct.pack("<I", seq), 0xffffffff) & 0xffffffff
+    output[sector:sector + 32] = struct.pack(
+        "<I20sII", seq, b"\xff" * 20, state, crc
+    )
+open(sys.argv[1], "wb").write(output)
+PY
+[[ "$(parse_esp32_active_ota_offset "$partition_fixture" "$otadata_fixture")" == "0x400000" ]]
+printf '\377\377\377\377' | dd of="$otadata_fixture" bs=1 seek=$((0x1000 + 28)) conv=notrunc status=none
+[[ "$(parse_esp32_active_ota_offset "$partition_fixture" "$otadata_fixture")" == "0x10000" ]]
+truncate -s 4096 "$otadata_fixture"
+if parse_esp32_active_ota_offset "$partition_fixture" "$otadata_fixture" \
+	>"${tmp_dir}/short-otadata.out" 2>"${tmp_dir}/short-otadata.err"; then
+	echo "FAIL: a truncated otadata read selected an active slot" >&2
+	exit 1
+fi
+grep -Fq 'two complete flash sectors' "${tmp_dir}/short-otadata.err"
+echo "PASS: ESP32 otadata parser selects the newest valid slot and fails closed"
 
 make_merged_fixture() {
 	local output_file=$1
@@ -212,22 +243,34 @@ read_esp32_app_partitions() {
 		$'0x400000\t0x280000\t0x11' \
 		$'0x10000\t0x280000\t0x10'
 }
+export TEST_ACTIVE_OTA_OFFSET=0x10000
+read_esp32_active_ota_offset() { printf '%s\n' "$TEST_ACTIVE_OTA_OFFSET"; }
 esp32_device_image_present_at_offset() {
 	echo "OTA slot population probe must not be called" >&2
 	return 2
 }
 offsets="$(esp32_update_flash_offsets /dev/mock "$firmware" 2>"${tmp_dir}/ota-slots.err")"
-[[ "$offsets" == $'0x10000\n0x400000' ]]
+[[ "$offsets" == $'0x400000\n0x10000' ]]
 grep -Fq 'empty OTA slots are mirrored too' "${tmp_dir}/ota-slots.err"
+grep -Fq 'Active ESP32 OTA slot 0x10000 will be written last' \
+	"${tmp_dir}/ota-slots.err"
 if grep -Fq 'population probe' "${tmp_dir}/ota-slots.err"; then
 	echo "FAIL: OTA slot selection still probed whether the secondary was populated" >&2
 	exit 1
 fi
 echo "PASS: app-only ESP32 updates select every OTA slot even when blank"
 
+export TEST_ACTIVE_OTA_OFFSET=0x400000
+offsets="$(esp32_update_flash_offsets /dev/mock "$firmware" 2>"${tmp_dir}/ota1-active.err")"
+[[ "$offsets" == $'0x10000\n0x400000' ]]
+grep -Fq 'Active ESP32 OTA slot 0x400000 will be written last' \
+	"${tmp_dir}/ota1-active.err"
+echo "PASS: whichever ESP32 OTA slot is active is selected last"
+
 read_esp32_app_partitions() {
 	printf '%s\n' $'0x10000\t0x1000\t0x0' $'0x400000\t0x1000\t0x11'
 }
+export TEST_ACTIVE_OTA_OFFSET=0x400000
 offsets="$(esp32_update_flash_offsets /dev/mock "$firmware" 2>"${tmp_dir}/missing-ota0.err")"
 [[ "$offsets" == "0x400000" ]]
 grep -Fq 'OTA slots but no ota_0 subtype; using 0x400000' \
@@ -237,6 +280,7 @@ echo "PASS: a table without ota_0 still selects an OTA slot instead of factory"
 read_esp32_app_partitions() {
 	printf '%s\n' $'0x10000\t0x1000\t0x10' $'0x400000\t0x4\t0x11'
 }
+export TEST_ACTIVE_OTA_OFFSET=0x10000
 if esp32_update_flash_offsets /dev/mock "$firmware" \
 	>"${tmp_dir}/undersized-slot.out" 2>"${tmp_dir}/undersized-slot.err"; then
 	echo "FAIL: an app-only image larger than an OTA slot was accepted" >&2
@@ -246,3 +290,19 @@ fi
 grep -Fq 'app partition at 0x400000 is only 4 bytes (0x4)' \
 	"${tmp_dir}/undersized-slot.err"
 echo "PASS: app-only ESP32 updates fail before writing an undersized OTA slot"
+
+python3 - "$script_path" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+start = source.index('ESP32_UPDATE_OFFSETS_OUTPUT=""')
+end = source.index('finish_esp32_flash_session "${DEVICE_PORT}"', start)
+flow = source[start:end]
+assert 'for ((i=0; i<${#ESP32_UPDATE_OFFSETS[@]}; i++)); do' in flow
+assert 'ESP32_SLOT_WRITE_AFTER="$NORESET"' in flow
+assert 'run_esp32_session_esptool "${DEVICE_PORT}"' in flow
+assert '"$flash_offset" "${DOWNLOADED_FILE}"' in flow
+assert 'ESP32_WRITE_ARGS' not in flow
+print("PASS: each ESP32 app slot is a separate verified write phase")
+PY

@@ -5123,22 +5123,15 @@ prepare_esp32_flash_session() {
 
 	# Native-USB ESP32 applications, including both single-CDC firmware and Full
 	# Companion's interface 00/02 pair, use esptool's USB-JTAG reset sequence to
-	# enter the ROM. Some boards, including Heltec V4, ignore the nRF52-style
-	# 1200-baud touch while --before=usb-reset works on the existing application
-	# port. Prefer the selected by-id link so a tty-number change cannot redirect
-	# the reset to another board. The ROM may retain the same tty or re-enumerate
-	# with a different product name and serial punctuation; in either case, match
-	# the captured physical USB identity before allowing any erase or write.
+	# enter the ROM. Never send an ordinary no-reset sync probe first: a damaged
+	# application can leave USB-Serial/JTAG enumerated without servicing CDC OUT,
+	# and writing SLIP sync bytes to that dead endpoint can wedge a DWC USB host.
+	# USB-reset is also safe when the selected device is already in ROM. Prefer
+	# the selected by-id link so a tty-number change cannot redirect the reset to
+	# another board. The ROM may retain the same tty or re-enumerate with a
+	# different product name and serial punctuation; in either case, match the
+	# captured physical USB identity before allowing any erase or write.
 	if esp32_port_uses_native_usb "$port"; then
-		if raw_esptool_mac_probe --port "$port" --before "$NORESET" \
-			--after "$NORESET" --baud 115200 "$READMAC"; then
-			ESP32_NATIVE_ROM_READY=1
-			echo "Selected ESP32 native USB port is already in ROM bootloader mode."
-			rm -f "$DOWNLOAD_DIR/CURRENT.BAK"
-			echo
-			return 0
-		fi
-
 		reset_port="${selected_by_id:-$port}"
 		if [[ -n "$selected_by_id" ]]; then
 			selected_live_port="$(readlink -f "$selected_by_id" 2>/dev/null || true)"
@@ -5517,6 +5510,137 @@ for i in range(0, min(len(data), 0x1000), 32):
 PY
 }
 
+parse_esp32_ota_data_partition() {
+	local partition_file="$1"
+
+	python3 - "$partition_file" <<'PY'
+import struct
+import sys
+
+data = open(sys.argv[1], "rb").read()
+for i in range(0, min(len(data), 0x1000), 32):
+    entry = data[i:i + 32]
+    if len(entry) < 32 or entry[0:2] == b"\xff\xff":
+        break
+    if entry[0:2] != b"\xaa\x50":
+        continue
+    part_type, subtype = entry[2], entry[3]
+    offset, size = struct.unpack_from("<II", entry, 4)
+    if part_type == 0x01 and subtype == 0x00 and offset and size >= 0x2000:
+        print(f"0x{offset:x}\t0x2000")
+        raise SystemExit(0)
+
+print("ERROR: ESP32 partition table has OTA app slots but no usable otadata partition.", file=sys.stderr)
+raise SystemExit(1)
+PY
+}
+
+parse_esp32_active_ota_offset() {
+	local partition_file="$1"
+	local otadata_file="$2"
+
+	python3 - "$partition_file" "$otadata_file" <<'PY'
+import struct
+import sys
+import zlib
+
+partition_path, otadata_path = sys.argv[1:3]
+table = open(partition_path, "rb").read()
+otadata = open(otadata_path, "rb").read()
+
+ota_slots = []
+for i in range(0, min(len(table), 0x1000), 32):
+    entry = table[i:i + 32]
+    if len(entry) < 32 or entry[0:2] == b"\xff\xff":
+        break
+    if entry[0:2] != b"\xaa\x50" or entry[2] != 0x00:
+        continue
+    subtype = entry[3]
+    offset, _ = struct.unpack_from("<II", entry, 4)
+    if 0x10 <= subtype <= 0x1f and offset:
+        ota_slots.append((subtype, offset))
+
+ota_slots.sort()
+if not ota_slots:
+    print("ERROR: no OTA app slots were available while parsing otadata.", file=sys.stderr)
+    raise SystemExit(1)
+if len(otadata) != 0x2000:
+    print("ERROR: otadata read did not return two complete flash sectors.", file=sys.stderr)
+    raise SystemExit(1)
+
+valid = []
+for sector in (0, 0x1000):
+    entry = otadata[sector:sector + 32]
+    seq, = struct.unpack_from("<I", entry, 0)
+    state, stored_crc = struct.unpack_from("<II", entry, 24)
+    expected_crc = zlib.crc32(struct.pack("<I", seq), 0xffffffff) & 0xffffffff
+    if seq not in (0, 0xffffffff) and stored_crc == expected_crc \
+            and state not in (0x3, 0x4):
+        valid.append(seq)
+
+if not valid:
+    # ESP-IDF's documented initial-otadata behavior selects ota_0 when there is
+    # no factory partition. The sorted first OTA subtype is that same slot.
+    active_index = 0
+else:
+    newest = valid[0]
+    for candidate in valid[1:]:
+        delta = (candidate - newest) & 0xffffffff
+        if 0 < delta < 0x80000000:
+            newest = candidate
+    active_index = (newest - 1) % len(ota_slots)
+
+print(f"0x{ota_slots[active_index][1]:x}")
+PY
+}
+
+read_esp32_active_ota_offset() {
+	local port="$1"
+	local partition_file otadata_file ota_layout="" ota_offset ota_size
+	local partition_size="" otadata_size="" active_offset=""
+
+	partition_file="$(mktemp)" || return 1
+	otadata_file="$(mktemp)" || {
+		rm -f -- "$partition_file"
+		return 1
+	}
+	if ! run_esp32_session_esptool "$port" --after "$NORESET" \
+		--baud "${ESP32_SAFE_BAUD:-115200}" "$READFLASH" \
+		0x8000 0x1000 "$partition_file" >/dev/null; then
+		echo "ERROR: could not read the ESP32 partition table while identifying the active OTA slot." >&2
+		rm -f -- "$partition_file" "$otadata_file"
+		return 1
+	fi
+	partition_size="$(stat -c '%s' "$partition_file" 2>/dev/null || true)"
+	if [[ "$partition_size" != "4096" ]] \
+		|| ! ota_layout="$(parse_esp32_ota_data_partition "$partition_file")"; then
+		echo "ERROR: could not identify a complete ESP32 otadata partition; refusing a non-transactional update." >&2
+		rm -f -- "$partition_file" "$otadata_file"
+		return 1
+	fi
+	read -r ota_offset ota_size <<< "$ota_layout"
+	if ! run_esp32_session_esptool "$port" --after "$NORESET" \
+		--baud "${ESP32_SAFE_BAUD:-115200}" "$READFLASH" \
+		"$ota_offset" "$ota_size" "$otadata_file" >/dev/null; then
+		echo "ERROR: could not read ESP32 otadata; refusing to risk the active app slot first." >&2
+		rm -f -- "$partition_file" "$otadata_file"
+		return 1
+	fi
+	otadata_size="$(stat -c '%s' "$otadata_file" 2>/dev/null || true)"
+	if [[ "$otadata_size" != "8192" ]]; then
+		echo "ERROR: ESP32 otadata read returned ${otadata_size:-0} of 8192 bytes." >&2
+		rm -f -- "$partition_file" "$otadata_file"
+		return 1
+	fi
+	if ! active_offset="$(parse_esp32_active_ota_offset \
+		"$partition_file" "$otadata_file")"; then
+		rm -f -- "$partition_file" "$otadata_file"
+		return 1
+	fi
+	rm -f -- "$partition_file" "$otadata_file"
+	printf '%s\n' "$active_offset"
+}
+
 esp32_prepare_merged_ota_mirror() {
 	local merged_file="$1"
 	local output_file="$2"
@@ -5670,7 +5794,8 @@ esp32_update_flash_offsets() {
 	local port="$1"
 	local firmware_file="$2"
 	local firmware_size partition offset size subtype primary_index=0 i probe_status=0
-	local subtype_dec=0 has_ota_slots=0
+	local subtype_dec=0 has_ota_slots=0 active_ota_offset="" active_selected=0
+	local fallback_count=0
 	local partition_output=""
 	local -a app_partitions=()
 	local -a app_offsets=()
@@ -5710,6 +5835,9 @@ esp32_update_flash_offsets() {
 	fi
 
 	if (( has_ota_slots )); then
+		if ! active_ota_offset="$(read_esp32_active_ota_offset "$port")"; then
+			return 1
+		fi
 		# Prefer ota_0, but malformed/nonstandard tables with only another OTA
 		# subtype must still choose an OTA partition rather than an unrelated
 		# factory or test application that happened to appear first.
@@ -5771,9 +5899,35 @@ esp32_update_flash_offsets() {
 		fi
 	done
 
-	for i in "${update_indices[@]}"; do
-		printf '%s\n' "${app_offsets[i]}"
-	done
+	if (( has_ota_slots )); then
+		# esptool processes address/file pairs in order. Put every non-active OTA
+		# slot first, so interruption either leaves the old active image untouched
+		# or leaves a fully verified fallback before the active slot is modified.
+		for i in "${update_indices[@]}"; do
+			[[ "${app_offsets[i]}" == "$active_ota_offset" ]] && continue
+			((fallback_count+=1))
+			printf '%s\n' "${app_offsets[i]}"
+		done
+		for i in "${update_indices[@]}"; do
+			if [[ "${app_offsets[i]}" == "$active_ota_offset" ]]; then
+				active_selected=1
+				printf '%s\n' "${app_offsets[i]}"
+			fi
+		done
+		if (( ! active_selected )); then
+			echo "ERROR: active ESP32 OTA slot ${active_ota_offset} was not selected; refusing the update." >&2
+			return 1
+		fi
+		if (( fallback_count )); then
+			echo "Active ESP32 OTA slot ${active_ota_offset} will be written last, after ${fallback_count} fallback slot(s) verify." >&2
+		else
+			echo "WARNING: this ESP32 layout has no second OTA slot; interruption-safe fallback is unavailable." >&2
+		fi
+	else
+		for i in "${update_indices[@]}"; do
+			printf '%s\n' "${app_offsets[i]}"
+		done
+	fi
 }
 
 list_usb_block_devs() {
@@ -6416,20 +6570,23 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 			exit 1
 		fi
 		mapfile -t ESP32_UPDATE_OFFSETS <<< "$ESP32_UPDATE_OFFSETS_OUTPUT"
-		ESP32_WRITE_ARGS=()
-		for flash_offset in "${ESP32_UPDATE_OFFSETS[@]}"; do
-			ESP32_WRITE_ARGS+=("$flash_offset" "${DOWNLOADED_FILE}")
-		done
 		ESP32_WRITE_AFTER="$(esp32_write_after_mode "$DEVICE_PORT")"
-		printf '%s --port %s --before %s --after %s --baud 115200 %s' \
-			"$ESPTOOL_CMD" "$DEVICE_PORT" "$ESP32_OPERATION_BEFORE" "$ESP32_WRITE_AFTER" "$WRITEFLASH"
-		for ((i=0; i<${#ESP32_WRITE_ARGS[@]}; i+=2)); do
-			printf ' %s "%s"' "${ESP32_WRITE_ARGS[i]}" "${ESP32_WRITE_ARGS[i+1]}"
+		for ((i=0; i<${#ESP32_UPDATE_OFFSETS[@]}; i++)); do
+			flash_offset="${ESP32_UPDATE_OFFSETS[i]}"
+			ESP32_SLOT_WRITE_AFTER="$NORESET"
+			if (( i + 1 == ${#ESP32_UPDATE_OFFSETS[@]} )); then
+				ESP32_SLOT_WRITE_AFTER="$ESP32_WRITE_AFTER"
+			fi
+			printf '%s --port %s --before %s --after %s --baud 115200 %s %s "%s"\n' \
+				"$ESPTOOL_CMD" "$DEVICE_PORT" "$ESP32_OPERATION_BEFORE" \
+				"$ESP32_SLOT_WRITE_AFTER" "$WRITEFLASH" "$flash_offset" "${DOWNLOADED_FILE}"
+			# Each slot is its own verified phase. The active slot is last, so a
+			# killed shell, power loss, or transport failure cannot strand both OTA
+			# slots partially written in one monolithic command.
+			run_esp32_session_esptool "${DEVICE_PORT}" \
+				--after "$ESP32_SLOT_WRITE_AFTER" --baud 115200 "$WRITEFLASH" \
+				"$flash_offset" "${DOWNLOADED_FILE}"
 		done
-		printf '\n'
-		run_esp32_session_esptool "${DEVICE_PORT}" \
-			--after "$ESP32_WRITE_AFTER" --baud 115200 "$WRITEFLASH" \
-			"${ESP32_WRITE_ARGS[@]}"
 		finish_esp32_flash_session "${DEVICE_PORT}"
 	fi
 	BOOTLOADER_PROBE_ACTIVE=0

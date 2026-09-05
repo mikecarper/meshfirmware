@@ -108,6 +108,7 @@ find_reenumerated_nrf52_port() {
 
 probed_port=""
 usb_reset_invocation=""
+probe_modes=()
 usb_reset_succeeds=1
 drop_matched_probe_once=0
 matched_probe_dropped=0
@@ -123,6 +124,7 @@ raw_esptool_mac_probe() {
 		previous="$arg"
 	done
 	if [[ "$before" == "$USBRESET" ]]; then
+		probe_modes+=("$before")
 		usb_reset_invocation="$*"
 		if (( usb_reset_succeeds )); then
 			rom_ready=1
@@ -130,6 +132,7 @@ raw_esptool_mac_probe() {
 		fi
 		return 1
 	fi
+	probe_modes+=("$before")
 	if (( drop_matched_probe_once && rom_ready && ! matched_probe_dropped )) \
 		&& [[ "$probed_port" == "$expected_rom_port" ]]; then
 		matched_probe_dropped=1
@@ -150,6 +153,10 @@ prepare_serial_port_for_flash() { return 0; }
 
 prepare_esp32_flash_session "$logging_port" "Heltec V4"
 
+[[ "${probe_modes[0]}" == "$USBRESET" ]] || {
+	echo "FAIL: native ESP32 application received a no-reset sync before USB reset" >&2
+	exit 1
+}
 expected_reset="--port $primary_link --before usb-reset --after no-reset --baud 115200 read-mac"
 [[ "$usb_reset_invocation" == "$expected_reset" ]] || {
 	echo "FAIL: ESP32 USB reset was '$usb_reset_invocation'" >&2
@@ -198,6 +205,7 @@ BOOTLOADER_PROBE_ACTIVE=0
 touched_port=""
 probed_port=""
 usb_reset_succeeds=0
+probe_modes=()
 expected_rom_port="$rom_port"
 rom_ready=0
 touch "${DOWNLOAD_DIR}/CURRENT.BAK"
@@ -238,6 +246,7 @@ rom_ready=0
 drop_matched_probe_once=1
 matched_probe_dropped=0
 recovery_called=0
+probe_modes=()
 
 prepare_esp32_flash_session "$logging_port" "Heltec V4"
 
