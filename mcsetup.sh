@@ -113,9 +113,164 @@ ensure_serial_group_access() {
   echo "Group membership updated. Log out and back in for ${serial_group} access to apply."
 }
 
+meshfirmware_enable_pi_usb_full_speed() {
+	local cmdline="$1" current line_count tmp token
+	local -a tokens=() updated=()
+
+	line_count="$(awk 'NF { count++ } END { print count + 0 }' "$cmdline")"
+	if [[ "$line_count" -ne 1 ]]; then
+		echo "Refusing to edit ${cmdline}: expected exactly one non-empty line." >&2
+		return 1
+	fi
+
+	current="$(awk 'NF { print; exit }' "$cmdline")"
+	read -r -a tokens <<< "$current"
+	for token in "${tokens[@]}"; do
+		[[ "$token" == dwc_otg.speed=* ]] || updated+=("$token")
+	done
+	updated+=("dwc_otg.speed=1")
+
+	tmp="$(mktemp)"
+	printf '%s\n' "${updated[*]}" > "$tmp"
+	if [[ ! -e "${cmdline}.meshfirmware-backup" ]]; then
+		if ! sudo cp -a -- "$cmdline" "${cmdline}.meshfirmware-backup"; then
+			rm -f -- "$tmp"
+			return 1
+		fi
+	fi
+	if ! sudo cp -- "$tmp" "$cmdline"; then
+		rm -f -- "$tmp"
+		return 1
+	fi
+	rm -f -- "$tmp"
+
+	current="$(cat "$cmdline")"
+	if [[ " $current " != *' dwc_otg.speed=1 '* ]]; then
+		echo "Could not verify dwc_otg.speed=1 in ${cmdline}." >&2
+		return 1
+	fi
+	sync
+	echo "Saved ${cmdline}; original retained as ${cmdline}.meshfirmware-backup."
+}
+
+meshfirmware_check_pi_usb_host_speed() {
+	local sys_root="${MESHFIRMWARE_SYS_ROOT:-/sys}"
+	local proc_root="${MESHFIRMWARE_PROC_ROOT:-/proc}"
+	local boot_root="${MESHFIRMWARE_BOOT_ROOT:-/boot}"
+	local tty_path="${MESHFIRMWARE_TTY:-/dev/tty}"
+	local model="" model_file speed speed_file usb_root resolved_root
+	local controller driver_path cmdline="" answer vendor_file product_file
+	local dwc_host=0 terminus_hub=0 configured=0
+
+	[[ "${MESHFIRMWARE_PI_USB_CHECK:-1}" != 0 ]] || return 0
+	[[ "$(uname -s)" == Linux ]] || return 0
+	for model_file in \
+		"${proc_root}/device-tree/model" \
+		"${sys_root}/firmware/devicetree/base/model"; do
+		if [[ -r "$model_file" ]]; then
+			model="$(tr -d '\000' < "$model_file")"
+			break
+		fi
+	done
+	[[ "$model" == *'Raspberry Pi'* ]] || return 0
+
+	speed_file="${sys_root}/module/dwc_otg/parameters/speed"
+	[[ -r "$speed_file" ]] || return 0
+	for usb_root in "${sys_root}"/bus/usb/devices/usb*; do
+		[[ -e "$usb_root" ]] || continue
+		resolved_root="$(readlink -f "$usb_root" 2>/dev/null || true)"
+		[[ -n "$resolved_root" ]] || continue
+		controller="$(dirname "$resolved_root")"
+		driver_path="$(readlink -f "${controller}/driver" 2>/dev/null || true)"
+		if [[ "${driver_path##*/}" == dwc_otg ]]; then
+			dwc_host=1
+			break
+		fi
+	done
+	(( dwc_host )) || return 0
+
+	speed="$(cat "$speed_file" 2>/dev/null || true)"
+	if [[ "$speed" == 1 ]]; then
+		echo "Raspberry Pi USB safeguard active: dwc_otg.speed=1 (12 Mbps USB Full Speed)."
+		return 0
+	fi
+
+	for vendor_file in "${sys_root}"/bus/usb/devices/*/idVendor; do
+		[[ -r "$vendor_file" ]] || continue
+		product_file="${vendor_file%idVendor}idProduct"
+		if [[ "$(cat "$vendor_file")" == 1a40 \
+			&& -r "$product_file" && "$(cat "$product_file")" == 0101 ]]; then
+			terminus_hub=1
+			break
+		fi
+	done
+
+	echo >&2
+	echo "WARNING: ${model} is using the legacy dwc_otg USB host at its default high speed." >&2
+	echo "Some Raspberry Pi hub/radio combinations can repeatedly reset the whole USB bus" >&2
+	echo "or lock the host (often error -71/-110 or FIQ FSM timeout messages)." >&2
+	if (( terminus_hub )); then
+		echo "A Terminus 1a40:0101 hub, a topology seen with this failure, is connected." >&2
+	fi
+	echo "The tested mitigation is dwc_otg.speed=1. It caps this USB bus at 12 Mbps;" >&2
+	echo "USB Ethernet/storage will be slower, while USB radio serial links are usually already 12 Mbps." >&2
+
+	for cmdline in "${boot_root}/firmware/cmdline.txt" "${boot_root}/cmdline.txt"; do
+		[[ -f "$cmdline" ]] && break
+		cmdline=""
+	done
+	if [[ -z "$cmdline" ]]; then
+		echo "No Raspberry Pi cmdline.txt was found, so no automatic change is available." >&2
+		return 0
+	fi
+	if grep -Eq '(^|[[:space:]])dwc_otg\.speed=1([[:space:]]|$)' "$cmdline"; then
+		configured=1
+		echo "dwc_otg.speed=1 is saved in ${cmdline} but is not active yet." >&2
+	fi
+	if declare -F no_sudo_mode >/dev/null 2>&1 && no_sudo_mode; then
+		echo "MCFIRMWARE_NO_SUDO=1: no boot configuration or reboot action was taken." >&2
+		return 0
+	fi
+
+	if [[ ! -r "$tty_path" ]]; then
+		echo "Run this script interactively to apply the mitigation and reboot." >&2
+		return 0
+	fi
+	if (( ! configured )); then
+		if ! read -r -p "Apply the 12 Mbps Raspberry Pi USB mitigation now? [y/N] " answer < "$tty_path"; then
+			return 0
+		fi
+		case "$answer" in
+			[Yy]|[Yy][Ee][Ss]) ;;
+			*) echo "USB speed was not changed."; return 0 ;;
+		esac
+		if ! sudo -n true 2>/dev/null; then
+			echo "sudo access is required to update ${cmdline}."
+			sudo -v
+		fi
+		meshfirmware_enable_pi_usb_full_speed "$cmdline"
+	fi
+
+	echo "A reboot is required before the USB speed change takes effect."
+	if ! read -r -p "Reboot now? [y/N] " answer < "$tty_path"; then
+		return 0
+	fi
+	case "$answer" in
+		[Yy]|[Yy][Ee][Ss])
+			echo "Rebooting to activate dwc_otg.speed=1..."
+			if ! sudo systemctl reboot; then
+				sudo reboot
+			fi
+			exit 0
+			;;
+		*) echo "Reboot later to activate dwc_otg.speed=1." ;;
+	esac
+}
+
 ensure_sudo_session
 start_sudo_keepalive
 ensure_serial_group_access
+meshfirmware_check_pi_usb_host_speed
 
 if [[ -n "${SUDO_USER:-}" ]]; then
   umask 022

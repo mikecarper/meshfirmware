@@ -45,7 +45,7 @@ esptool_output_port_busy() { return 1; }
 recover_busy_serial_port() { return 1; }
 no_sudo_mode() { return 0; }
 esptool_output_needs_reset() { return 1; }
-auto_reset_serial_port() { return 1; }
+offer_serial_port_recovery() { return 1; }
 manual_reboot_choice() { return 1; }
 print_esptool_recovery_hint() { return 0; }
 sudo() {

@@ -19,7 +19,7 @@ extract_function() {
 
 for function_name in \
 	selected_flash_serial_port prepare_esp32_flash_session finish_esp32_flash_session \
-	auto_reset_serial_port; do
+	offer_identity_safe_1200_touch offer_serial_port_recovery; do
 	definition="$(extract_function "$function_name")"
 	[[ "$definition" == "${function_name}() {"* ]] || {
 		echo "failed to extract ${function_name}" >&2
@@ -209,6 +209,8 @@ probe_modes=()
 expected_rom_port="$rom_port"
 rom_ready=0
 touch "${DOWNLOAD_DIR}/CURRENT.BAK"
+printf '%s\n' y > "${tmp_dir}/recovery-answer"
+MESHFIRMWARE_TTY="${tmp_dir}/recovery-answer"
 
 prepare_esp32_flash_session "$logging_port" "Heltec V4"
 
@@ -287,9 +289,31 @@ expected_finish="9s --port $rom_port --before no-reset --after hard-reset read-m
 echo "PASS: ESP32 ROM exit uses guarded hard reset and follows runtime USB identity"
 
 native_reset_output="${tmp_dir}/native-reset-output"
-if auto_reset_serial_port "$rom_port" 2>"$native_reset_output"; then
+if offer_serial_port_recovery "$rom_port" 2>"$native_reset_output"; then
 	echo "FAIL: raw DTR/RTS fallback was allowed on native ESP32 USB" >&2
 	exit 1
 fi
 grep -Fq 'Skipping raw DTR/RTS recovery on native ESP32 USB port' "$native_reset_output"
 echo "PASS: unsafe generic DTR/RTS recovery is refused on native ESP32 USB"
+
+uart_port="${tmp_dir}/ttyUSB0"
+touch "$uart_port"
+selected_flash_serial_port() { printf '%s\n' "$1"; }
+esp32_port_uses_native_usb() { return 1; }
+python_log="${tmp_dir}/python-log"
+python3() { printf '%s\n' "$*" >> "$python_log"; }
+sleep() { :; }
+
+printf '%s\n' n > "$MESHFIRMWARE_TTY"
+if offer_serial_port_recovery "$uart_port" >/dev/null 2>&1; then
+	echo "FAIL: declined DTR/RTS recovery returned success" >&2
+	exit 1
+fi
+[[ ! -e "$python_log" ]]
+
+printf '%s\n' y > "$MESHFIRMWARE_TTY"
+offer_serial_port_recovery "$uart_port" >/dev/null
+grep -Fq -- "$uart_port" "$python_log"
+recovery_source="$(extract_function offer_serial_port_recovery)"
+! grep -Eq 'stty|chmod|sudo' <<< "$recovery_source"
+echo "PASS: UART recovery is opt-in, identity-resolved, and uses no USB or 1200-baud reset"

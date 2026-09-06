@@ -138,7 +138,7 @@ import hashlib
 
 source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 assert '3) reset USB connection (not a radio reboot), then retry' in source
-assert 'Reset USB connection before probing (not a radio reboot)? [y/N]' in source
+assert 'Reset USB connection before probing (not a radio reboot)? [y/N]' not in source
 assert source.count('prepare_selected_usb_connection "$detected_dev" || return 1') == 2
 assert 'partial_tool="$(mktemp "${cached_tool}.partial.XXXXXX")"' in source
 assert '|| ! meshcore_usb_reset_tool_hash_matches "$partial_tool"' in source
@@ -146,10 +146,11 @@ pin = re.search(r'^MESHCORE_USB_RESET_TOOL_SHA256="([0-9a-f]{64})"$', source, re
 helper = pathlib.Path(sys.argv[1]).parent / 'tools' / 'meshcore_usb_reset.py'
 assert hashlib.sha256(helper.read_bytes().replace(b'\r\n', b'\n')).hexdigest() == pin
 prepare = re.search(r'^prepare_selected_usb_connection\(\) \{\n(.*?)^\}', source, re.M | re.S).group(1)
-assert prepare.rstrip().endswith('USB_RESET_RECOVERED_PORT=""')
+assert 'reset_selected_usb_connection' not in prepare
+assert 'read -r' not in prepare
 for name in ('probe_esptool', 'probe_esptool_mac'):
     body = re.search(r'^' + name + r'\(\) \{\n(.*?)^\}', source, re.M | re.S).group(1)
     assert 'invoke_esptool "$@"' not in body, name + ' retains stale retry arguments'
     assert body.count('refresh_usb_recovered_esptool_args attempt_args') == 2
-print('PASS: chooser, manual recovery, pinned download and probe retry wiring')
+print('PASS: selection is inspect-only; recovery remains manual and identity-pinned')
 PY

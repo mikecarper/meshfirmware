@@ -233,7 +233,162 @@ configure_usb_autosuspend() {
 	echo -1 | sudo tee /sys/module/usbcore/parameters/autosuspend >/dev/null
 }
 
+meshfirmware_enable_pi_usb_full_speed() {
+	local cmdline="$1" current line_count tmp token
+	local -a tokens=() updated=()
+
+	line_count="$(awk 'NF { count++ } END { print count + 0 }' "$cmdline")"
+	if [[ "$line_count" -ne 1 ]]; then
+		echo "Refusing to edit ${cmdline}: expected exactly one non-empty line." >&2
+		return 1
+	fi
+
+	current="$(awk 'NF { print; exit }' "$cmdline")"
+	read -r -a tokens <<< "$current"
+	for token in "${tokens[@]}"; do
+		[[ "$token" == dwc_otg.speed=* ]] || updated+=("$token")
+	done
+	updated+=("dwc_otg.speed=1")
+
+	tmp="$(mktemp)"
+	printf '%s\n' "${updated[*]}" > "$tmp"
+	if [[ ! -e "${cmdline}.meshfirmware-backup" ]]; then
+		if ! sudo cp -a -- "$cmdline" "${cmdline}.meshfirmware-backup"; then
+			rm -f -- "$tmp"
+			return 1
+		fi
+	fi
+	if ! sudo cp -- "$tmp" "$cmdline"; then
+		rm -f -- "$tmp"
+		return 1
+	fi
+	rm -f -- "$tmp"
+
+	current="$(cat "$cmdline")"
+	if [[ " $current " != *' dwc_otg.speed=1 '* ]]; then
+		echo "Could not verify dwc_otg.speed=1 in ${cmdline}." >&2
+		return 1
+	fi
+	sync
+	echo "Saved ${cmdline}; original retained as ${cmdline}.meshfirmware-backup."
+}
+
+meshfirmware_check_pi_usb_host_speed() {
+	local sys_root="${MESHFIRMWARE_SYS_ROOT:-/sys}"
+	local proc_root="${MESHFIRMWARE_PROC_ROOT:-/proc}"
+	local boot_root="${MESHFIRMWARE_BOOT_ROOT:-/boot}"
+	local tty_path="${MESHFIRMWARE_TTY:-/dev/tty}"
+	local model="" model_file speed speed_file usb_root resolved_root
+	local controller driver_path cmdline="" answer vendor_file product_file
+	local dwc_host=0 terminus_hub=0 configured=0
+
+	[[ "${MESHFIRMWARE_PI_USB_CHECK:-1}" != 0 ]] || return 0
+	[[ "$(uname -s)" == Linux ]] || return 0
+	for model_file in \
+		"${proc_root}/device-tree/model" \
+		"${sys_root}/firmware/devicetree/base/model"; do
+		if [[ -r "$model_file" ]]; then
+			model="$(tr -d '\000' < "$model_file")"
+			break
+		fi
+	done
+	[[ "$model" == *'Raspberry Pi'* ]] || return 0
+
+	speed_file="${sys_root}/module/dwc_otg/parameters/speed"
+	[[ -r "$speed_file" ]] || return 0
+	for usb_root in "${sys_root}"/bus/usb/devices/usb*; do
+		[[ -e "$usb_root" ]] || continue
+		resolved_root="$(readlink -f "$usb_root" 2>/dev/null || true)"
+		[[ -n "$resolved_root" ]] || continue
+		controller="$(dirname "$resolved_root")"
+		driver_path="$(readlink -f "${controller}/driver" 2>/dev/null || true)"
+		if [[ "${driver_path##*/}" == dwc_otg ]]; then
+			dwc_host=1
+			break
+		fi
+	done
+	(( dwc_host )) || return 0
+
+	speed="$(cat "$speed_file" 2>/dev/null || true)"
+	if [[ "$speed" == 1 ]]; then
+		echo "Raspberry Pi USB safeguard active: dwc_otg.speed=1 (12 Mbps USB Full Speed)."
+		return 0
+	fi
+
+	for vendor_file in "${sys_root}"/bus/usb/devices/*/idVendor; do
+		[[ -r "$vendor_file" ]] || continue
+		product_file="${vendor_file%idVendor}idProduct"
+		if [[ "$(cat "$vendor_file")" == 1a40 \
+			&& -r "$product_file" && "$(cat "$product_file")" == 0101 ]]; then
+			terminus_hub=1
+			break
+		fi
+	done
+
+	echo >&2
+	echo "WARNING: ${model} is using the legacy dwc_otg USB host at its default high speed." >&2
+	echo "Some Raspberry Pi hub/radio combinations can repeatedly reset the whole USB bus" >&2
+	echo "or lock the host (often error -71/-110 or FIQ FSM timeout messages)." >&2
+	if (( terminus_hub )); then
+		echo "A Terminus 1a40:0101 hub, a topology seen with this failure, is connected." >&2
+	fi
+	echo "The tested mitigation is dwc_otg.speed=1. It caps this USB bus at 12 Mbps;" >&2
+	echo "USB Ethernet/storage will be slower, while USB radio serial links are usually already 12 Mbps." >&2
+
+	for cmdline in "${boot_root}/firmware/cmdline.txt" "${boot_root}/cmdline.txt"; do
+		[[ -f "$cmdline" ]] && break
+		cmdline=""
+	done
+	if [[ -z "$cmdline" ]]; then
+		echo "No Raspberry Pi cmdline.txt was found, so no automatic change is available." >&2
+		return 0
+	fi
+	if grep -Eq '(^|[[:space:]])dwc_otg\.speed=1([[:space:]]|$)' "$cmdline"; then
+		configured=1
+		echo "dwc_otg.speed=1 is saved in ${cmdline} but is not active yet." >&2
+	fi
+	if declare -F no_sudo_mode >/dev/null 2>&1 && no_sudo_mode; then
+		echo "MCFIRMWARE_NO_SUDO=1: no boot configuration or reboot action was taken." >&2
+		return 0
+	fi
+
+	if [[ ! -r "$tty_path" ]]; then
+		echo "Run this script interactively to apply the mitigation and reboot." >&2
+		return 0
+	fi
+	if (( ! configured )); then
+		if ! read -r -p "Apply the 12 Mbps Raspberry Pi USB mitigation now? [y/N] " answer < "$tty_path"; then
+			return 0
+		fi
+		case "$answer" in
+			[Yy]|[Yy][Ee][Ss]) ;;
+			*) echo "USB speed was not changed."; return 0 ;;
+		esac
+		if ! sudo -n true 2>/dev/null; then
+			echo "sudo access is required to update ${cmdline}."
+			sudo -v
+		fi
+		meshfirmware_enable_pi_usb_full_speed "$cmdline"
+	fi
+
+	echo "A reboot is required before the USB speed change takes effect."
+	if ! read -r -p "Reboot now? [y/N] " answer < "$tty_path"; then
+		return 0
+	fi
+	case "$answer" in
+		[Yy]|[Yy][Ee][Ss])
+			echo "Rebooting to activate dwc_otg.speed=1..."
+			if ! sudo systemctl reboot; then
+				sudo reboot
+			fi
+			exit 0
+			;;
+		*) echo "Reboot later to activate dwc_otg.speed=1." ;;
+	esac
+}
+
 initialize_privilege_mode
+meshfirmware_check_pi_usb_host_speed
 
 if [[ -n "${SUDO_USER:-}" ]]; then
 	umask 022
@@ -1126,27 +1281,16 @@ print(port)
 }
 
 prepare_selected_usb_connection() {
-	local port=$1 answer=""
+	local port=$1
 	USB_RESET_FAILED=0
 	USB_RESET_RECOVERED_PORT=""
 	DEVICE_PORT="$port"
 	if ! capture_selected_usb_reset_identity "$port"; then
 		USB_RESET_EXPECTED_IDENTITY=""
-		echo "USB connection reset is unavailable for this selection; ordinary probing can continue." >&2
+		echo "Device-only USB recovery is unavailable for this selection; ordinary probing can continue." >&2
 		return 0
 	fi
 	printf '%s\n' "$DEVICE_PORT" > "$DEVICE_PORT_FILE" || return 1
-	if no_sudo_mode; then
-		return 0
-	fi
-	if ! read -r -p "Reset USB connection before probing (not a radio reboot)? [y/N] " answer </dev/tty; then
-		return 0
-	fi
-	[[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]] || return 0
-	reset_selected_usb_connection "$DEVICE_PORT" || return 1
-	# Selection callers reload DEVICE_PORT immediately; no old argument remains.
-	# Do not carry an application USB recovery into a later ROM handoff.
-	USB_RESET_RECOVERED_PORT=""
 }
 
 ensure_meshcore_backup_python() {
@@ -1902,6 +2046,22 @@ trigger_nrf52_1200_touch() {
 		exec 3>&-
 		exec 3<&-
 	' _ "$port"
+}
+
+offer_identity_safe_1200_touch() {
+	local port="$1" purpose="${2:-bootloader recovery}" answer=""
+	local tty_path="${MESHFIRMWARE_TTY:-/dev/tty}"
+
+	echo "The selected device did not enter its bootloader using the normal reset method." >&2
+	echo "A 1200-baud touch will re-enumerate that device and may enter its bootloader." >&2
+	if ! read -r -p "Try one identity-safe 1200-baud touch for ${purpose}? [y/N] " answer < "$tty_path"; then
+		return 1
+	fi
+	if [[ ! "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+		echo "1200-baud recovery skipped." >&2
+		return 1
+	fi
+	trigger_nrf52_1200_touch "$port"
 }
 
 nrf52_candidate_identity_rank() {
@@ -4353,27 +4513,34 @@ recover_busy_serial_port() {
 	return 0
 }
 
-auto_reset_serial_port() {
-	local port="$1"
+offer_serial_port_recovery() {
+	local port="$1" live_port="" answer=""
+	local tty_path="${MESHFIRMWARE_TTY:-/dev/tty}"
 	[[ -z "$port" ]] && return 1
+	if ! live_port="$(selected_flash_serial_port "$port")"; then
+		echo "The selected USB identity is no longer available; refusing serial recovery." >&2
+		return 1
+	fi
+	port="$live_port"
 	if esp32_port_uses_native_usb "$port"; then
 		echo "Skipping raw DTR/RTS recovery on native ESP32 USB port $port." >&2
 		echo "The identity-safe application-to-ROM handoff must be retried instead." >&2
 		return 1
 	fi
-	if no_sudo_mode; then
-		echo "No-sudo mode cannot run the privileged ESP serial-reset fallback on $port." >&2
+
+	echo "esptool could not connect through the selected UART bridge on $port." >&2
+	echo "A DTR/RTS toggle may place that ESP32 into its ROM bootloader." >&2
+	echo "This does not reset the USB bus and does not send a 1200-baud touch." >&2
+	if ! read -r -p "Try one DTR/RTS recovery toggle on this device? [y/N] " answer < "$tty_path"; then
+		return 1
+	fi
+	if [[ ! "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+		echo "Serial recovery skipped." >&2
 		return 1
 	fi
 
-	echo "Trying automatic serial reset on $port..."
-	sudo chmod a+rw "$port" 2>/dev/null || true
-
-	echo "Trying 1200-baud touch on $port..."
-	sudo bash -lc "exec 3<> \"$port\"; stty -F \"$port\" 1200 hupcl; sleep 1; exec 3>&-; exec 3<&-" || true
-
-	echo "Trying DTR/RTS toggle on $port..."
-	sudo python3 -c '
+	echo "Trying one DTR/RTS toggle on $port..."
+	if ! python3 -c '
 import os, sys, fcntl, termios, struct, time
 port = sys.argv[1]
 TIOCM_DTR = getattr(termios, "TIOCM_DTR", 0x002)
@@ -4397,10 +4564,13 @@ except OSError:
     sys.exit(1)
 finally:
     os.close(fd)
-' "$port" || true
+' "$port"; then
+		echo "DTR/RTS recovery failed; use the board's BOOT/RESET controls." >&2
+		return 1
+	fi
 
-	echo "Waiting 10 seconds for device to reboot..."
-	sleep 10
+	echo "Waiting briefly for the selected device to enter its bootloader..."
+	sleep 2
 	return 0
 }
 
@@ -4874,7 +5044,7 @@ run_esptool() {
 	fi
 
 	if [[ "${MESH_DISABLE_1200_RECOVERY:-0}" != "1" && -n "$port" ]] && esptool_output_needs_reset "$output"; then
-		if auto_reset_serial_port "$port"; then
+		if offer_serial_port_recovery "$port"; then
 			if ! esp32_prepare_esptool_attempt attempt_args port "$@"; then
 				return 1
 			fi
@@ -5184,7 +5354,7 @@ prepare_esp32_flash_session() {
 				return 1
 			fi
 		else
-			echo "The ESP32 USB reset did not answer; falling back to one 1200-baud touch on the same USB identity."
+			echo "The ESP32 USB reset did not answer; an optional identity-safe 1200-baud recovery is available."
 			# A timed-out USB-reset command may nevertheless have entered ROM. Find
 			# only the captured identity and probe it before touching the port.
 			candidate_port="$(find_reenumerated_nrf52_port "$port" \
@@ -5206,10 +5376,9 @@ prepare_esp32_flash_session() {
 				}
 				port="$candidate_port"
 				original_instance="$(nrf52_port_instance "$port")"
-				if ! trigger_nrf52_1200_touch "$port"; then
-					echo "The primary CDC touch failed; checking for a service holding $port."
-					stop_serial_locking_services "$port" || true
-					trigger_nrf52_1200_touch "$port"
+				if ! offer_identity_safe_1200_touch "$port" "ESP32 ROM recovery"; then
+					echo "ESP32 bootloader recovery was not performed; no flash operation was started." >&2
+					return 1
 				fi
 				if ! bootloader_port="$(wait_for_nrf52_bootloader_port "$port" \
 					"$selected_by_id" "$expected_serial" "$expected_path_stem" \
@@ -5393,7 +5562,7 @@ probe_esptool() {
 	fi
 
 	if [[ "${MESH_DISABLE_1200_RECOVERY:-0}" != "1" && -n "$port" ]] && esptool_output_needs_reset "$output"; then
-		if auto_reset_serial_port "$port"; then
+		if offer_serial_port_recovery "$port"; then
 			if retry_output=$(invoke_esptool "${attempt_args[@]}" 2>&1); then
 				return 0
 			else
@@ -5475,7 +5644,7 @@ probe_esptool_mac() {
 	fi
 
 	if [[ "${MESH_DISABLE_1200_RECOVERY:-0}" != "1" && -n "$port" ]] && esptool_output_needs_reset "$output"; then
-		if auto_reset_serial_port "$port"; then
+		if offer_serial_port_recovery "$port"; then
 			if retry_output=$(invoke_esptool "${attempt_args[@]}" 2>&1); then
 				esp32_record_and_verify_probe_output "$retry_output"
 				return $?

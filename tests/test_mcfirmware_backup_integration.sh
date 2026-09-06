@@ -158,7 +158,7 @@ fi
 # DFU transition before its own early backup gate.
 AUTODETECT_SOURCE="$(extract_function autodetect_device)"
 AUTODETECT_BEFORE_BACKUP="${AUTODETECT_SOURCE%%request_meshcore_usb_backup_before_flash*}"
-AUTO_RESET_SOURCE="$(extract_function auto_reset_serial_port)"
+SERIAL_RECOVERY_SOURCE="$(extract_function offer_serial_port_recovery)"
 PREBACKUP_RESET_CHAIN=''
 for probe_name in probe_esptool probe_esptool_mac; do
 	if grep -Eq "(^|[^[:alnum:]_])${probe_name}([^[:alnum:]_]|$)" <<<"$AUTODETECT_BEFORE_BACKUP"; then
@@ -166,12 +166,12 @@ for probe_name in probe_esptool probe_esptool_mac; do
 		unguarded_calls="$(grep -E "(^|[^[:alnum:]_])${probe_name}([^[:alnum:]_]|$)" <<<"$AUTODETECT_BEFORE_BACKUP" \
 			| grep -Ev "MESH_DISABLE_1200_RECOVERY=1[[:space:]]+${probe_name}([^[:alnum:]_]|$)" || true)"
 		if [[ -n "$unguarded_calls" ]] \
-			&& grep -Eq '(^|[^[:alnum:]_])auto_reset_serial_port([^[:alnum:]_]|$)' <<<"$probe_source" \
-			&& grep -Eq -- 'stty.*[[:space:]]1200|--baud[[:space:]]+1200|--touch[[:space:]]+1200' <<<"$AUTO_RESET_SOURCE"; then
-			PREBACKUP_RESET_CHAIN="${probe_name} -> auto_reset_serial_port -> 1200 baud"
+			&& grep -Eq '(^|[^[:alnum:]_])offer_serial_port_recovery([^[:alnum:]_]|$)' <<<"$probe_source" \
+			&& grep -Eq -- 'stty.*[[:space:]]1200|--baud[[:space:]]+1200|--touch[[:space:]]+1200' <<<"$SERIAL_RECOVERY_SOURCE"; then
+			PREBACKUP_RESET_CHAIN="${probe_name} -> offer_serial_port_recovery -> 1200 baud"
 			break
 		fi
-		if grep -Eq '(^|[^[:alnum:]_])auto_reset_serial_port([^[:alnum:]_]|$)' <<<"$probe_source" \
+		if grep -Eq '(^|[^[:alnum:]_])offer_serial_port_recovery([^[:alnum:]_]|$)' <<<"$probe_source" \
 			&& ! grep -Fq 'MESH_DISABLE_1200_RECOVERY' <<<"$probe_source"; then
 			PREBACKUP_RESET_CHAIN="${probe_name} ignores its pre-backup 1200-recovery guard"
 			break

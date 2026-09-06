@@ -35,12 +35,28 @@ cd meshfirmware
 
 </details>
 
+### Raspberry Pi USB host warning
+
+`mcfirmware.sh`, `mcsetup.sh`, and `mtfirmware.sh` check whether they are running
+on a Raspberry Pi whose active USB host controller uses the legacy `dwc_otg`
+driver. When that bus is still at its default high speed, the scripts warn that
+some hub/radio combinations can repeatedly re-enumerate or lock the host. The
+warning specifically identifies a connected Terminus `1a40:0101` hub when
+present.
+
+The scripts can add `dwc_otg.speed=1` to the Pi's single-line `cmdline.txt` and
+create a one-time `.meshfirmware-backup`, but only after an explicit **Yes**.
+They ask separately before rebooting. A reboot is required to activate the
+setting. The mitigation caps that DWC USB bus at 12 Mbps, so USB Ethernet and
+storage become slower; USB radio serial devices commonly already run at 12
+Mbps. Set `MESHFIRMWARE_PI_USB_CHECK=0` to suppress this startup check.
+
 ### Recover a stalled USB connection (Linux)
 
 `mcsetup.sh` has a **U) Reset USB connection** action and offers recovery when
 the radio does not answer its initial clock query. The MeshCore flasher,
-`mcfirmware.sh`, offers USB connection recovery before probing the selected
-radio and in its manual recovery menu.
+`mcfirmware.sh`, records the selected identity without resetting it and offers
+device-only USB recovery only from its manual post-failure recovery menu.
 
 This is the device-only USB reset used to recover a stalled Station G2 USB
 interface. It reconnects USB; it does **not** reboot the radio CPU, enter the
@@ -48,7 +64,8 @@ bootloader, erase flash, change settings, or toggle a GPIO relay. It is
 separate from the firmware's `reboot` command and the flasher's bootloader-entry
 sequence. It cannot repair a radio whose firmware itself is hung.
 
-Recovery is optional (default **No**) and requires Linux and `sudo`. Close any
+Recovery is optional (default **No**) and requires Linux and `sudo`. No healthy
+probe triggers it automatically. Close any
 serial terminal or stop the service using that radio first; recovery refuses
 busy ports rather than stopping programs. The tools save the selected USB
 identity before probing, reject hubs or a different/replaced device, and only
@@ -68,6 +85,12 @@ The shared Python helper is included in a checkout. Single-script downloads
 fetch a copy with a checksum pinned by the script; a missing or mismatched
 helper disables recovery. This Linux feature does not change `mcsetup.cmd`
 or `firmware.cmd` on Windows.
+
+Bootloader entry after the user confirms a flash is separate and still uses the
+mode transition required by that board. Generic ESP32 UART recovery no longer
+combines a 1200-baud touch with DTR/RTS: after a failed connection it offers one
+identity-resolved DTR/RTS toggle, default **No**. Native ESP32 1200-baud fallback
+is also explicitly confirmed before it can re-enumerate a device.
 
 ### nRF52 RAK board safety check
 
