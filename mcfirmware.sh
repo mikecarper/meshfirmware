@@ -273,6 +273,95 @@ meshfirmware_enable_pi_usb_full_speed() {
 	echo "Saved ${cmdline}; original retained as ${cmdline}.meshfirmware-backup."
 }
 
+# Read mounted UF2 metadata only when its block device belongs to this USB device.
+# Never mount storage or enter DFU just to make a speed recommendation.
+meshfirmware_pi_usb_has_uf2() {
+	local usb_device="$1" sys_root="$2" proc_root="$3"
+	local mount_id parent_id dev_number mount_root mount_point mount_rest block_path info_file
+	[[ -r "${proc_root}/self/mountinfo" ]] || return 1
+	while read -r mount_id parent_id dev_number mount_root mount_point mount_rest; do
+		block_path="$(readlink -f "${sys_root}/dev/block/${dev_number}" 2>/dev/null || true)"
+		[[ "$block_path" == "$usb_device/"* ]] || continue
+		# mountinfo escapes spaces, tabs, newlines and backslashes using octal.
+		printf -v mount_point '%b' "$mount_point"
+		info_file="${mount_point%/}/INFO_UF2.TXT"
+		[[ -r "$info_file" ]] || continue
+		if grep -Eiq '^UF2[[:space:]]+Bootloader' "$info_file" \
+			&& grep -Eiq '^Board-ID:' "$info_file"; then
+			return 0
+		fi
+	done < "${proc_root}/self/mountinfo"
+	return 1
+}
+
+meshfirmware_classify_pi_usb_device() {
+	local device="$1" sys_root="$2" proc_root="$3"
+	local vendor product description device_class interface interface_class subclass driver
+	local storage=0 network=0 serial=0 node=0 bootloader=0
+	vendor="$(cat "${device}/idVendor" 2>/dev/null || true)"
+	product="$(cat "${device}/idProduct" 2>/dev/null || true)"
+	description="$(cat "${device}/manufacturer" "${device}/product" 2>/dev/null || true)"
+	description="${description,,}"
+	device_class="$(cat "${device}/bDeviceClass" 2>/dev/null || true)"
+	if [[ "$device_class" == 09 ]]; then echo hub; return 0; fi
+	[[ "$device_class" != 08 ]] || storage=1
+	for interface in "${device}"/*:*; do
+		[[ -d "$interface" ]] || continue
+		interface_class="$(cat "${interface}/bInterfaceClass" 2>/dev/null || true)"
+		subclass="$(cat "${interface}/bInterfaceSubClass" 2>/dev/null || true)"
+		driver="$(readlink -f "${interface}/driver" 2>/dev/null || true)"
+		[[ "$interface_class" != 08 ]] || storage=1
+		if [[ "$interface_class" == 09 ]]; then echo hub; return 0; fi
+		if [[ -d "${interface}/net" \
+			|| ( "$interface_class" == 02 && "$subclass" =~ ^(06|0d|0e)$ ) ]]; then
+			network=1
+		fi
+		if [[ "$interface_class" == 02 && "$subclass" == 02 ]]; then serial=1; fi
+		case "${driver##*/}" in
+			cdc_acm|cp210x|ch341|ftdi_sio|usbserial) serial=1 ;;
+			cdc_ether|cdc_ncm|cdc_mbim|rndis_host|asix|ax88179_178a|r8152|smsc95xx|smsc75xx|lan78xx)
+				network=1 ;;
+		esac
+	done
+	# Generic UART bridges are candidates, not proof that mesh firmware is running.
+	case "${vendor,,}:${product,,}" in
+		10c4:ea60|1a86:7523|1a86:5523|1a86:55d4|1a86:55d3|0403:6001|0403:6015|303a:1001)
+			serial=1 ;;
+	esac
+	case "$description" in
+		*meshtastic*|*meshcore*|*heltec*|*lilygo*|*rakwireless*|*wisblock*|*rak46*|*t1000*|*t-echo*|*t-beam*|*t-deck*|*xiao*|*nrf52*|*feather*)
+			node=1 ;;
+	esac
+	case "$description" in *uf2*|*bootloader*|*dfu*) bootloader=1 ;; esac
+	# A networking or mass-storage interface takes priority over a serial sibling.
+	if (( network )); then
+		if (( storage )); then echo storage; else echo network; fi
+		return 0
+	fi
+	# RAK/Feather UF2 and CDC-only bootloader IDs do not contain DFU in the name:
+	# https://github.com/oltaco/Adafruit_nRF52_Bootloader_OTAFIX/blob/master/src/boards/wiscore_rak4631_board/board.h
+	# XIAO, T1000-E and MeshTower IDs also occur elsewhere in this repository.
+	case "${vendor,,}:${product,,}" in
+		2886:0044|2886:0045|2886:0057|239a:0029|239a:002a|239a:0071) echo dfu; return 0 ;;
+	esac
+	if (( storage )); then
+		if (( node && bootloader )) \
+			|| meshfirmware_pi_usb_has_uf2 "$device" "$sys_root" "$proc_root"; then
+			echo dfu
+		else
+			echo storage
+		fi
+	elif (( node && bootloader )); then
+		echo dfu
+	elif (( node )); then
+		echo node
+	elif (( serial )); then
+		echo serial
+	else
+		echo other
+	fi
+}
+
 meshfirmware_check_pi_usb_host_speed() {
 	local sys_root="${MESHFIRMWARE_SYS_ROOT:-/sys}"
 	local proc_root="${MESHFIRMWARE_PROC_ROOT:-/proc}"
@@ -281,6 +370,10 @@ meshfirmware_check_pi_usb_host_speed() {
 	local model="" model_file speed speed_file usb_root resolved_root
 	local controller driver_path cmdline="" answer vendor_file product_file
 	local dwc_host=0 terminus_hub=0 configured=0
+	local device affected category label vendor product root
+	local total=0 nodes=0 dfu=0 serial=0 network=0 storage=0 other=0 hubs=0 suggest_full_speed=0
+	local speed_tier=3 speed_prompt="Apply the 12 Mbps Raspberry Pi USB mitigation now? [y/N] "
+	local -a dwc_roots=() device_lines=()
 
 	[[ "${MESHFIRMWARE_PI_USB_CHECK:-1}" != 0 ]] || return 0
 	[[ "$(uname -s)" == Linux ]] || return 0
@@ -304,47 +397,111 @@ meshfirmware_check_pi_usb_host_speed() {
 		driver_path="$(readlink -f "${controller}/driver" 2>/dev/null || true)"
 		if [[ "${driver_path##*/}" == dwc_otg ]]; then
 			dwc_host=1
-			break
+			dwc_roots+=("$resolved_root")
 		fi
 	done
 	(( dwc_host )) || return 0
 
-	speed="$(cat "$speed_file" 2>/dev/null || true)"
-	if [[ "$speed" == 1 ]]; then
-		echo "Raspberry Pi USB safeguard active: dwc_otg.speed=1 (12 Mbps USB Full Speed)."
-		return 0
-	fi
-
+	# Count physical devices once, even when they expose several CDC/MSC interfaces.
+	# Only devices below dwc_otg roots are affected by this setting.
 	for vendor_file in "${sys_root}"/bus/usb/devices/*/idVendor; do
 		[[ -r "$vendor_file" ]] || continue
-		product_file="${vendor_file%idVendor}idProduct"
-		if [[ "$(cat "$vendor_file")" == 1a40 \
-			&& -r "$product_file" && "$(cat "$product_file")" == 0101 ]]; then
-			terminus_hub=1
-			break
+		device="$(readlink -f "${vendor_file%/idVendor}" 2>/dev/null || true)"
+		[[ -n "$device" ]] || continue
+		affected=0
+		for root in "${dwc_roots[@]}"; do
+			[[ "$device" != "$root/"* ]] || affected=1
+		done
+		(( affected )) || continue
+		vendor="$(cat "$vendor_file" 2>/dev/null || true)"
+		product_file="${device}/idProduct"
+		product="$(cat "$product_file" 2>/dev/null || true)"
+		category="$(meshfirmware_classify_pi_usb_device "$device" "$sys_root" "$proc_root")"
+		if [[ "$category" == hub ]]; then
+			hubs=$((hubs + 1))
+			[[ "${vendor,,}:${product,,}" != 1a40:0101 ]] || terminus_hub=1
+			continue
 		fi
+		total=$((total + 1))
+		case "$category" in
+			node) nodes=$((nodes + 1)); label="node" ;;
+			dfu) dfu=$((dfu + 1)); label="node/UF2 bootloader (DFU)" ;;
+			serial) serial=$((serial + 1)); label="serial adapter (possible node)" ;;
+			network) network=$((network + 1)); label="USB Ethernet / Wi-Fi adapter" ;;
+			storage) storage=$((storage + 1)); label="USB storage / SD-card reader" ;;
+			*) other=$((other + 1)); label="other/unknown device" ;;
+		esac
+		product="$(cat "${device}/product" 2>/dev/null || true)"
+		product="${product//[$'\r\n\t']/ }"
+		device_lines+=("  ${device##*/}: ${product:-unnamed USB device} [$label]")
 	done
+	if (( total > 0 && storage == 0 && other == 0 )); then
+		suggest_full_speed=1
+		speed_tier=1
+		if (( network > 0 )); then
+			speed_tier=2
+			speed_prompt="Use USB 1.1 for light networking (12 Mbps shared bus cap)? [y/N] "
+		fi
+	fi
 
+	speed="$(cat "$speed_file" 2>/dev/null || true)"
 	echo >&2
-	echo "WARNING: ${model} is using the legacy dwc_otg USB host at its default high speed." >&2
-	echo "Some Raspberry Pi hub/radio combinations can repeatedly reset the whole USB bus" >&2
-	echo "or lock the host (often error -71/-110 or FIQ FSM timeout messages)." >&2
+	if [[ "$speed" == 1 ]]; then
+		echo "Raspberry Pi USB safeguard active: dwc_otg.speed=1 (12 Mbps USB Full Speed)." >&2
+	else
+		echo "WARNING: ${model} is using the legacy dwc_otg USB host at its default high speed." >&2
+		echo "Some Raspberry Pi hub/radio combinations can repeatedly reset the whole USB bus" >&2
+		echo "or lock the host (often error -71/-110 or FIQ FSM timeout messages)." >&2
+	fi
 	if (( terminus_hub )); then
 		echo "A Terminus 1a40:0101 hub, a topology seen with this failure, is connected." >&2
 	fi
-	echo "The tested mitigation is dwc_otg.speed=1. It caps this USB bus at 12 Mbps;" >&2
-	echo "USB Ethernet/storage will be slower, while USB radio serial links are usually already 12 Mbps." >&2
+	echo "USB inventory: $total device(s) on dwc_otg; $nodes node(s), $dfu DFU/UF2, $serial serial candidate(s), $network network adapter(s), $storage storage, $other other/unknown; $hubs hub(s) excluded." >&2
+	if (( total > 0 )); then printf '%s\n' "${device_lines[@]}" >&2; fi
+	echo "USB speed scale: 1 = favor 1.1 | 2 = light networking / either speed | 3 = favor 2.0" >&2
+	echo "Selected tier: $speed_tier/3" >&2
+	if (( suggest_full_speed )); then
+		if (( speed_tier == 2 )); then
+			echo "Recommendation: USB 1.1 for light networking; USB 2.0 for higher throughput (middle tier)." >&2
+			echo "Only network adapters and optional nodes were found. Traffic demand is not measured." >&2
+			echo "The entire USB bus shares the 12 Mbps cap, including Ethernet/Wi-Fi traffic." >&2
+		else
+			echo "Recommendation: USB 1.1 / Full Speed (12 Mbps) for this node-only USB bus." >&2
+			echo "dwc_otg.speed=1 caps the entire bus; radio serial links are usually already 12 Mbps." >&2
+		fi
+		if (( serial > 0 )); then
+			echo "Serial adapters are possible nodes; confirm they serve nodes before changing speed." >&2
+		fi
+	else
+		echo "Recommendation: USB 2.0 / High Speed (up to 480 Mbps)." >&2
+		if (( storage > 0 || other > 0 )); then
+			echo "Storage or unidentified devices share this bus; a 12 Mbps cap may slow them." >&2
+		else
+			echo "No node devices were identified; reconnect the nodes before considering a 12 Mbps cap." >&2
+		fi
+	fi
 
 	for cmdline in "${boot_root}/firmware/cmdline.txt" "${boot_root}/cmdline.txt"; do
 		[[ -f "$cmdline" ]] && break
 		cmdline=""
 	done
+	if [[ -n "$cmdline" ]] \
+		&& grep -Eq '(^|[[:space:]])dwc_otg\.speed=1([[:space:]]|$)' "$cmdline"; then
+		configured=1
+	fi
+	if (( ! suggest_full_speed )); then
+		if [[ "$speed" == 1 ]] || (( configured )); then
+			echo "To allow USB 2.0 speeds, remove dwc_otg.speed=1 from ${cmdline:-the boot cmdline.txt} and reboot when convenient." >&2
+		fi
+		echo "No USB speed change or reboot is being offered for this device mix." >&2
+		return 0
+	fi
+	[[ "$speed" != 1 ]] || return 0
 	if [[ -z "$cmdline" ]]; then
 		echo "No Raspberry Pi cmdline.txt was found, so no automatic change is available." >&2
 		return 0
 	fi
-	if grep -Eq '(^|[[:space:]])dwc_otg\.speed=1([[:space:]]|$)' "$cmdline"; then
-		configured=1
+	if (( configured )); then
 		echo "dwc_otg.speed=1 is saved in ${cmdline} but is not active yet." >&2
 	fi
 	if declare -F no_sudo_mode >/dev/null 2>&1 && no_sudo_mode; then
@@ -357,7 +514,7 @@ meshfirmware_check_pi_usb_host_speed() {
 		return 0
 	fi
 	if (( ! configured )); then
-		if ! read -r -p "Apply the 12 Mbps Raspberry Pi USB mitigation now? [y/N] " answer < "$tty_path"; then
+		if ! read -r -p "$speed_prompt" answer < "$tty_path"; then
 			return 0
 		fi
 		case "$answer" in

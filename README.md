@@ -207,6 +207,31 @@ The [script](https://github.com/mikecarper/meshfirmware/blob/main/firmware.sh) d
 
 
 
+### Raspberry Pi USB speed recommendation
+
+On Raspberry Pis using the legacy dwc_otg USB host, mcfirmware.sh, mcsetup.sh,
+and mtfirmware.sh count physical devices on the affected bus (excluding hubs).
+The recommendation uses a three-tier scale:
+
+1. **Favor USB 1.1:** only nodes, node bootloaders, or serial adapters.
+2. **Middle ground:** USB Ethernet/Wi-Fi adapters alone or alongside nodes.
+   USB 1.1 may suit light traffic; USB 2.0 preserves higher throughput.
+   The script does not measure traffic demand, and the 12 Mbps cap is shared
+   across the entire USB bus.
+3. **Favor USB 2.0:** storage/SD-card readers or unknown peripherals, even when
+   nodes or networking are also present. An empty bus also defaults to this tier.
+
+Generic serial adapters are labeled as possible nodes because USB descriptors
+cannot prove which firmware is running. Node DFU/UF2 drives are recognized through
+bootloader identity or mounted UF2 metadata belonging to that same USB device;
+ordinary storage is not assumed to be a bootloader just because it also has a
+serial interface. The check does not mount drives or reset devices.
+
+Tiers 1 and 2 offer the existing opt-in boot setting and reboot prompts, with
+the network throughput tradeoff stated in the tier-2 prompt. Tier 3 only gives
+advice, including how to remove an existing 12 Mbps cap. Devices on other USB
+controllers do not affect the recommendation.
+
 Usage
 -----
 
