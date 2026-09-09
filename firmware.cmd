@@ -400,12 +400,14 @@ function get_esptool_cmd() {
 	$script:ESPTOOL_WRITE_FLASH = "write_flash"
 	$script:ESPTOOL_ERASE_FLASH = "erase_flash"
 	$script:ESPTOOL_READ_FLASH_STATUS = "read_flash_status"
+	$script:ESPTOOL_CHIP_ID = "chip_id"
 	if ($esptoolVersion -match '(?i)\besptool\s+v(\d+)') {
 		$majorVersion = [int]$matches[1]
 		if ($majorVersion -ge 5) {
 			$script:ESPTOOL_WRITE_FLASH = "write-flash"
 			$script:ESPTOOL_ERASE_FLASH = "erase-flash"
 			$script:ESPTOOL_READ_FLASH_STATUS = "read-flash-status"
+			$script:ESPTOOL_CHIP_ID = "chip-id"
 		}
 	}
 	if ($pythonVersion) {
@@ -481,7 +483,23 @@ function run_cmd {
 		}
     }
 
-    $output = & $exe @args 2>&1 | Out-String   # capture as ONE string
+	# Windows PowerShell wraps native stderr in ErrorRecords. A successful
+	# esptool warning (for example S3 has a MAC instead of chip-id) must not
+	# become a terminating exception merely because the caller uses Stop.
+	$previousErrorPreference = $ErrorActionPreference
+	$null = Get-Command $exe -ErrorAction Stop
+	try {
+		$ErrorActionPreference = 'Continue'
+		$PSNativeCommandUseErrorActionPreference = $false
+		$output = & $exe @args 2>&1 | Out-String
+		$exitCode = $LASTEXITCODE
+	}
+	finally {
+		$ErrorActionPreference = $previousErrorPreference
+	}
+	if ($exitCode -ne 0) {
+		throw "Native command failed (exit $exitCode): $CommandLine`n$output"
+	}
 	Write-Progress -Activity " " -Status " " -Completed
     return $output.TrimEnd()
 }
@@ -1335,13 +1353,25 @@ function getMeshCore {
         [int]$CmdTimeoutMs = 500
     )
 
+    # Native ESP32 USB-Serial/JTAG uses DTR/RTS for hardware reset/download
+    # control, not an application session. Asserting them during inventory
+    # can strand a running V4 in ROM after close/reopen. Keep normal nRF52
+    # CDC session signalling and USB-UART behavior unchanged.
+    $probeControlLines = $true
+    $probeIdentity = Get-UsbComPortIdentity -ComPort $ComPort
+    if ($probeIdentity -and
+        $probeIdentity.ParentInstanceId -match '^USB\\VID_303A&PID_1001(?:\\|&)' -and
+        $probeIdentity.BusReportedDescription -eq 'USB JTAG/serial debug unit') {
+        $probeControlLines = $false
+    }
+
     foreach ($baud in $Bauds) {
         $sp = $null
         $enteredTerminalForProbe = $false
         try {
             Write-Progress -Id 41 -Activity "Probing serial" -Status "$ComPort @ $baud" -PercentComplete 0
 
-            $sp = Open-SerialPort -ComPort $ComPort -Baud $baud -ReadTimeoutMs 1000 -WriteTimeoutMs 1000 -Dtr $true -Rts $true
+            $sp = Open-SerialPort -ComPort $ComPort -Baud $baud -ReadTimeoutMs 1000 -WriteTimeoutMs 1000 -Dtr $probeControlLines -Rts $probeControlLines
 			$VersionCmdTimeoutMs = [Math]::Max($CmdTimeoutMs, 1500)
 			$companionInfo = Get-MeshCoreCompanionInfo -SerialPort $sp -TotalMs $VersionCmdTimeoutMs
 			if ($companionInfo) {
@@ -4460,7 +4490,7 @@ function updateFlashViaEspTool {
 		}
 
 		# run esptool and capture *all* output
-		$output = run_cmd "$ESPTOOL_CMD --baud 1200 --port $selectedComPort chip_id"
+		$output = run_cmd "$ESPTOOL_CMD --baud 1200 --port $selectedComPort $script:ESPTOOL_CHIP_ID"
 
 		if ($output -match 'device attached to the system is not') {
 			if ($attempt -eq 5) {
@@ -4683,8 +4713,8 @@ function Install-SimpleMergedEspImage {
 		Write-Host ""
 		Write-Host ""
 		Write-Host ""
-		Write-Host "Setting baud to 1200 for firmware update mode. $ESPTOOL_CMD --baud 1200 --port $ComPort chip_id"
-		$null = run_cmd "$ESPTOOL_CMD --baud 1200 --port $ComPort chip_id"
+		Write-Host "Setting baud to 1200 for firmware update mode. $ESPTOOL_CMD --baud 1200 --port $ComPort $script:ESPTOOL_CHIP_ID"
+		$null = run_cmd "$ESPTOOL_CMD --baud 1200 --port $ComPort $script:ESPTOOL_CHIP_ID"
 		$selectedComPortPart2 = Resolve-EspUsbComPort `
 			-PreferredComPort $ComPort `
 			-UsbIdentity $UsbIdentity `
@@ -4860,8 +4890,8 @@ function installFlashViaEspTool {
 	Write-Host ""
 	Write-Host ""
 	Write-Host ""
-	Write-Host "Setting baud to 1200 for firmware update mode. $ESPTOOL_CMD --baud 1200 --port $selectedComPort chip_id"
-	$a = run_cmd "$ESPTOOL_CMD --baud 1200 --port $selectedComPort chip_id"
+	Write-Host "Setting baud to 1200 for firmware update mode. $ESPTOOL_CMD --baud 1200 --port $selectedComPort $script:ESPTOOL_CHIP_ID"
+	$a = run_cmd "$ESPTOOL_CMD --baud 1200 --port $selectedComPort $script:ESPTOOL_CHIP_ID"
 	$selectedComPortPart2 = Resolve-EspUsbComPort `
 		-PreferredComPort $selectedComPort `
 		-UsbIdentity $usbIdentity `
@@ -5286,11 +5316,10 @@ function Test-UsbIdentityIsNrf52Dfu {
 		return $true
 	}
 
-	# Seeed's T1000-E OTAFIX bootloader uses its own non-Adafruit USB VID/PID
-	# and reports the plain product name "T1000-E", without a DFU/UF2 suffix.
-	# Keep this allow-list exact so a normal Seeed runtime device cannot be
-	# mistaken for a no-touch DFU target.
-	return ($parentInstanceId -match '(?i)^USB\\VID_2886&PID_0057\\')
+	# Seeed's CDC-only XIAO, XIAO Sense and T1000-E bootloaders use plain
+	# product names without DFU/UF2 suffixes. These are exact bootloader IDs,
+	# matching mcfirmware.sh; their 0x80xx application IDs remain excluded.
+	return ($parentInstanceId -match '(?i)^USB\\VID_2886&PID_(0044|0045|0057)\\')
 }
 
 function Assert-UsbIdentityIsNrf52Dfu {

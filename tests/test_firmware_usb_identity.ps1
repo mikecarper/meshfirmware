@@ -35,6 +35,7 @@ if ($parseErrors.Count -ne 0) {
 
 foreach ($functionName in @(
 	'Test-IsWindowsHost',
+	'get_esptool_cmd',
 	'Enter-MeshCoreTerminalForProbe',
 	'Exit-MeshCoreTerminalAfterProbe',
 	'getMeshCore',
@@ -208,6 +209,29 @@ Assert-True -Condition (Test-UsbIdentityIsNrf52Dfu -Identity $t1000eDfu) -Messag
 Assert-True -Condition (-not (Test-UsbIdentityIsNrf52Dfu -Identity $t1000eWrongPid)) -Message 'An unlisted Seeed USB PID was misidentified as T1000-E DFU mode.'
 Assert-True -Condition (-not (Test-UsbIdentityIsNrf52Dfu -Identity $t1000eRuntime)) -Message 'T1000-E runtime firmware was misidentified as DFU mode.'
 Assert-True -Condition (-not (Test-UsbIdentityIsNrf52Dfu -Identity $t096Runtime)) -Message 'Runtime firmware was misidentified as DFU mode.'
+
+foreach ($pidValue in @('0044', '0045', '8044', '8045', '0046')) {
+	$xiaoIdentity = [pscustomobject]@{
+		SerialNumber = 'B35E71C1C3726CE7'
+		ParentInstanceId = "USB\VID_2886&PID_$pidValue\B35E71C1C3726CE7"
+		BusReportedDescription = 'Seeed XIAO nRF52840'
+		InterfaceNumber = '00'
+	}
+	Assert-Equal -Expected ($pidValue -in @('0044', '0045')) `
+		-Actual (Test-UsbIdentityIsNrf52Dfu -Identity $xiaoIdentity) `
+		-Message "XIAO CDC-only DFU classification was incorrect for PID $pidValue."
+}
+
+# Exercise actual version selection; do not require installed tools or hardware.
+$productionGetEsptool = (Get-Command get_esptool_cmd).ScriptBlock
+function esptool { param($operation) return "esptool v$script:mockEsptoolVersion" }
+foreach ($script:mockEsptoolVersion in @('4.8.1', '5.4.0')) {
+	$null = & $productionGetEsptool
+	$modern = $script:mockEsptoolVersion.StartsWith('5.')
+	Assert-Equal -Expected $(if ($modern) { 'chip-id' } else { 'chip_id' }) `
+		-Actual $script:ESPTOOL_CHIP_ID -Message 'Chip identification command does not match esptool major version.'
+}
+Remove-Item Function:esptool
 
 $noTouchRuntimeRejected = $false
 try {
@@ -677,6 +701,7 @@ function Resolve-EspUsbComPort {
 function get_esptool_cmd {
 	$script:ESPTOOL_ERASE_FLASH = 'erase_flash'
 	$script:ESPTOOL_WRITE_FLASH = 'write_flash'
+	$script:ESPTOOL_CHIP_ID = 'chip_id'
 	return 'esptool'
 }
 $script:espCommands = @()
@@ -869,7 +894,14 @@ Assert-Equal `
 # hardware/name/version and finally restores Binary mode.
 $meshProbePort = [pscustomobject]@{ IsOpen = $true }
 $meshProbePort | Add-Member -MemberType ScriptMethod -Name Close -Value { $this.IsOpen = $false }
-function Open-SerialPort { param($ComPort, $Baud, $ReadTimeoutMs, $WriteTimeoutMs, $Dtr, $Rts) return $meshProbePort }
+function Open-SerialPort {
+    param($ComPort, $Baud, $ReadTimeoutMs, $WriteTimeoutMs, $Dtr, $Rts)
+    $script:probeDtr = $Dtr
+    $script:probeRts = $Rts
+    return $meshProbePort
+}
+$script:probeUsbIdentity = $t096Runtime
+function Get-UsbComPortIdentity { param($ComPort) return $script:probeUsbIdentity }
 function Get-UsableSerialResponse { param($Text, $Kind, $MaxLength) return [string]$Text }
 $script:meshProbeInTerminal = $false
 $script:meshProbeEnterCalls = 0
@@ -903,6 +935,32 @@ Assert-Equal -Expected 'MeshCore' -Actual $meshProbeResult.Project -Message 'Inv
 Assert-Equal -Expected 'v1.17.1' -Actual $meshProbeResult.FWVersion -Message 'Inventory lost the Full Companion firmware version.'
 Assert-Equal -Expected 1 -Actual $script:meshProbeEnterCalls -Message 'Inventory used an unexpected number of Binary-to-terminal handoffs.'
 Assert-Equal -Expected 1 -Actual $script:meshProbeExitCalls -Message 'Inventory did not restore Binary mode exactly once.'
+Assert-True -Condition ($script:probeDtr -and $script:probeRts) -Message 'nRF52 CDC probe lost its session control lines.'
+
+# The V4's native USB controller recognizes modem-control changes as a
+# reset/download sequence. Match both its VID/PID and immutable product
+# descriptor: TinyUSB firmware can use the same VID/PID but requires DTR.
+foreach ($fixture in @(
+    @{ Parent='USB\VID_303A&PID_1001\44:1B:F6:6A:E8:44'; Description='USB JTAG/serial debug unit'; AssertLines=$false },
+    @{ Parent='USB\VID_303A&PID_1001\another-s3'; Description='USB JTAG/serial debug unit'; AssertLines=$false },
+    @{ Parent='USB\VID_303A&PID_1001\tinyusb'; Description='ESP32S3 Dev Module'; AssertLines=$true },
+    @{ Parent='USB\VID_10C4&PID_EA60\uart'; Description='CP210x USB to UART'; AssertLines=$true },
+    @{ Parent='USB\VID_239A&PID_8029\nrf52'; Description='MeshCore Full Companion'; AssertLines=$true },
+    @{ Parent=''; Description=''; AssertLines=$true }
+)) {
+    $script:probeUsbIdentity = [pscustomobject]@{
+        ParentInstanceId=$fixture.Parent
+        BusReportedDescription=$fixture.Description
+    }
+    $meshProbePort.IsOpen = $true
+    $null = getMeshCore -ComPort 'COM9' -CmdTimeoutMs 1
+    Assert-Equal -Expected $fixture.AssertLines -Actual $script:probeDtr -Message 'Probe used unsafe DTR state.'
+    Assert-Equal -Expected $fixture.AssertLines -Actual $script:probeRts -Message 'Probe used unsafe RTS state.'
+}
+$script:probeUsbIdentity = $null
+$meshProbePort.IsOpen = $true
+$null = getMeshCore -ComPort 'COM9' -CmdTimeoutMs 1
+Assert-True -Condition ($script:probeDtr -and $script:probeRts) -Message 'Unknown USB identity changed legacy probe behavior.'
 
 # Interface 02 is output-only and cannot answer the same probe. Keep it visible
 # for log readers, but inherit the same-radio interface 00 board/version and

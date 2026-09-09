@@ -6,6 +6,26 @@ Scripts that automates the process of selecting, downloading, and applying firmw
 Make sure file is named firmware.cmd and not firmware.cmd.txt  
 double click and run the file firmware.cmd  
 
+The Windows flasher recognizes the serial-only Seeed XIAO/XIAO Sense DFU
+products (`2886:0044` / `2886:0045`) as well as T1000-E (`2886:0057`), while
+still rejecting their application-mode IDs and rechecking the selected USB
+identity after COM-port changes. It selects esptool 4/5 command spellings
+automatically. Native stderr warnings do not abort successful operations in
+Windows PowerShell 5; a nonzero tool exit still stops the flash.
+
+Normal MeshCore identification leaves DTR/RTS deasserted on native ESP32
+USB-Serial/JTAG devices (including Heltec V4), whose hardware interprets
+those signals as reset/download controls. This prevents the probe from
+accidentally entering download mode. nRF52 CDC and USB-UART probing retain
+their existing control-line behavior; intentional flashing resets are unchanged.
+
+Regression checks (no connected radio needed):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_usb_identity.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_native_commands.ps1
+```
+
 Windows Video
 -----
 
