@@ -59,7 +59,7 @@ CONFIG_URL="https://api.meshcore.nz/api/v1/config"
 BOOT_WAIT="${BOOT_WAIT:-2}" 
 BAUD="${3:-115200}"
 DEFAULT_BAUDS=(57600 115200 38400 9600 19200 2400)
-SERIAL_BAUD_CACHE=57600
+SERIAL_BAUD_CACHE=""
 SERIAL_IDLE_TIMEOUT=2.5 
 SERIAL_TOTAL_TIMEOUT=7.5
 
@@ -1078,7 +1078,7 @@ serial_cmd() {
   local extract_regex="${SERIAL_EXTRACT_REGEX:-}"
 
   # Fast read/exit behavior
-  local total_timeout="${SERIAL_TOTAL_TIMEOUT:-7.5s}"  # hard cap
+  local total_timeout="${SERIAL_TOTAL_TIMEOUT:-7.5s}"  # seconds, optional s suffix
   local idle_timeout="${SERIAL_IDLE_TIMEOUT:-2.5}"    # socat exits after idle
   local device_name_now="${DEVICE_NAME}"
   if [[ -z "${device_name_now}" ]]; then
@@ -1120,71 +1120,70 @@ serial_cmd() {
     candidates=("${candidates[0]}")
   fi
 
-  local baud attempt out last_out
+  local baud attempt out last_out rc=0
   last_out=""
 
-	for baud in "${candidates[@]}"; do
-	    for ((attempt=1; attempt<=max_retries; attempt++)); do
-			out="$(
-			  # shellcheck disable=SC2016
-			  timeout -s KILL "${total_timeout}" \
-				bash -o pipefail -c '
-			  device="$1"
-			  baud="$2"
-			  line="$3"
-			  idle="$4"
-			  noise_pat="$5"
-			  output_mode="$6"
-			  response_regex="$7"
-			  extract_regex="$8"
-
-			  printf "%b" "${line}\r\n" \
-				| socat -T "${idle}" - "OPEN:${device},raw,echo=0,b${baud}" 2>/dev/null \
-				| tr "\r" "\n" \
-				| sed -E $'"'"'s/\x1B\\[[0-9;]*[A-Za-z]//g'"'"' \
-				| sed -E "s/^[[:space:][:cntrl:]]*(->|>)+[[:space:]]*//" \
-				| sed -E "s/^[[:space:][:cntrl:]]+//; s/[[:space:]]+$//" \
-				| sed -E "s/^[^0-9A-Za-z+\\-]+//" \
-				| {
-					if [[ -n "$extract_regex" ]]; then
-					  grep -Eo "$extract_regex"
-					else
-					  grep -E -v "$noise_pat" \
-					  | awk -v cmd="$line" -v mode="$output_mode" -v response_regex="$response_regex" '"'"'
-					NF {
-					  if ($0 == cmd) next
-					  if (response_regex != "" && $0 !~ response_regex) next
-					  if (mode == "all") {
-					    print
-					  } else {
-					    keep = $0
-					  }
-					}
-					END {
-					  if (mode != "all") print keep
-					}
-					  '"'"'
-					fi
-				  }
-			' _ "${device_name_now}" "${baud}" "${line}" "${idle_timeout}" "${noise_pat}" "${output_mode}" "${response_regex}" "${extract_regex}"
-		)"
-		rc=$?
-
-		# Timeout (KILL) or other error -> retry
-		if (( rc != 0 )); then
-		  out=""
-		fi
+  for baud in "${candidates[@]}"; do
+    for ((attempt=1; attempt<=max_retries; attempt++)); do
+      if out="$(
+        printf '%s\r\n' "$line" \
+          | {
+              # Keep reading after printf closes stdin. Bound only the serial
+              # reader so the filters can finish and retain replies even when
+              # continuous packet logs keep the idle timeout from firing.
+              read_status=0
+              timeout --foreground --kill-after=1s "$total_timeout" \
+                socat -t "${total_timeout%s}" -T "$idle_timeout" - \
+                  "OPEN:${device_name_now},raw,echo=0,b${baud}" 2>/dev/null \
+                || read_status=$?
+              case "$read_status" in
+                0|124|137) : ;;
+                *) exit "$read_status" ;;
+              esac
+            } \
+          | tr '\r' '\n' \
+          | sed -E $'s/\x1B\\[[0-9;]*[A-Za-z]//g' \
+          | {
+              if [[ -n "$extract_regex" ]]; then
+                grep -Eo "$extract_regex" || true
+              else
+                MCSETUP_SERIAL_COMMAND="$line" awk \
+                  -v mode="$output_mode" -v response_regex="$response_regex" \
+                  -v noise_pat="$noise_pat" '
+                  BEGIN { cmd = ENVIRON["MCSETUP_SERIAL_COMMAND"] }
+                  {
+                    sub(/^[[:space:][:cntrl:]]+/, "")
+                    marked = sub(/^(->|>)+[[:space:]]*/, "")
+                    sub(/[[:space:]]+$/, "")
+                    if (!NF || $0 == cmd) next
+                    # A marked CLI reply can itself start with ERR: or contain
+                    # log-like text (for example a node name or owner.info).
+                    if (!marked && $0 ~ noise_pat) next
+                    if (response_regex != "" && $0 !~ response_regex) next
+                    if (mode == "all") print
+                    else keep = $0
+                  }
+                  END { if (mode != "all") print keep }
+                '
+              fi
+            }
+      )"; then
+        rc=0
+      else
+        rc=$?
+        out=""
+      fi
 
       last_out="$out"
 
-      if [[ "$allow_blank_response" == "1" && $rc -eq 0 && ( -z "$out" || "$out" == "$line" || "$out" =~ $noise_pat ) ]]; then
+      if [[ "$allow_blank_response" == "1" && $rc -eq 0 && -z "$out" ]]; then
         SERIAL_BAUD_CACHE="$baud"
         BAUD="$baud"
         return 0
       fi
 
-      # Empty, echo, or log line -> retry
-      if [[ -z "$out" || "$out" == "$line" || "$out" =~ $noise_pat ]]; then
+      # Echoes and logs have already been filtered; preserve marked error replies.
+      if [[ -z "$out" ]]; then
         sleep "$delay_between"
         continue
       fi
@@ -1197,13 +1196,44 @@ serial_cmd() {
     done
   done
 
-  # Total failure: return empty (or whatever last_out was), but success exit code
+  # A silent device returns an empty reply; report transport failures separately.
   printf '%s' "$last_out"
-  return 0
+  return "$rc"
 }
 
 serial_cmd_multiline_200ms() {
   SERIAL_RETRIES=1 SERIAL_OUTPUT_MODE=all SERIAL_IDLE_TIMEOUT=0.2 SERIAL_TOTAL_TIMEOUT=2s serial_cmd "$@"
+}
+
+run_raw_command() {
+  local line="$1" raw_out
+  if [[ -z "$line" ]]; then
+    echo "No command entered."
+    return 0
+  fi
+  if [[ -z "${DEVICE_NAME:-}" ]]; then
+    echo "No serial port selected. Exit and select a radio first."
+    return 0
+  fi
+
+  echo "Running: $line"
+  # Clock parsing is not a connection test. Send explicit raw commands even if
+  # the clock query failed, and never replay a write while scanning baud rates.
+  # Discover the baud with a read-only command if no earlier foreground command
+  # cached it (command-substitution reads cannot update the parent shell cache).
+  if [[ -z "${SERIAL_BAUD_CACHE:-}" ]]; then
+    SERIAL_RETRIES=1 serial_cmd "board" >/dev/null || true
+  fi
+  if raw_out="$(SERIAL_RETRIES=1 SERIAL_FIRST_CANDIDATE_ONLY=1 \
+      SERIAL_OUTPUT_MODE=all serial_cmd "$line")"; then
+    if [[ -n "$raw_out" ]]; then
+      printf '%s\n' "$raw_out"
+    else
+      echo "No reply received. Check the radio before retrying; no automatic retry was made."
+    fi
+  else
+    echo "Serial command failed on ${DEVICE_NAME}. Check the connection and close other serial programs."
+  fi
 }
 
 read_hex_key_setting() {
@@ -1240,6 +1270,9 @@ clean_node_info_field() {
     || [[ ! "$value" =~ ^[[:alnum:]][[:alnum:][:space:].,_+:/()#-]*$ ]]; then
     value=""
   fi
+  case "${value,,}" in
+    "unknown command"*|"err:"*|"error:"*|"error,"*|"error "*) value="" ;;
+  esac
   printf '%s' "$value"
 }
 
@@ -1285,7 +1318,9 @@ query_companion_device_info() {
     bash -o pipefail -c '
       device=$1
       idle=$2
-      printf "\x3c\x02\x00\x16\x0e" \
+      # End the line too: a text repeater otherwise buffers this binary probe
+      # and prepends it to the following board command. Companion ignores CR/LF.
+      printf "\x3c\x02\x00\x16\x0e\r\n" \
         | socat -T "$idle" - "OPEN:${device},raw,echo=0,b115200" 2>/dev/null
     ' _ "$device" "$idle_timeout" \
     | LC_ALL=C perl -0777 -ne '
@@ -1330,7 +1365,7 @@ query_companion_full_version() {
     bash -o pipefail -c '
       device=$1
       idle=$2
-      printf "\x3c\x08\x00\x42version" \
+      printf "\x3c\x08\x00\x42version\r\n" \
         | socat -T "$idle" - "OPEN:${device},raw,echo=0,b115200" 2>/dev/null
     ' _ "$device" "$idle_timeout" \
     | LC_ALL=C perl -0777 -ne '
@@ -1682,7 +1717,7 @@ edit_repeater_settings_menu() {
     echo " C) Clear stats"
 	echo " Q) Quit"
     echo
-    echo "Choose an item to edit, an action, or q to finish."
+    echo "Choose an item, an action, type a firmware command, or q to finish."
     print_detected_node_summary
     read -rp "Choice: " choice
 
@@ -1712,22 +1747,11 @@ edit_repeater_settings_menu() {
         ;;
 
 		0)
-		  read -rp "Command to run (multiline read, 200ms idle timeout): " v
-		  if [ -n "$v" ]; then
-			echo "Running: $v"
-			if [[ -n "${device_epoch:-}" ]]; then
-				raw_out="$(serial_cmd_multiline_200ms "$v" | trim)"
-				if [[ -n "$raw_out" ]]; then
-				  printf '%s\n' "$raw_out"
-				else
-				  echo "(No response within 200ms idle window.)"
-				fi
-			else
-				serial_cmd_echo "$v"
-			fi
-		  else
-			echo "No command entered."
-		  fi
+          echo "Examples: get tx; get tempradioat"
+          echo "Temporary radio: tempradio 910.1,500,7,5,180 (180 minutes = 3 hours)"
+          echo "Scheduled radio: set tempradioat freq,bw,sf,cr,start_epoch,end_epoch"
+          read -rp "Command to run: " v
+          run_raw_command "$v"
 		  ;;
 
 		1)
@@ -2021,6 +2045,10 @@ edit_repeater_settings_menu() {
       c|C)
         echo "Clearing stats..."
         serial_cmd "clear stats"
+        ;;
+
+      [[:alpha:]][[:alpha:]]*)
+        run_raw_command "$choice"
         ;;
 
       *)

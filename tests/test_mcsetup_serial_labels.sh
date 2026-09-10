@@ -71,6 +71,21 @@ refresh_detected_node_info
 [[ "$(print_detected_node_summary)" == 'Detected: RAK 4631. v1.17.1' ]]
 echo "PASS: mcsetup normalizes text-CLI board and version replies"
 
+serial_cmd() {
+	case "$1" in
+		board) printf '%s' 'Unknown command' ;;
+		ver) printf '%s' 'v1.16.01-halo-keymind-dev-ebd7da79' ;;
+		*) return 1 ;;
+	esac
+}
+refresh_detected_node_info
+[[ -z "$DETECTED_NODE_BOARD" ]]
+[[ "$(print_detected_node_summary)" == 'Detected: v1.16.01-halo-keymind-dev-ebd7da79' ]]
+for error in 'Unknown command.' 'ERR: unsupported' 'Error, invalid params'; do
+	[[ -z "$(clean_node_info_field "$error")" ]]
+done
+echo "PASS: CLI errors cannot become detected board or firmware labels"
+
 python3 - "$script_path" <<'PY'
 import sys
 
