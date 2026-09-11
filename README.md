@@ -121,7 +121,7 @@ matching pair continues automatically.
 
 A mismatch, ambiguous identity, or unknown RAK payload cancels by default. If
 the mismatch is intentional, the script displays a one-time token such as
-`rak3401-to-rak4631` (`firmware-to-connected-device`). Type that exact token at
+`unknown-to-rak4631` (`connected-device-to-firmware-target`). Type that exact token at
 the prompt to continue. Enter or any other response cancels without erasing or
 flashing.
 
@@ -129,11 +129,20 @@ For deliberate unattended use, pass only the exact token printed by the
 script:
 
 ```bash
-MCFIRMWARE_BOARD_OVERRIDE=rak3401-to-rak4631 ./mcfirmware.sh
+MCFIRMWARE_BOARD_OVERRIDE=unknown-to-rak4631 ./mcfirmware.sh
 ```
 
 This override is intentionally specific to the detected firmware/device pair;
 `yes`, `force`, and a token for another pair are rejected.
+
+For nRF52 `flash-wipe + flash`, a firmware provider or cached catalog may be
+missing the board's `.erase` entry. The script looks up the selected board in
+the official MeshCore catalog and refreshes that catalog if needed. It keeps
+the selected firmware or bootloader file and the active provider unchanged.
+Only an exact, unique board match is selected automatically; otherwise you
+must choose an erase package for the physical board or cancel. If no erase
+packages are available, the script stops before erase or DFU. The one-time
+board override does not bypass this erase-package lookup.
 
 
 Linux Video

@@ -3408,7 +3408,9 @@ choose_meshcore_firmware() {
 		JSON_VALIDATE_FILTER='type == "array"' \
 			_cached_json "$RELEASE_INFO2_URL" "$CACHE_FILE" "$RELEASE_INFO2_FALLBACK_URL" || true
 		ERASE_URL=$( _jq1 --arg d "$DEVICE" ".device[]|select(.name==\$d)|.erase // empty" )
-		[[ -n $ERASE_URL ]] && ERASE_URL="https://flasher.meshcore.io/firmware/$ERASE_URL"
+		if [[ -n "$ERASE_URL" ]]; then
+			ERASE_URL="$(meshcore_erase_url "$ERASE_URL")" || return 1
+		fi
 	fi
 
     # ---------------- step 3 - role ---------------------------------------
@@ -3700,27 +3702,87 @@ download_and_verify() {
     echo "$dest" > "$dest_file"
 }
 
+meshcore_erase_url() {
+	local package="${1:-}"
+	if [[ -z "$package" || "$package" == *[[:space:]]* ]]; then
+		echo "Invalid or empty erase package URL; cancelling before erase or DFU." >&2
+		return 1
+	fi
+	case "$package" in
+		http://*|https://*) printf '%s\n' "$package" ;;
+		firmware/*) printf 'https://flasher.meshcore.io/%s\n' "$package" ;;
+		/*) printf 'https://flasher.meshcore.io%s\n' "$package" ;;
+		*) printf 'https://flasher.meshcore.io/firmware/%s\n' "$package" ;;
+	esac
+}
+
+nrf52_erase_entries() {
+	jq -r '.device[]? | select(.type == "nrf52")
+		| select(.name | type == "string" and length > 0)
+		| select(.erase | type == "string" and length > 0)
+		| [.name, .erase] | @tsv' "$1" 2>/dev/null
+}
+
 choose_erase_zip() {
-  local tty="/dev/tty"
+  local selected_device="${1:-}"
+  local tty="${MCFIRMWARE_ERASE_TTY:-/dev/tty}"
 
   declare -A seen=()
   local -a dev=() erase=()
-  local dn ez key
+  local -a catalogs=("$CONFIG_FILE") matches=()
+  [[ "$DEFAULT_CONFIG_FILE" == "$CONFIG_FILE" ]] || catalogs+=("$DEFAULT_CONFIG_FILE")
+  local dn ez key catalog pass
 
-  while IFS=$'\t' read -r dn ez; do
-    [[ -n "$dn" && -n "$ez" ]] || continue
-    key="$dn"$'\t'"$ez"
-    [[ -n "${seen[$key]+x}" ]] && continue
-    seen[$key]=1
-    dev+=("$dn")
-    erase+=("$ez")
-  done < <(_jq1 '.device[] | select(.erase? and .erase != "") | [.name, .erase] | @tsv')
+  # Firmware providers can omit .erase altogether. Keep their firmware selection
+  # intact, and consult the official catalog only for the missing erase metadata.
+  for pass in cached refreshed; do
+    if [[ "$pass" == refreshed ]]; then
+      echo "No matching erase entry in the cached catalogs; refreshing the official MeshCore erase catalog." >&2
+      # A recently downloaded catalog may itself lack .erase. Bypass its age
+      # check, without discarding a usable cache if the network is unavailable.
+      CACHE_TIMEOUT_SECONDS=0 \
+        JSON_VALIDATE_FILTER='(.device | type == "array") and any(.device[]; .type == "nrf52" and (.erase | type == "string" and length > 0))' \
+        _cached_json "$RELEASE_INFO1_URL" "$DEFAULT_CONFIG_FILE" "$RELEASE_INFO1_FALLBACK_URL" >&2 || true
+    fi
+    seen=(); dev=(); erase=(); matches=()
+    for catalog in "${catalogs[@]}"; do
+      while IFS=$'\t' read -r dn ez; do
+        [[ -n "$dn" && -n "$ez" ]] || continue
+        key="$dn"$'\t'"$ez"
+        [[ -n "${seen[$key]+x}" ]] && continue
+        seen[$key]=1
+        dev+=("$dn")
+        erase+=("$ez")
+        [[ "$dn" != "$selected_device" ]] || matches+=("$ez")
+      done < <(nrf52_erase_entries "$catalog" || true)
+
+      # Prefer the active provider's exact match, then the official one. Never
+      # auto-select a different board or guess between conflicting entries.
+      if (( ${#matches[@]} == 1 )); then
+        echo "Using erase package for $selected_device from $catalog: ${matches[0]}" >&2
+        printf '%s\n' "${matches[0]}"
+        return 0
+      fi
+      (( ${#matches[@]} == 0 )) || break
+    done
+    (( ${#matches[@]} == 0 )) || break
+    if [[ -z "$selected_device" || "$selected_device" == CustomFirmware ]] \
+      && (( ${#dev[@]} > 0 )); then
+      break
+    fi
+  done
 
   local n=${#dev[@]}
-  (( n > 0 )) || { echo "No devices with .erase found" >&2; return 1; }
+  if (( n == 0 )); then
+    echo "No nRF52 erase packages found for ${selected_device:-the selected board} in the active or official catalog." >&2
+    printf 'Checked catalog: %s\n' "${catalogs[@]}" >&2
+    echo "Check the catalog download/connection and retry. Cancelled before erase or DFU; the selected firmware file was not changed." >&2
+    return 1
+  fi
 
   {
-    echo "Select erase package:"
+    echo "No unique erase package matched ${selected_device:-the selected board}."
+    echo "Select the erase package for the physical board (q cancels):"
     local i
     for i in "${!dev[@]}"; do
       printf '%3d) %-40s %s\n' "$((i+1))" "${dev[$i]}" "${erase[$i]}"
@@ -3998,7 +4060,8 @@ nrf52_board_override_token() {
 
 	[[ -n "$firmware_family" ]] || firmware_family="unknown"
 	[[ -n "$device_family" ]] || device_family="unknown"
-	printf '%s-to-%s' "$firmware_family" "$device_family"
+	# Describe the recovery direction: current connected identity -> target.
+	printf '%s-to-%s' "$device_family" "$firmware_family"
 }
 
 nrf52_confirm_board_override() {
@@ -4016,6 +4079,7 @@ nrf52_confirm_board_override() {
 	echo "  $reason" >&2
 	echo "  Firmware payload: $(rak_board_family_label "$firmware_family")" >&2
 	echo "  Connected device: $(rak_board_family_label "$device_family")" >&2
+	echo "  Override direction: connected device -> firmware target." >&2
 	echo "  Safe default: cancel before erase or DFU." >&2
 
 	if [[ -n "$configured_token" ]]; then
@@ -6988,9 +7052,10 @@ else
 		[[ -f "$ERASE_URL_FILE" ]] && ERASE_URL="$(<"$ERASE_URL_FILE")"
 		#echo "$ERASE_URL"
 		if [[ -z "$ERASE_URL" ]]; then
-			ERASE_ZIP="$(choose_erase_zip)" || exit 1
-			ERASE_URL="https://flasher.meshcore.io/firmware/$ERASE_ZIP"
+			ERASE_ZIP="$(choose_erase_zip "$DEVICE")" || exit 1
+			ERASE_URL="$ERASE_ZIP"
 		fi
+		ERASE_URL="$(meshcore_erase_url "$ERASE_URL")" || exit 1
 		download_and_verify "$ERASE_URL" "$ERASE_FILE_FILE" 0 "Erase"
 		[[ -f "$ERASE_FILE_FILE" ]] && ERASE_FILE="$(<"$ERASE_FILE_FILE")"
 	fi

@@ -84,6 +84,13 @@ cp -- "$tag_package" "$misleading_package"
 [[ -z "$(rak_board_family_from_text 'Heltec V4')" ]]
 echo "PASS: RAK board-family text markers are classified"
 
+[[ "$(nrf52_board_override_token rak4631 unknown)" == unknown-to-rak4631 ]]
+[[ "$(nrf52_board_override_token rak3401 rak4631)" == rak4631-to-rak3401 ]]
+[[ "$(nrf52_board_override_token unknown rak4631)" == rak4631-to-unknown ]]
+[[ "$(nrf52_board_override_token rak4631 ambiguous)" == ambiguous-to-rak4631 ]]
+[[ "$(nrf52_board_override_token '' '')" == unknown-to-unknown ]]
+echo "PASS: override tokens run from connected identity to firmware target"
+
 [[ "$(nrf52_firmware_rak_family "$tag_package")" == "rak4631" ]]
 [[ "$(nrf52_firmware_rak_family "$rak3401_package")" == "rak3401" ]]
 [[ "$(nrf52_firmware_rak_family "$rak3401_full_package")" == "rak3401" ]]
@@ -135,6 +142,10 @@ expect_status "a generic or incorrect override is rejected" 1 \
 	nrf52_validate_rak_board_pair "$rak3401_package" /dev/mock "CustomFirmware"
 
 export MCFIRMWARE_BOARD_OVERRIDE="rak3401-to-rak4631"
+expect_status "the old firmware-to-device token is rejected" 1 \
+	nrf52_validate_rak_board_pair "$rak3401_package" /dev/mock "CustomFirmware"
+
+export MCFIRMWARE_BOARD_OVERRIDE="rak4631-to-rak3401"
 expect_status "the exact mismatch token allows deliberate intervention" 0 \
 	nrf52_validate_rak_board_pair "$rak3401_package" /dev/mock "CustomFirmware"
 
@@ -143,6 +154,39 @@ expect_status "a misleading RAK3401 filename around a RAK4631 payload cancels" 1
 	nrf52_validate_rak_board_pair "$misleading_package" /dev/mock "CustomFirmware"
 expect_status "an unverified payload on a known RAK target cancels" 1 \
 	nrf52_validate_rak_board_pair "$unknown_package" /dev/mock "CustomFirmware"
+
+mock_board="GAT562"
+mock_properties[ID_MODEL]="GAT562_OTAFIX"
+mock_properties[ID_SERIAL]="GAT562_OTAFIX_TEST"
+printf '%s\n' 'usb-GAT562_OTAFIX_TEST-if00' >"$DEVICE_PORT_NAME_FILE"
+expect_status "RAK recovery from a non-RAK bootloader identity cancels by default" 1 \
+	nrf52_validate_rak_board_pair "$tag_package" /dev/mock "RAK WisBlock / WisMesh (RAK 4631)"
+export MCFIRMWARE_BOARD_OVERRIDE="rak4631-to-unknown"
+expect_status "the old recovery token is rejected" 1 \
+	nrf52_validate_rak_board_pair "$tag_package" /dev/mock "RAK WisBlock / WisMesh (RAK 4631)"
+export MCFIRMWARE_BOARD_OVERRIDE="unknown-to-rak4631"
+expect_status "the exact reported recovery token permits deliberate RAK recovery" 0 \
+	nrf52_validate_rak_board_pair "$tag_package" /dev/mock "RAK WisBlock / WisMesh (RAK 4631)"
+unset MCFIRMWARE_BOARD_OVERRIDE
+
+MCFIRMWARE_BOARD_GUARD_TTY="${tmp_dir}/override-tty"
+touch "$MCFIRMWARE_BOARD_GUARD_TTY"
+read() {
+	[[ $# == 2 && "$1" == -r && "$2" == answer ]] || return 1
+	printf -v answer '%s' "$mock_answer"
+}
+mock_answer=unknown-to-rak4631
+expect_status "the interactive recovery prompt accepts unknown-to-rak4631" 0 \
+	nrf52_confirm_board_override rak4631 unknown
+grep -Fq 'Override token (unknown-to-rak4631):' "$MCFIRMWARE_BOARD_GUARD_TTY"
+mock_answer=rak4631-to-unknown
+expect_status "the interactive recovery prompt rejects the old direction" 1 \
+	nrf52_confirm_board_override rak4631 unknown
+mock_answer=''
+expect_status "Enter still cancels the interactive recovery prompt" 1 \
+	nrf52_confirm_board_override rak4631 unknown
+unset -f read
+MCFIRMWARE_BOARD_GUARD_TTY="${tmp_dir}/missing-tty"
 
 mock_board="Heltec V4"
 mock_properties[ID_MODEL]="Heltec_V4"
