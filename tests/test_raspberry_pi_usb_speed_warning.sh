@@ -103,9 +103,15 @@ export MESHFIRMWARE_BOOT_ROOT="$boot_root"
 export MESHFIRMWARE_TTY="${tmp_dir}/no-tty"
 
 output="$(meshfirmware_check_pi_usb_host_speed 2>&1)"
-grep -Fq 'USB safeguard active' <<< "$output"
+[[ "$output" == 'Raspberry Pi USB safeguard active: dwc_otg.speed=1 (12 Mbps USB Full Speed); no change needed.' ]]
+! grep -Fq 'USB inventory:' <<< "$output"
 [[ "$(cat "${boot_root}/firmware/cmdline.txt")" == 'console=tty1 rootwait' ]]
-echo 'PASS: an active 12 Mbps setting is reported without editing or prompting'
+echo 'PASS: a compatible bus at active 12 Mbps gets one compact status line'
+
+output="$(MESHFIRMWARE_PI_USB_VERBOSE=1 meshfirmware_check_pi_usb_host_speed 2>&1)"
+grep -Fq 'USB inventory:' <<< "$output"
+grep -Fq 'Selected tier: 1/3' <<< "$output"
+echo 'PASS: full active-speed diagnostics remain available on request'
 
 printf '%s\n' 0 > "${sys_root}/module/dwc_otg/parameters/speed"
 output="$(meshfirmware_check_pi_usb_host_speed 2>&1)"
@@ -268,9 +274,10 @@ grep -Fq '1 network adapter(s), 0 storage, 0 other/unknown' <<< "$output"
 printf '%s\n' 1 > "${sys_root}/module/dwc_otg/parameters/speed"
 output="$(meshfirmware_check_pi_usb_host_speed 2>&1)"
 grep -Fq 'USB safeguard active' <<< "$output"
-grep -Fq 'Selected tier: 2/3' <<< "$output"
+grep -Fq 'no change needed' <<< "$output"
+! grep -Fq 'Selected tier:' <<< "$output"
 ! grep -Fq 'remove dwc_otg.speed=1' <<< "$output"
-echo 'PASS: a lone Wi-Fi adapter is middle-tier even when the 1.1 cap is already active'
+echo 'PASS: a lone Wi-Fi adapter at the active 1.1 cap also gets compact output'
 
 # A storage interface on that same adapter moves it to the high-speed end.
 add_usb_interface 1-1.7 1 08 06

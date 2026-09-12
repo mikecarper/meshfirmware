@@ -9,6 +9,7 @@ import select
 import shlex
 import shutil
 import subprocess
+import tempfile
 import termios
 import threading
 import time
@@ -18,8 +19,10 @@ import unittest
 
 SCRIPT = (Path(__file__).resolve().parents[1] / "mcsetup.sh").read_text()
 FUNCTION_NAMES = (
-    "serial_cmd", "serial_cmd_echo", "serial_cmd_multiline_200ms",
-    "run_raw_command", "open_picocom_console", "read_hex_key_setting", "trim", "set_empty_settings",
+    "serial_cmd", "serial_cmd_echo", "serial_cmd_multiline_200ms", "serial_setting_cmd",
+    "run_raw_command", "open_picocom_console", "read_usb_logging_setting",
+    "setup_has_separate_logging_tty", "prime_serial_baud", "offer_disable_usb_logging",
+    "read_hex_key_setting", "trim", "set_empty_settings",
     "edit_repeater_settings_menu", "clean_node_info_field",
     "normalize_firmware_version", "query_companion_device_info",
     "query_companion_full_version", "refresh_detected_node_info",
@@ -158,6 +161,7 @@ MCSETUP_INFO_TOTAL_TIMEOUT=0.35s
             output = self.run_shell(
                 radio,
                 """
+ensure_command() { printf 'ENSURE_COMMAND:%s\\n' "$1"; }
 picocom() { printf 'PICOCOM_ARGS:'; printf ' <%s>' "$@"; printf '\\n'; }
 set_empty_settings
 device_epoch=
@@ -169,8 +173,113 @@ edit_repeater_settings_menu
             self.assertIn("P) Picocom serial console (exit: Ctrl-A, then Ctrl-X)", output)
             self.assertIn("To exit: press Ctrl-A, release it, then press Ctrl-X.", output)
             self.assertIn("Ctrl-C is sent to the radio and does not exit picocom.", output)
-            self.assertIn(f"PICOCOM_ARGS: <--baud> <57600> <--flow> <n> <{radio.port}>", output)
+            self.assertIn("ENSURE_COMMAND:picocom", output)
+            self.assertIn(f"PICOCOM_ARGS: <--baud> <57600> <--flow> <n> <--noreset> <{radio.port}>", output)
+            self.assertLess(output.index("ENSURE_COMMAND:picocom"), output.index("PICOCOM_ARGS:"))
             self.assertIn("Returned to setup.", output)
+
+    def test_enabled_usb_logging_can_be_disabled_with_one_rebooting_write(self):
+        replies = {
+            b"get usb.logging": b"on",
+            b"board": b"Station G2",
+            b"set usb.logging off reboot": None,
+        }
+        with Radio(replies) as radio:
+            output = self.run_shell(
+                radio,
+                "status=0; offer_disable_usb_logging || status=$?; echo STATUS:$status",
+                "y\n",
+            )
+            self.assertEqual(radio.commands, [
+                b"get usb.logging", b"set usb.logging off reboot",
+            ])
+            self.assertIn("USB logging is enabled", output)
+            self.assertIn("Sending: set usb.logging off reboot", output)
+            self.assertIn("STATUS:2", output)
+
+    def test_disabled_usb_logging_needs_no_prompt_or_write(self):
+        with Radio({b"get usb.logging": b"off"}, required_baud=termios.B57600) as radio:
+            output = self.run_shell(
+                radio,
+                "status=0; offer_disable_usb_logging || status=$?; "
+                "echo STATUS:$status BAUD:$SERIAL_BAUD_CACHE PROFILE:$SERIAL_SETTINGS_PROFILE",
+                options='SERIAL_BAUD_CACHE=""',
+            )
+            self.assertEqual(radio.commands, [b"get usb.logging", b"get usb.logging"])
+            self.assertNotIn("Turn off USB logging", output)
+            self.assertIn("STATUS:0 BAUD:57600 PROFILE:fast", output)
+
+    def test_separate_logging_tty_enables_fast_reads_without_disable_prompt(self):
+        with Radio({b"get usb.logging": b"on"}) as radio:
+            output = self.run_shell(
+                radio,
+                "setup_has_separate_logging_tty() { return 0; }; "
+                "offer_disable_usb_logging; echo PROFILE:$SERIAL_SETTINGS_PROFILE",
+            )
+            self.assertEqual(radio.commands, [b"get usb.logging"])
+            self.assertIn("USB logging has a separate tty", output)
+            self.assertNotIn("Turn off USB logging", output)
+            self.assertIn("PROFILE:fast", output)
+
+    def test_interface_02_sibling_is_detected_as_separate_logging_tty(self):
+        with tempfile.TemporaryDirectory() as directory, Radio() as radio:
+            by_id = Path(directory)
+            primary = by_id / "usb-RAK4631_TEST-if00"
+            logging = by_id / "usb-RAK4631_TEST-if02"
+            primary.touch()
+            logging.touch()
+            output = self.run_shell(
+                radio,
+                "setup_has_separate_logging_tty && echo SEPARATE",
+                options=(
+                    f"MCSETUP_SERIAL_BY_ID_DIR={shlex.quote(directory)}; "
+                    f"SETUP_USB_SELECTED_LINK={shlex.quote(str(primary))}"
+                ),
+            )
+            self.assertEqual(output.strip(), "SEPARATE")
+
+    def test_settings_profiles_use_only_the_verified_baud(self):
+        with Radio() as radio:
+            output = self.run_shell(
+                radio,
+                """
+serial_cmd() {
+    printf 'PROFILE:%s RETRIES:%s FIRST:%s IDLE:%s TOTAL:%s\\n' \
+        "$SERIAL_SETTINGS_PROFILE" "$SERIAL_RETRIES" \
+        "$SERIAL_FIRST_CANDIDATE_ONLY" "$SERIAL_IDLE_TIMEOUT" "$SERIAL_TOTAL_TIMEOUT"
+}
+SERIAL_SETTINGS_PROFILE=fast
+serial_setting_cmd 'get dutycycle'
+SERIAL_SETTINGS_PROFILE=known-noisy
+serial_setting_cmd 'get dutycycle'
+""",
+            )
+            self.assertIn("PROFILE:fast RETRIES:1 FIRST:1 IDLE:0.2 TOTAL:0.5s", output)
+            self.assertIn("PROFILE:known-noisy RETRIES:1 FIRST:1 IDLE:0.35 TOTAL:2s", output)
+
+    def test_quiet_setting_read_finishes_on_short_idle_timeout(self):
+        with Radio({b"get dutycycle": b"100"}) as radio:
+            start = time.monotonic()
+            output = self.run_shell(
+                radio,
+                "SERIAL_SETTINGS_PROFILE=fast; "
+                "SERIAL_RESPONSE_REGEX='^[0-9]+$' serial_setting_cmd 'get dutycycle'",
+            )
+            self.assertLess(time.monotonic() - start, 1.0)
+            self.assertEqual(radio.commands, [b"get dutycycle"])
+            self.assertEqual(output.strip(), "100")
+
+    def test_noisy_setting_read_is_capped_without_baud_retries(self):
+        with Radio({b"get dutycycle": b"100"}, logs=True) as radio:
+            start = time.monotonic()
+            output = self.run_shell(
+                radio,
+                "SERIAL_SETTINGS_PROFILE=known-noisy; "
+                "SERIAL_RESPONSE_REGEX='^[0-9]+$' serial_setting_cmd 'get dutycycle'",
+            )
+            self.assertLess(time.monotonic() - start, 3.0)
+            self.assertEqual(radio.commands, [b"get dutycycle"])
+            self.assertEqual(output.strip(), "100")
 
     def test_command_can_be_entered_at_choice(self):
         command = b"tempradio 910.1,500,7,5,180"

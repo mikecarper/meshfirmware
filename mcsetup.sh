@@ -65,6 +65,8 @@ DEFAULT_BAUDS=(57600 115200 38400 9600 19200 2400)
 SERIAL_BAUD_CACHE=""
 SERIAL_IDLE_TIMEOUT=2.5 
 SERIAL_TOTAL_TIMEOUT=7.5
+SERIAL_SETTINGS_PROFILE="conservative"
+USB_LOGGING_SETTING=""
 
 # Resolve base user/group
 BASE_USER="${SUDO_USER:-$USER}"
@@ -329,6 +331,11 @@ meshfirmware_check_pi_usb_host_speed() {
 	fi
 
 	speed="$(cat "$speed_file" 2>/dev/null || true)"
+	if [[ "$speed" == 1 && "$suggest_full_speed" == 1 \
+		&& "${MESHFIRMWARE_PI_USB_VERBOSE:-0}" != 1 ]]; then
+		echo "Raspberry Pi USB safeguard active: dwc_otg.speed=1 (12 Mbps USB Full Speed); no change needed." >&2
+		return 0
+	fi
 	echo >&2
 	if [[ "$speed" == 1 ]]; then
 		echo "Raspberry Pi USB safeguard active: dwc_otg.speed=1 (12 Mbps USB Full Speed)." >&2
@@ -1306,6 +1313,20 @@ serial_cmd_multiline_200ms() {
   SERIAL_RETRIES=1 SERIAL_OUTPUT_MODE=all SERIAL_IDLE_TIMEOUT=0.2 SERIAL_TOTAL_TIMEOUT=2s serial_cmd "$@"
 }
 
+serial_setting_cmd() {
+  case "${SERIAL_SETTINGS_PROFILE:-conservative}" in
+    fast)
+      SERIAL_RETRIES=1 SERIAL_FIRST_CANDIDATE_ONLY=1 \
+        SERIAL_IDLE_TIMEOUT=0.2 SERIAL_TOTAL_TIMEOUT=0.5s serial_cmd "$@"
+      ;;
+    known-noisy)
+      SERIAL_RETRIES=1 SERIAL_FIRST_CANDIDATE_ONLY=1 \
+        SERIAL_IDLE_TIMEOUT=0.35 SERIAL_TOTAL_TIMEOUT=2s serial_cmd "$@"
+      ;;
+    *) serial_cmd "$@" ;;
+  esac
+}
+
 run_raw_command() {
   local line="$1" raw_out
   if [[ -z "$line" ]]; then
@@ -1362,12 +1383,177 @@ open_picocom_console() {
   echo "To exit: press Ctrl-A, release it, then press Ctrl-X."
   echo "Ctrl-C is sent to the radio and does not exit picocom."
   echo
-  if ! picocom --baud "$console_baud" --flow n "$DEVICE_NAME"; then
+  if ! picocom --baud "$console_baud" --flow n --noreset "$DEVICE_NAME"; then
     echo "Picocom ended with an error; returning to setup."
   else
     echo "Returned to setup."
   fi
   return 0
+}
+
+read_usb_logging_setting() {
+  local capture value read_status=0
+  capture="$(mktemp)" || return 1
+  if SERIAL_RETRIES=1 SERIAL_IDLE_TIMEOUT=0.35 SERIAL_TOTAL_TIMEOUT=1.5s \
+    SERIAL_RESPONSE_REGEX='^(on|off|true|false|0|1)$' \
+    serial_cmd 'get usb.logging' >"$capture" 2>/dev/null; then
+    read_status=0
+  else
+    read_status=$?
+  fi
+  value="$(<"$capture")"
+  rm -f -- "$capture"
+  (( read_status == 0 )) || return 1
+  value="$(trim "$value")"
+  case "${value,,}" in
+    on|true|1) USB_LOGGING_SETTING=on ;;
+    off|false|0) USB_LOGGING_SETTING=off ;;
+    *) return 1 ;;
+  esac
+}
+
+setup_has_separate_logging_tty() {
+  local by_id_dir="${MCSETUP_SERIAL_BY_ID_DIR:-/dev/serial/by-id}"
+  local selected_name prefix candidate candidate_name
+  selected_name="$(basename "${SETUP_USB_SELECTED_LINK:-}")"
+  [[ "$selected_name" == *-if00* ]] || return 1
+  prefix="${selected_name%%-if00*}"
+  shopt -s nullglob
+  for candidate in "$by_id_dir"/*; do
+    candidate_name="$(basename "$candidate")"
+    if [[ "$candidate_name" == "${prefix}-if02"* ]]; then
+      shopt -u nullglob
+      return 0
+    fi
+  done
+  shopt -u nullglob
+  return 1
+}
+
+prime_serial_baud() {
+  local capture
+  [[ -n "${SERIAL_BAUD_CACHE:-}" ]] && return 0
+  capture="$(mktemp)" || return 1
+  SERIAL_RETRIES=1 SERIAL_IDLE_TIMEOUT=0.35 SERIAL_TOTAL_TIMEOUT=1.5s \
+    serial_cmd board >"$capture" 2>/dev/null || true
+  rm -f -- "$capture"
+  [[ -n "${SERIAL_BAUD_CACHE:-}" ]]
+}
+
+# Return 2 after requesting the firmware's immediate reboot.
+offer_disable_usb_logging() {
+  local answer usb_logging="" separate_logging_tty=0
+
+  setup_has_separate_logging_tty && separate_logging_tty=1
+  if read_usb_logging_setting; then
+    usb_logging="$USB_LOGGING_SETTING"
+  elif (( separate_logging_tty )); then
+    if prime_serial_baud; then
+      SERIAL_SETTINGS_PROFILE=fast
+      echo "USB logging has a separate tty; fast settings reads enabled."
+    fi
+    return 0
+  else
+    return 0
+  fi
+
+  if [[ "$usb_logging" == off ]]; then
+    SERIAL_SETTINGS_PROFILE=fast
+    echo "USB logging is off; fast settings reads enabled."
+    return 0
+  fi
+  if (( separate_logging_tty )); then
+    SERIAL_SETTINGS_PROFILE=fast
+    echo "USB logging has a separate tty; fast settings reads enabled."
+    return 0
+  fi
+
+  SERIAL_SETTINGS_PROFILE=known-noisy
+
+  echo
+  echo "USB logging is enabled and is writing debug/radio traffic to this tty."
+  read -rp "Turn off USB logging and reboot the radio now? [y/N]: " answer || return 0
+  if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+    echo "USB logging left enabled; setup reads may remain slow or noisy."
+    return 0
+  fi
+
+  echo "Sending: set usb.logging off reboot"
+  run_raw_command 'set usb.logging off reboot'
+  echo "USB logging disable/reboot command issued. Wait for the radio to reconnect, then run mcsetup.sh again."
+  return 2
+}
+
+setup_usb_host_controller() {
+  jq -r '.host_controller // empty' <<<"${SETUP_USB_IDENTITY:-}" 2>/dev/null || true
+}
+
+confirm_reboot_raspberry_pi() {
+  local answer
+
+  read -rp "Reboot the Raspberry Pi now? [y/N]: " answer || return 1
+  if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+    echo "Raspberry Pi reboot skipped."
+    return 1
+  fi
+  if ! ensure_sudo_session; then
+    echo "Could not obtain sudo access; Raspberry Pi reboot cancelled." >&2
+    return 2
+  fi
+
+  echo "Rebooting the Raspberry Pi..."
+  if sudo systemctl reboot; then
+    return 0
+  fi
+  if sudo reboot; then
+    return 0
+  fi
+  echo "Could not reboot the Raspberry Pi." >&2
+  return 2
+}
+
+# Return 0 to retry the radio, 1 to continue without recovery, or 2 to stop.
+recover_setup_serial_connection() {
+  local choice reboot_status controller
+  controller="$(setup_usb_host_controller)"
+
+  if [[ "$controller" != dwc_otg ]]; then
+    confirm_setup_usb_reset
+    return $?
+  fi
+
+  echo "Automatic USB reset is unavailable on this Raspberry Pi's legacy dwc_otg host."
+  echo "The reset was not attempted; the existing serial port may still be testable."
+  while :; do
+    echo
+    echo " T) Test the existing serial port with Picocom"
+    echo " R) Reboot the Raspberry Pi"
+    echo " C) Continue setup without USB recovery"
+    echo " Q) Quit setup"
+    read -rp "Choice: " choice || return 2
+    case "$choice" in
+      t|T|p|P)
+        open_picocom_console
+        reboot_status=0
+        offer_disable_usb_logging || reboot_status=$?
+        if (( reboot_status == 2 )); then exit 0; fi
+        echo "Retrying the radio after the Picocom test..."
+        return 0
+        ;;
+      r|R)
+        reboot_status=0
+        if confirm_reboot_raspberry_pi; then
+          exit 0
+        else
+          reboot_status=$?
+          if (( reboot_status == 2 )); then return 2; fi
+        fi
+        ;;
+      c|C|"") return 1 ;;
+      q|Q) return 2 ;;
+      *) echo "Choose T, R, C, or Q." ;;
+    esac
+  done
 }
 
 read_hex_key_setting() {
@@ -1750,10 +1936,10 @@ load_repeater_settings() {
     esac
     case "$k" in
       guest.password)
-        v="$(SERIAL_RETRIES=1 SERIAL_IDLE_TIMEOUT=0.2 SERIAL_TOTAL_TIMEOUT=2s SERIAL_ALLOW_BLANK_RESPONSE=1 SERIAL_FIRST_CANDIDATE_ONLY=1 serial_cmd "get $k" | trim)"
+        v="$(SERIAL_ALLOW_BLANK_RESPONSE=1 serial_setting_cmd "get $k" | trim)"
         ;;
       owner.info)
-        v="$(SERIAL_RETRIES=1 SERIAL_ALLOW_BLANK_RESPONSE=1 SERIAL_FIRST_CANDIDATE_ONLY=1 serial_cmd "get $k" | trim)"
+        v="$(SERIAL_ALLOW_BLANK_RESPONSE=1 serial_setting_cmd "get $k" | trim)"
         ;;
       prv.key)
         v="$(read_hex_key_setting "$k" 128)"
@@ -1762,7 +1948,7 @@ load_repeater_settings() {
         v="$(read_hex_key_setting "$k" 64)"
         ;;
       *)
-        v="$(SERIAL_RESPONSE_REGEX="$response_regex" serial_cmd "get $k" | trim)"
+        v="$(SERIAL_RESPONSE_REGEX="$response_regex" serial_setting_cmd "get $k" | trim)"
         ;;
     esac
     case "$k" in
@@ -1796,12 +1982,12 @@ load_repeater_settings() {
   done
   
   printf '\rReading setting: %-24s' "powersaving"
-  setting_powersaving="$(SERIAL_RESPONSE_REGEX='^(on|off)$' serial_cmd 'powersaving' | trim)"
+  setting_powersaving="$(SERIAL_RESPONSE_REGEX='^(on|off)$' serial_setting_cmd 'powersaving' | trim)"
 
   # radio needs CSV parsing: {freq},{bw},{sf},{cr}
   local radio_raw
   printf '\rReading setting: %-24s' "radio"
-  radio_raw="$(SERIAL_RESPONSE_REGEX='^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+),[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+),[0-9]+,[0-9]+$' serial_cmd 'get radio' | trim)"
+  radio_raw="$(SERIAL_RESPONSE_REGEX='^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+),[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+),[0-9]+,[0-9]+$' serial_setting_cmd 'get radio' | trim)"
   # remove spaces around commas just in case
   radio_raw="$(echo "$radio_raw" | sed -E 's/[[:space:]]*,[[:space:]]*/,/g')"
   IFS=',' read -r RADIO_FREQ RADIO_BW RADIO_SF RADIO_CR <<< "$radio_raw"
@@ -2278,6 +2464,9 @@ if [[ -n "$DEVICE_NAME" ]]; then
   remember_setup_usb_identity || true
   refresh_detected_node_info || true
   print_detected_node_summary
+  usb_logging_status=0
+  offer_disable_usb_logging || usb_logging_status=$?
+  if (( usb_logging_status == 2 )); then exit 0; fi
 fi
 
 force_time_sync
@@ -2287,7 +2476,7 @@ device_epoch="$(read_device_clock_epoch)"
 
 if [[ -z "$device_epoch" && -n "$SETUP_USB_IDENTITY" ]]; then
   echo "The radio did not answer. USB connection recovery may help a stalled USB interface."
-  if confirm_setup_usb_reset; then
+  if recover_setup_serial_connection; then
     refresh_detected_node_info || true
     print_detected_node_summary
     device_epoch="$(read_device_clock_epoch)"

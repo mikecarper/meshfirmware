@@ -11,7 +11,8 @@ extract_function() {
     capture && $0 == "}" { exit }
   ' "$script_path"
 }
-for name in confirm_setup_usb_reset remember_setup_usb_identity setup_usb_reset_helper_matches; do
+for name in confirm_setup_usb_reset remember_setup_usb_identity setup_usb_reset_helper_matches \
+  setup_usb_host_controller confirm_reboot_raspberry_pi recover_setup_serial_connection; do
   definition="$(extract_function "$name")"
   [[ "$definition" == "$name() {"* ]]
   # shellcheck disable=SC2294
@@ -71,15 +72,55 @@ confirm_setup_usb_reset <<<y >/dev/null 2>&1 || status=$?
 [[ "$status" == 1 && "$(wc -c <"$call_log")" == "$before" ]]
 echo "PASS: missing original identity cannot be recaptured from a potentially recycled tty"
 
+hash_result=0
+reset_result=0
+SETUP_USB_IDENTITY='{"status":"inspected","host_controller":"dwc_otg","identity":{"usb_serial":"TEST-G2","usb_path":"1-1"}}'
+open_picocom_console() { printf '%s\n' picocom >>"$call_log"; }
+offer_disable_usb_logging() { return 0; }
+confirm_setup_usb_reset() { printf '%s\n' reset >>"$call_log"; return 99; }
+before="$(wc -c <"$call_log")"
+output="$(recover_setup_serial_connection <<<t)"
+[[ "$output" == *'Test the existing serial port with Picocom'* ]]
+[[ "$output" == *'Retrying the radio after the Picocom test'* ]]
+[[ "$(tail -n 1 "$call_log")" == picocom ]]
+! tail -c "+$((before + 1))" "$call_log" | grep -Fxq reset
+echo "PASS: dwc_otg recovery offers Picocom without attempting a prohibited USB reset"
+
+status=0
+recover_setup_serial_connection <<<c >/dev/null || status=$?
+[[ "$status" == 1 ]]
+status=0
+recover_setup_serial_connection <<<q >/dev/null || status=$?
+[[ "$status" == 2 ]]
+echo "PASS: Raspberry Pi recovery menu can continue or stop explicitly"
+
+reboot_log="$(mktemp)"
+sudo() { printf '%s\n' "$*" >>"$reboot_log"; }
+ensure_sudo_session() { return 0; }
+confirm_reboot_raspberry_pi <<<n >/dev/null || status=$?
+[[ "$status" == 1 && ! -s "$reboot_log" ]]
+confirm_reboot_raspberry_pi <<<y >/dev/null
+grep -Fxq 'systemctl reboot' "$reboot_log"
+rm -f -- "$reboot_log"
+echo "PASS: Raspberry Pi reboot requires confirmation and uses systemd"
+
 python3 - "$script_path" <<'PY'
 import sys
 from pathlib import Path
 script = Path(sys.argv[1]).read_text()
 main = script[script.index("# Sync Time\n"):]
 assert main.index("remember_setup_usb_identity") < main.index("refresh_detected_node_info")
+assert main.index("offer_disable_usb_logging") < main.index("force_time_sync")
 assert 'echo " U) Reset USB connection (not a radio reboot)"' in script
 assert 'if (( reset_status == 2 )); then return 2; fi' in script
 assert 'if (( reset_status == 2 )); then exit 1; fi' in main
-assert main.index("confirm_setup_usb_reset") < main.index('serial_cmd "time $host_epoch"')
+assert main.index("recover_setup_serial_connection") < main.index('serial_cmd "time $host_epoch"')
+assert 'if ! ensure_command picocom' in script
+assert 'picocom --baud "$console_baud" --flow n --noreset "$DEVICE_NAME"' in script
+assert "run_raw_command 'set usb.logging off reboot'" in script
+load_settings = script[script.index("load_repeater_settings() {"):script.index("edit_repeater_settings_menu() {")]
+assert 'serial_setting_cmd "get $k"' in load_settings
+assert "serial_setting_cmd 'powersaving'" in load_settings
+assert "serial_setting_cmd 'get radio'" in load_settings
 PY
-echo "PASS: setup captures identity before probes and offers safe recovery before clock writes"
+echo "PASS: setup captures identity before probes and offers safe recovery choices before clock writes"

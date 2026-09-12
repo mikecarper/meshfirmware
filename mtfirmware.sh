@@ -271,6 +271,11 @@ meshfirmware_check_pi_usb_host_speed() {
 	fi
 
 	speed="$(cat "$speed_file" 2>/dev/null || true)"
+	if [[ "$speed" == 1 && "$suggest_full_speed" == 1 \
+		&& "${MESHFIRMWARE_PI_USB_VERBOSE:-0}" != 1 ]]; then
+		echo "Raspberry Pi USB safeguard active: dwc_otg.speed=1 (12 Mbps USB Full Speed); no change needed." >&2
+		return 0
+	fi
 	echo >&2
 	if [[ "$speed" == 1 ]]; then
 		echo "Raspberry Pi USB safeguard active: dwc_otg.speed=1 (12 Mbps USB Full Speed)." >&2

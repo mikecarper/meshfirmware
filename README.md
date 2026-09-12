@@ -96,10 +96,25 @@ again instead of retrying a possibly reused tty number. The flasher's
 On Raspberry Pi, the reset helper also resolves the live host-controller
 driver from sysfs. It refuses to issue `USBDEVFS_RESET` through the legacy
 `dwc_otg` driver because cancelling an active USB request can freeze the Pi.
-Use the radio's normal bootloader entry or physically reconnect only that
-radio, then reselect it. The script does not offer to replace `dwc_otg` with
-`dwc2`: live testing on a Zero 2 W with nested hubs found repeated whole-tree
-disconnects under `dwc2`.
+When `mcsetup.sh` finds an unresponsive radio on that driver, it offers to test
+the existing tty with Picocom, reboot the Raspberry Pi after confirmation,
+continue without recovery, or quit. Picocom is installed through the detected
+package manager when needed and is launched without resetting the serial
+control lines on exit. If the tty is unavailable, use the radio's normal
+bootloader entry or physically reconnect only that radio, then reselect it.
+The script does not offer to replace `dwc_otg` with `dwc2`: live testing on a
+Zero 2 W with nested hubs found repeated whole-tree disconnects under `dwc2`.
+
+Before reading the clock and repeater settings, `mcsetup.sh` checks
+`get usb.logging`. When logging is enabled, it offers to send
+`set usb.logging off reboot` once and then exits cleanly while the radio
+reconnects. Continuous debug and packet output can otherwise prevent the
+serial reader's idle timeout and make individual setting reads appear stalled.
+When logging is off, or an nRF52 exposes its logging stream on the separate
+interface `02` tty, setup retains the verified baud and uses a 0.2-second idle
+window with a 0.5-second hard deadline for single-value settings. A known noisy command tty is restricted to
+the verified baud and a two-second ceiling; multiline commands retain their
+separate, longer read behavior.
 
 The shared Python helper is included in a checkout. Single-script downloads
 fetch a copy with a checksum pinned by the script; a missing or mismatched
