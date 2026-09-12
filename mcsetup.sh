@@ -1261,7 +1261,14 @@ serial_cmd() {
                   BEGIN { cmd = ENVIRON["MCSETUP_SERIAL_COMMAND"] }
                   {
                     sub(/^[[:space:][:cntrl:]]+/, "")
-                    marked = sub(/^(->|>)+[[:space:]]*/, "")
+                    # Keymind get replies contain their own "> " prefix and
+                    # the serial console wraps every reply in "  -> ".  Strip
+                    # every marker, including whitespace-separated forms such
+                    # as "-> > value".  Removing only the first marker makes a
+                    # valid value fail response_regex and triggers every retry
+                    # at every candidate baud.
+                    marked = 0
+                    while (sub(/^(->|>)[[:space:]]*/, "")) marked = 1
                     sub(/[[:space:]]+$/, "")
                     if (!NF || $0 == cmd) next
                     # A marked CLI reply can itself start with ERR: or contain
@@ -1310,7 +1317,20 @@ serial_cmd() {
 }
 
 serial_cmd_multiline_200ms() {
-  SERIAL_RETRIES=1 SERIAL_OUTPUT_MODE=all SERIAL_IDLE_TIMEOUT=0.2 SERIAL_TOTAL_TIMEOUT=2s serial_cmd "$@"
+  case "${SERIAL_SETTINGS_PROFILE:-conservative}" in
+    fast)
+      SERIAL_RETRIES=1 SERIAL_FIRST_CANDIDATE_ONLY=1 SERIAL_OUTPUT_MODE=all \
+        SERIAL_IDLE_TIMEOUT=0.2 SERIAL_TOTAL_TIMEOUT=0.5s serial_cmd "$@"
+      ;;
+    known-noisy)
+      SERIAL_RETRIES=1 SERIAL_FIRST_CANDIDATE_ONLY=1 SERIAL_OUTPUT_MODE=all \
+        SERIAL_IDLE_TIMEOUT=0.35 SERIAL_TOTAL_TIMEOUT=2s serial_cmd "$@"
+      ;;
+    *)
+      SERIAL_RETRIES=1 SERIAL_OUTPUT_MODE=all SERIAL_IDLE_TIMEOUT=0.2 \
+        SERIAL_TOTAL_TIMEOUT=2s serial_cmd "$@"
+      ;;
+  esac
 }
 
 serial_setting_cmd() {
@@ -1394,8 +1414,11 @@ open_picocom_console() {
 read_usb_logging_setting() {
   local capture value read_status=0
   capture="$(mktemp)" || return 1
+  # Capture any marked CLI reply here, then validate it below.  Older firmware
+  # returns an unsupported/unknown response; accepting that transport reply
+  # still identifies and caches the working baud instead of scanning every
+  # baud again for every later setting.
   if SERIAL_RETRIES=1 SERIAL_IDLE_TIMEOUT=0.35 SERIAL_TOTAL_TIMEOUT=1.5s \
-    SERIAL_RESPONSE_REGEX='^(on|off|true|false|0|1)$' \
     serial_cmd 'get usb.logging' >"$capture" 2>/dev/null; then
     read_status=0
   else
@@ -1454,6 +1477,10 @@ offer_disable_usb_logging() {
     fi
     return 0
   else
+    if prime_serial_baud; then
+      SERIAL_SETTINGS_PROFILE=known-noisy
+      echo "USB logging state is unavailable; bounded settings reads enabled."
+    fi
     return 0
   fi
 
@@ -1881,6 +1908,24 @@ set_empty_settings() {
 }
 
 load_repeater_settings() {
+  # This function runs in the main shell, so baud discovery here persists for
+  # every command substitution used below.  Clock reads cannot provide that
+  # guarantee because callers capture their output with $(...).
+  if prime_serial_baud && [[ "${SERIAL_SETTINGS_PROFILE:-conservative}" == conservative ]]; then
+    SERIAL_SETTINGS_PROFILE=known-noisy
+  fi
+
+  case "${SERIAL_SETTINGS_PROFILE:-conservative}" in
+    fast)
+      echo "Serial settings read mode: fast (${SERIAL_BAUD_CACHE:-${BAUD:-115200}} baud, 0.5s maximum per read)."
+      ;;
+    known-noisy)
+      echo "Serial settings read mode: bounded (${SERIAL_BAUD_CACHE:-${BAUD:-115200}} baud, 2s maximum per read)."
+      ;;
+    *)
+      echo "Serial settings read mode: compatibility (baud is not verified)."
+      ;;
+  esac
   echo "reading all radio settings"
 
   # https://github.com/meshcore-dev/MeshCore/blob/main/src/helpers/CommonCLI.cpp#L131

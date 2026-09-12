@@ -180,7 +180,7 @@ edit_repeater_settings_menu
 
     def test_enabled_usb_logging_can_be_disabled_with_one_rebooting_write(self):
         replies = {
-            b"get usb.logging": b"on",
+            b"get usb.logging": b"> on",
             b"board": b"Station G2",
             b"set usb.logging off reboot": None,
         }
@@ -198,7 +198,9 @@ edit_repeater_settings_menu
             self.assertIn("STATUS:2", output)
 
     def test_disabled_usb_logging_needs_no_prompt_or_write(self):
-        with Radio({b"get usb.logging": b"off"}, required_baud=termios.B57600) as radio:
+        # Current Keymind firmware puts a value marker inside the console's
+        # reply marker: "  -> > off".
+        with Radio({b"get usb.logging": b"> off"}, required_baud=termios.B57600) as radio:
             output = self.run_shell(
                 radio,
                 "status=0; offer_disable_usb_logging || status=$?; "
@@ -209,8 +211,34 @@ edit_repeater_settings_menu
             self.assertNotIn("Turn off USB logging", output)
             self.assertIn("STATUS:0 BAUD:57600 PROFILE:fast", output)
 
+    def test_nested_console_and_value_markers_are_stripped(self):
+        with Radio({b"get dutycycle": b"> 100.0%"}) as radio:
+            output = self.run_shell(
+                radio,
+                "SERIAL_SETTINGS_PROFILE=fast; "
+                "SERIAL_RESPONSE_REGEX='^[0-9.]+%$' serial_setting_cmd 'get dutycycle'",
+            )
+            self.assertEqual(radio.commands, [b"get dutycycle"])
+            self.assertEqual(output.strip(), "100.0%")
+
+    def test_unknown_usb_logging_still_locks_baud_and_bounds_reads(self):
+        replies = {
+            b"get usb.logging": b"unknown config: usb.logging",
+            b"board": b"Station G2",
+        }
+        with Radio(replies) as radio:
+            output = self.run_shell(
+                radio,
+                "offer_disable_usb_logging; "
+                "echo BAUD:$SERIAL_BAUD_CACHE PROFILE:$SERIAL_SETTINGS_PROFILE",
+                options='SERIAL_BAUD_CACHE=""',
+            )
+            self.assertEqual(radio.commands, [b"get usb.logging"])
+            self.assertIn("USB logging state is unavailable; bounded settings reads enabled.", output)
+            self.assertIn("BAUD:115200 PROFILE:known-noisy", output)
+
     def test_separate_logging_tty_enables_fast_reads_without_disable_prompt(self):
-        with Radio({b"get usb.logging": b"on"}) as radio:
+        with Radio({b"get usb.logging": b"> on"}) as radio:
             output = self.run_shell(
                 radio,
                 "setup_has_separate_logging_tty() { return 0; }; "
