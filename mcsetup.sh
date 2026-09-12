@@ -15,6 +15,9 @@ set -euo pipefail
 # shellcheck disable=SC2317
 # Ensure we always restore on exit
 cleanup() {
+	if declare -F restart_stopped_time_sync_services >/dev/null; then
+		restart_stopped_time_sync_services
+	fi
 	USB_AUTOSUSPEND_END=$(cat /sys/module/usbcore/parameters/autosuspend)
 	if [[ "$USB_AUTOSUSPEND_END" != "$USB_AUTOSUSPEND" ]]; then
 		echo "$USB_AUTOSUSPEND" | sudo tee /sys/module/usbcore/parameters/autosuspend >/dev/null
@@ -67,6 +70,7 @@ SERIAL_TOTAL_TIMEOUT=7.5
 BASE_USER="${SUDO_USER:-$USER}"
 BASE_GROUP="$(id -gn "$BASE_USER")"
 SUDO_KEEPALIVE_PID=""
+TIME_SYNC_STOPPED_SERVICES=()
 
 ensure_sudo_session() {
   if sudo -n true 2>/dev/null; then
@@ -567,7 +571,62 @@ ensure_time_sync_client() {
   sudo systemctl restart chrony
 }
 
+system_clock_is_synchronized() {
+  local synchronized=""
+
+  if command -v timedatectl >/dev/null 2>&1; then
+    synchronized="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)"
+    [[ "${synchronized,,}" == "yes" ]] && return 0
+  fi
+
+  if command -v ntpq >/dev/null 2>&1 \
+    && ntpq -pn 2>/dev/null | awk '$1 ~ /^\*/ { found=1 } END { exit !found }'; then
+    return 0
+  fi
+
+  return 1
+}
+
+restart_stopped_time_sync_services() {
+  local service
+
+  ((${#TIME_SYNC_STOPPED_SERVICES[@]} > 0)) || return 0
+  for service in "${TIME_SYNC_STOPPED_SERVICES[@]}"; do
+    echo "Restarting time synchronization service ${service}..." >&2
+    sudo systemctl start "$service" >/dev/null 2>&1 || true
+  done
+  TIME_SYNC_STOPPED_SERVICES=()
+}
+
+stop_active_time_sync_services() {
+  local service
+  local -a candidates=(
+    ntp.service ntpd.service ntpsec.service systemd-timesyncd.service
+  )
+
+  TIME_SYNC_STOPPED_SERVICES=()
+  command -v systemctl >/dev/null 2>&1 || return 0
+  for service in "${candidates[@]}"; do
+    if systemctl is-active --quiet "$service" 2>/dev/null; then
+      echo "Temporarily stopping time synchronization service ${service}..." >&2
+      if sudo systemctl stop "$service"; then
+        TIME_SYNC_STOPPED_SERVICES+=("$service")
+      else
+        restart_stopped_time_sync_services
+        return 1
+      fi
+    fi
+  done
+}
+
 force_time_sync() {
+  local ntpd_status=0
+
+  if system_clock_is_synchronized; then
+    echo "System clock is already synchronized."
+    return 0
+  fi
+
   if command -v chronyc >/dev/null 2>&1; then
     sudo systemctl enable chrony >/dev/null 2>&1 || true
     sudo systemctl restart chrony >/dev/null 2>&1 || true
@@ -577,8 +636,22 @@ force_time_sync() {
   fi
 
   if command -v ntpd >/dev/null 2>&1; then
-    sudo ntpd -gq
-    return 0
+    stop_active_time_sync_services || return 1
+    if sudo ntpd -gq; then
+      ntpd_status=0
+    else
+      ntpd_status=$?
+    fi
+    restart_stopped_time_sync_services
+    if (( ntpd_status == 0 )); then
+      return 0
+    fi
+    if system_clock_is_synchronized; then
+      echo "The restored time service reports a synchronized system clock."
+      return 0
+    fi
+    echo "Unable to synchronize the system clock with ntpd." >&2
+    return "$ntpd_status"
   fi
 
   if command -v ntpdate >/dev/null 2>&1; then
