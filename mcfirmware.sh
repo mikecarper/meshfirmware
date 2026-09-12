@@ -908,6 +908,85 @@ expand_home_path() {
 	printf '%s%s' "$prefix" "$path"
 }
 
+esp_merged_sibling_selection() {
+	local selection="${1:-}" base suffix stem lower_stem
+
+	[[ -n "$selection" ]] || return 1
+	base="${selection%%[\?#]*}"
+	suffix="${selection:${#base}}"
+	[[ "${base,,}" == *.bin ]] || return 1
+	stem="${base%.*}"
+	lower_stem="${stem,,}"
+	case "$lower_stem" in
+		*-merged|*_merged|*cleaninstall|*factory|*freshinstall*) return 1 ;;
+	esac
+	printf '%s-merged.bin%s\n' "$stem" "$suffix"
+}
+
+esp_app_sibling_selection() {
+	local selection="${1:-}" base suffix stem lower_stem app_stem
+
+	[[ -n "$selection" ]] || return 1
+	base="${selection%%[\?#]*}"
+	suffix="${selection:${#base}}"
+	[[ "${base,,}" == *.bin ]] || return 1
+	stem="${base%.*}"
+	lower_stem="${stem,,}"
+	case "$lower_stem" in
+		*-merged) app_stem="${stem:0:${#stem}-7}" ;;
+		*_merged) app_stem="${stem:0:${#stem}-7}" ;;
+		*) return 1 ;;
+	esac
+	[[ -n "$app_stem" ]] || return 1
+	printf '%s.bin%s\n' "$app_stem" "$suffix"
+}
+
+firmware_selection_url() {
+	local selection="${1:-}"
+
+	[[ -n "$selection" ]] || return 1
+	[[ "$selection" == file:///* ]] && selection="${selection#file://}"
+	selection="$(expand_home_path "$selection")"
+	case "$selection" in
+		http://*|https://*) printf '%s\n' "$selection" ;;
+		/firmware/*|/releases/*) printf 'https://flasher.meshcore.io%s\n' "$selection" ;;
+		/*) printf '%s\n' "$selection" ;;
+		*) printf 'https://flasher.meshcore.io/%s\n' "$selection" ;;
+	esac
+}
+
+firmware_selection_exists() {
+	local resolved=""
+
+	resolved="$(firmware_selection_url "${1:-}" 2>/dev/null || true)"
+	[[ -n "$resolved" ]] || return 1
+	if [[ "$resolved" =~ ^https?:// ]]; then
+		wget -q --spider --timeout=10 --tries=1 "$resolved"
+	else
+		[[ -f "$resolved" ]]
+	fi
+}
+
+download_firmware_selection() {
+	local selection="${1:-}" resolved=""
+
+	resolved="$(firmware_selection_url "$selection")" || return 1
+	URL_PATH="$selection"
+	case "$resolved" in
+		http://*|https://*)
+			URL="$resolved"
+			download_and_verify "$URL" "$DOWNLOADED_FILE_FILE" 1 "Firmware"
+			;;
+		*)
+			if [[ ! -f "$resolved" ]]; then
+				echo "Firmware file not found: $resolved" >&2
+				return 1
+			fi
+			printf '%s\n' "$resolved" > "$DOWNLOADED_FILE_FILE"
+			;;
+	esac
+}
+
 detect_custom_firmware_type() {
 	local selection="${1:-}" arch_lc="${2,,}" check="" name_lc=""
 
@@ -4004,6 +4083,75 @@ query_companion_board_model() {
 	printf '%s' "${info%%$'\t'*}"
 }
 
+query_companion_cli_command() {
+	local device="$1"
+	local command_text="$2"
+	local total_timeout="${SERIAL_INFO_TOTAL_TIMEOUT:-1.2s}"
+	local idle_timeout="${SERIAL_INFO_IDLE_TIMEOUT:-0.35}"
+
+	[[ -e "$device" && -n "$command_text" ]] || return 1
+	ensure_command socat || return 1
+	ensure_command perl || return 1
+
+	# Companion protocol v14+ command 0x42 carries one UTF-8 CLI command. Build
+	# the little-endian frame dynamically so diagnostics such as storage.layout
+	# can use the same path as the existing version query.
+	# shellcheck disable=SC2016
+	timeout -s KILL "$total_timeout" \
+		bash -o pipefail -c '
+			device=$1
+			idle=$2
+			command_text=$3
+			perl -e '\''$c=$ARGV[0]; print "<", pack("v", length($c)+1), chr(0x42), $c'\'' "$command_text" \
+				| socat -T "$idle" - "OPEN:${device},raw,echo=0,b115200" 2>/dev/null
+		' _ "$device" "$idle_timeout" "$command_text" \
+		| LC_ALL=C perl -0777 -ne '
+			my $buf = $_;
+			my $pos = 0;
+			while (($pos = index($buf, ">", $pos)) >= 0) {
+				last if $pos + 3 > length($buf);
+				my $len = unpack("v", substr($buf, $pos + 1, 2));
+				my $end = $pos + 3 + $len;
+				if ($len >= 2 && $len <= 512 && $end <= length($buf)) {
+					my $payload = substr($buf, $pos + 3, $len);
+					if (ord(substr($payload, 0, 1)) == 29) {
+						my $reply = substr($payload, 1);
+						$reply =~ s/\x00.*//s;
+						print $reply;
+						exit;
+					}
+				}
+				$pos++;
+			}
+		'
+}
+
+clean_storage_layout_reply() {
+	local value="${1:-}"
+
+	value="$(printf '%s' "$value" \
+		| LC_ALL=C tr -cd '\11\12\15\40-\176' \
+		| tr '\r' '\n' \
+		| sed -n 's/^.*\(int:esp32=[0-9][0-9]*K[[:space:]].*\)$/\1/p' \
+		| tail -n1)"
+	[[ -n "$value" && ${#value} -le 512 ]] || return 1
+	printf '%s' "$value"
+}
+
+read_esp32_storage_layout() {
+	local device="$1"
+	local reply=""
+
+	reply="$(query_companion_cli_command "$device" "get storage.layout" 2>/dev/null || true)"
+	reply="$(clean_storage_layout_reply "$reply" 2>/dev/null || true)"
+	if [[ -z "$reply" ]]; then
+		reply="$(quick_node_info_cmd "$device" "get storage.layout" 2>/dev/null || true)"
+		reply="$(clean_storage_layout_reply "$reply" 2>/dev/null || true)"
+	fi
+	[[ -n "$reply" ]] || return 1
+	printf '%s\n' "$reply"
+}
+
 read_node_info_with_retry() {
 	local device="$1"
 	local info=''
@@ -6045,6 +6193,142 @@ for i in range(0, min(len(data), 0x1000), 32):
 PY
 }
 
+parse_esp32_storage_layout_min_app_size() {
+	local layout="${1:-}" partition_text entry label size_kib size_bytes min_bytes=0
+	local -a entries=()
+
+	[[ "$layout" =~ (^|[[:space:]])int:esp32=[0-9]+K([[:space:]]|$) ]] || return 1
+	[[ "$layout" == *';'* ]] || return 1
+	partition_text="${layout#*;}"
+	IFS=',' read -r -a entries <<< "$partition_text"
+	for entry in "${entries[@]}"; do
+		entry="$(printf '%s' "$entry" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+		if [[ "$entry" =~ ^([[:alnum:]_.-]+)\*?@0x[0-9a-fA-F]+\+([0-9]+)K$ ]]; then
+			label="${BASH_REMATCH[1],,}"
+			size_kib="${BASH_REMATCH[2]}"
+			case "$label" in
+				app*|ota_[0-9]*|ota-[0-9]*|factory|test) ;;
+				*) continue ;;
+			esac
+			size_bytes=$((size_kib * 1024))
+			if (( size_bytes > 0 && (min_bytes == 0 || size_bytes < min_bytes) )); then
+				min_bytes=$size_bytes
+			fi
+		fi
+	done
+
+	(( min_bytes > 0 )) || return 1
+	printf '%s\n' "$min_bytes"
+}
+
+esp32_selected_app_payload_size() {
+	local firmware_file="$1"
+	local layout="$2"
+
+	[[ -f "$firmware_file" ]] || return 1
+	if [[ "$layout" == "app-only" ]]; then
+		stat -c '%s' "$firmware_file"
+		return
+	fi
+	[[ "$layout" == "merged" ]] || return 1
+
+	python3 - "$firmware_file" <<'PY'
+import struct
+import sys
+
+data = open(sys.argv[1], "rb").read()
+table_offset = 0x8000
+table = data[table_offset:table_offset + 0x1000]
+if len(table) != 0x1000:
+    raise SystemExit(1)
+
+apps = []
+for index in range(0, len(table), 32):
+    entry = table[index:index + 32]
+    if len(entry) < 32 or entry[0:2] == b"\xff\xff":
+        break
+    if entry[0:2] != b"\xaa\x50" or entry[2] != 0x00:
+        continue
+    subtype = entry[3]
+    offset, size = struct.unpack_from("<II", entry, 4)
+    if offset and size:
+        apps.append((subtype, offset, size))
+
+if not apps:
+    raise SystemExit(1)
+primary = next((part for part in apps if part[0] == 0x10), None)
+if primary is None:
+    primary = next((part for part in apps if part[0] == 0x00), apps[0])
+_, offset, size = primary
+if len(data) <= offset or len(data) > offset + size:
+    raise SystemExit(1)
+print(len(data) - offset)
+PY
+}
+
+esp32_runtime_storage_preflight() {
+	local requested_port="$1"
+	local firmware_file="$2"
+	local layout="$3"
+	local selection="$4"
+	local runtime_port="" storage_layout="" partition_size="" payload_size=""
+	local partition_kib=0 payload_kib=0 alternate=""
+
+	ESP32_PREFLIGHT_ALTERNATE=""
+	ESP32_PREFLIGHT_ALTERNATE_TYPE=""
+	ESP32_PREFLIGHT_ALTERNATE_AVAILABLE=0
+	[[ "$layout" == "app-only" || "$layout" == "merged" ]] || return 0
+
+	runtime_port="$(selected_flash_serial_port "$requested_port" 2>/dev/null || true)"
+	[[ -n "$runtime_port" ]] || return 0
+	storage_layout="$(read_esp32_storage_layout "$runtime_port" 2>/dev/null || true)"
+	[[ -n "$storage_layout" ]] || return 0
+	partition_size="$(parse_esp32_storage_layout_min_app_size "$storage_layout" 2>/dev/null || true)"
+	payload_size="$(esp32_selected_app_payload_size "$firmware_file" "$layout" 2>/dev/null || true)"
+	[[ "$partition_size" =~ ^[0-9]+$ && "$payload_size" =~ ^[0-9]+$ ]] || return 0
+	partition_kib=$((partition_size / 1024))
+	payload_kib=$(( (payload_size + 1023) / 1024 ))
+
+	echo "ESP32 runtime storage preflight: selected app payload ${payload_size} bytes (${payload_kib} KiB); smallest reported app partition ${partition_size} bytes (${partition_kib} KiB)."
+	if [[ "$layout" == "app-only" ]]; then
+		if (( payload_size <= partition_size )); then
+			echo "The app-only image fits the currently reported ESP32 app partition."
+			return 0
+		fi
+		echo "Warning: the app-only image is too large for the currently reported ESP32 app partition." >&2
+		alternate="$(esp_merged_sibling_selection "$selection" 2>/dev/null || true)"
+		if [[ -n "$alternate" ]]; then
+			ESP32_PREFLIGHT_ALTERNATE="$alternate"
+			ESP32_PREFLIGHT_ALTERNATE_TYPE="flash-wipe"
+			if firmware_selection_exists "$alternate"; then
+				ESP32_PREFLIGHT_ALTERNATE_AVAILABLE=1
+				echo "Verified merged alternative: $alternate" >&2
+			else
+				echo "Likely merged filename (availability not verified): $alternate" >&2
+			fi
+		fi
+		return 0
+	fi
+
+	if (( payload_size <= partition_size )); then
+		echo "Merged firmware is not required for capacity: its app payload fits the currently reported ESP32 app partition."
+		echo "Using the merged image will still erase the device and replace its partition layout." >&2
+		alternate="$(esp_app_sibling_selection "$selection" 2>/dev/null || true)"
+		if [[ -n "$alternate" ]]; then
+			ESP32_PREFLIGHT_ALTERNATE="$alternate"
+			ESP32_PREFLIGHT_ALTERNATE_TYPE="flash-update"
+			if firmware_selection_exists "$alternate"; then
+				ESP32_PREFLIGHT_ALTERNATE_AVAILABLE=1
+				echo "Verified app-only alternative: $alternate"
+			else
+				echo "Likely app-only filename (availability not verified): $alternate"
+			fi
+		fi
+	else
+		echo "The merged image's app payload is too large for the current app partition; a merged install is required to use this build." >&2
+	fi
+}
+
 parse_esp32_ota_data_partition() {
 	local partition_file="$1"
 
@@ -6969,22 +7253,7 @@ while [[ -z $URL_PATH ]]; do
 		rm -f "$SELECTED_VERSION_FILE"
 	fi
 done
-if [[ "$URL_PATH" == file:///* ]]; then
-	URL_PATH="${URL_PATH#file://}"
-fi
-URL_PATH="$(expand_home_path "$URL_PATH")"
-if [[ "$URL_PATH" =~ ^https?:// ]]; then
-    URL="$URL_PATH"
-	download_and_verify "$URL" "$DOWNLOADED_FILE_FILE" 1 "Firmware"
-else
-    if [[ "$URL_PATH" == /* && -f "$URL_PATH" ]]; then
-        printf '%s\n' "$URL_PATH" > "$DOWNLOADED_FILE_FILE"
-    else
-        [[ "$URL_PATH" != /* ]] && URL_PATH="/$URL_PATH"
-        URL="https://flasher.meshcore.io${URL_PATH}"
-	    download_and_verify "$URL" "$DOWNLOADED_FILE_FILE" 1 "Firmware"
-    fi
-fi
+download_firmware_selection "$URL_PATH"
 
 ARCHITECTURE=''
 DEVICE=''
@@ -7010,10 +7279,34 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 	[[ -f "$ESPTOOL_FILE"     ]] && ESPTOOL_CMD="$(<"$ESPTOOL_FILE")"
 	export ESPTOOL_PORT=$DEVICE_PORT
 	[[ -f "$SELECTED_TYPE_FILE"    ]] && TYPE="$(<"$SELECTED_TYPE_FILE")"
-	print_fw_line "Downloaded firmware:" "$DOWNLOADED_FILE"
-	print_file_size_line "Downloaded bytes:" "$DOWNLOADED_FILE"
-	FW_LAYOUT="$(esp_firmware_layout "$DOWNLOADED_FILE")"
-	FW_NAME_HINT="$(esp_filename_layout_hint "$DOWNLOADED_FILE")"
+	while :; do
+		print_fw_line "Downloaded firmware:" "$DOWNLOADED_FILE"
+		print_file_size_line "Downloaded bytes:" "$DOWNLOADED_FILE"
+		FW_LAYOUT="$(esp_firmware_layout "$DOWNLOADED_FILE")"
+		FW_NAME_HINT="$(esp_filename_layout_hint "$URL_PATH")"
+		esp32_runtime_storage_preflight "$DEVICE_PORT" "$DOWNLOADED_FILE" \
+			"$FW_LAYOUT" "$URL_PATH"
+		if [[ "${ESP32_PREFLIGHT_ALTERNATE_AVAILABLE:-0}" -ne 1 ]]; then
+			break
+		fi
+		PREFLIGHT_CHOICE=""
+		if ! read -r -p "Use the verified suggested firmware instead? [y/N] " \
+			PREFLIGHT_CHOICE < "${MESHFIRMWARE_TTY:-/dev/tty}"; then
+			break
+		fi
+		case "$PREFLIGHT_CHOICE" in
+			y|Y|yes|YES|Yes)
+				URL_PATH="$ESP32_PREFLIGHT_ALTERNATE"
+				TYPE="$ESP32_PREFLIGHT_ALTERNATE_TYPE"
+				printf '%s\n' "$URL_PATH" > "$SELECTED_URL_FILE"
+				printf '%s\n' "$TYPE" > "$SELECTED_TYPE_FILE"
+				download_firmware_selection "$URL_PATH"
+				DOWNLOADED_FILE="$(<"$DOWNLOADED_FILE_FILE")"
+				echo "Switched to $(describe_flash_action "$TYPE"): $URL_PATH"
+				;;
+			*) break ;;
+		esac
+	done
 	if [[ "$FW_LAYOUT" == "merged" ]]; then
 		echo "Firmware layout: merged image detected from file contents"
 	elif [[ "$FW_LAYOUT" == "app-only" ]]; then
