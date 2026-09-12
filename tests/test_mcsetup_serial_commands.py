@@ -19,7 +19,7 @@ import unittest
 SCRIPT = (Path(__file__).resolve().parents[1] / "mcsetup.sh").read_text()
 FUNCTION_NAMES = (
     "serial_cmd", "serial_cmd_echo", "serial_cmd_multiline_200ms",
-    "run_raw_command", "read_hex_key_setting", "trim", "set_empty_settings",
+    "run_raw_command", "open_picocom_console", "read_hex_key_setting", "trim", "set_empty_settings",
     "edit_repeater_settings_menu", "clean_node_info_field",
     "normalize_firmware_version", "query_companion_device_info",
     "query_companion_full_version", "refresh_detected_node_info",
@@ -152,6 +152,25 @@ MCSETUP_INFO_TOTAL_TIMEOUT=0.35s
             self.assertEqual(radio.commands, [b"get tx"])
             self.assertIn("\n15\n", output)
             self.assertNotIn("printf '%b'", output)
+
+    def test_picocom_menu_uses_detected_baud_and_explains_exit(self):
+        with Radio() as radio:
+            output = self.run_shell(
+                radio,
+                """
+picocom() { printf 'PICOCOM_ARGS:'; printf ' <%s>' "$@"; printf '\\n'; }
+set_empty_settings
+device_epoch=
+SERIAL_BAUD_CACHE=57600
+edit_repeater_settings_menu
+""",
+                "p\nq\n",
+            )
+            self.assertIn("P) Picocom serial console (exit: Ctrl-A, then Ctrl-X)", output)
+            self.assertIn("To exit: press Ctrl-A, release it, then press Ctrl-X.", output)
+            self.assertIn("Ctrl-C is sent to the radio and does not exit picocom.", output)
+            self.assertIn(f"PICOCOM_ARGS: <--baud> <57600> <--flow> <n> <{radio.port}>", output)
+            self.assertIn("Returned to setup.", output)
 
     def test_command_can_be_entered_at_choice(self):
         command = b"tempradio 910.1,500,7,5,180"

@@ -1337,6 +1337,39 @@ run_raw_command() {
   fi
 }
 
+open_picocom_console() {
+  local console_baud="${SERIAL_BAUD_CACHE:-${BAUD:-115200}}"
+
+  if [[ -z "${DEVICE_NAME:-}" ]]; then
+    echo "No serial port selected. Exit and select a radio first."
+    return 0
+  fi
+  if [[ ! -e "$DEVICE_NAME" ]]; then
+    echo "Serial port ${DEVICE_NAME} is not present."
+    return 0
+  fi
+  if [[ ! "$console_baud" =~ ^[0-9]+$ ]]; then
+    console_baud=115200
+  fi
+  if ! ensure_command picocom; then
+    echo "Could not install picocom; returning to setup."
+    return 0
+  fi
+
+  ensure_serial_access "$DEVICE_NAME" || true
+  echo
+  echo "Opening picocom on ${DEVICE_NAME} at ${console_baud} baud."
+  echo "To exit: press Ctrl-A, release it, then press Ctrl-X."
+  echo "Ctrl-C is sent to the radio and does not exit picocom."
+  echo
+  if ! picocom --baud "$console_baud" --flow n "$DEVICE_NAME"; then
+    echo "Picocom ended with an error; returning to setup."
+  else
+    echo "Returned to setup."
+  fi
+  return 0
+}
+
 read_hex_key_setting() {
   local key="$1"
   local hex_chars="$2"
@@ -1818,6 +1851,7 @@ edit_repeater_settings_menu() {
     echo " O) Start OTA"
     echo " K) Clock-reset reboot"
     echo " U) Reset USB connection (not a radio reboot)"
+    echo " P) Picocom serial console (exit: Ctrl-A, then Ctrl-X)"
     echo " C) Clear stats"
 	echo " Q) Quit"
     echo
@@ -1848,6 +1882,10 @@ edit_repeater_settings_menu() {
           reset_status=$?
           if (( reset_status == 2 )); then return 2; fi
         fi
+        ;;
+
+      p|P)
+        open_picocom_console
         ;;
 
 		0)
