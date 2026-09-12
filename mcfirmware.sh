@@ -1168,27 +1168,27 @@ ensure_command() {
 }
 
 ensure_pipx_uv_backend() {
-	local bootstrap_pipx resolved_backend uv_binary
+	local resolved_backend="" uv_binary=""
 
-	ensure_command pipx
+	ensure_command pipx || return 1
 	export PATH="${HOME}/.local/bin:${PATH}"
 	hash -r
 
 	uv_binary="$(pipx environment --value PIPX_UV_BINARY 2>/dev/null || true)"
-	if [[ -z "$uv_binary" || ! -x "$uv_binary" ]]; then
-		bootstrap_pipx="$(command -v pipx)"
-		echo "Installing a current pipx with the uv backend..." >&2
-		"$bootstrap_pipx" install --force 'pipx[uv]'
-		hash -r
+	if [[ -n "$uv_binary" && -x "$uv_binary" ]]; then
+		export PIPX_DEFAULT_BACKEND=uv
+		resolved_backend="$(pipx environment --value PIPX_RESOLVED_BACKEND 2>/dev/null || true)"
+		if [[ "$resolved_backend" == "uv" ]]; then
+			return 0
+		fi
 	fi
 
-	export PIPX_DEFAULT_BACKEND=uv
-	uv_binary="$(pipx environment --value PIPX_UV_BINARY 2>/dev/null || true)"
-	resolved_backend="$(pipx environment --value PIPX_RESOLVED_BACKEND 2>/dev/null || true)"
-	if [[ -z "$uv_binary" || ! -x "$uv_binary" || "$resolved_backend" != "uv" ]]; then
-		echo "Could not enable the pipx uv backend." >&2
-		return 1
-	fi
+	# uv does not publish binaries for every platform supported by pipx (notably
+	# older 32-bit Raspberry Pi systems). pipx's pip backend remains fully
+	# supported for every command this script uses, so lack of uv is not fatal.
+	export PIPX_DEFAULT_BACKEND=pip
+	echo "pipx uv backend is unavailable; using the standard pip backend."
+	return 0
 }
 
 print_command() {
