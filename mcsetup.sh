@@ -1402,7 +1402,10 @@ print_detected_node_summary() {
   local summary=''
   summary="$(format_detected_node_summary \
     "$DETECTED_NODE_BOARD" "$DETECTED_NODE_VERSION" 2>/dev/null || true)"
-  [[ -n "$summary" ]] && echo "$summary"
+  if [[ -n "$summary" ]]; then
+    echo "$summary"
+  fi
+  return 0
 }
 
 query_companion_device_info() {

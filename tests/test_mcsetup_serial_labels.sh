@@ -86,6 +86,13 @@ for error in 'Unknown command.' 'ERR: unsupported' 'Error, invalid params'; do
 done
 echo "PASS: CLI errors cannot become detected board or firmware labels"
 
+DETECTED_NODE_BOARD=''
+DETECTED_NODE_VERSION=''
+empty_summary="$(print_detected_node_summary)"
+[[ -z "$empty_summary" ]]
+print_detected_node_summary
+echo "PASS: missing optional identity does not abort setup"
+
 python3 - "$script_path" <<'PY'
 import sys
 
