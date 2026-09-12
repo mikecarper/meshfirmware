@@ -22,7 +22,7 @@ for function_name in \
 	initialize_privilege_mode configure_usb_autosuspend \
 	detect_package_manager package_name_for_manager install_packages ensure_command \
 	nrf52_serial_port_access \
-	stop_serial_locking_services terminate_serial_locking_processes; do
+	stop_service_names stop_serial_locking_services terminate_serial_locking_processes; do
 	definition="$(extract_function "$function_name")"
 	[[ "$definition" == "${function_name}() {"* ]] || {
 		echo "failed to extract ${function_name}" >&2

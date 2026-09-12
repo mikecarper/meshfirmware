@@ -151,6 +151,6 @@ assert 'read -r' not in prepare
 for name in ('probe_esptool', 'probe_esptool_mac'):
     body = re.search(r'^' + name + r'\(\) \{\n(.*?)^\}', source, re.M | re.S).group(1)
     assert 'invoke_esptool "$@"' not in body, name + ' retains stale retry arguments'
-    assert body.count('refresh_usb_recovered_esptool_args attempt_args') == 2
+    assert body.count('refresh_usb_recovered_esptool_args attempt_args') >= 2
 print('PASS: selection is inspect-only; recovery remains manual and identity-pinned')
 PY

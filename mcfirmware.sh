@@ -4397,31 +4397,57 @@ record_locked_service() {
 	fi
 }
 
-stop_serial_locking_services() {
-	local port="$1"
-	local services=""
-	local -a service_list=()
+stop_service_names() {
+	local services="$1"
 	local service
+	local -a service_list=()
 
-	services="$(get_locked_service "$port" || true)"
 	[[ -n "$services" && "$services" != "None" ]] || return 1
-
 	read -r -a service_list <<< "$services"
 	((${#service_list[@]})) || return 1
 	if no_sudo_mode; then
-		echo "No-sudo mode found locking service(s) on $port: $services; stop them explicitly first." >&2
+		echo "No-sudo mode found locking service(s): $services; stop them explicitly first." >&2
 		return 1
 	fi
 
-	echo "Stopping service $services..."
-	if ! sudo systemctl stop "${service_list[@]}"; then
-		return 1
-	fi
+	# Record every unit before stopping any of them. systemctl may stop one unit
+	# and still return failure for another; EXIT cleanup must still restore the
+	# service that was successfully stopped.
 	for service in "${service_list[@]}"; do
 		record_locked_service "$service"
 	done
+	echo "Stopping service $services..."
+	sudo systemctl stop "${service_list[@]}"
+}
+
+stop_serial_locking_services() {
+	local port="$1"
+	local services=""
+
+	services="$(get_locked_service "$port" || true)"
+	[[ -n "$services" && "$services" != "None" ]] || return 1
+	if ! stop_service_names "$services"; then
+		return 1
+	fi
 	sleep 3
 	return 0
+}
+
+stop_active_serial_probe_services() {
+	local service
+	local -a active_services=()
+
+	# ModemManager, brltty, and gpsd can briefly claim a newly enumerated CDC
+	# device and release it before lsof is sampled. This path is reached only
+	# after esptool reports a busy selected USB radio, so stop active serial
+	# probers for the duration of this flash and restore them from EXIT cleanup.
+	for service in ModemManager.service brltty.service gpsd.service; do
+		if systemctl is-active --quiet "$service" 2>/dev/null; then
+			active_services+=("$service")
+		fi
+	done
+	((${#active_services[@]})) || return 1
+	stop_service_names "${active_services[*]}"
 }
 
 terminate_serial_locking_processes() {
@@ -4715,14 +4741,51 @@ esptool_output_port_busy() {
 
 recover_busy_serial_port() {
 	local port="$1"
+	local live_port=""
+	local service_stopped=0
+	local attempt
 
 	echo "Serial port $port is busy; checking for locking services..."
-	if stop_serial_locking_services "$port"; then
-		return 0
+	# The selected CDC device may re-enumerate between esptool's failed open and
+	# service discovery. Follow its saved by-id identity instead of querying or
+	# retrying the stale tty number.
+	for ((attempt=0; attempt<20; attempt++)); do
+		live_port="$(selected_flash_serial_port "$port" 2>/dev/null || true)"
+		[[ -n "$live_port" && -e "$live_port" ]] && break
+		sleep 0.1
+	done
+	if [[ -n "$live_port" && -e "$live_port" ]]; then
+		if [[ "$live_port" != "$port" ]]; then
+			echo "The selected radio re-enumerated from $port to $live_port; checking the live port."
+		fi
+		port="$live_port"
+		USB_RESET_RECOVERED_PORT="$live_port"
 	fi
 
-	if terminate_serial_locking_processes "$port"; then
+	if stop_serial_locking_services "$port"; then
+		service_stopped=1
+	elif [[ -s "${DEVICE_PORT_NAME_FILE:-}" ]] \
+		&& stop_active_serial_probe_services; then
+		service_stopped=1
+	fi
+
+	if (( ! service_stopped )) && terminate_serial_locking_processes "$port"; then
 		return 0
+	fi
+	if (( service_stopped )); then
+		# A probing service may have raced the USB enumeration and made the tty
+		# disappear. Give the same saved identity a bounded chance to return, then
+		# direct the caller's retry to that live port.
+		for ((attempt=0; attempt<30; attempt++)); do
+			live_port="$(selected_flash_serial_port "$port" 2>/dev/null || true)"
+			if [[ -n "$live_port" && -e "$live_port" ]]; then
+				USB_RESET_RECOVERED_PORT="$live_port"
+				return 0
+			fi
+			sleep 0.1
+		done
+		echo "The locking service was stopped, but the selected USB radio did not return." >&2
+		return 1
 	fi
 	if no_sudo_mode; then
 		echo "No-sudo mode refuses to continue while ${port} may still be busy." >&2
@@ -5756,6 +5819,9 @@ probe_esptool() {
 			printf '%s\n' "$output" >&2
 			return "$status"
 		fi
+		if [[ -n "${USB_RESET_RECOVERED_PORT:-}" ]]; then
+			refresh_usb_recovered_esptool_args attempt_args || return 1
+		fi
 		if retry_output=$(invoke_esptool "${attempt_args[@]}" 2>&1); then
 			return 0
 		else
@@ -5835,6 +5901,9 @@ probe_esptool_mac() {
 		if ! recover_busy_serial_port "$port"; then
 			printf '%s\n' "$output" >&2
 			return "$status"
+		fi
+		if [[ -n "${USB_RESET_RECOVERED_PORT:-}" ]]; then
+			refresh_usb_recovered_esptool_args attempt_args || return 1
 		fi
 		if retry_output=$(invoke_esptool "${attempt_args[@]}" 2>&1); then
 			esp32_record_and_verify_probe_output "$retry_output"
