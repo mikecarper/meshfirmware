@@ -17,7 +17,7 @@ extract_function() {
 
 for function_name in \
 	esptool_safe_serial_bootstrap esptool_port_argument \
-	configure_esptool_invocation; do
+	resolve_esptool_pipx_app configure_esptool_invocation; do
 	definition="$(extract_function "$function_name")"
 	[[ "$definition" == "${function_name}() {"* ]] || {
 		echo "failed to extract ${function_name}" >&2
@@ -27,6 +27,9 @@ for function_name in \
 	# shellcheck disable=SC2294
 	eval "$definition"
 done
+
+ESPTOOL_PIPX_APP=esptool
+ESPTOOL_VERSION_OUTPUT='esptool v5.4.0'
 
 expect_equal() {
 	local label=$1 expected=$2 actual=$3
@@ -64,26 +67,26 @@ ESP32_NATIVE_ROM_READY=1
 configure_esptool_invocation --port /dev/serial/by-id/heltec-v4 \
 	--before no-reset --after no-reset read-mac
 expect_equal "proven native ROM session reopens without the pre-ROM line guard" \
-	"pipx run esptool" "${ESPTOOL_INVOKE_COMMAND[*]}"
+	"pipx run --spec esptool esptool" "${ESPTOOL_INVOKE_COMMAND[*]}"
 ESP32_NATIVE_ROM_READY=0
 
 configure_esptool_invocation --port /dev/serial/by-id/heltec-v4 \
 	--before usb-reset --after no-reset read-mac
 expect_equal "native USB reset lets esptool own its control-line sequence" \
-	"pipx run esptool" "${ESPTOOL_INVOKE_COMMAND[*]}"
+	"pipx run --spec esptool esptool" "${ESPTOOL_INVOKE_COMMAND[*]}"
 
 configure_esptool_invocation --port=/dev/serial/by-id/heltec-v4 \
 	--before=usb_reset --after=no_reset read_mac
 expect_equal "esptool 4 native USB reset also bypasses the idle-line wrapper" \
-	"pipx run esptool" "${ESPTOOL_INVOKE_COMMAND[*]}"
+	"pipx run --spec esptool esptool" "${ESPTOOL_INVOKE_COMMAND[*]}"
 
 configure_esptool_invocation image-info firmware.bin
 expect_equal "non-serial command keeps ordinary runner" \
-	"pipx run esptool" "${ESPTOOL_INVOKE_COMMAND[*]}"
+	"pipx run --spec esptool esptool" "${ESPTOOL_INVOKE_COMMAND[*]}"
 
 configure_esptool_invocation --port socket://127.0.0.1:3333 read-mac
 expect_equal "socket transport keeps ordinary runner" \
-	"pipx run esptool" "${ESPTOOL_INVOKE_COMMAND[*]}"
+	"pipx run --spec esptool esptool" "${ESPTOOL_INVOKE_COMMAND[*]}"
 
 cat >"${tmp_dir}/serial.py" <<'PY'
 class FakePort:
@@ -125,7 +128,7 @@ grep -qx 'CACHED_STATE=False,False' <<<"$bootstrap_output"
 grep -qx 'OPEN_STATE=False,False' <<<"$bootstrap_output"
 echo "PASS: bootstrap sets idle DTR/RTS before the underlying port open"
 
-if rg -n 'pipx run esptool .*--port|pipx run esptool --port' "$script_path" >/dev/null; then
+if rg -n 'pipx run( --spec esptool [^ ]+)? .*--port|pipx run( --spec esptool [^ ]+)? --port' "$script_path" >/dev/null; then
 	echo "FAIL: a device esptool call bypasses the guarded invocation" >&2
 	exit 1
 fi

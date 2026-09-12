@@ -15,14 +15,18 @@ extract_function() {
 	' "$script_path"
 }
 
-definition="$(extract_function esptool_set_variables)"
-[[ "$definition" == 'esptool_set_variables() {'* ]]
-# Deliberately evaluate the function extracted from the production script.
-# shellcheck disable=SC2294
-eval "$definition"
+for function_name in resolve_esptool_pipx_app esptool_set_variables; do
+	definition="$(extract_function "$function_name")"
+	[[ "$definition" == "${function_name}() {"* ]]
+	# Deliberately evaluate the function extracted from the production script.
+	# shellcheck disable=SC2294
+	eval "$definition"
+done
 
 fake_esptool_major=5
+fake_esptool_app=esptool
 pipx() {
+	[[ "${4:-}" == "$fake_esptool_app" ]] || return 1
 	printf 'esptool v%s.4.0\n' "$fake_esptool_major"
 	if [[ "$fake_esptool_major" == 5 ]]; then
 		# The old pipx|grep -m1 pipeline closed while this producer was still
@@ -36,13 +40,19 @@ pipx() {
 
 NORESET='unset'
 WRITEFLASH='unset'
+ESPTOOL_PIPX_APP=''
+ESPTOOL_VERSION_OUTPUT=''
 esptool_set_variables >/dev/null
 [[ "$NORESET" == no-reset && "$WRITEFLASH" == write-flash ]]
 echo "PASS: esptool 5 version output cannot terminate the flasher through pipefail"
 
 fake_esptool_major=4
+fake_esptool_app=esptool.py
 NORESET='unset'
 WRITEFLASH='unset'
+ESPTOOL_PIPX_APP=''
+ESPTOOL_VERSION_OUTPUT=''
 esptool_set_variables >/dev/null
 [[ "$NORESET" == no_reset && "$WRITEFLASH" == write_flash ]]
-echo "PASS: esptool 4 command spelling remains supported"
+[[ "$ESPTOOL_PIPX_APP" == esptool.py ]]
+echo "PASS: esptool 4 falls back to its esptool.py entry point"

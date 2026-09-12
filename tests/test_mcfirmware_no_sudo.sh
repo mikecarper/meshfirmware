@@ -20,7 +20,8 @@ extract_function() {
 for function_name in \
 	no_sudo_mode ensure_sudo_session start_sudo_keepalive \
 	initialize_privilege_mode configure_usb_autosuspend \
-	detect_package_manager package_name_for_manager install_packages ensure_command \
+	detect_package_manager package_name_for_manager apt_update_or_use_cached_metadata \
+	install_packages ensure_command \
 	nrf52_serial_port_access \
 	stop_service_names stop_serial_locking_services terminate_serial_locking_processes; do
 	definition="$(extract_function "$function_name")"

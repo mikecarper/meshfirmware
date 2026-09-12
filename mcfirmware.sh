@@ -101,6 +101,8 @@ ESP32_MERGED_OTA_IMAGE=""
 FAST_IDENTITY_ATTEMPTED_PORT=""
 DETECTED_NODE_BOARD=""
 DETECTED_NODE_VERSION=""
+ESPTOOL_PIPX_APP=""
+ESPTOOL_VERSION_OUTPUT=""
 # The Indicator's CH340 bridge has repeatedly dropped long reads above this
 # rate.  Identity and partition reads are safety gates, so use the same
 # board-qualified conservative rate as erase/write instead of risking a fast
@@ -700,7 +702,7 @@ classify_bin() {
 
 	run_esptool_on_file() {
 		local target="$1"
-		pipx run esptool image_info "$target" 2>/dev/null || true
+		pipx run --spec esptool python -m esptool image_info "$target" 2>/dev/null || true
 	}
 
 	run_esptool_on_offset_image() {
@@ -709,7 +711,7 @@ classify_bin() {
 
 		tmp=$(mktemp)
 		dd if="$f" of="$tmp" bs=1 skip="$off" status=none 2>/dev/null || true
-		pipx run esptool image_info "$tmp" 2>/dev/null || true
+		pipx run --spec esptool python -m esptool image_info "$tmp" 2>/dev/null || true
 		rm -f "$tmp"
 	}
 
@@ -1117,6 +1119,35 @@ package_name_for_manager() {
 	printf '%s\n' "$package_name"
 }
 
+apt_update_or_use_cached_metadata() {
+	local answer=""
+	local tty_path="${MESHFIRMWARE_TTY:-/dev/tty}"
+
+	if sudo apt-get update; then
+		PACKAGE_METADATA_UPDATED=1
+		return 0
+	fi
+
+	echo >&2
+	echo "apt-get update failed. Existing cached package indexes may still be usable." >&2
+	echo "Continuing can install older packages, but package authentication will remain enabled." >&2
+	if ! read -r -p "Continue using cached apt package indexes? [y/N] " answer < "$tty_path"; then
+		echo "Unable to read a response; package installation cancelled." >&2
+		return 1
+	fi
+	case "$answer" in
+		y|Y|yes|YES|Yes)
+			PACKAGE_METADATA_UPDATED=1
+			echo "Continuing with cached apt package indexes." >&2
+			return 0
+			;;
+		*)
+			echo "Package installation cancelled." >&2
+			return 1
+			;;
+	esac
+}
+
 install_packages() {
 	if no_sudo_mode; then
 		echo "No-sudo mode cannot install missing package(s): $*" >&2
@@ -1139,8 +1170,7 @@ install_packages() {
 			;;
 		apt-get)
 			if (( ! PACKAGE_METADATA_UPDATED )); then
-				sudo apt-get update || return 1
-				PACKAGE_METADATA_UPDATED=1
+				apt_update_or_use_cached_metadata || return 1
 			fi
 			sudo apt-get install -y "${packages[@]}"
 			;;
@@ -4519,6 +4549,24 @@ prepare_serial_port_for_flash() {
 	return 0
 }
 
+resolve_esptool_pipx_app() {
+	local candidate="" output="" attempted_output=""
+
+	[[ -n "${ESPTOOL_PIPX_APP:-}" ]] && return 0
+	for candidate in esptool esptool.py; do
+		if output="$(pipx run --spec esptool "$candidate" version 2>&1)"; then
+			ESPTOOL_PIPX_APP="$candidate"
+			ESPTOOL_VERSION_OUTPUT="$output"
+			return 0
+		fi
+		attempted_output+="${output}"$'\n'
+	done
+
+	printf '%s' "$attempted_output" >&2
+	echo "Unable to run either the esptool or esptool.py package entry point." >&2
+	return 1
+}
+
 
 esptool_set_variables() {
 	local version_output="" ver="" major=""
@@ -4528,7 +4576,8 @@ esptool_set_variables() {
 	# grep -m1 can close that producer early and abort the entire flasher with a
 	# SIGPIPE before any device operation. Capture the small response first and
 	# extract its first version without a producer/consumer pipeline.
-	version_output="$(pipx run esptool version)"
+	resolve_esptool_pipx_app || return 1
+	version_output="$ESPTOOL_VERSION_OUTPUT"
 	if [[ "$version_output" =~ ([0-9]+(\.[0-9]+)+) ]]; then
 		ver="${BASH_REMATCH[1]}"
 	fi
@@ -4638,7 +4687,8 @@ esptool_port_argument() {
 configure_esptool_invocation() {
 	local port="" before="" previous="" arg bootstrap=""
 	port="$(esptool_port_argument "$@" 2>/dev/null || true)"
-	ESPTOOL_INVOKE_COMMAND=(pipx run esptool)
+	resolve_esptool_pipx_app || return 1
+	ESPTOOL_INVOKE_COMMAND=(pipx run --spec esptool "$ESPTOOL_PIPX_APP")
 	for arg in "$@"; do
 		if [[ "$previous" == "--before" ]]; then
 			before="$arg"
@@ -4703,7 +4753,7 @@ get_espcmd() {
 	ensure_command pipx
 
 	esptool_set_variables
-	ESPTOOL_CMD="pipx run esptool"
+	ESPTOOL_CMD="pipx run --spec esptool $ESPTOOL_PIPX_APP"
 
 	#if sudo "$PYTHON" -m esptool version >/dev/null 2>&1; then
 	#	ESPTOOL_CMD="$PYTHON -m esptool"

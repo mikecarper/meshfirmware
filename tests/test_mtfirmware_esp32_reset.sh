@@ -18,10 +18,13 @@ flash_path = source[start:end]
 assert not re.search(r"ESPTOOL_CMD.*--baud[ =]1200", flash_path)
 assert 'export ESPTOOL_PORT=$device_port_name' in flash_path
 assert '$ESPTOOL_CMD --baud 115200 write-flash 0x10000 "$basename_selected"' in flash_path
+assert 'pipx run --spec esptool esptool version' in flash_path
+assert 'pipx run --spec esptool esptool.py version' in flash_path
+assert 'ESPTOOL_CMD="pipx run --spec esptool esptool.py"' in flash_path
 assert '"$abs_script" -p "${device_port_name}" -f "$basename_selected"' in flash_path
 assert flash_path.index('Would you like to $operation the firmware?') < flash_path.index(
     'export ESPTOOL_PORT=$device_port_name'
 )
 PY
 
-echo 'PASS: mtfirmware performs no redundant 1200-baud ESP32 reset before the confirmed flash'
+echo 'PASS: mtfirmware selects a compatible esptool entry point without a redundant ESP32 reset'

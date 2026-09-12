@@ -467,6 +467,35 @@ package_name_for_manager() {
   printf '%s\n' "$package_name"
 }
 
+apt_update_or_use_cached_metadata() {
+  local answer=""
+  local tty_path="${MESHFIRMWARE_TTY:-/dev/tty}"
+
+  if sudo apt-get update; then
+    PACKAGE_METADATA_UPDATED=1
+    return 0
+  fi
+
+  echo >&2
+  echo "apt-get update failed. Existing cached package indexes may still be usable." >&2
+  echo "Continuing can install older packages, but package authentication will remain enabled." >&2
+  if ! read -r -p "Continue using cached apt package indexes? [y/N] " answer < "$tty_path"; then
+    echo "Unable to read a response; package installation cancelled." >&2
+    return 1
+  fi
+  case "$answer" in
+    y|Y|yes|YES|Yes)
+      PACKAGE_METADATA_UPDATED=1
+      echo "Continuing with cached apt package indexes." >&2
+      return 0
+      ;;
+    *)
+      echo "Package installation cancelled." >&2
+      return 1
+      ;;
+  esac
+}
+
 install_packages() {
   detect_package_manager || return 1
 
@@ -485,8 +514,7 @@ install_packages() {
       ;;
     apt-get)
       if (( ! PACKAGE_METADATA_UPDATED )); then
-        sudo apt-get update || return 1
-        PACKAGE_METADATA_UPDATED=1
+        apt_update_or_use_cached_metadata || return 1
       fi
       sudo apt-get install -y "${packages[@]}"
       ;;
