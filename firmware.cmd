@@ -53,8 +53,8 @@ $KEYMIND_RAW_BASE_URL = "https://raw.githubusercontent.com/mikecarper/MeshCore/k
 $KEYMIND_CASCADE_FALLBACK_URL = "$KEYMIND_RAW_BASE_URL/mesh-america/keymind-cascade-v1.16.0-provider.json"
 $KEYMIND_CASCADE_LOGGING_FALLBACK_URL = "$KEYMIND_RAW_BASE_URL/mesh-america/keymind-cascade-logging-v1.16.0-provider.json"
 $MESHCORE_BACKUP_TOOL_URL = "https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_backup.py"
-$MESHCORE_BACKUP_TOOL_VERSION = '0.2.0'
-$MESHCORE_BACKUP_TOOL_SHA256 = '742008038ea7d636ded1a746152be5748578f93fd7619dbbe16bf40df2560559'
+$MESHCORE_BACKUP_TOOL_VERSION = '0.2.1'
+$MESHCORE_BACKUP_TOOL_SHA256 = '16a67a248a3e4547954929478cab073968f3d960c58f1d454f89de3756d7e4b7'
 
 $timeoutMeshtastic = 10 # Timeout duration in seconds
 $baud = 1200 # 115200
@@ -6540,30 +6540,33 @@ function Resolve-MeshCoreBackupTool {
 }
 
 function Ensure-MeshCoreBackupDependencies {
+	param([Parameter(Mandatory)][string]$ToolPath)
+
 	if ([string]::IsNullOrWhiteSpace([string]$pythonCommand)) {
 		throw 'Python is not available for the MeshCore USB backup.'
 	}
 
-	& $pythonCommand -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' *> $null
-	if ($LASTEXITCODE -ne 0) {
-		throw 'MeshCore USB backup requires Python 3.10 or newer.'
+	# Run a file, not quoted Python via -c: PS5 removes the embedded quotes.
+	# Stream versions and pip diagnostics without treating native stderr as a
+	# terminating PowerShell error or leaking text into the caller's result.
+	$previousErrorAction = $ErrorActionPreference
+	try {
+		$ErrorActionPreference = 'Continue'
+		$PSNativeCommandUseErrorActionPreference = $false
+		$global:LASTEXITCODE = 10
+		& $pythonCommand $ToolPath dependencies --install --text 2>&1 | ForEach-Object {
+			# PS5 wraps even blank stderr lines in a RemoteException. Preserve
+			# the actual message without displaying that misleading type name.
+			$line = if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { [string]$_ }
+			if (-not [string]::IsNullOrWhiteSpace($line)) { Write-Host $line }
+		}
+		$dependencyExitCode = $global:LASTEXITCODE
 	}
-
-	$dependencyProbe = 'import re; from importlib.metadata import version; v=lambda n: tuple((list(map(int, re.findall(r"\d+", version(n))[:3])) + [0, 0, 0])[:3]); raise SystemExit(0 if (1, 6, 3) <= v("meshcore-cli") < (2, 0, 0) and (2, 3, 9) <= v("meshcore") < (3, 0, 0) and (1, 5, 0) <= v("PyNaCl") < (2, 0, 0) else 1)'
-	& $pythonCommand -c $dependencyProbe *> $null
-	if ($LASTEXITCODE -eq 0) {
-		return
+	finally {
+		$ErrorActionPreference = $previousErrorAction
 	}
-
-	Write-Host 'Installing the existing MeshCore Python API and CLI used by USB backup...'
-	& $pythonCommand -m pip install --upgrade --no-warn-script-location 'meshcore>=2.3.9,<3' 'meshcore-cli>=1.6.3,<2' 'PyNaCl>=1.5,<2'
-	if ($LASTEXITCODE -ne 0) {
-		throw 'Could not install meshcore-cli, which provides the supported MeshCore USB APIs.'
-	}
-
-	& $pythonCommand -c $dependencyProbe *> $null
-	if ($LASTEXITCODE -ne 0) {
-		throw 'The installed MeshCore Python API versions are outside the supported range.'
+	if ($dependencyExitCode -ne 0) {
+		throw "MeshCore USB backup dependency check/repair failed (exit $dependencyExitCode). See installed/supported versions and diagnostics above."
 	}
 }
 
@@ -6587,8 +6590,8 @@ function Invoke-MeshCoreBackupHelper {
 		[switch]$Quiet
 	)
 
-	Ensure-MeshCoreBackupDependencies
 	$tool = Resolve-MeshCoreBackupTool
+	Ensure-MeshCoreBackupDependencies -ToolPath $tool
 	$output = @(& $pythonCommand $tool @Arguments 2>&1)
 	$exitCode = $LASTEXITCODE
 	$lines = @($output | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })

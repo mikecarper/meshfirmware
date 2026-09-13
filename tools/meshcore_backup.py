@@ -36,6 +36,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 import sys
 import uuid
 from dataclasses import dataclass
@@ -45,13 +46,36 @@ from typing import Any, Awaitable, Callable, Mapping, Optional
 
 SCHEMA = "org.meshfirmware.meshcore-backup/v1"
 ARCHIVE_KIND = "meshcore-logical-usb"
-TOOL_VERSION = "0.2.0"
+TOOL_VERSION = "0.2.1"
 MIN_MESHCORE_VERSION = (2, 3, 9)
 MIN_MESHCORE_CLI_VERSION = (1, 6, 3)
 MIN_PYNACL_VERSION = (1, 5, 0)
 MAX_MESHCORE_VERSION = (3, 0, 0)
 MAX_MESHCORE_CLI_VERSION = (2, 0, 0)
 MAX_PYNACL_VERSION = (2, 0, 0)
+# Keep supported ranges and the reproducible repair set in this helper, not in
+# shell-specific inline Python (Windows PowerShell 5 strips embedded quotes).
+DEPENDENCIES = (
+    ("meshcore", MIN_MESHCORE_VERSION, MAX_MESHCORE_VERSION, "2.3.9.1"),
+    ("meshcore-cli", MIN_MESHCORE_CLI_VERSION, MAX_MESHCORE_CLI_VERSION, "1.6.3"),
+    ("PyNaCl", MIN_PYNACL_VERSION, MAX_PYNACL_VERSION, "1.6.2"),
+)
+DEPENDENCY_APIS = {
+    "meshcore": (
+        ("meshcore", "MeshCore.create_serial"),
+        ("meshcore.commands", "CommandHandler.send_appstart"),
+        ("meshcore.commands", "CommandHandler.send_device_query"),
+        ("meshcore.commands", "CommandHandler.export_private_key"),
+        ("meshcore.commands", "CommandHandler.get_contacts"),
+        ("meshcore.commands", "CommandHandler.get_channel"),
+        ("meshcore.commands", "CommandHandler.run_cli_command"),
+    ),
+    "meshcore-cli": (
+        ("meshcore_cli.meshcore_cli", "setup_repeater_serial"),
+        ("meshcore_cli.meshcore_cli", "process_repeater_line"),
+    ),
+    "PyNaCl": (("nacl.bindings", "crypto_scalarmult_ed25519_base_noclamp"),),
+}
 ROLE_CHOICES = ("auto", "companion", "repeater", "room-server", "sensor", "kiss")
 SECTION_STATES = {"complete", "unsupported", "disabled", "error", "not_applicable"}
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -170,24 +194,148 @@ def _require_package_version(
     maximum_exclusive: Optional[tuple[int, ...]] = None,
 ) -> None:
     installed = _package_version(name)
-    if installed is None:
-        raise BackupError(ExitCode.DEPENDENCY, f"{name} is not installed")
-    numeric = tuple(int(part) for part in re.findall(r"\d+", installed)[: len(minimum)])
-    numeric += (0,) * (len(minimum) - len(numeric))
-    if numeric < minimum:
-        floor = ".".join(str(part) for part in minimum)
-        raise BackupError(ExitCode.DEPENDENCY, f"{name}>={floor} is required")
-    if maximum_exclusive is not None and numeric >= maximum_exclusive:
-        floor = ".".join(str(part) for part in minimum)
-        ceiling = ".".join(str(part) for part in maximum_exclusive)
+    required = _version_range(minimum, maximum_exclusive)
+    # Accept stable releases, including MeshCore's fourth release component.
+    # A prerelease such as 2.3.9rc1 must not be mistaken for stable 2.3.9.
+    match = re.fullmatch(r"(\d+(?:\.\d+)*)(?:\.post\d+)?(?:\+[a-zA-Z0-9.-]+)?", installed or "")
+    numeric = tuple(int(part) for part in match[1].split(".")) if match else ()
+    numeric += (0,) * max(0, len(minimum) - len(numeric))
+    if not match or numeric < minimum or (
+        maximum_exclusive is not None and numeric >= maximum_exclusive
+    ):
+        installed_label = f"installed {installed}" if installed else "not installed"
         raise BackupError(
-            ExitCode.DEPENDENCY, f"{name}>={floor},<{ceiling} is required"
+            ExitCode.DEPENDENCY,
+            f"{name}: {installed_label}; required {required} (stable release)",
         )
+
+
+def _version_range(minimum: tuple[int, ...], maximum: Optional[tuple[int, ...]]) -> str:
+    value = ">=" + ".".join(map(str, minimum))
+    return value + (",<" + ".".join(map(str, maximum)) if maximum else "")
 
 
 def _require_python_version() -> None:
     if sys.version_info < (3, 10):
-        raise BackupError(ExitCode.DEPENDENCY, "Python 3.10 or newer is required")
+        raise BackupError(
+            ExitCode.DEPENDENCY,
+            f"Python 3.10 or newer is required; installed {sys.version.split()[0]} ({sys.executable})",
+        )
+
+
+def _check_dependency_api(name: str) -> None:
+    # Inspect callables only: never open a USB port, create a client, or issue a
+    # radio command. Suppress import-time logs, which can contain user config.
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        for module_name, attribute_path in DEPENDENCY_APIS[name]:
+            try:
+                value = importlib.import_module(module_name)
+                for attribute in attribute_path.split("."):
+                    value = getattr(value, attribute)
+                if not callable(value):
+                    raise TypeError("API is not callable")
+            except Exception as exc:
+                raise BackupError(
+                    ExitCode.DEPENDENCY,
+                    f"{module_name}.{attribute_path} unavailable ({type(exc).__name__})",
+                ) from None
+
+
+def dependency_report() -> dict[str, Any]:
+    packages = []
+    for name, minimum, maximum, pin in DEPENDENCIES:
+        item = {
+            "name": name, "installed": _package_version(name),
+            "supported": _version_range(minimum, maximum), "repair_version": pin,
+            "version_ok": False, "api_ok": False,
+        }
+        try:
+            _require_package_version(name, minimum, maximum)
+            item["version_ok"] = True
+            _check_dependency_api(name)
+            item["api_ok"] = True
+        except BackupError as exc:
+            item["error"] = exc.reason
+        packages.append(item)
+    ok = all(item["api_ok"] for item in packages)
+    return {
+        "ok": ok, "exit_code": int(ExitCode.OK if ok else ExitCode.DEPENDENCY),
+        "python": sys.version.split()[0], "executable": sys.executable,
+        "packages": packages,
+    }
+
+
+def _print_dependency_report(report: dict[str, Any], text: bool, stream=None) -> None:
+    stream = stream or sys.stdout
+    if not text:
+        print(json.dumps(report, sort_keys=True), file=stream, flush=True)
+        return
+    print(f"MeshCore USB backup: Python {report['python']} ({report['executable']})", file=stream)
+    for item in report["packages"]:
+        status = "API OK" if item["api_ok"] else item["error"]
+        installed_label = f"installed {item['installed']}" if item["installed"] else "not installed"
+        if not item["version_ok"]:
+            status = "unsupported version (stable release required)" if item["installed"] else "missing package"
+        print(
+            f"  {item['name']}: {installed_label}; "
+            f"supported {item['supported']}; repair {item['repair_version']} -- {status}",
+            file=stream,
+        )
+    if report.get("error"):
+        print(report["error"], file=stream)
+    stream.flush()
+
+
+def _probe_dependency_report() -> dict[str, Any]:
+    # Keep imports out of the repair supervisor: on Windows, loaded PyNaCl/
+    # CFFI DLLs cannot be replaced by pip until the importing process exits.
+    command = [sys.executable, str(Path(__file__).resolve()), "dependencies"]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        report = json.loads(result.stdout)
+        if result.returncode not in (0, 10) or report["exit_code"] != result.returncode:
+            raise ValueError("unexpected dependency probe exit")
+        if not isinstance(report["packages"], list) or not report["packages"]:
+            raise ValueError("missing package report")
+        return report
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise BackupError(
+            ExitCode.DEPENDENCY,
+            f"MeshCore dependency probe could not produce a version/API report ({type(exc).__name__}); backup stopped.",
+        ) from None
+
+
+def ensure_dependencies(*, install: bool = False, text: bool = False) -> int:
+    report = _probe_dependency_report() if install else dependency_report()
+    if report["ok"] or not install:
+        _print_dependency_report(report, text)
+        return report["exit_code"]
+
+    _print_dependency_report(report, text, sys.stderr)
+    requirements = [f"{name}=={pin}" for name, _, _, pin in DEPENDENCIES]
+    print("Installing the MeshCore USB backup repair set: " + ", ".join(requirements),
+          file=sys.stderr, flush=True)
+    command = [sys.executable, "-m", "pip", "install", "--upgrade", "--no-warn-script-location"]
+    if any(item["version_ok"] and not item["api_ok"] for item in report["packages"]):
+        command.append("--force-reinstall")
+    try:
+        result = subprocess.run(command + requirements, stdout=sys.stderr, stderr=sys.stderr, check=False)
+        if result.returncode:
+            report["error"] = (
+                f"MeshCore dependency installation failed (pip exit {result.returncode}); backup stopped. "
+                "Versions shown are from before the failed repair."
+            )
+        else:
+            # Imports from before pip may still be cached. Validate the actual
+            # repaired installation in a fresh process, with no repair loop.
+            probe = [sys.executable, str(Path(__file__).resolve()), "dependencies"]
+            if text:
+                probe.append("--text")
+            return subprocess.run(probe, check=False).returncode
+    except OSError as exc:
+        report["error"] = f"MeshCore dependency repair could not start ({type(exc).__name__}); backup stopped."
+    _print_dependency_report(report, text)
+    return int(ExitCode.DEPENDENCY)
 
 
 def _json_safe(value: Any) -> Any:
@@ -1648,6 +1796,9 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--expected-public-key")
 
     subparsers.add_parser("version", help="print the helper/frontend contract version")
+    dependencies = subparsers.add_parser("dependencies", help="report/check USB API versions without connecting to a radio")
+    dependencies.add_argument("--install", action="store_true", help="repair missing or incompatible packages once")
+    dependencies.add_argument("--text", action="store_true", help="print human-readable versions and diagnostics")
     return parser
 
 
@@ -1664,6 +1815,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
     try:
         _require_python_version()
+        if args.command == "dependencies":
+            return ensure_dependencies(install=args.install, text=args.text)
         if args.command == "backup":
             output_dir = args.output_dir or _default_output_dir()
             request = BackupRequest(

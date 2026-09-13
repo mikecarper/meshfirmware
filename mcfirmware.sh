@@ -572,8 +572,8 @@ KEYMIND_RAW_BASE_URL="https://raw.githubusercontent.com/mikecarper/MeshCore/keym
 KEYMIND_CASCADE_FALLBACK_URL="${KEYMIND_RAW_BASE_URL}/mesh-america/keymind-cascade-v1.16.0-provider.json"
 KEYMIND_CASCADE_LOGGING_FALLBACK_URL="${KEYMIND_RAW_BASE_URL}/mesh-america/keymind-cascade-logging-v1.16.0-provider.json"
 MESHCORE_BACKUP_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_backup.py"
-MESHCORE_BACKUP_TOOL_VERSION="0.2.0"
-MESHCORE_BACKUP_TOOL_SHA256="742008038ea7d636ded1a746152be5748578f93fd7619dbbe16bf40df2560559"
+MESHCORE_BACKUP_TOOL_VERSION="0.2.1"
+MESHCORE_BACKUP_TOOL_SHA256="16a67a248a3e4547954929478cab073968f3d960c58f1d454f89de3756d7e4b7"
 MESHCORE_USB_RESET_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_usb_reset.py"
 MESHCORE_USB_RESET_TOOL_SHA256="364de4c2e100df3ec2be795fc6079722ce1790416ba5a2d04d0c53e6c87c7083"
 USB_RESET_EXPECTED_IDENTITY=""
@@ -1565,13 +1565,12 @@ prepare_selected_usb_connection() {
 }
 
 ensure_meshcore_backup_python() {
+	local helper="$1"
 	local venv_dir="${FIRMWARE_ROOT}/tools/meshcore-backup-venv"
 	local venv_python="${venv_dir}/bin/python"
-	local dependency_probe='import re; from importlib.metadata import version; v=lambda n: tuple((list(map(int, re.findall(r"\d+", version(n))[:3])) + [0, 0, 0])[:3]); raise SystemExit(0 if (1, 6, 3) <= v("meshcore-cli") < (2, 0, 0) and (2, 3, 9) <= v("meshcore") < (3, 0, 0) and (1, 5, 0) <= v("PyNaCl") < (2, 0, 0) else 1)'
 
-	ensure_command python3 python3
 	if ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
-		echo "MeshCore USB backup requires Python 3.10 or newer." >&2
+		echo "MeshCore USB backup requires Python 3.10 or newer; installed $(python3 --version 2>&1)." >&2
 		return 1
 	fi
 	if [[ ! -x "$venv_python" ]]; then
@@ -1583,12 +1582,9 @@ ensure_meshcore_backup_python() {
 		fi
 	fi
 
-	if ! "$venv_python" -c "$dependency_probe" >/dev/null 2>&1; then
-		echo "Installing the existing MeshCore Python API and CLI used by USB backup..." >&2
-		"$venv_python" -m pip install --upgrade 'meshcore>=2.3.9,<3' 'meshcore-cli>=1.6.3,<2' 'PyNaCl>=1.5,<2' >&2
-	fi
-	if ! "$venv_python" -c "$dependency_probe" >/dev/null 2>&1; then
-		echo "The installed MeshCore Python API versions are outside the supported range." >&2
+	# The verified helper owns version reporting, API checks, and pinned repair.
+	if ! "$venv_python" "$helper" dependencies --install --text >&2; then
+		echo "MeshCore USB backup dependency check/repair failed; see versions and diagnostics above." >&2
 		return 1
 	fi
 
@@ -1723,10 +1719,12 @@ request_meshcore_usb_backup_before_flash() {
 		esac
 	done
 	if (( backup_requested )); then
-		if ! backup_python="$(ensure_meshcore_backup_python)"; then
+		if ! ensure_command python3 python3; then
 			backup_rc=10
 		elif ! helper="$(resolve_meshcore_backup_tool)"; then
 			backup_rc=32
+		elif ! backup_python="$(ensure_meshcore_backup_python "$helper")"; then
+			backup_rc=10
 		else
 			# ROLE describes the firmware selected for installation, which may
 			# differ from the role currently running on this node. Let the helper

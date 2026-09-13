@@ -64,6 +64,10 @@ FAKE_MODE=safe
 BACKUP_CALLED_FILE="${TEST_TMP}/backup-called"
 
 # Replace every external operation reached by the request function.
+ensure_command() {
+	return 0
+}
+
 resolve_meshcore_backup_tool() {
 	printf '%s\n' fake_helper
 }
@@ -188,19 +192,34 @@ else
 	pass 'autodetect_device performs no 1200-baud transition before backup'
 fi
 
-# Keep the supported dependency contract visible at both entry points.
-for required_text in \
-	"meshcore>=2.3.9,<3" \
-	"meshcore-cli>=1.6.3,<2" \
-	"PyNaCl>=1.5,<2" \
-	"sys.version_info >= (3, 10)"
-do
-	if grep -Fq -- "$required_text" "$FIRMWARE_SCRIPT"; then
-		pass "mcfirmware.sh enforces ${required_text}"
-	else
-		fail "mcfirmware.sh does not enforce ${required_text}"
-	fi
-done
+# The helper owns the dependency contract; the shell must invoke its repair
+# and version-reporting entry point with the very same Python used for backup.
+DEPENDENCIES_SOURCE="$(extract_function ensure_meshcore_backup_python)"
+if grep -Fq -- '"$venv_python" "$helper" dependencies --install --text >&2' <<<"$DEPENDENCIES_SOURCE" \
+	&& ! grep -Fq -- 'dependency_probe' <<<"$DEPENDENCIES_SOURCE"; then
+	pass 'mcfirmware.sh delegates API checks, version reporting, and repair to the helper'
+else
+	fail 'mcfirmware.sh does not use the shared dependency check/repair contract'
+fi
+
+# Exercise the actual launcher function with an existing fake venv. Its
+# stdout must contain only the Python path, never diagnostics; failure must
+# propagate and never provide a usable interpreter to the flashing gate.
+(
+	eval "$DEPENDENCIES_SOURCE"
+	FIRMWARE_ROOT="${TEST_TMP}/cache with spaces"
+	mkdir -p "${FIRMWARE_ROOT}/tools/meshcore-backup-venv/bin"
+	EXPECTED_PYTHON="${FIRMWARE_ROOT}/tools/meshcore-backup-venv/bin/python"
+	cp "${TEST_DIR}/fixtures/meshcore_backup_dependency_python.sh" "$EXPECTED_PYTHON"
+	chmod +x "$EXPECTED_PYTHON"
+	export MESHFIRMWARE_TEST_DEPENDENCY_EXIT=0
+	ACTUAL="$(ensure_meshcore_backup_python 'helper with spaces.py')" || exit 1
+	[[ "$ACTUAL" == "$EXPECTED_PYTHON" ]] || exit 1
+	export MESHFIRMWARE_TEST_DEPENDENCY_EXIT=10
+	ACTUAL="$(ensure_meshcore_backup_python 'helper with spaces.py')" && exit 1
+	[[ -z "$ACTUAL" ]]
+) && pass 'dependency launcher keeps diagnostics off stdout and fails closed' \
+	|| fail 'dependency launcher lost its interpreter/output/failure contract'
 
 # A cached helper is executable code and owns the archive safety contract. The
 # launcher must reject an older helper instead of trusting its historical

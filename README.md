@@ -24,7 +24,38 @@ Regression checks (no connected radio needed):
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_usb_identity.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_native_commands.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_backup_dependencies.ps1
 ```
+
+## MeshCore USB backup dependencies
+
+Before an nRF52 logical USB backup, both flashers display the selected Python
+interpreter and the installed, supported, and repair versions of each package:
+
+| Package | Supported stable versions | Pinned repair version |
+| --- | --- | --- |
+| MeshCore Python API (`meshcore`) | `>=2.3.9,<3` | `2.3.9.1` |
+| MeshCore CLI (`meshcore-cli`) | `>=1.6.3,<2` | `1.6.3` |
+| PyNaCl | `>=1.5,<2` | `1.6.2` |
+
+Python 3.10 or newer is required. Compatible installations are reused after
+checking that the USB backup APIs can be imported. Missing, incompatible, or
+broken packages trigger one repair attempt using the exact versions above,
+followed by a fresh-process API check. Installation failures remain visible
+and stop the backup; the existing explicit confirmation before continuing
+without a complete backup is unchanged. Linux uses its dedicated backup venv;
+Windows uses the Python interpreter selected by `firmware.cmd`.
+
+To display versions and check APIs without installing anything or connecting
+to a radio (use `python3` on Linux):
+
+```text
+python tools/meshcore_backup.py dependencies --text
+```
+
+Add `--install` to repair that interpreter's backup dependencies. The Windows
+launcher runs this helper as a file, avoiding Windows PowerShell 5's loss of
+embedded quotes in inline Python version checks.
 
 Windows Video
 -----
