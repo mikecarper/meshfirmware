@@ -1711,6 +1711,7 @@ request_meshcore_usb_backup_before_flash() {
 	MESHCORE_BACKUP_VERIFIED=0
 	MESHCORE_BACKUP_WIPE_SAFE=0
 	MESHCORE_BACKUP_EXIT_CODE=1
+	MESHCORE_BACKUP_UNAVAILABLE_REASON=""
 	echo "The logical backup uses the existing MeshCore USB APIs (nRF52 and ESP32)." >&2
 	echo "It includes private identity and channel secrets when exposed by the current role and firmware." >&2
 	echo "The archive is stored in a current-user backup directory." >&2
@@ -1819,11 +1820,28 @@ confirm_meshcore_usb_backup_for_action() {
 	# backup for a write-only update. A failed requested backup gets a separate
 	# fail-closed confirmation.
 	if (( backup_requested )); then
-		echo "WARNING: MeshCore USB backup did not produce a usable archive (exit code ${backup_rc})." >&2
+		if [[ -n "${MESHCORE_BACKUP_UNAVAILABLE_REASON:-}" ]]; then
+			echo "WARNING: ${MESHCORE_BACKUP_UNAVAILABLE_REASON}" >&2
+		else
+			echo "WARNING: MeshCore USB backup did not produce a usable archive (exit code ${backup_rc})." >&2
+		fi
 		read -r -p "Continue the write-only update without a complete backup? [y/N] " continue_choice </dev/tty
 		[[ "$continue_choice" =~ ^[Yy]([Ee][Ss])?$ ]] || return 1
 	fi
 	return 0
+}
+
+mark_meshcore_backup_unavailable_in_nrf52_dfu() {
+	local port=$1
+
+	# Preserve the regular fail-closed action confirmation: a write-only update
+	# still needs an explicit yes, and a wipe still needs its full override.
+	MESHCORE_BACKUP_REQUESTED=1
+	MESHCORE_BACKUP_VERIFIED=0
+	MESHCORE_BACKUP_WIPE_SAFE=0
+	MESHCORE_BACKUP_EXIT_CODE=30
+	MESHCORE_BACKUP_UNAVAILABLE_REASON="The selected nRF52 is already in USB DFU mode on ${port}; MeshCore's running USB API is unavailable, so no logical backup can be created."
+	echo "$MESHCORE_BACKUP_UNAVAILABLE_REASON" >&2
 }
 
 prepare_meshcore_usb_backup_before_flash() {
@@ -1835,6 +1853,10 @@ prepare_meshcore_usb_backup_before_flash() {
 	canonicalize_meshcore_primary_usb_selection "$DEVICE_PORT" "$DEVICE_BY_ID_NAME" || return 1
 	printf '%s\n' "$DEVICE_PORT" > "$DEVICE_PORT_FILE" || return 1
 	printf '%s\n' "$DEVICE_BY_ID_NAME" > "$DEVICE_PORT_NAME_FILE" || return 1
+	if nrf52_port_is_dfu_before_meshcore_backup "$DEVICE_PORT"; then
+		mark_meshcore_backup_unavailable_in_nrf52_dfu "$DEVICE_PORT"
+		return 0
+	fi
 	# Releases serial owners without resetting the radio into ROM/DFU.
 	prepare_serial_port_for_flash "$DEVICE_PORT" || return 1
 	request_meshcore_usb_backup_before_flash \
@@ -2392,6 +2414,77 @@ nrf52_port_is_dfu_bootloader() {
 		return 0
 	fi
 	return 1
+}
+
+nrf52_saved_by_id_serial_hint() {
+	local saved_link_or_name=$1
+	local saved_name="" serial_hint=""
+
+	saved_name="$(basename -- "$saved_link_or_name")"
+	# Linux by-id names conventionally end with the device serial immediately
+	# before -ifNN.  Use it only when it is a reasonably long alphanumeric token;
+	# this is a recovery hint, never a broad product-name match.
+	if [[ "$saved_name" =~ _([^_]+)-if[0-9A-Fa-f]{2}(-port[0-9]+)?$ ]]; then
+		serial_hint="$(normalize_usb_serial_identity "${BASH_REMATCH[1]}")"
+	fi
+	[[ "$serial_hint" =~ ^[[:alnum:]]{8,}$ ]] || return 1
+	printf '%s\n' "$serial_hint"
+}
+
+find_selected_nrf52_dfu_port_from_saved_identity() {
+	local saved_by_id=$1
+	local by_id_dir="${NRF52_SERIAL_BY_ID_DIR:-/dev/serial/by-id}"
+	local expected_serial="" link candidate candidate_serial=""
+	local -a matches=()
+	local -A seen_ports=()
+
+	expected_serial="$(nrf52_saved_by_id_serial_hint "$saved_by_id" 2>/dev/null || true)"
+	[[ -n "$expected_serial" && -d "$by_id_dir" ]] || return 1
+
+	shopt -s nullglob
+	for link in "${by_id_dir}"/*; do
+		candidate="$(readlink -f "$link" 2>/dev/null || true)"
+		[[ -n "$candidate" && -e "$candidate" ]] || continue
+		candidate_serial="$(normalize_usb_serial_identity \
+			"$(udev_device_property "$candidate" ID_SERIAL_SHORT)")"
+		[[ "$candidate_serial" == "$expected_serial" ]] || continue
+		# The currently enumerated product becomes the candidate's selected link,
+		# but its serial must still match the disconnected selection. This accepts
+		# only a known DFU identity for that exact physical radio.
+		if ! nrf52_port_is_dfu_bootloader "$candidate" "$link" "$link" \
+			"$expected_serial" ""; then
+			continue
+		fi
+		if [[ -z "${seen_ports[$candidate]+x}" ]]; then
+			seen_ports["$candidate"]=1
+			matches+=("$candidate")
+		fi
+	done
+	shopt -u nullglob
+
+	if ((${#matches[@]} == 1)); then
+		printf '%s\n' "${matches[0]}"
+		return 0
+	fi
+	if ((${#matches[@]} > 1)); then
+		echo "Refusing ambiguous nRF52 DFU recovery identity: ${matches[*]}" >&2
+		return 2
+	fi
+	return 1
+}
+
+nrf52_port_is_dfu_before_meshcore_backup() {
+	local port=$1
+	local selected_link="" expected_serial="" expected_path_stem=""
+
+	[[ -e "$port" ]] || return 1
+	selected_link="$(serial_by_id_link_for_port "$port" 2>/dev/null || true)"
+	[[ -n "$selected_link" ]] || return 1
+	expected_serial="$(udev_device_property "$port" ID_SERIAL_SHORT)"
+	expected_path_stem="$(nrf52_usb_path_stem \
+		"$(udev_device_property "$port" ID_PATH)")"
+	nrf52_port_is_dfu_bootloader "$port" "$selected_link" "$selected_link" \
+		"$expected_serial" "$expected_path_stem"
 }
 
 trigger_nrf52_1200_touch() {
@@ -7616,8 +7709,18 @@ else
 	echo "nrf52 device"
 	echo "Downloaded firmware: $DOWNLOADED_FILE"
 	if ! NRF52_RUNTIME_PORT="$(selected_flash_serial_port "$DEVICE_PORT")"; then
-		echo "The selected nRF52 USB identity is unavailable; refusing board validation on a cached tty." >&2
-		exit 1
+		if NRF52_RUNTIME_PORT="$(find_selected_nrf52_dfu_port_from_saved_identity \
+			"$(nrf52_selected_by_id_path)")"; then
+			echo "The selected nRF52 re-enumerated as its verified USB DFU bootloader on $NRF52_RUNTIME_PORT."
+			echo "A logical MeshCore USB backup is unavailable while the board is in DFU mode."
+			if ! save_selected_serial_port "$NRF52_RUNTIME_PORT"; then
+				exit 1
+			fi
+			DEVICE_PORT="$NRF52_RUNTIME_PORT"
+		else
+			echo "The selected nRF52 USB identity is unavailable; refusing board validation on a cached tty." >&2
+			exit 1
+		fi
 	fi
 	if [[ "$NRF52_RUNTIME_PORT" != "$DEVICE_PORT" ]]; then
 		echo "Using live port $NRF52_RUNTIME_PORT instead of stale port $DEVICE_PORT before board validation."
@@ -7694,8 +7797,18 @@ else
 	if [[ -n "$NRF52_SELECTED_BY_ID" ]]; then
 		NRF52_RUNTIME_PORT="$(readlink -f "$NRF52_SELECTED_BY_ID" 2>/dev/null || true)"
 		if [[ -z "$NRF52_RUNTIME_PORT" || ! -e "$NRF52_RUNTIME_PORT" ]]; then
-			echo "The selected nRF52 USB identity is no longer connected: $NRF52_SELECTED_BY_ID" >&2
-			exit 1
+			if NRF52_RUNTIME_PORT="$(find_selected_nrf52_dfu_port_from_saved_identity \
+				"$NRF52_SELECTED_BY_ID")"; then
+				echo "The selected nRF52 re-enumerated as its verified USB DFU bootloader on $NRF52_RUNTIME_PORT."
+				echo "The earlier MeshCore backup could not run because the board is now in DFU mode."
+				if ! save_selected_serial_port "$NRF52_RUNTIME_PORT"; then
+					exit 1
+				fi
+				NRF52_SELECTED_BY_ID="$(nrf52_selected_by_id_path)"
+			else
+				echo "The selected nRF52 USB identity is no longer connected: $NRF52_SELECTED_BY_ID" >&2
+				exit 1
+			fi
 		fi
 		if [[ "$NRF52_RUNTIME_PORT" != "$DEVICE_PORT" ]]; then
 			echo "Using live port $NRF52_RUNTIME_PORT instead of stale port $DEVICE_PORT."

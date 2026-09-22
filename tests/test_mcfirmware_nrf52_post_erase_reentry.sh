@@ -15,8 +15,12 @@ extract_function() {
 	' "$script_path"
 }
 
-for function_name in wait_for_nrf52_bootloader_port nrf52_port_is_dfu_bootloader \
-	nrf52_confirm_unmatched_dfu_override run_nrf52_dfu_package_buttonless; do
+for function_name in normalize_usb_serial_identity nrf52_usb_path_stem \
+	serial_by_id_link_for_port wait_for_nrf52_bootloader_port \
+	nrf52_port_is_dfu_bootloader nrf52_saved_by_id_serial_hint \
+	find_selected_nrf52_dfu_port_from_saved_identity \
+	nrf52_port_is_dfu_before_meshcore_backup nrf52_confirm_unmatched_dfu_override \
+	run_nrf52_dfu_package_buttonless; do
 	definition="$(extract_function "$function_name")"
 	[[ "$definition" == "${function_name}() {"* ]] || {
 		echo "failed to extract ${function_name}" >&2
@@ -42,6 +46,7 @@ mock_identity_match=1
 mock_vendor_id=2886
 mock_product_id=0057
 mock_model="T1000-E"
+mock_serial="25B8546F36809E2C"
 dfu_calls=0
 touch_calls=0
 
@@ -105,6 +110,8 @@ udev_device_property() {
 	ID_VENDOR_ID) printf '%s\n' "$mock_vendor_id" ;;
 	ID_MODEL_ID) printf '%s\n' "$mock_product_id" ;;
 	ID_MODEL) printf '%s\n' "$mock_model" ;;
+	ID_SERIAL_SHORT) printf '%s\n' "$mock_serial" ;;
+	ID_PATH) printf '%s\n' 'pci-0000:00:14.0-usb-0:1:1.0' ;;
 	ID_USB_INTERFACES) printf '%s\n' ':020201:0a0000:' ;;
 	*) printf '\n' ;;
 	esac
@@ -127,6 +134,44 @@ trigger_nrf52_1200_touch() {
 	touch_calls=$((touch_calls + 1))
 	return 1
 }
+
+# A stale application by-id link can contain the physical USB serial.  When
+# that exact radio re-enumerates under an OTAFIX serial DFU product name, the
+# helper must recover only the uniquely matching known DFU port. This lets the
+# caller report that a logical MeshCore backup is impossible before attempting
+# the running-node API.
+dfu_by_id_dir="${tmp_dir}/dfu-by-id"
+dfu_port="${tmp_dir}/ttyACM-dfu"
+saved_runtime_link="${tmp_dir}/usb-Seeed_Studio_T1000-E_25B8546F36809E2C-if00"
+mkdir "$dfu_by_id_dir"
+touch "$dfu_port"
+ln -s "$dfu_port" "$dfu_by_id_dir/usb-OTAFIX_T1000-E_25B8546F36809E2C-if00"
+NRF52_SERIAL_BY_ID_DIR="$dfu_by_id_dir"
+recovered_dfu_port="$(find_selected_nrf52_dfu_port_from_saved_identity "$saved_runtime_link")"
+[[ "$recovered_dfu_port" == "$dfu_port" ]]
+if nrf52_port_is_dfu_before_meshcore_backup "$dfu_port"; then
+	:
+else
+	echo "FAIL: direct known DFU endpoint was not detected before backup" >&2
+	exit 1
+fi
+echo "PASS: a uniquely matched known DFU endpoint is detected before backup"
+
+mock_product_id=8044
+if find_selected_nrf52_dfu_port_from_saved_identity "$saved_runtime_link"; then
+	echo "FAIL: a MeshCore application PID was accepted as DFU recovery" >&2
+	exit 1
+fi
+mock_product_id=0057
+second_dfu_port="${tmp_dir}/ttyACM-dfu-second"
+touch "$second_dfu_port"
+ln -s "$second_dfu_port" "$dfu_by_id_dir/usb-OTAFIX_T1000-E-second_25B8546F36809E2C-if00"
+if find_selected_nrf52_dfu_port_from_saved_identity "$saved_runtime_link"; then
+	echo "FAIL: ambiguous DFU recovery candidates were accepted" >&2
+	exit 1
+fi
+rm -f "$dfu_by_id_dir/usb-OTAFIX_T1000-E-second_25B8546F36809E2C-if00"
+echo "PASS: DFU preflight rejects application and ambiguous recovery candidates"
 
 NRF52_BOARD_GUARD_PASSED=1
 NRF52_SELECTED_BY_ID="$selected_link"

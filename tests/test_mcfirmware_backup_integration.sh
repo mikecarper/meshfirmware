@@ -245,6 +245,7 @@ fi
 		DEVICE_BY_ID_NAME=test-if00
 	}
 	prepare_serial_port_for_flash() { [[ "$1" == /dev/ttyPRIMARY ]]; }
+	nrf52_port_is_dfu_before_meshcore_backup() { return 1; }
 	request_meshcore_usb_backup_before_flash() {
 		[[ "$1" == backup-only && "$2" == /dev/ttyPRIMARY && "$5" == test-if00 ]]
 	}
@@ -255,8 +256,23 @@ fi
 	request_meshcore_usb_backup_before_flash() { touch "${TEST_TMP}/unexpected-backup"; }
 	if prepare_meshcore_usb_backup_before_flash backup-only; then exit 1; fi
 	[[ ! -e "${TEST_TMP}/unexpected-backup" ]]
-) && pass 'early backup resolves the primary USB identity and fails closed on identity loss' \
-	|| fail 'early backup lost its USB identity gate'
+	# An already-DFU nRF52 cannot answer the MeshCore USB API. It must skip the
+	# impossible backup before serial preparation or any private-state reads,
+	# while preserving the later action-specific confirmation.
+	canonicalize_meshcore_primary_usb_selection() {
+		DEVICE_PORT=/dev/ttyPRIMARY
+		DEVICE_BY_ID_NAME=test-if00
+	}
+	nrf52_port_is_dfu_before_meshcore_backup() { return 0; }
+	prepare_serial_port_for_flash() { touch "${TEST_TMP}/unexpected-serial-prep"; }
+	request_meshcore_usb_backup_before_flash() { touch "${TEST_TMP}/unexpected-backup"; }
+	rm -f "${TEST_TMP}/unexpected-serial-prep" "${TEST_TMP}/unexpected-backup"
+	prepare_meshcore_usb_backup_before_flash backup-only || exit 1
+	[[ "$MESHCORE_BACKUP_REQUESTED" == 1 && "$MESHCORE_BACKUP_VERIFIED" == 0 \
+		&& "$MESHCORE_BACKUP_WIPE_SAFE" == 0 && "$MESHCORE_BACKUP_EXIT_CODE" == 30 ]]
+	[[ ! -e "${TEST_TMP}/unexpected-serial-prep" && ! -e "${TEST_TMP}/unexpected-backup" ]]
+) && pass 'early backup resolves identity, fails closed on loss, and skips known DFU mode' \
+	|| fail 'early backup lost its USB-identity or DFU preflight gate'
 
 # Auto-detection runs before the final backup gate. It therefore must remain a
 # read-only classification step and contain no direct or transitive baud-touch /
