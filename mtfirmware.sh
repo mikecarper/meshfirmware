@@ -166,9 +166,11 @@ meshfirmware_classify_pi_usb_device() {
 	fi
 	# RAK/Feather UF2 and CDC-only bootloader IDs do not contain DFU in the name:
 	# https://github.com/oltaco/Adafruit_nRF52_Bootloader_OTAFIX/blob/master/src/boards/wiscore_rak4631_board/board.h
-	# XIAO, T1000-E and MeshTower IDs also occur elsewhere in this repository.
+	# Exact OTAFIX bootloader identities are intentionally listed rather than
+	# accepting a vendor range: Seeed XIAO/T1000-E/Wio Tracker and Adafruit
+	# 239a-family boards including ProMicro/Keepteen and T-Echo/ThinkNode.
 	case "${vendor,,}:${product,,}" in
-		2886:0044|2886:0045|2886:0057|239a:0029|239a:002a|239a:0071) echo dfu; return 0 ;;
+		2886:0044|2886:0045|2886:0057|2886:1667|239a:0029|239a:002a|239a:0071|239a:00b3|239a:00da) echo dfu; return 0 ;;
 	esac
 	if (( storage )); then
 		if (( node && bootloader )) \

@@ -5326,10 +5326,10 @@ function Test-UsbIdentityIsNrf52Dfu {
 		return $true
 	}
 
-	# Seeed's CDC-only XIAO, XIAO Sense and T1000-E bootloaders use plain
+	# Seeed's CDC-only XIAO, XIAO Sense, T1000-E and Wio Tracker L1 bootloaders use plain
 	# product names without DFU/UF2 suffixes. These are exact bootloader IDs,
 	# matching mcfirmware.sh; their 0x80xx application IDs remain excluded.
-	return ($parentInstanceId -match '(?i)^USB\\VID_2886&PID_(0044|0045|0057)\\')
+	return ($parentInstanceId -match '(?i)^USB\\VID_2886&PID_(0044|0045|0057|1667)\\')
 }
 
 function Assert-UsbIdentityIsNrf52Dfu {

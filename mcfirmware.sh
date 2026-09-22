@@ -342,9 +342,11 @@ meshfirmware_classify_pi_usb_device() {
 	fi
 	# RAK/Feather UF2 and CDC-only bootloader IDs do not contain DFU in the name:
 	# https://github.com/oltaco/Adafruit_nRF52_Bootloader_OTAFIX/blob/master/src/boards/wiscore_rak4631_board/board.h
-	# XIAO, T1000-E and MeshTower IDs also occur elsewhere in this repository.
+	# Exact OTAFIX bootloader identities are intentionally listed rather than
+	# accepting a vendor range: Seeed XIAO/T1000-E/Wio Tracker and Adafruit
+	# 239a-family boards including ProMicro/Keepteen and T-Echo/ThinkNode.
 	case "${vendor,,}:${product,,}" in
-		2886:0044|2886:0045|2886:0057|239a:0029|239a:002a|239a:0071) echo dfu; return 0 ;;
+		2886:0044|2886:0045|2886:0057|2886:1667|239a:0029|239a:002a|239a:0071|239a:00b3|239a:00da) echo dfu; return 0 ;;
 	esac
 	if (( storage )); then
 		if (( node && bootloader )) \
@@ -2281,14 +2283,45 @@ nrf52_port_is_dfu_bootloader() {
 	local selected_by_id=$3
 	local expected_serial=$4
 	local expected_path_stem=$5
+	local verified_post_erase_identity="${6:-0}"
+	local allow_unmatched_dfu="${7:-0}"
 	local usb_bus usb_interfaces model vendor_id product_id
 
-	# This shortcut is allowed only for the exact by-id link selected by the
-	# user. A matching USB path or serial alone is sufficient after an expected
-	# reset, but is not enough to skip that reset in the first place.
-	[[ -n "$selected_by_id" && "$candidate_link" == "$selected_by_id" ]] || return 1
-	nrf52_candidate_matches_identity "$port" "$candidate_link" "$selected_by_id" \
-		"$expected_serial" "$expected_path_stem" || return 1
+	case "$verified_post_erase_identity" in
+		0|1) ;;
+		*)
+			echo "Invalid verified post-erase identity mode: $verified_post_erase_identity" >&2
+			return 2
+			;;
+	esac
+	case "$allow_unmatched_dfu" in
+		0|1) ;;
+		*)
+			echo "Invalid unmatched nRF52 DFU override mode: $allow_unmatched_dfu" >&2
+			return 2
+			;;
+	esac
+
+	# A no-touch DFU upload normally requires the exact by-id link selected by
+	# the user. A flash-wipe can deliberately leave the same physical radio in
+	# DFU under a different by-id product name, however. The sole post-erase
+	# caller may opt in after wait_for_nrf52_bootloader_port has uniquely
+	# revalidated its USB path/serial identity. Do not relax ordinary entry into
+	# DFU, where a path or serial match alone is not evidence of a reset.
+	if [[ -n "$selected_by_id" && "$candidate_link" == "$selected_by_id" ]]; then
+		:
+	elif (( verified_post_erase_identity == 1 )); then
+		:
+	elif (( allow_unmatched_dfu == 1 )); then
+		:
+	else
+		return 1
+	fi
+	if ! nrf52_candidate_matches_identity "$port" "$candidate_link" \
+		"$selected_by_id" "$expected_serial" "$expected_path_stem"; then
+		(( allow_unmatched_dfu == 1 )) || return 1
+		echo "WARNING: explicit DFU override bypasses the missing or mismatched USB identity on $port." >&2
+	fi
 	usb_bus="$(udev_device_property "$port" ID_BUS)"
 	[[ "$usb_bus" == "usb" ]] || return 1
 
@@ -2305,7 +2338,33 @@ nrf52_port_is_dfu_bootloader() {
 		&& ( "${product_id,,}" == "0044" || "${product_id,,}" == "0045" ) ]]; then
 		return 0
 	fi
+	# Exact Seeed bootloader identities include XIAO/Sense, T1000-E, and the
+	# Wio Tracker L1. Keep them separate from application PIDs such as 2886:8044.
+	if [[ "${vendor_id,,}" == "2886" \
+		&& ( "${product_id,,}" == "0057" || "${product_id,,}" == "1667" ) ]]; then
+		return 0
+	fi
+	# RAK3401's OTAFIX serial DFU endpoint has no required MSC sibling or DFU
+	# model text. This exact bootloader PID remains behind the selected-link (or
+	# verified post-erase identity) gates above.
+	if [[ "${vendor_id,,}" == "239a" && "${product_id,,}" == "002a" ]]; then
+		return 0
+	fi
+	# Heltec Mesh Node T1 uses the same serial-only OTAFIX family, with this
+	# distinct exact bootloader PID. Keep it identity-gated rather than accepting
+	# a broader 239a product range.
+	if [[ "${vendor_id,,}" == "239a" && "${product_id,,}" == "0029" ]]; then
+		return 0
+	fi
 	if [[ "${vendor_id,,}" == "239a" && "${product_id,,}" == "0071" ]]; then
+		return 0
+	fi
+	# OTAFIX also publishes these exact serial-capable nRF52 bootloader IDs:
+	# 00b3 (ProMicro nRF52840 / Keepteen LT1) and 00da (T-Echo Lite,
+	# nRF52840 DK, and ThinkNode). They remain behind the same physical identity
+	# gate; do not treat the surrounding 239a product range as DFU.
+	if [[ "${vendor_id,,}" == "239a" \
+		&& ( "${product_id,,}" == "00b3" || "${product_id,,}" == "00da" ) ]]; then
 		return 0
 	fi
 
@@ -2328,6 +2387,10 @@ nrf52_port_is_dfu_bootloader() {
 	case "${model,,}" in
 		*bootloader*|*uf2*|*dfu*) return 0 ;;
 	esac
+	if (( allow_unmatched_dfu == 1 )); then
+		echo "WARNING: explicit DFU override accepts the unrecognised USB DFU identity on $port." >&2
+		return 0
+	fi
 	return 1
 }
 
@@ -2487,10 +2550,19 @@ wait_for_nrf52_bootloader_port() {
 	local expected_path_stem=$4
 	local original_instance=$5
 	local purpose="${6:-bootloader CDC port}"
+	local allow_unchanged_selected_identity="${7:-0}"
 	local timeout_seconds="${NRF52_DFU_REENUMERATE_TIMEOUT_SECONDS:-30}"
 	local poll_seconds="${NRF52_DFU_REENUMERATE_POLL_SECONDS:-0.25}"
 	local deadline=$((SECONDS + timeout_seconds))
 	local reset_seen=0 current_instance live_port
+
+	case "$allow_unchanged_selected_identity" in
+		0|1) ;;
+		*)
+			echo "Invalid nRF52 re-enumeration mode: $allow_unchanged_selected_identity" >&2
+			return 2
+			;;
+	esac
 
 	echo "Waiting up to ${timeout_seconds}s for the matching ${purpose}..." >&2
 	while (( SECONDS <= deadline )); do
@@ -2499,10 +2571,17 @@ wait_for_nrf52_bootloader_port() {
 			reset_seen=1
 		fi
 
-		if (( reset_seen )); then
+		# A verified erase package can deliberately leave the selected DFU CDC
+		# endpoint alive without an observable tty-node transition. Only the
+		# post-erase caller may opt in; the initial runtime-to-bootloader handoff
+		# still requires an observed transition.
+		if (( reset_seen || allow_unchanged_selected_identity == 1 )); then
 			live_port="$(find_reenumerated_nrf52_port "$runtime_port" "$selected_by_id" \
 				"$expected_serial" "$expected_path_stem" "$original_instance" || true)"
 			if [[ -n "$live_port" ]]; then
+				if (( ! reset_seen )); then
+					echo "The verified erase left the matching selected USB endpoint active; continuing on it." >&2
+				fi
 				printf '%s\n' "$live_port"
 				return 0
 			fi
@@ -2514,10 +2593,69 @@ wait_for_nrf52_bootloader_port() {
 	return 1
 }
 
+nrf52_confirm_unmatched_dfu_override() {
+	local port="$1"
+	local reason="${2:-The selected USB identity could not be verified.}"
+	local tty="${MCFIRMWARE_DFU_OVERRIDE_TTY:-/dev/tty}"
+	local configured_answer="${MCFIRMWARE_DFU_OVERRIDE:-}"
+	local answer=""
+
+	configured_answer="${configured_answer,,}"
+	echo "nRF52 DFU identity check stopped automatic flashing." >&2
+	echo "  $reason" >&2
+	echo "  Candidate port: ${port:-unknown}" >&2
+	echo "  Safe default: cancel before the DFU upload." >&2
+	if [[ -n "$configured_answer" ]]; then
+		if [[ "$configured_answer" == "y" || "$configured_answer" == "yes" ]]; then
+			echo "  Explicit unmatched DFU override accepted." >&2
+			return 0
+		fi
+		echo "  MCFIRMWARE_DFU_OVERRIDE was not y/yes; cancelling." >&2
+		return 1
+	fi
+
+	if [[ ! -r "$tty" || ! -w "$tty" ]]; then
+		echo "  No interactive terminal is available." >&2
+		echo "  To continue deliberately in a non-interactive run, use:" >&2
+		echo "    MCFIRMWARE_DFU_OVERRIDE=yes ./mcfirmware.sh" >&2
+		return 1
+	fi
+
+	{
+		echo "Continue with this unmatched DFU device? [y/N]"
+	} >"$tty"
+	IFS= read -r answer <"$tty" || answer=""
+	answer="${answer,,}"
+	if [[ "$answer" == "y" || "$answer" == "yes" ]]; then
+		echo "Explicit one-time unmatched DFU override accepted." >&2
+		return 0
+	fi
+
+	echo "DFU override was not confirmed; no DFU command was run." >&2
+	return 1
+}
+
 run_nrf52_dfu_package_buttonless() {
 	local package_file=$1
 	local runtime_port=$2
+	local verified_post_erase_identity="${3:-0}"
+	local allow_unmatched_dfu="${4:-0}"
 	local runtime_instance bootloader_port bootloader_instance candidate_link=""
+
+	case "$verified_post_erase_identity" in
+		0|1) ;;
+		*)
+			echo "Invalid verified post-erase identity mode: $verified_post_erase_identity" >&2
+			return 2
+			;;
+	esac
+	case "$allow_unmatched_dfu" in
+		0|1) ;;
+		*)
+			echo "Invalid unmatched nRF52 DFU override mode: $allow_unmatched_dfu" >&2
+			return 2
+			;;
+	esac
 
 	if [[ "${NRF52_BOARD_GUARD_PASSED:-0}" -ne 1 ]]; then
 		echo "The nRF52 board safety check has not passed; refusing DFU." >&2
@@ -2538,8 +2676,13 @@ run_nrf52_dfu_package_buttonless() {
 	fi
 	if ! nrf52_candidate_matches_identity "$runtime_port" "$candidate_link" \
 		"$NRF52_SELECTED_BY_ID" "$NRF52_RUNTIME_SERIAL" "$NRF52_RUNTIME_PATH_STEM"; then
-		echo "Serial port $runtime_port no longer matches the selected nRF52 USB identity." >&2
-		return 1
+		if (( allow_unmatched_dfu != 1 )); then
+			if ! nrf52_confirm_unmatched_dfu_override "$runtime_port" \
+				"Serial port $runtime_port no longer matches the selected nRF52 USB identity."; then
+				return 1
+			fi
+		fi
+		allow_unmatched_dfu=1
 	fi
 
 	runtime_instance="$(nrf52_port_instance "$runtime_port")"
@@ -2548,8 +2691,13 @@ run_nrf52_dfu_package_buttonless() {
 		return 1
 	}
 	if nrf52_port_is_dfu_bootloader "$runtime_port" "$candidate_link" \
-		"$NRF52_SELECTED_BY_ID" "$NRF52_RUNTIME_SERIAL" "$NRF52_RUNTIME_PATH_STEM"; then
-		echo "Selected nRF52 is already in its matching DFU bootloader on $runtime_port."
+		"$NRF52_SELECTED_BY_ID" "$NRF52_RUNTIME_SERIAL" "$NRF52_RUNTIME_PATH_STEM" \
+		"$verified_post_erase_identity" "$allow_unmatched_dfu"; then
+		if (( allow_unmatched_dfu == 1 )); then
+			echo "Using the explicitly approved unmatched DFU endpoint on $runtime_port."
+		else
+			echo "Selected nRF52 is already in its matching DFU bootloader on $runtime_port."
+		fi
 		echo "Flashing $package_file directly without a 1200-baud touch..."
 		if ! run_nrfutil_dfu_serial_live_port "$package_file" "$runtime_port"; then
 			return 1
@@ -7558,6 +7706,7 @@ else
 	NRF52_RUNTIME_INSTANCE="$(nrf52_port_instance "$NRF52_RUNTIME_PORT")"
 	NRF52_LAST_DFU_PORT=""
 	NRF52_LAST_DFU_INSTANCE=""
+	NRF52_ALLOW_UNMATCHED_DFU=0
 
 	if [[ -z "$NRF52_RUNTIME_INSTANCE" ]]; then
 		echo "Cannot identify the running nRF52 serial port $NRF52_RUNTIME_PORT." >&2
@@ -7584,11 +7733,21 @@ else
 		sleep 1
 		if ! NRF52_RUNTIME_PORT="$(wait_for_nrf52_bootloader_port "$NRF52_LAST_DFU_PORT" \
 			"$NRF52_SELECTED_BY_ID" "$NRF52_RUNTIME_SERIAL" "$NRF52_RUNTIME_PATH_STEM" \
-			"$NRF52_LAST_DFU_INSTANCE" "runtime CDC port after erase")"; then
-			echo "The erase package programmed successfully, but ${DEVICE} did not return for the firmware install." >&2
-			exit 1
+			"$NRF52_LAST_DFU_INSTANCE" "serial port after erase" 1)"; then
+			NRF52_RUNTIME_PORT="${NRF52_LAST_DFU_PORT:-}"
+			if [[ ! -e "$NRF52_RUNTIME_PORT" ]] \
+				|| ! nrf52_confirm_unmatched_dfu_override "$NRF52_RUNTIME_PORT" \
+					"The erase package completed, but no matching USB identity returned for the firmware install."; then
+				echo "The erase package programmed successfully, but the selected USB identity did not return for the firmware install." >&2
+				exit 1
+			fi
+			NRF52_ALLOW_UNMATCHED_DFU=1
+			echo "Continuing on explicit unmatched-DFU override port $NRF52_RUNTIME_PORT." >&2
 		fi
-		if ! run_nrf52_dfu_package_buttonless "$DOWNLOADED_FILE" "$NRF52_RUNTIME_PORT"; then
+		# The preceding post-erase wait resolved this exact physical USB identity,
+		# so it may remain in a serial-only DFU product whose by-id link changed.
+		if ! run_nrf52_dfu_package_buttonless "$DOWNLOADED_FILE" "$NRF52_RUNTIME_PORT" \
+			1 "$NRF52_ALLOW_UNMATCHED_DFU"; then
 			echo "Firmware ${ACTION} failed for ${DEVICE} on ${DEVICE_PORT}."
 			exit 1
 		fi

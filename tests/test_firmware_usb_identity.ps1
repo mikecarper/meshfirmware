@@ -212,16 +212,16 @@ Assert-True -Condition (-not (Test-UsbIdentityIsNrf52Dfu -Identity $t1000eWrongP
 Assert-True -Condition (-not (Test-UsbIdentityIsNrf52Dfu -Identity $t1000eRuntime)) -Message 'T1000-E runtime firmware was misidentified as DFU mode.'
 Assert-True -Condition (-not (Test-UsbIdentityIsNrf52Dfu -Identity $t096Runtime)) -Message 'Runtime firmware was misidentified as DFU mode.'
 
-foreach ($pidValue in @('0044', '0045', '8044', '8045', '0046')) {
-	$xiaoIdentity = [pscustomobject]@{
+foreach ($pidValue in @('0044', '0045', '0057', '1667', '8044', '8045', '0046', '0058', '1668')) {
+	$seeedIdentity = [pscustomobject]@{
 		SerialNumber = 'B35E71C1C3726CE7'
 		ParentInstanceId = "USB\VID_2886&PID_$pidValue\B35E71C1C3726CE7"
-		BusReportedDescription = 'Seeed XIAO nRF52840'
+		BusReportedDescription = 'Seeed nRF52840'
 		InterfaceNumber = '00'
 	}
-	Assert-Equal -Expected ($pidValue -in @('0044', '0045')) `
-		-Actual (Test-UsbIdentityIsNrf52Dfu -Identity $xiaoIdentity) `
-		-Message "XIAO CDC-only DFU classification was incorrect for PID $pidValue."
+	Assert-Equal -Expected ($pidValue -in @('0044', '0045', '0057', '1667')) `
+		-Actual (Test-UsbIdentityIsNrf52Dfu -Identity $seeedIdentity) `
+		-Message "Seeed CDC-only DFU classification was incorrect for PID $pidValue."
 }
 
 # Exercise actual version selection; do not require installed tools or hardware.

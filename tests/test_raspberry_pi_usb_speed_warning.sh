@@ -126,16 +126,20 @@ grep -Fq 'confirm they serve nodes' <<< "$output"
 echo 'PASS: risky Pi topology warns but cannot change a non-interactive host'
 
 # These bootloaders may have no mounted drive or explicit DFU product string.
-for usb_id in 2886:0057 239a:0029 239a:002a; do
+# Keep every entry point aligned with the exact OTAFIX board identities.
+for usb_id in 2886:0044 2886:0045 2886:0057 2886:1667 239a:0029 239a:002a 239a:0071 239a:00b3 239a:00da; do
 	printf '%s\n' "${usb_id%:*}" > "${controller}/usb1/1-1.2/idVendor"
 	printf '%s\n' "${usb_id#*:}" > "${controller}/usb1/1-1.2/idProduct"
 	printf '%s\n' 'USB Device' > "${controller}/usb1/1-1.2/product"
 	[[ "$(meshfirmware_classify_pi_usb_device "${controller}/usb1/1-1.2" "$sys_root" "$proc_root")" == dfu ]]
 done
+printf '%s\n' 239a > "${controller}/usb1/1-1.2/idVendor"
+printf '%s\n' 00b4 > "${controller}/usb1/1-1.2/idProduct"
+[[ "$(meshfirmware_classify_pi_usb_device "${controller}/usb1/1-1.2" "$sys_root" "$proc_root")" == storage ]]
 printf '%s\n' 2886 > "${controller}/usb1/1-1.2/idVendor"
 printf '%s\n' 0044 > "${controller}/usb1/1-1.2/idProduct"
 printf '%s\n' 'XIAO nRF52840' > "${controller}/usb1/1-1.2/product"
-echo 'PASS: T1000-E and RAK/Feather bootloader IDs are recognized without mounted media'
+echo 'PASS: exact OTAFIX bootloader IDs are recognized without mounted media'
 
 # Devices on an independent controller do not influence the dwc_otg recommendation.
 mkdir -p "${sys_root}/devices/platform/other.usb/usb2/2-1"
