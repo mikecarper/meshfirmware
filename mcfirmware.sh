@@ -1695,7 +1695,7 @@ request_meshcore_usb_backup_before_flash() {
 	local device_hint="$3"
 	local role="$4"
 	local by_id_name="${5:-}"
-	local choice="" override="" continue_choice=""
+	local choice=""
 	local helper="" backup_python="" role_hint=""
 	local backup_output="" backup_rc=0 backup_requested=1
 	local summary_line="" summary_exit="" archive_path=""
@@ -1704,7 +1704,12 @@ request_meshcore_usb_backup_before_flash() {
 	local -a identity_args=()
 
 	echo >&2
-	echo "The nRF52 backup uses the existing MeshCore USB APIs." >&2
+	# Reset per attempt so a previous node's result cannot authorize this one.
+	MESHCORE_BACKUP_REQUESTED=1
+	MESHCORE_BACKUP_VERIFIED=0
+	MESHCORE_BACKUP_WIPE_SAFE=0
+	MESHCORE_BACKUP_EXIT_CODE=1
+	echo "The logical backup uses the existing MeshCore USB APIs (nRF52 and ESP32)." >&2
 	echo "It includes private identity and channel secrets when exposed by the current role and firmware." >&2
 	echo "The archive is stored in a current-user backup directory." >&2
 	while true; do
@@ -1773,6 +1778,22 @@ request_meshcore_usb_backup_before_flash() {
 		fi
 	fi
 
+	MESHCORE_BACKUP_REQUESTED=$backup_requested
+	MESHCORE_BACKUP_VERIFIED=$archive_verified
+	MESHCORE_BACKUP_WIPE_SAFE=$wipe_safe
+	MESHCORE_BACKUP_EXIT_CODE=$backup_rc
+	# This stage only collects a snapshot, before the flash action/confirmation.
+	[[ "$action" == "backup-only" ]] && return 0
+	confirm_meshcore_usb_backup_for_action "$action"
+}
+
+confirm_meshcore_usb_backup_for_action() {
+	local action="$1"
+	local archive_verified="${MESHCORE_BACKUP_VERIFIED:-0}"
+	local wipe_safe="${MESHCORE_BACKUP_WIPE_SAFE:-0}"
+	local backup_requested="${MESHCORE_BACKUP_REQUESTED:-1}"
+	local backup_rc="${MESHCORE_BACKUP_EXIT_CODE:-unknown}"
+	local override="" continue_choice=""
 	if (( archive_verified )); then
 		if [[ "$action" != "flash-wipe" ]] || (( wipe_safe )); then
 			return 0
@@ -1801,6 +1822,21 @@ request_meshcore_usb_backup_before_flash() {
 		[[ "$continue_choice" =~ ^[Yy]([Ee][Ss])?$ ]] || return 1
 	fi
 	return 0
+}
+
+prepare_meshcore_usb_backup_before_flash() {
+	local action="$1"
+	local current_role="${ROLE:-auto}"
+	[[ -f "$SELECTED_ROLE_FILE" ]] && current_role="$(<"$SELECTED_ROLE_FILE")"
+	DEVICE_BY_ID_NAME=""
+	[[ -f "$DEVICE_PORT_NAME_FILE" ]] && DEVICE_BY_ID_NAME="$(<"$DEVICE_PORT_NAME_FILE")"
+	canonicalize_meshcore_primary_usb_selection "$DEVICE_PORT" "$DEVICE_BY_ID_NAME" || return 1
+	printf '%s\n' "$DEVICE_PORT" > "$DEVICE_PORT_FILE" || return 1
+	printf '%s\n' "$DEVICE_BY_ID_NAME" > "$DEVICE_PORT_NAME_FILE" || return 1
+	# Releases serial owners without resetting the radio into ROM/DFU.
+	prepare_serial_port_for_flash "$DEVICE_PORT" || return 1
+	request_meshcore_usb_backup_before_flash \
+		"$action" "$DEVICE_PORT" "$DEVICE" "$current_role" "$DEVICE_BY_ID_NAME"
 }
 
 # Compatibility entry point retained for callers and tests that use the
@@ -5887,7 +5923,7 @@ prepare_esp32_flash_session() {
 			return 1
 		fi
 		BOOTLOADER_PROBE_PORT="$bootloader_port"
-		echo "ESP chip responded; skipping existing firmware backup."
+		echo "ESP chip responded; ROM flashing session is ready."
 		rm -f "$DOWNLOAD_DIR/CURRENT.BAK"
 		echo
 		return 0
@@ -5897,7 +5933,7 @@ prepare_esp32_flash_session() {
 	if raw_esptool_mac_probe --port "$port" --before "$NORESET" \
 		--after "$NORESET" --baud 115200 "$READMAC"; then
 		ESP32_NATIVE_ROM_READY=1
-		echo "ESP chip already responds in bootloader mode; skipping existing firmware backup."
+		echo "ESP chip already responds in bootloader mode; flashing session is ready."
 		rm -f "$DOWNLOAD_DIR/CURRENT.BAK"
 		echo
 		return 0
@@ -5911,7 +5947,7 @@ prepare_esp32_flash_session() {
 	if probe_esptool_mac --port "$port" --before "$DEFAULTRESET" \
 		--after "$NORESET" --baud 115200 "$READMAC"; then
 		ESP32_OPERATION_BEFORE="$DEFAULTRESET"
-		echo "ESP chip responded; skipping existing firmware backup."
+		echo "ESP chip responded; ROM flashing session is ready."
 		rm -f "$DOWNLOAD_DIR/CURRENT.BAK"
 		echo
 		return 0
@@ -7329,7 +7365,10 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 	esp32_validate_image_for_device "$DEVICE" "$DOWNLOADED_FILE" "$FW_LAYOUT"
 	
 	echo
-	echo "Device firmware backup will be attempted after you confirm flashing."
+	if ! prepare_meshcore_usb_backup_before_flash backup-only; then
+		echo "No ESP32 flash commands were run." >&2
+		exit 1
+	fi
 	echo "Commands that would be run."
 	
 	if [[ "$FW_LAYOUT" == "merged" || ( "$FW_LAYOUT" != "app-only" && "$TYPE" == "flash-wipe" ) ]]; then
@@ -7340,6 +7379,7 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 		if [[ "$FW_LAYOUT" == "merged" ]]; then
 			echo "  dual-OTA layouts also mirror the embedded app into every secondary OTA slot"
 		fi
+		confirm_meshcore_usb_backup_for_action flash-wipe || exit 1
 		EXECUTION_MODE="$(choose_flash_execution_mode "ERASE and INSTALL ${DEVICE} on ${DEVICE_PORT}")"
 		if [[ "$EXECUTION_MODE" == "echo" ]]; then
 			echo "Echo-only selected; no ESP32 flash commands were run."
@@ -7384,6 +7424,7 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 		echo "  serial preparation and identity-safe native USB handoff"
 		echo "  $ESPTOOL_CMD --port <matching-port> --before <session-reset> --after <safe-reset> --baud 115200 $WRITEFLASH <device app offset> \"${DOWNLOADED_FILE}\""
 		echo "The ESP32 partition table will be read from the device. The update will stop if the image does not fit; every OTA app slot will be updated, including empty slots."
+		confirm_meshcore_usb_backup_for_action flash-update || exit 1
 		EXECUTION_MODE="$(choose_flash_execution_mode "UPDATE ${DEVICE} on ${DEVICE_PORT}")"
 		if [[ "$EXECUTION_MODE" == "echo" ]]; then
 			echo "Echo-only selected; no ESP32 flash commands were run."
@@ -7443,6 +7484,11 @@ else
 	fi
 	NRF52_BOARD_GUARD_PASSED=1
 
+	if ! prepare_meshcore_usb_backup_before_flash backup-only; then
+		echo "No nRF52 DFU command was run." >&2
+		exit 1
+	fi
+
 	if [[ "$TYPE" == "flash-update" || "$TYPE" == "flash-wipe" ]]; then
 		ACTION="$TYPE"
 		echo "Auto-detected firmware action: $(describe_flash_action "$ACTION")"
@@ -7462,6 +7508,7 @@ else
 		done
 	fi
 	
+	confirm_meshcore_usb_backup_for_action "$ACTION" || exit 1
 	if [[ $ACTION == "flash-wipe" ]]; then
 		
 		[[ -f "$ERASE_URL_FILE" ]] && ERASE_URL="$(<"$ERASE_URL_FILE")"
@@ -7490,23 +7537,6 @@ else
 		echo "Echo-only selected; no nRF52 DFU commands were run."
 		exit 0
 	fi
-	CURRENT_ROLE="${ROLE:-auto}"
-	[[ -f "$SELECTED_ROLE_FILE" ]] && CURRENT_ROLE="$(<"$SELECTED_ROLE_FILE")"
-	DEVICE_BY_ID_NAME=""
-	[[ -f "$DEVICE_PORT_NAME_FILE" ]] && DEVICE_BY_ID_NAME="$(<"$DEVICE_PORT_NAME_FILE")"
-	if ! canonicalize_meshcore_primary_usb_selection "$DEVICE_PORT" "$DEVICE_BY_ID_NAME"; then
-		echo "No nRF52 DFU command was run." >&2
-		exit 1
-	fi
-	printf '%s\n' "$DEVICE_PORT" > "$DEVICE_PORT_FILE"
-	printf '%s\n' "$DEVICE_BY_ID_NAME" > "$DEVICE_PORT_NAME_FILE"
-	prepare_serial_port_for_flash "$DEVICE_PORT"
-	if ! request_meshcore_usb_backup_before_flash \
-		"$ACTION" "$DEVICE_PORT" "$DEVICE" "$CURRENT_ROLE" "$DEVICE_BY_ID_NAME"; then
-		echo "No nRF52 DFU command was run." >&2
-		exit 1
-	fi
-
 	echo "Getting the latest version of adafruit-nrfutil"
 	pipx run adafruit-nrfutil version
 

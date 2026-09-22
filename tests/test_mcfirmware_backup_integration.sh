@@ -91,16 +91,16 @@ fake_backup_python() {
 			printf 'helper diagnostic, but no JSON summary\n'
 			return 0
 			;;
-		unsafe)
-			printf '{"ok":true,"exit_code":0,"archive":"%s","path":"%s","completeness":"partial","safe_for_wipe":false}\n' \
+		unsafe|partial)
+			printf '{"ok": true,"exit_code": 0,"archive": "%s","path": "%s","completeness": "partial","safe_for_wipe": false}\n' \
 				"$FAKE_ARCHIVE" "$FAKE_ARCHIVE"
-			if [[ "$operation" == "verify" ]]; then
+			if [[ "$operation" == "verify" && ( "$FAKE_MODE" == unsafe || "$*" == *--require-safe-for-wipe* ) ]]; then
 				return 40
 			fi
 			return 0
 			;;
 		safe)
-			printf '{"ok":true,"exit_code":0,"archive":"%s","path":"%s","completeness":"complete","safe_for_wipe":true}\n' \
+			printf '{"ok": true,"exit_code": 0,"archive": "%s","path": "%s","completeness": "complete","safe_for_wipe": true}\n' \
 				"$FAKE_ARCHIVE" "$FAKE_ARCHIVE"
 			return 0
 			;;
@@ -156,6 +156,107 @@ if (( REQUEST_RC == 0 )) && [[ ! -s "$BACKUP_CALLED_FILE" ]]; then
 else
 	pass 'invalid Y/n input cannot silently skip backup'
 fi
+
+# Collecting a backup must not ask for flash permission yet. Exercise the
+# two stages in the same shell, as main does, for safe/partial/failed/skipped
+# snapshots; the result must be reset for every attempt.
+FAKE_MODE=safe
+if request_meshcore_usb_backup_before_flash backup-only /dev/ttyFAKE Test auto test-if00 \
+	< <(printf 'y\n') >"${TEST_TMP}/two-stage" 2>&1 \
+	&& [[ "$MESHCORE_BACKUP_VERIFIED" == 1 && "$MESHCORE_BACKUP_WIPE_SAFE" == 1 ]] \
+	&& confirm_meshcore_usb_backup_for_action flash-wipe </dev/null; then
+	pass 'safe backup is collected before a separately authorized flash action'
+else
+	fail 'two-stage safe backup failed'
+fi
+
+FAKE_MODE=partial
+if request_meshcore_usb_backup_before_flash backup-only /dev/ttyFAKE Test auto test-if00 \
+	< <(printf 'y\n') >"${TEST_TMP}/two-stage" 2>&1 \
+	&& [[ "$MESHCORE_BACKUP_VERIFIED" == 1 && "$MESHCORE_BACKUP_WIPE_SAFE" == 0 ]] \
+	&& confirm_meshcore_usb_backup_for_action flash-update </dev/null \
+	&& ! confirm_meshcore_usb_backup_for_action flash-wipe < <(printf '\n') 2>/dev/null \
+	&& confirm_meshcore_usb_backup_for_action flash-wipe < <(printf 'WIPE WITHOUT BACKUP\n') 2>/dev/null; then
+	pass 'partial backup permits update but still requires an explicit wipe override'
+else
+	fail 'two-stage partial backup lost its wipe safety guard'
+fi
+
+FAKE_MODE=non_json
+if request_meshcore_usb_backup_before_flash backup-only /dev/ttyFAKE Test auto test-if00 \
+	< <(printf 'y\n') >"${TEST_TMP}/two-stage" 2>&1 \
+	&& [[ "$MESHCORE_BACKUP_VERIFIED" == 0 && "$MESHCORE_BACKUP_WIPE_SAFE" == 0 ]] \
+	&& ! confirm_meshcore_usb_backup_for_action flash-update < <(printf '\n') 2>/dev/null \
+	&& confirm_meshcore_usb_backup_for_action flash-update < <(printf 'yes\n') 2>/dev/null; then
+	pass 'failed backup clears earlier success and requires explicit update consent'
+else
+	fail 'two-stage failed backup reused stale success or bypassed consent'
+fi
+
+if request_meshcore_usb_backup_before_flash backup-only /dev/ttyFAKE Test auto test-if00 \
+	< <(printf 'n\n') >"${TEST_TMP}/two-stage" 2>&1 \
+	&& [[ "$MESHCORE_BACKUP_REQUESTED" == 0 ]] \
+	&& confirm_meshcore_usb_backup_for_action flash-update </dev/null \
+	&& ! confirm_meshcore_usb_backup_for_action flash-wipe < <(printf '\n') 2>/dev/null; then
+	pass 'skipping backup permits update but does not authorize erase'
+else
+	fail 'skipped backup lost action-specific safety'
+fi
+[[ -f "$FAKE_ARCHIVE" ]] && pass 'backup archive is retained independently of flashing' \
+	|| fail 'backup archive was removed'
+
+# Verify the live entry points, not just the request helper: both ESP32 paths
+# and nRF52 must collect the backup ahead of the action/confirmation and any
+# reset/write. Echo-only exits before any firmware operation.
+if python3 - "$FIRMWARE_SCRIPT" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text()
+main = source[source.index('# MAIN\n'):]
+esp, nrf = main.split('\n\techo "nrf52 device"', 1)
+backup = esp.index('prepare_meshcore_usb_backup_before_flash backup-only')
+assert esp.count('choose_flash_execution_mode') == 2
+for branch in esp[backup:].split('EXECUTION_MODE=')[1:]:
+    assert branch.index('choose_flash_execution_mode') < branch.index('prepare_esp32_flash_session')
+    assert branch.index('exit 0') < branch.index('prepare_esp32_flash_session')
+assert nrf.index('prepare_meshcore_usb_backup_before_flash backup-only') < nrf.index('Choose firmware action')
+assert nrf.index('confirm_meshcore_usb_backup_for_action') < nrf.index('choose_flash_execution_mode')
+assert nrf.index('choose_flash_execution_mode') < nrf.index('run_nrf52_dfu_package_buttonless')
+assert nrf.index('exit 0', nrf.index('choose_flash_execution_mode')) < nrf.index('run_nrf52_dfu_package_buttonless')
+assert 'request_meshcore_usb_backup_before_flash' not in nrf  # No duplicate late prompt.
+PY
+then
+	pass 'Linux ESP32/nRF52 backup precedes flash confirmation and echo-only performs no firmware write'
+else
+	fail 'Linux backup/confirmation/firmware operation ordering is wrong'
+fi
+
+(
+	SELECTED_ROLE_FILE="${TEST_TMP}/selected-role"
+	DEVICE_PORT_FILE="${TEST_TMP}/selected-port"
+	DEVICE_PORT_NAME_FILE="${TEST_TMP}/selected-by-id"
+	DEVICE_PORT=/dev/ttySTALE
+	DEVICE='Test radio'
+	printf 'test-if02\n' > "$DEVICE_PORT_NAME_FILE"
+	canonicalize_meshcore_primary_usb_selection() {
+		[[ "$1" == /dev/ttySTALE && "$2" == test-if02 ]] || return 1
+		DEVICE_PORT=/dev/ttyPRIMARY
+		DEVICE_BY_ID_NAME=test-if00
+	}
+	prepare_serial_port_for_flash() { [[ "$1" == /dev/ttyPRIMARY ]]; }
+	request_meshcore_usb_backup_before_flash() {
+		[[ "$1" == backup-only && "$2" == /dev/ttyPRIMARY && "$5" == test-if00 ]]
+	}
+	prepare_meshcore_usb_backup_before_flash backup-only || exit 1
+	[[ "$(<"$DEVICE_PORT_FILE")" == /dev/ttyPRIMARY ]] || exit 1
+	# Identity resolution failure must stop even the read of private state.
+	canonicalize_meshcore_primary_usb_selection() { return 1; }
+	request_meshcore_usb_backup_before_flash() { touch "${TEST_TMP}/unexpected-backup"; }
+	if prepare_meshcore_usb_backup_before_flash backup-only; then exit 1; fi
+	[[ ! -e "${TEST_TMP}/unexpected-backup" ]]
+) && pass 'early backup resolves the primary USB identity and fails closed on identity loss' \
+	|| fail 'early backup lost its USB identity gate'
 
 # Auto-detection runs before the final backup gate. It therefore must remain a
 # read-only classification step and contain no direct or transitive baud-touch /

@@ -4439,6 +4439,16 @@ function flashESP32() {
 		Write-Warning "Filename suggests '$($strategy.FileNameMode)' but image layout looks like '$($strategy.ClassifiedMode)'. Using '$($strategy.SelectedMode)'."
 	}
 
+	if ($hw.Project -eq 'MeshCore') {
+		$usbIdentity = Get-SelectedUsbIdentityForFlash -Hardware $hw
+		$hw.ComPort = Resolve-EspUsbComPort -PreferredComPort $hw.ComPort `
+			-UsbIdentity $usbIdentity -Purpose 'MeshCore USB backup'
+		$action = if ($strategy.SelectedMode -eq 'install') { 'flash-wipe' } else { 'flash-update' }
+		$null = Request-MeshCoreUsbBackupBeforeFlash -Hardware $hw -ComPort $hw.ComPort `
+			-UsbIdentity $usbIdentity -Action $action
+		if (-not (Confirm-MeshCoreFlash -Hardware $hw -Action $action)) { return $false }
+	}
+
 	if ($strategy.SelectedMode -eq 'install') {
 		return (installFlashViaEspTool $hw)
 	}
@@ -6653,7 +6663,8 @@ function Test-CachedMeshCoreUsbBackup {
 	param(
 		[Parameter(Mandatory)][pscustomobject]$Hardware,
 		[Parameter(Mandatory)][psobject]$UsbIdentity,
-		[switch]$RequireSafeForWipe
+		[switch]$RequireSafeForWipe,
+		[switch]$Quiet
 	)
 
 	$pathProperty = $Hardware.PSObject.Properties['MeshCoreBackupPath']
@@ -6673,11 +6684,13 @@ function Test-CachedMeshCoreUsbBackup {
 	$verification = Invoke-MeshCoreBackupHelper -Arguments $verifyArgs -Quiet
 	if ($verification.ExitCode -ne 0 -or $null -eq $verification.Summary -or
 		$verification.Summary.ok -ne $true) {
-		Write-Warning 'The cached MeshCore backup no longer passes integrity/completeness verification; a new backup is required.'
+		if (-not $Quiet) {
+			Write-Warning 'The cached MeshCore backup no longer passes integrity/completeness verification; a new backup is required.'
+		}
 		return $false
 	}
 
-	Write-Host "Reusing verified MeshCore USB backup: $($pathProperty.Value)" -ForegroundColor Green
+	if (-not $Quiet) { Write-Host "Reusing verified MeshCore USB backup: $($pathProperty.Value)" -ForegroundColor Green }
 	return $true
 }
 
@@ -6686,18 +6699,25 @@ function Request-MeshCoreUsbBackupBeforeFlash {
 		[Parameter(Mandatory)][pscustomobject]$Hardware,
 		[Parameter(Mandatory)][string]$ComPort,
 		[Parameter(Mandatory)][psobject]$UsbIdentity,
-		[Parameter(Mandatory)][ValidateSet('flash-update', 'flash-wipe')][string]$Action
+		[Parameter(Mandatory)][ValidateSet('backup-only', 'flash-update', 'flash-wipe')][string]$Action
 	)
 
 	if (Test-CachedMeshCoreUsbBackup `
 		-Hardware $Hardware `
 		-UsbIdentity $UsbIdentity `
 		-RequireSafeForWipe:($Action -eq 'flash-wipe')) {
+		if ($Action -eq 'backup-only') {
+			return [pscustomobject]@{
+				Requested = $true
+				Verified = $true
+				SafeForWipe = (Test-CachedMeshCoreUsbBackup -Hardware $Hardware -UsbIdentity $UsbIdentity -RequireSafeForWipe -Quiet)
+			}
+		}
 		return $true
 	}
 
 	Write-Host ''
-	Write-Host 'The nRF52 backup uses the existing MeshCore USB APIs.'
+	Write-Host 'The logical backup uses the existing MeshCore USB APIs (nRF52 and ESP32).'
 	Write-Host 'It includes private identity and channel secrets when exposed by the current role and firmware.' -ForegroundColor Yellow
 	Write-Host 'The archive is stored in a current-user backup directory.' -ForegroundColor Yellow
 	do {
@@ -6713,6 +6733,7 @@ function Request-MeshCoreUsbBackupBeforeFlash {
 		$normalizedChoice -match '^(?i:y(?:es)?)$'
 	$backup = $null
 	$verifiedArchive = $false
+	$wipeSafe = $false
 	if ($makeBackup) {
 		try {
 			$backup = Invoke-MeshCoreUsbBackup `
@@ -6753,7 +6774,7 @@ function Request-MeshCoreUsbBackupBeforeFlash {
 					-Quiet
 				if ($safeVerification.ExitCode -eq 0 -and $null -ne $safeVerification.Summary -and
 					$safeVerification.Summary.ok -eq $true) {
-					return $true
+					$wipeSafe = $true
 				}
 			}
 		}
@@ -6765,8 +6786,24 @@ function Request-MeshCoreUsbBackupBeforeFlash {
 		Write-Warning "MeshCore USB backup did not produce a usable archive (exit code $($backup.ExitCode))."
 	}
 
+	$result = [pscustomobject]@{ Requested = $makeBackup; Verified = $verifiedArchive; SafeForWipe = $wipeSafe }
+	# Collect the snapshot before asking which flash action to take. Its result
+	# is local to this attempt; it is not permission to erase or write firmware.
+	if ($Action -eq 'backup-only') { return $result }
+	return (Confirm-MeshCoreUsbBackupForAction -BackupResult $result -Action $Action)
+}
+
+function Confirm-MeshCoreUsbBackupForAction {
+	param(
+		[Parameter(Mandatory)][psobject]$BackupResult,
+		[Parameter(Mandatory)][ValidateSet('flash-update', 'flash-wipe')][string]$Action
+	)
+
+	if ($BackupResult.Verified -and ($Action -eq 'flash-update' -or $BackupResult.SafeForWipe)) {
+		return $true
+	}
 	if ($Action -eq 'flash-wipe') {
-		if ($verifiedArchive) {
+		if ($BackupResult.Verified) {
 			Write-Warning 'The logical backup is verified, but the current MeshCore APIs do not expose all stored state and messages.'
 		}
 		Write-Warning 'A wipe will erase node identity and stored data without a full wipe-safe backup.'
@@ -6775,13 +6812,25 @@ function Request-MeshCoreUsbBackupBeforeFlash {
 			throw 'MeshCore flash-wipe aborted because no complete verified backup is available.'
 		}
 	}
-	elseif ($makeBackup) {
+	elseif ($BackupResult.Requested) {
 		$continue = Read-Host 'Continue the write-only update without a complete backup? [y/N]'
 		if ($continue.Trim() -notmatch '^y(?:es)?$') {
 			throw 'MeshCore flash-update aborted because the requested backup did not complete.'
 		}
 	}
 
+	return $false
+}
+
+function Confirm-MeshCoreFlash {
+	param(
+		[Parameter(Mandatory)][pscustomobject]$Hardware,
+		[Parameter(Mandatory)][ValidateSet('flash-update', 'flash-wipe')][string]$Action
+	)
+
+	$choice = Read-Host "Run $Action for $($Hardware.HWNameFile) on $($Hardware.ComPort)? [y/N]"
+	if (([string]$choice).Trim() -match '^(?i:y(?:es)?)$') { return $true }
+	Write-Host 'Flash cancelled. Any backup already created has been kept.'
 	return $false
 }
 
@@ -6804,15 +6853,17 @@ function flashMeshCoreNrf52 {
 		throw "MeshCore nRF52 flashing expects a .zip package: $selectedFirmwareFile"
 	}
 
-	$action = Get-MeshCoreNrf52FlashAction -hw $hw
-	Write-Host "Running $action..."
 	$runtimeComPort = $selectedComPort
 	$bootloaderHint = Get-MeshCoreBootloaderHintText -hw $hw
-	$null = Request-MeshCoreUsbBackupBeforeFlash `
+	$backupResult = Request-MeshCoreUsbBackupBeforeFlash `
 		-Hardware $hw `
 		-ComPort $runtimeComPort `
 		-UsbIdentity $usbIdentity `
-		-Action $action
+		-Action 'backup-only'
+	$action = Get-MeshCoreNrf52FlashAction -hw $hw
+	$null = Confirm-MeshCoreUsbBackupForAction -BackupResult $backupResult -Action $action
+	if (-not (Confirm-MeshCoreFlash -Hardware $hw -Action $action)) { return $false }
+	Write-Host "Running $action..."
 
 	if ($action -eq 'flash-wipe') {
 		$eraseUrl = Select-MeshCoreEraseUrl -hw $hw

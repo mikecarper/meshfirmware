@@ -62,6 +62,8 @@ foreach ($functionName in @(
 	'Resolve-Nrf52DfuComPort',
 	'Test-CachedMeshCoreUsbBackup',
 	'Request-MeshCoreUsbBackupBeforeFlash',
+	'Confirm-MeshCoreUsbBackupForAction',
+	'Confirm-MeshCoreFlash',
 	'flashMeshtasticNrf52',
 	'flashMeshCoreNrf52'
 )) {
@@ -1258,7 +1260,8 @@ function Resolve-LiveUsbComPort {
 	}
 	return 'COM9'
 }
-function Get-MeshCoreNrf52FlashAction { param($hw) return 'flash-update' }
+function Get-MeshCoreNrf52FlashAction { param($hw) $script:meshFlashOrder += 'action'; return 'flash-update' }
+function Confirm-MeshCoreFlash { param($Hardware, $Action) $script:meshFlashOrder += 'confirm'; return $true }
 function Get-MeshCoreBootloaderHintText { param($hw) return '' }
 $script:meshFlashOrder = @()
 $script:meshBackupCalls = @()
@@ -1270,7 +1273,7 @@ function Request-MeshCoreUsbBackupBeforeFlash {
 		UsbIdentity = $UsbIdentity
 		Action = $Action
 	}
-	return $true
+	return [pscustomobject]@{ Requested = $true; Verified = $true; SafeForWipe = $false }
 }
 $script:meshFlashDfuCalls = @()
 function Invoke-NrfutilSerialDfu {
@@ -1293,9 +1296,9 @@ Assert-Equal -Expected 1 -Actual $script:primarySelectionInputs.Count -Message '
 Assert-Equal -Expected 'COM21' -Actual $script:primarySelectionInputs[0].ComPort -Message 'MeshCore flash lost the originally selected logging COM.'
 Assert-Equal -Expected 1 -Actual $script:meshBackupCalls.Count -Message 'MeshCore flash did not request exactly one USB backup.'
 Assert-Equal -Expected 'COM9' -Actual $script:meshBackupCalls[0].ComPort -Message 'MeshCore backup did not use the canonical primary interface.'
-Assert-Equal -Expected 'flash-update' -Actual $script:meshBackupCalls[0].Action -Message 'MeshCore backup did not receive the selected flash action.'
+Assert-Equal -Expected 'backup-only' -Actual $script:meshBackupCalls[0].Action -Message 'MeshCore backup must precede the flash action choice.'
 Assert-Equal -Expected 'backup' -Actual $script:meshFlashOrder[0] -Message 'MeshCore entered DFU before requesting its USB backup.'
-Assert-Equal -Expected 'dfu' -Actual $script:meshFlashOrder[1] -Message 'MeshCore DFU did not follow its USB backup.'
+Assert-Equal -Expected 'backup,action,confirm,dfu' -Actual ($script:meshFlashOrder -join ',') -Message 'MeshCore must back up before action selection and confirm before DFU.'
 Assert-Equal -Expected 1 -Actual $script:meshFlashDfuCalls.Count -Message 'Unexpected MeshCore DFU call count for flash-update.'
 Assert-Equal -Expected 'COM9' -Actual $script:meshFlashDfuCalls[0].ComPort -Message 'MeshCore attempted its 1200 touch on logging interface 02.'
 Assert-Equal -Expected 1200 -Actual $script:meshFlashDfuCalls[0].TouchBaud -Message 'MeshCore flash-update lost its expected touch request.'

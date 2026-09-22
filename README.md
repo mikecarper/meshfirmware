@@ -25,11 +25,29 @@ Regression checks (no connected radio needed):
 powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_usb_identity.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_native_commands.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_backup_dependencies.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_backup_prompt_order.ps1
 ```
+
+## MeshCore backup before flashing
+
+Both `firmware.cmd` (Windows) and `mcfirmware.sh` (Linux) offer a verified
+logical USB backup for nRF52 and ESP32 before the final flash confirmation.
+For nRF52, the backup also precedes the update/wipe action menu. You can make
+a backup and then decline flashing (Windows) or choose echo-only (Linux);
+the backup is retained and no erase/write is performed.
+
+The current firmware must expose a supported MeshCore USB API; a device
+already in ROM/DFU mode cannot provide a logical backup. Failed backups
+require explicit confirmation before updating, and a wipe without a complete
+wipe-safe backup still requires typing `WIPE WITHOUT BACKUP`. These are
+logical snapshots, not full flash images, and may contain private identity
+and channel secrets. Archives remain in the current user's backup directory.
+
+Linux regression check: `bash tests/test_mcfirmware_backup_integration.sh`.
 
 ## MeshCore USB backup dependencies
 
-Before an nRF52 logical USB backup, both flashers display the selected Python
+Before a logical USB backup, both flashers display the selected Python
 interpreter and the installed, supported, and repair versions of each package:
 
 | Package | Supported stable versions | Pinned repair version |
