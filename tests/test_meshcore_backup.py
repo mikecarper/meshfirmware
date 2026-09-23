@@ -166,6 +166,10 @@ class FakeCommands:
         return FakeEvent("custom_vars", {"owner": "test"})
 
     async def run_cli_command(self, command):
+        if command == "get bluetooth.name":
+            return FakeEvent("cli_reply", {"text": "> MeshCore-Test (default from node name)"})
+        if command == "version":
+            return FakeEvent("cli_reply", {"text": "Companion 1.17.1-test-long-version (protocol 14, build today)"})
         return FakeEvent("cli_reply", {"text": f"> value-for-{command}"})
 
 
@@ -277,6 +281,14 @@ class MeshCoreBackupTests(unittest.TestCase):
             self.assertEqual(
                 archive["payload"]["sections"]["channels"]["counts"],
                 {"declared": 2, "received": 2},
+            )
+            self.assertEqual(
+                archive["payload"]["sections"]["bluetooth_name"]["data"],
+                {"name": "MeshCore-Test", "default": True},
+            )
+            self.assertEqual(
+                archive["payload"]["sections"]["device_info"]["data"]["ver_full"],
+                "1.17.1-test-long-version",
             )
             self.assertFalse(archive["payload"]["restore_plan"]["executor_implemented"])
             self.assertIn("messages", archive["payload"]["excluded"])

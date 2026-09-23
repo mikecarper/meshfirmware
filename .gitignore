@@ -22,3 +22,5 @@ __pycache__/
 # Local device configuration and backups (may contain credentials)
 /config.yaml
 /config_backup.*.yaml*
+/mt.config_backup.*.yaml*
+/mc.config_backup.*.json

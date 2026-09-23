@@ -53,8 +53,8 @@ $KEYMIND_RAW_BASE_URL = "https://raw.githubusercontent.com/mikecarper/MeshCore/k
 $KEYMIND_CASCADE_FALLBACK_URL = "$KEYMIND_RAW_BASE_URL/mesh-america/keymind-cascade-v1.16.0-provider.json"
 $KEYMIND_CASCADE_LOGGING_FALLBACK_URL = "$KEYMIND_RAW_BASE_URL/mesh-america/keymind-cascade-logging-v1.16.0-provider.json"
 $MESHCORE_BACKUP_TOOL_URL = "https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_backup.py"
-$MESHCORE_BACKUP_TOOL_VERSION = '0.2.1'
-$MESHCORE_BACKUP_TOOL_SHA256 = '16a67a248a3e4547954929478cab073968f3d960c58f1d454f89de3756d7e4b7'
+$MESHCORE_BACKUP_TOOL_VERSION = '0.2.2'
+$MESHCORE_BACKUP_TOOL_SHA256 = 'b7c273497a207310e58ca6c04c0eac1ac0687e5c868464c62b9b214b01071aa4'
 
 $timeoutMeshtastic = 10 # Timeout duration in seconds
 $baud = 1200 # 115200
@@ -2283,7 +2283,7 @@ function MakeConfigBackup {
 	Write-Host "Making a config backup"
 
 	# Generate the backup config name
-	$backupConfigName = "$ScriptPath\config_backup.${HWNameShort}.${selectedComPort}.$([System.DateTime]::Now.ToString('yyyyMMddHHmmss')).yaml"
+	$backupConfigName = "$ScriptPath\mt.config_backup.${HWNameShort}.${selectedComPort}.$([System.DateTime]::Now.ToString('yyyyMMddHHmmss')).yaml"
 
 	# Start the loop for backup process
 	while ($true) {
@@ -6594,6 +6594,23 @@ function Get-MeshCoreBackupRoleHint {
 	}
 }
 
+function Get-MeshCoreBackupOutputPath {
+	param(
+		[string]$DeviceHint = '',
+		[string]$ComPort = ''
+	)
+
+	# Keep user-controlled labels in a single filename beside firmware.cmd.
+	# The unique UTC timestamp prevents a repeat backup from overwriting an
+	# earlier archive for the same radio.
+	$label = ($DeviceHint -replace '[<>:"/\\|?*\x00-\x1F]+', '-').Trim('. ')
+	if ([string]::IsNullOrWhiteSpace($label)) { $label = 'unknown' }
+	$portLabel = ($ComPort -replace '[^A-Za-z0-9_.-]+', '-').Trim('. ')
+	if ([string]::IsNullOrWhiteSpace($portLabel)) { $portLabel = 'usb' }
+	$timestamp = [System.DateTime]::UtcNow.ToString('yyyyMMddTHHmmss.fffffffZ')
+	return (Join-Path -Path $ScriptPath -ChildPath "mc.config_backup.${label}.${portLabel}.${timestamp}.json")
+}
+
 function Invoke-MeshCoreBackupHelper {
 	param(
 		[Parameter(Mandatory)][string[]]$Arguments,
@@ -6643,7 +6660,12 @@ function Invoke-MeshCoreUsbBackup {
 		throw "$ComPort is the logging interface. MeshCore backup must use the primary interface 00."
 	}
 
-	$args = @('backup', '--port', $ComPort, '--role-hint', (Get-MeshCoreBackupRoleHint -Role $RoleHint))
+	$backupOutputPath = Get-MeshCoreBackupOutputPath -DeviceHint $DeviceHint -ComPort $ComPort
+	$args = @(
+		'backup', '--port', $ComPort,
+		'--role-hint', (Get-MeshCoreBackupRoleHint -Role $RoleHint),
+		'--output', $backupOutputPath
+	)
 	foreach ($pair in @(
 		@('--usb-serial', [string]$actualIdentity.SerialNumber),
 		@('--usb-location', [string]$actualIdentity.LocationPath),
@@ -6719,7 +6741,7 @@ function Request-MeshCoreUsbBackupBeforeFlash {
 	Write-Host ''
 	Write-Host 'The logical backup uses the existing MeshCore USB APIs (nRF52 and ESP32).'
 	Write-Host 'It includes private identity and channel secrets when exposed by the current role and firmware.' -ForegroundColor Yellow
-	Write-Host 'The archive is stored in a current-user backup directory.' -ForegroundColor Yellow
+	Write-Host 'The archive is stored beside firmware.cmd as mc.config_backup.<device>.<port>.<timestamp>.json.' -ForegroundColor Yellow
 	do {
 		$choice = Read-Host 'Create and verify a logical USB backup before flashing? [Y/n]'
 		$normalizedChoice = ([string]$choice).Trim()

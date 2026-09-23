@@ -41,7 +41,43 @@ already in ROM/DFU mode cannot provide a logical backup. Failed backups
 require explicit confirmation before updating, and a wipe without a complete
 wipe-safe backup still requires typing `WIPE WITHOUT BACKUP`. These are
 logical snapshots, not full flash images, and may contain private identity
-and channel secrets. Archives remain in the current user's backup directory.
+and channel secrets. Windows saves new backups at the checkout root as
+`mc.config_backup.*.json` (MeshCore) or `mt.config_backup.*.yaml`
+(Meshtastic); Linux keeps its existing backup location. Older MeshCore JSON
+backups in the current user's `.meshfirmware/backups` directory also remain
+usable.
+New companion archives keep Bluetooth name as `name` plus a boolean
+`default`, rather than embedding "(default from node name)" in a text value.
+They also retain `device_info.ver_full` from the read-only `version` command;
+the protocol's original 20-byte `ver` field remains unchanged. The restore
+tool accepts older text-format archives too.
+
+### Restore a MeshCore companion backup
+
+On Windows, double-click `restore.cmd`. It offers the newest JSON backup or
+lets you enter a full path, checks archive integrity, identifies the USB
+device, and asks before changing any settings. To move the backup to a
+different board, choose **different hardware**, enter its displayed USB
+serial, and explicitly approve identity replacement. The target must already
+run MeshCore companion firmware and have room for the saved populated
+channels and contacts. The new board's existing identity and matching
+settings will be overwritten; its unrelated contacts are not deleted. After
+restore, Bluetooth is cycled once if it was enabled, so the phone app can
+reconnect and reload settings.
+
+For Linux, use `python3 tools/meshcore_restore.py ports` to see available
+devices, then `probe --input BACKUP.json --target-serial SERIAL --new-hardware`
+and finally `restore --input BACKUP.json --target-serial SERIAL --new-hardware
+--confirmed --replace-identity`. Omit the target-serial and new-hardware
+options to restore to the original USB device. Run `resync` with the same
+target options and `--confirmed` to cycle enabled Bluetooth after using the
+Python helper directly. This is a logical settings
+restore, not a firmware, unread-message, or every optional CLI-only setting restore.
+An unresponsive device in DFU or a non-companion role is never written.
+If a Full Companion is in its text terminal with USB logging on, the Windows
+launcher asks before temporarily switching that setting off to enter binary
+mode. A successful restore leaves USB logging at the state recorded in the
+backup. Use `--allow-mode-switch` for this behavior with the Python helper.
 
 Linux regression check: `bash tests/test_mcfirmware_backup_integration.sh`.
 

@@ -46,7 +46,7 @@ from typing import Any, Awaitable, Callable, Mapping, Optional
 
 SCHEMA = "org.meshfirmware.meshcore-backup/v1"
 ARCHIVE_KIND = "meshcore-logical-usb"
-TOOL_VERSION = "0.2.1"
+TOOL_VERSION = "0.2.2"
 MIN_MESHCORE_VERSION = (2, 3, 9)
 MIN_MESHCORE_CLI_VERSION = (1, 6, 3)
 MIN_PYNACL_VERSION = (1, 5, 0)
@@ -542,6 +542,10 @@ def _validate_device_info(value: Any) -> Optional[str]:
     for field in ("fw_build", "model", "ver"):
         if not isinstance(value[field], str) or not value[field]:
             return f"DEVICE_INFO {field} is invalid"
+    if "ver_full" in value and (
+        not isinstance(value["ver_full"], str) or not value["ver_full"]
+    ):
+        return "DEVICE_INFO full version is invalid"
     if protocol_version >= 9 and not isinstance(value.get("repeat"), bool):
         return "DEVICE_INFO repeat setting is missing or invalid"
     if protocol_version >= 10 and (
@@ -874,8 +878,34 @@ async def collect_companion(client: Any, request: BackupRequest) -> dict[str, An
                     elif lower.startswith("error") or lower.startswith("-> error"):
                         cli_section["state"] = "error"
                         cli_section["reason"] = "firmware reported an error for this setting"
+                    elif section_name == "bluetooth_name":
+                        match = re.fullmatch(
+                            r">\s*(.*?)\s+\((default from node name|custom)\)\s*",
+                            text,
+                            re.IGNORECASE,
+                        )
+                        if not match:
+                            cli_section["state"] = "error"
+                            cli_section["reason"] = "Bluetooth name reply has an unrecognized format"
+                        else:
+                            cli_section["data"] = {
+                                "name": match.group(1),
+                                "default": match.group(2).lower() == "default from node name",
+                            }
             cli_section["command"] = command
             sections[section_name] = cli_section
+        # DEVICE_INFO reserves only 20 bytes for the firmware version,
+        # including its NUL terminator. A read-only CLI query can retain the
+        # complete human-readable version without altering the raw field.
+        full_version = await _query_section(
+            run_cli, "cli_reply", required=False, args=("version",)
+        )
+        if full_version.get("state") == "complete":
+            version_data = full_version.get("data")
+            version_text = version_data.get("text") if isinstance(version_data, Mapping) else None
+            match = re.search(r"\bCompanion\s+(\S+)\s+\(protocol\b", version_text or "", re.IGNORECASE)
+            if match and sections["device_info"].get("state") == "complete":
+                sections["device_info"]["data"]["ver_full"] = match.group(1)
         sections["storage_layout"]["diagnostic_scope"] = (
             "layout_only; this is not a filesystem consistency check"
         )
@@ -1319,6 +1349,23 @@ def validate_archive_data(
             or type(section.get("required")) is not bool
         ):
             raise BackupError(ExitCode.ARCHIVE_INVALID, f"section metadata is invalid: {name}")
+    bluetooth_section = sections.get("bluetooth_name")
+    if isinstance(bluetooth_section, Mapping) and bluetooth_section.get("state") == "complete":
+        bluetooth_data = bluetooth_section.get("data")
+        if not isinstance(bluetooth_data, Mapping):
+            raise BackupError(ExitCode.ARCHIVE_INVALID, "Bluetooth name section has no data")
+        if "name" in bluetooth_data or "default" in bluetooth_data:
+            if (
+                set(bluetooth_data) != {"name", "default"}
+                or not isinstance(bluetooth_data.get("name"), str)
+                or not bluetooth_data["name"]
+                or type(bluetooth_data.get("default")) is not bool
+            ):
+                raise BackupError(ExitCode.ARCHIVE_INVALID, "Bluetooth name fields are invalid")
+        elif not isinstance(bluetooth_data.get("text"), str):
+            # Older 0.2.1 archives keep the CLI reply as text; continue to
+            # accept them, but new archives use explicit name/default fields.
+            raise BackupError(ExitCode.ARCHIVE_INVALID, "Bluetooth name section is invalid")
 
     capture_api = source.get("capture_api")
     role = None
