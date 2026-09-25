@@ -2299,6 +2299,28 @@ nrf52_uf2_mount_matches_identity() {
 	return 1
 }
 
+nrf52_post_erase_identity_proof() {
+	local port=$1
+	local expected_serial=$2
+	local expected_path_stem=$3
+	local actual_serial actual_path_stem
+
+	# This is intentionally stronger than the normal re-enumeration matcher.
+	# It is used only for the immediate application install after a successful
+	# erase, when the old runtime by-id name is expected to disappear. Both the
+	# USB serial and parent physical path must survive and agree; either one
+	# alone is not sufficient to bypass the normal by-id requirement.
+	expected_serial="$(normalize_usb_serial_identity "$expected_serial")"
+	actual_serial="$(normalize_usb_serial_identity \
+		"$(udev_device_property "$port" ID_SERIAL_SHORT)")"
+	actual_path_stem="$(nrf52_usb_path_stem \
+		"$(udev_device_property "$port" ID_PATH)")"
+	[[ -n "$expected_serial" && -n "$expected_path_stem" ]] || return 1
+	[[ -n "$actual_serial" && -n "$actual_path_stem" ]] || return 1
+	[[ "$actual_serial" == "$expected_serial" ]] || return 1
+	[[ "$actual_path_stem" == "$expected_path_stem" ]]
+}
+
 nrf52_port_is_dfu_bootloader() {
 	local port=$1
 	local candidate_link=$2
@@ -2324,23 +2346,24 @@ nrf52_port_is_dfu_bootloader() {
 			;;
 	esac
 
-	# A no-touch DFU upload normally requires the exact by-id link selected by
-	# the user. A flash-wipe can deliberately leave the same physical radio in
-	# DFU under a different by-id product name, however. The sole post-erase
-	# caller may opt in after wait_for_nrf52_bootloader_port has uniquely
-	# revalidated its USB path/serial identity. Do not relax ordinary entry into
-	# DFU, where a path or serial match alone is not evidence of a reset.
+	# The selected by-id link uses normal USB identity matching. After an
+	# erase, a changed link is accepted only when both the USB serial and
+	# physical path match. An explicit unmatched-DFU override remains separate.
+	local identity_verified=0
 	if [[ -n "$selected_by_id" && "$candidate_link" == "$selected_by_id" ]]; then
-		:
+		if nrf52_candidate_matches_identity "$port" "$candidate_link" \
+			"$selected_by_id" "$expected_serial" "$expected_path_stem"; then
+			identity_verified=1
+		fi
 	elif (( verified_post_erase_identity == 1 )); then
-		:
-	elif (( allow_unmatched_dfu == 1 )); then
-		:
-	else
-		return 1
+		if nrf52_candidate_matches_identity "$port" "$candidate_link" \
+			"$selected_by_id" "$expected_serial" "$expected_path_stem" \
+			&& nrf52_post_erase_identity_proof "$port" "$expected_serial" \
+				"$expected_path_stem"; then
+			identity_verified=1
+		fi
 	fi
-	if ! nrf52_candidate_matches_identity "$port" "$candidate_link" \
-		"$selected_by_id" "$expected_serial" "$expected_path_stem"; then
+	if (( identity_verified == 0 )); then
 		(( allow_unmatched_dfu == 1 )) || return 1
 		echo "WARNING: explicit DFU override bypasses the missing or mismatched USB identity on $port." >&2
 	fi
@@ -2352,8 +2375,10 @@ nrf52_port_is_dfu_bootloader() {
 	# but only after the selected by-id link and stable USB identity gates above.
 	# The running base-XIAO MeshCore application is 2886:8044 and must not take
 	# this path; 0044 and 0045 are the OTAFIX base/Sense bootloader products.
-	# Likewise, HT-n5262 application firmware uses 239a:4405 while its exact
-	# MeshTower V2 bootloader identity is 239a:0071.
+	# Likewise, the RAK3401 serial DFU endpoint is exactly 239a:002a (not the
+	# nearby 239a:802a product), and Heltec Mesh Node T1 OTAFIX is exactly
+	# 239a:0029 (not 239a:8029). HT-n5262 application firmware uses 239a:4405
+	# and its MeshTower V2 bootloader identity is 239a:0071.
 	vendor_id="$(udev_device_property "$port" ID_VENDOR_ID)"
 	product_id="$(udev_device_property "$port" ID_MODEL_ID)"
 	if [[ "${vendor_id,,}" == "2886" \
