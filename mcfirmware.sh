@@ -116,7 +116,6 @@ restore_port_after_bootloader_probe() {
 	local no_reset="${NORESET:-no-reset}"
 	local operation_before="${ESP32_OPERATION_BEFORE:-$no_reset}"
 	local read_mac="${READMAC:-read-mac}"
-	local watchdog_reset="${WATCHDOGRESET:-watchdog-reset}"
 
 	[[ "${BOOTLOADER_PROBE_ACTIVE:-0}" -eq 1 ]] || return 0
 	[[ -n "$port" ]] || return 0
@@ -134,9 +133,9 @@ restore_port_after_bootloader_probe() {
 	if ! invoke_esptool_timeout 8s --port "$port" --before "$operation_before" \
 		--after "$hard_reset" "$read_mac" >/dev/null 2>&1; then
 		if verified_port="$(esp32_verified_destructive_port \
-			"$port" "ESP32 cleanup watchdog reset")"; then
+			"$port" "ESP32 cleanup hard reset")"; then
 			invoke_esptool_timeout 8s --port "$verified_port" \
-				--before "$operation_before" --after "$watchdog_reset" \
+				--before "$operation_before" --after "$hard_reset" \
 				run >/dev/null 2>&1 || true
 		fi
 	fi
@@ -6263,9 +6262,12 @@ finish_esp32_flash_session() {
 	fi
 
 	if [[ "${ESP32_SESSION_IS_S3:-0}" -eq 1 ]]; then
-		echo "ESP32-S3 operation complete; exiting the stub with a watchdog reset."
-		if ! run_esp32_session_esptool "$port" --after "$WATCHDOGRESET" run; then
-			echo "Warning: the ESP32-S3 watchdog run/reset failed; press RESET once to start the application." >&2
+		# A no-reset `run` only leaves the verified image in the ROM/stub. The
+		# Station G2 demonstrated this in production: both slots verified, but
+		# the USB identity stayed "USB JTAG/serial debug unit" until a hard reset.
+		echo "ESP32-S3 operation complete; hard-resetting out of the ROM stub."
+		if ! run_esp32_session_esptool "$port" --after "$HARDRESET" run; then
+			echo "Warning: the ESP32-S3 hard reset failed; press RESET once to start the application." >&2
 			return 1
 		fi
 	elif (( native_usb )); then
@@ -6286,6 +6288,14 @@ finish_esp32_flash_session() {
 			"${ESP32_FLASH_EXPECTED_PATH_STEM:-}" "$rom_instance" \
 			"ESP32 runtime primary CDC port")"; then
 			echo "The flashed ESP32 did not return on its verified USB identity." >&2
+			return 1
+		fi
+		if [[ -z "$runtime_port" ]]; then
+			echo "The flashed ESP32 returned no verified runtime USB port." >&2
+			return 1
+		fi
+		if esp32_port_is_rom_usb_jtag "$runtime_port"; then
+			echo "The flashed ESP32 is still in ROM mode; application USB did not return." >&2
 			return 1
 		fi
 		if ! save_selected_serial_port "$runtime_port"; then
@@ -6498,6 +6508,37 @@ for i in range(0, min(len(data), 0x1000), 32):
 PY
 }
 
+describe_esp32_partition_table() {
+	local partition_file="$1"
+	python3 - "$partition_file" <<'PY'
+import struct
+import sys
+
+data = open(sys.argv[1], "rb").read()
+if len(data) != 0x1000:
+    raise SystemExit("ERROR: incomplete ESP32 partition table")
+print("ESP32 flash partition table (read-only at 0x8000):", file=sys.stderr)
+count = 0
+for i in range(0, len(data), 32):
+    entry = data[i:i + 32]
+    if entry[:2] == b"\xff\xff":
+        break
+    if entry[:2] != b"\xaa\x50":
+        continue
+    kind, subtype = entry[2:4]
+    offset, size = struct.unpack_from("<II", entry, 4)
+    if not offset or not size:
+        continue
+    label = entry[12:28].split(b"\0", 1)[0].decode("ascii", "replace")
+    print(f"  {label or '(unnamed)'}: type=0x{kind:02x} subtype=0x{subtype:02x} "
+          f"offset=0x{offset:x} size=0x{size:x} ({size // 1024} KiB)",
+          file=sys.stderr)
+    count += 1
+if not count:
+    raise SystemExit("ERROR: no ESP32 partition entries found")
+PY
+}
+
 parse_esp32_storage_layout_min_app_size() {
 	local layout="${1:-}" partition_text entry label size_kib size_bytes min_bytes=0
 	local -a entries=()
@@ -6588,6 +6629,7 @@ esp32_runtime_storage_preflight() {
 	[[ -n "$runtime_port" ]] || return 0
 	storage_layout="$(read_esp32_storage_layout "$runtime_port" 2>/dev/null || true)"
 	[[ -n "$storage_layout" ]] || return 0
+	echo "ESP32 running partition layout (read-only): $storage_layout"
 	partition_size="$(parse_esp32_storage_layout_min_app_size "$storage_layout" 2>/dev/null || true)"
 	payload_size="$(esp32_selected_app_payload_size "$firmware_file" "$layout" 2>/dev/null || true)"
 	[[ "$partition_size" =~ ^[0-9]+$ && "$payload_size" =~ ^[0-9]+$ ]] || return 0
@@ -6848,6 +6890,10 @@ read_esp32_app_partitions() {
 		partition_size="$(stat -c '%s' "$partition_file" 2>/dev/null || true)"
 		if [[ "$partition_size" != "4096" ]]; then
 			echo "ERROR: ESP32 partition-table read returned ${partition_size:-0} of 4096 bytes; refusing an unchecked app update." >&2
+			rm -f "$partition_file"
+			return 1
+		fi
+		if ! describe_esp32_partition_table "$partition_file"; then
 			rm -f "$partition_file"
 			return 1
 		fi
@@ -7675,7 +7721,7 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 		run_esp32_session_esptool "${DEVICE_PORT}" \
 			--after "$NORESET" --baud 115200 "$ERASEFLASH"
 		sleep 1
-		# S3 uses an explicit watchdog run/reset after the verified write. Native
+		# S3 uses an explicit hard reset after the verified write. Native
 		# USB also keeps the known ROM instance until its guarded finish step.
 		ESP32_WRITE_AFTER="$(esp32_write_after_mode "$DEVICE_PORT")"
 		run_esp32_session_esptool "${DEVICE_PORT}" \

@@ -27,6 +27,11 @@ function Resolve-Nrf52PrimaryUsbSelection {
 }
 function Resolve-LiveUsbComPort { param($PreferredComPort, $Purpose, $UsbIdentity, $IdentityTimeoutSec) return 'COM9' }
 function Resolve-EspUsbComPort { param($PreferredComPort, $Purpose, $UsbIdentity) return 'COM9' }
+function Get-EspRuntimeStorageLayout {
+    param($ComPort)
+    $script:events.Add('partition')
+    return 'int:esp32=16384K ext:none; app0*@0x10000+6400K,app1@0x650000+6400K'
+}
 function Get-MeshCoreBootloaderHintText { param($hw) return '' }
 function Test-UsbComPortIdentityMatch { param($Expected, $Actual) return $Expected.SerialNumber -eq $Actual.SerialNumber }
 function Start-Sleep { param($Seconds) }
@@ -45,6 +50,12 @@ function Invoke-NrfutilSerialDfu {
 }
 function installFlashViaEspTool { param($hw) $script:events.Add('write'); return $true }
 function updateFlashViaEspTool { param($hw) $script:events.Add('write'); return $true }
+function Complete-Esp32FlashSession {
+    param($ComPort, $UsbIdentity)
+    Assert-True ($UsbIdentity.SerialNumber -eq 'selected-radio') 'Reboot check lost USB identity.'
+    $script:events.Add('reboot-verified')
+    return 'COM9'
+}
 function Invoke-MeshCoreUsbBackup {
     param($ComPort, $UsbIdentity, $DeviceHint, $RoleHint)
     Assert-True ($ComPort -eq 'COM9') 'Backup did not use the live primary port.'
@@ -97,6 +108,7 @@ try {
             Assert-True ($result -eq $false) "$entry did not cancel."
             Assert-Order backup-prompt flash-confirm
             Assert-Order verify flash-confirm
+            if ($entry -eq 'flashESP32') { Assert-Order partition backup }
             if ($entry -eq 'flashMeshCoreNrf52') { Assert-Order backup action; Assert-Order action flash-confirm }
             Assert-True (-not $script:events.Contains('write')) "$entry wrote after cancellation."
             Assert-True (Test-Path -LiteralPath $hw.MeshCoreBackupPath) 'Cancelling removed the backup.'
@@ -109,6 +121,7 @@ try {
             Assert-True (-not $script:events.Contains('backup-prompt')) 'Same-node retry duplicated the backup prompt.'
             Assert-Order verify flash-confirm
             Assert-Order flash-confirm write
+            if ($entry -eq 'flashESP32') { Assert-Order write reboot-verified }
 
             Reset-Case partial $action @('y', '')
             $blocked = $false
@@ -145,6 +158,7 @@ try {
         Assert-True ($result -eq $true) 'Explicitly authorized update was blocked.'
         Assert-Order update-consent flash-confirm
         Assert-Order flash-confirm write
+        if ($entry -eq 'flashESP32') { Assert-Order write reboot-verified }
         Write-Host "PASS $entry backup-before-confirmation, cancellation, retry, skip, partial, and failure cases"
     }
 }

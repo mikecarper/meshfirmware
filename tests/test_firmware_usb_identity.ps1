@@ -206,6 +206,15 @@ Assert-True `
 Assert-True `
 	-Condition (-not (Test-UsbComPortIdentityMatch -Expected $pocketRuntime -Actual $pocketDfuChangedSerial)) `
 	-Message 'Different explicit serials incorrectly matched by USB location.'
+$g2Runtime = [pscustomobject]@{ SerialNumber = 'CC8DA2E96F34'; LocationPath = 'PCIROOT(0)#USBROOT(0)#USB(8)' }
+$g2Rom = [pscustomobject]@{ SerialNumber = 'CC:8D:A2:E9:6F:34'; LocationPath = 'PCIROOT(0)#USBROOT(0)#USB(8)' }
+$otherG2Rom = [pscustomobject]@{ SerialNumber = 'CC:8D:A2:E9:6F:35'; LocationPath = 'PCIROOT(0)#USBROOT(0)#USB(8)' }
+Assert-True `
+	-Condition (Test-UsbComPortIdentityMatch -Expected $g2Runtime -Actual $g2Rom) `
+	-Message 'ESP32 runtime/ROM MAC punctuation changed the selected USB identity.'
+Assert-True `
+	-Condition (-not (Test-UsbComPortIdentityMatch -Expected $g2Runtime -Actual $otherG2Rom)) `
+	-Message 'Different ESP32 chip MACs matched only by socket location.'
 Assert-True -Condition (Test-UsbIdentityIsNrf52Dfu -Identity $pocketDfu) -Message 'DFU mode was not recognized.'
 Assert-True -Condition (Test-UsbIdentityIsNrf52Dfu -Identity $t1000eDfu) -Message 'T1000-E 2886:0057 DFU mode was not recognized.'
 Assert-True -Condition (-not (Test-UsbIdentityIsNrf52Dfu -Identity $t1000eWrongPid)) -Message 'An unlisted Seeed USB PID was misidentified as T1000-E DFU mode.'

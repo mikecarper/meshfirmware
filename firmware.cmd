@@ -401,6 +401,8 @@ function get_esptool_cmd() {
 	$script:ESPTOOL_ERASE_FLASH = "erase_flash"
 	$script:ESPTOOL_READ_FLASH_STATUS = "read_flash_status"
 	$script:ESPTOOL_CHIP_ID = "chip_id"
+	$script:ESPTOOL_NO_RESET = "no_reset"
+	$script:ESPTOOL_HARD_RESET = "hard_reset"
 	if ($esptoolVersion -match '(?i)\besptool\s+v(\d+)') {
 		$majorVersion = [int]$matches[1]
 		if ($majorVersion -ge 5) {
@@ -408,6 +410,8 @@ function get_esptool_cmd() {
 			$script:ESPTOOL_ERASE_FLASH = "erase-flash"
 			$script:ESPTOOL_READ_FLASH_STATUS = "read-flash-status"
 			$script:ESPTOOL_CHIP_ID = "chip-id"
+			$script:ESPTOOL_NO_RESET = "no-reset"
+			$script:ESPTOOL_HARD_RESET = "hard-reset"
 		}
 	}
 	if ($pythonVersion) {
@@ -4418,6 +4422,79 @@ function ChooseMeshCoreFirmware {
 }
 
 
+function Get-EspRuntimeStorageLayout {
+	param([Parameter(Mandatory)][string]$ComPort)
+	$serialPort = [System.IO.Ports.SerialPort]::new($ComPort, 115200,
+		[System.IO.Ports.Parity]::None, 8, [System.IO.Ports.StopBits]::One)
+	$serialPort.DtrEnable = $false
+	$serialPort.RtsEnable = $false
+	$serialPort.ReadTimeout = 200
+	$serialPort.WriteTimeout = 1000
+	try {
+		$serialPort.Open()
+		Start-Sleep -Milliseconds 250
+		$serialPort.DiscardInBuffer()
+		$serialPort.Write("get storage.layout`r")
+		$reply = ''
+		$deadline = [DateTime]::UtcNow.AddSeconds(3)
+		while ([DateTime]::UtcNow -lt $deadline) {
+			$reply += $serialPort.ReadExisting()
+			$match = [regex]::Match($reply, 'int:esp32=[0-9]+K[^\r\n]*;[^\r\n]*')
+			if ($match.Success) { return $match.Value.Trim() }
+			Start-Sleep -Milliseconds 100
+		}
+		return ''
+	}
+	finally {
+		if ($serialPort.IsOpen) { $serialPort.Close() }
+		$serialPort.Dispose()
+	}
+}
+
+function Complete-Esp32FlashSession {
+	param(
+		[Parameter(Mandatory)][string]$ComPort,
+		[Parameter(Mandatory)][psobject]$UsbIdentity
+	)
+
+	$lastPort = $ComPort
+	$lastResolvedPort = ''
+	$resetAttempted = $false
+	for ($attempt = 0; $attempt -lt 8; $attempt++) {
+		try {
+			$lastPort = Resolve-EspUsbComPort -PreferredComPort $lastPort `
+				-UsbIdentity $UsbIdentity -TimeoutMs 2000 `
+				-Purpose 'ESP32 application reboot verification'
+			$lastResolvedPort = $lastPort
+			$layout = Get-EspRuntimeStorageLayout -ComPort $lastPort
+			if ($layout) {
+				Write-Host "ESP32 application returned on $lastPort`: $layout"
+				return $lastPort
+			}
+		}
+		catch {
+			# Native USB can disappear briefly between ROM and application modes.
+		}
+
+		if ($attempt -eq 1 -and -not $resetAttempted -and $lastResolvedPort) {
+			$resetAttempted = $true
+			$esptool = get_esptool_cmd
+			Write-Host "ESP32 application did not answer; hard-resetting $lastResolvedPort out of ROM mode."
+			try {
+				$resetExitCode = run_cmd "$esptool --baud 115200 --port $lastResolvedPort --before $script:ESPTOOL_NO_RESET --after $script:ESPTOOL_HARD_RESET run" -Stream
+			}
+			catch {
+				$resetExitCode = 1
+			}
+			if ($resetExitCode -ne 0) {
+				Write-Warning "ESP32 ROM hard-reset command failed on $lastResolvedPort (exit $resetExitCode); checking whether the application returned anyway."
+			}
+		}
+		Start-Sleep -Milliseconds 500
+	}
+	throw "ESP32 firmware was written, but its application did not answer on the selected USB device after reset. Check its boot log before reporting this flash as successful."
+}
+
 function flashESP32() {
     param(
         [Parameter(Mandatory)][pscustomobject]$hw      # must expose Architecture, SelectedFirmwareFile, selectedComPort/Drive
@@ -4443,16 +4520,56 @@ function flashESP32() {
 		$usbIdentity = Get-SelectedUsbIdentityForFlash -Hardware $hw
 		$hw.ComPort = Resolve-EspUsbComPort -PreferredComPort $hw.ComPort `
 			-UsbIdentity $usbIdentity -Purpose 'MeshCore USB backup'
+		$storageLayout = Get-EspRuntimeStorageLayout -ComPort $hw.ComPort
+		if ($storageLayout) {
+			Write-Host "ESP32 running partition layout (read-only): $storageLayout"
+		}
+		if ($strategy.SelectedMode -eq 'update') {
+			if (-not $storageLayout) {
+				throw 'Could not read ESP32 partition layout from the running firmware; refusing an unchecked app update.'
+			}
+			$appSlots = @([regex]::Matches($storageLayout,
+				'(?:app[0-9]+|ota_[0-9]+|factory)(\*)?@(0x[0-9a-fA-F]+)\+([0-9]+)K') |
+				ForEach-Object { [pscustomobject]@{
+					Active = $_.Groups[1].Success
+					Offset = $_.Groups[2].Value
+					Size = [int64]$_.Groups[3].Value * 1024
+				} })
+			if ($appSlots.Count -eq 0) {
+				throw 'ESP32 partition layout has no parseable application slot; refusing update.'
+			}
+			$activeSlots = @($appSlots | Where-Object { $_.Active })
+			if ($activeSlots.Count -ne 1) {
+				throw 'ESP32 partition layout does not identify exactly one active app slot; refusing update.'
+			}
+			$smallestApp = ($appSlots | Measure-Object -Property Size -Minimum).Minimum
+			$appBytes = (Get-Item -LiteralPath $hw.FirmwareFile).Length
+			Write-Host "ESP32 image: $appBytes bytes; smallest app slot: $smallestApp bytes."
+			if ($appBytes -gt $smallestApp) {
+				throw 'ESP32 app image does not fit the current partition layout; use the board-specific migration procedure.'
+			}
+			$updateOffsets = @($appSlots | Where-Object { -not $_.Active } |
+				ForEach-Object { $_.Offset }) + @($activeSlots[0].Offset)
+			$hw | Add-Member -NotePropertyName EspUpdateOffsets `
+				-NotePropertyValue ([string[]]$updateOffsets) -Force
+			Write-Host "ESP32 update order: $($updateOffsets -join ', ') (active slot last)."
+		}
 		$action = if ($strategy.SelectedMode -eq 'install') { 'flash-wipe' } else { 'flash-update' }
 		$null = Request-MeshCoreUsbBackupBeforeFlash -Hardware $hw -ComPort $hw.ComPort `
 			-UsbIdentity $usbIdentity -Action $action
 		if (-not (Confirm-MeshCoreFlash -Hardware $hw -Action $action)) { return $false }
 	}
 
-	if ($strategy.SelectedMode -eq 'install') {
-		return (installFlashViaEspTool $hw)
+	$written = if ($strategy.SelectedMode -eq 'install') {
+		installFlashViaEspTool $hw
+	} else {
+		updateFlashViaEspTool $hw
 	}
-	return (updateFlashViaEspTool $hw)
+	if (-not $written) { return $false }
+	if ($hw.Project -eq 'MeshCore') {
+		$hw.ComPort = Complete-Esp32FlashSession -ComPort $hw.ComPort -UsbIdentity $usbIdentity
+	}
+	return $true
 }
 
 function updateFlashViaEspTool {
@@ -4534,10 +4651,14 @@ function updateFlashViaEspTool {
 		-UsbIdentity $usbIdentity `
 		-TimeoutMs 12000 `
 		-Purpose "ESP32 firmware update after 1200-baud reset"
-	Write-Host "Flashing $SelectedFirmwareFile at 0x10000. Write application firmware."
-	Write-Host "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $WriteFlashCommand 0x10000 $SelectedFirmwareFile"
+	$updateOffsets = if ($hw.PSObject.Properties['EspUpdateOffsets']) {
+		@($hw.EspUpdateOffsets)
+	} else { @('0x10000') }
+	$writePairs = ($updateOffsets | ForEach-Object { "$_ `"$SelectedFirmwareFile`"" }) -join ' '
+	Write-Host "Flashing $SelectedFirmwareFile to app slot(s): $($updateOffsets -join ', ')."
+	Write-Host "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $WriteFlashCommand $writePairs"
 	Write-Host ""
-	$writeExitCode = run_cmd "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $WriteFlashCommand 0x10000 $SelectedFirmwareFile" -Stream
+	$writeExitCode = run_cmd "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $WriteFlashCommand $writePairs" -Stream
 	if ($writeExitCode -ne 0) {
 		throw "ESP32 application firmware write failed on $selectedComPortPart2 with exit code $writeExitCode."
 	}
@@ -5356,7 +5477,16 @@ function Test-UsbComPortIdentityMatch {
 		# Two explicitly reported but different serial numbers are an identity
 		# conflict. Do not override that conflict with a matching USB location;
 		# doing so could flash a different radio swapped into the same socket.
-		return $expectedSerial.Equals($actualSerial, [System.StringComparison]::OrdinalIgnoreCase)
+		if ($expectedSerial.Equals($actualSerial, [System.StringComparison]::OrdinalIgnoreCase)) {
+			return $true
+		}
+		# ESP32-S3 application CDC uses a bare chip MAC while its ROM USB/JTAG
+		# descriptor writes the same MAC with colons. Keep requiring all 12 digits.
+		$expectedMac = $expectedSerial -replace '[:\-]', ''
+		$actualMac = $actualSerial -replace '[:\-]', ''
+		return ($expectedMac -match '^[0-9a-fA-F]{12}$' -and
+			$actualMac -match '^[0-9a-fA-F]{12}$' -and
+			$expectedMac.Equals($actualMac, [System.StringComparison]::OrdinalIgnoreCase))
 	}
 
 	$expectedLocation = [string]$Expected.LocationPath

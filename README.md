@@ -81,6 +81,42 @@ backup. Use `--allow-mode-switch` for this behavior with the Python helper.
 
 Linux regression check: `bash tests/test_mcfirmware_backup_integration.sh`.
 
+## Check ESP32 partitions before an update
+
+On a running MeshCore Station G2, open its USB serial console at 115200 baud
+and enter `get storage.layout`. This is read-only and reports flash size,
+the active app slot (`*`), both app slot offsets and sizes, NVS, and the
+filesystem. For example, Bellevue's expanded 16 MB layout reports
+`app0@0x10000+6400K,app1@0x650000+6400K`. An app-only `.bin` must fit in
+the smallest app slot; use the partition migration procedure only if the
+existing slots cannot hold it. A merged `.bin` replaces the partition table
+and is a new install, not an in-place app update.
+
+If the application does not answer, put the ESP32 into its ROM download mode
+and read the physical table without erasing or writing:
+
+```bash
+esptool --chip esp32s3 --port /dev/serial/by-id/YOUR_DEVICE \
+  read-flash 0x8000 0x1000 partitions.bin
+```
+
+With esptool 4, use `esptool.py` and `read_flash` instead. On native USB,
+the ROM device may enumerate with a different by-id name; verify its MAC
+address before using that port.
+
+Both flashers print the running `get storage.layout` reply before a MeshCore
+ESP32 update. They refuse an app-only image that exceeds the smallest reported
+app slot. `mcfirmware.sh` also reads and prints the physical table at `0x8000`
+before selecting any app write offset, and stops if the table is incomplete
+or the image does not fit. `firmware.cmd` requires a readable running layout
+before its app-only update; use the ROM download-mode command above if the
+application is unresponsive.
+
+After writing, the flashers confirm that the selected ESP32 returns as a
+running application. If it stays in ROM download mode, they issue an esptool
+hard reset and check the application serial console again. A verified flash
+write alone is not reported as a successful update when the app never starts.
+
 ## MeshCore USB backup dependencies
 
 Before a logical USB backup, both flashers display the selected Python

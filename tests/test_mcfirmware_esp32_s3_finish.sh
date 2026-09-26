@@ -50,7 +50,6 @@ touch "$uart_port" "$native_port" "$expected_runtime_port"
 
 NORESET="no-reset"
 HARDRESET="hard-reset"
-WATCHDOGRESET="watchdog-reset"
 READMAC="read-mac"
 ESP32_PROBE_TIMEOUT_SECONDS=12
 ESP32_FLASH_SELECTED_BY_ID="${tmp_dir}/by-id-v4"
@@ -75,28 +74,28 @@ ESP32_SESSION_IS_S3=1
 ESP32_OPERATION_BEFORE="default-reset"
 [[ "$(esp32_write_after_mode "$uart_port")" == "no-reset" ]]
 finish_esp32_flash_session "$uart_port" >"${tmp_dir}/uart-finish-output"
-grep -Fxq -- "--port $uart_port --before default-reset --after watchdog-reset run" \
+grep -Fxq -- "--port $uart_port --before default-reset --after hard-reset run" \
 	"$operation_log"
 [[ ! -e "$invoke_log" ]] || {
-	echo "FAIL: S3 UART finish used the legacy hard-reset command" >&2
+	echo "FAIL: S3 UART finish used the legacy fallback command" >&2
 	exit 1
 }
-grep -Fq 'operation complete; exiting the stub with a watchdog reset' \
+grep -Fq 'operation complete; hard-resetting out of the ROM stub' \
 	"${tmp_dir}/uart-finish-output"
-echo "PASS: ESP32-S3 UART exits the stub with watchdog-reset run"
+echo "PASS: ESP32-S3 UART exits the stub with hard-reset run"
 
 : >"$operation_log"
 ESP32_OPERATION_BEFORE="no-reset"
 DEVICE_PORT=""
 [[ "$(esp32_write_after_mode "$native_port")" == "no-reset" ]]
 finish_esp32_flash_session "$native_port" >"${tmp_dir}/native-s3-finish-output"
-grep -Fxq -- "--port $native_port --before no-reset --after watchdog-reset run" \
+grep -Fxq -- "--port $native_port --before no-reset --after hard-reset run" \
 	"$operation_log"
 [[ "$DEVICE_PORT" == "$expected_runtime_port" ]] || {
-	echo "FAIL: native S3 watchdog reset did not follow the runtime USB identity" >&2
+	echo "FAIL: native S3 hard reset did not follow the runtime USB identity" >&2
 	exit 1
 }
-echo "PASS: native ESP32-S3 uses watchdog reset and follows re-enumeration"
+echo "PASS: native ESP32-S3 uses hard reset and follows re-enumeration"
 
 : >"$operation_log"
 : >"$invoke_log"
