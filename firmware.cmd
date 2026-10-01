@@ -53,8 +53,8 @@ $KEYMIND_RAW_BASE_URL = "https://raw.githubusercontent.com/mikecarper/MeshCore/k
 $KEYMIND_CASCADE_FALLBACK_URL = "$KEYMIND_RAW_BASE_URL/mesh-america/keymind-cascade-v1.16.0-provider.json"
 $KEYMIND_CASCADE_LOGGING_FALLBACK_URL = "$KEYMIND_RAW_BASE_URL/mesh-america/keymind-cascade-logging-v1.16.0-provider.json"
 $MESHCORE_BACKUP_TOOL_URL = "https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_backup.py"
-$MESHCORE_BACKUP_TOOL_VERSION = '0.2.2'
-$MESHCORE_BACKUP_TOOL_SHA256 = 'b7c273497a207310e58ca6c04c0eac1ac0687e5c868464c62b9b214b01071aa4'
+$MESHCORE_BACKUP_TOOL_VERSION = '0.2.3'
+$MESHCORE_BACKUP_TOOL_SHA256 = 'b4a957e05ea3c00be7f46ddb6269874e4167c8f5bf42976487425696af2140cd'
 
 $timeoutMeshtastic = 10 # Timeout duration in seconds
 $baud = 1200 # 115200
@@ -3145,6 +3145,21 @@ function GetHW() {
 	Write-Host "Selected target: $selectedNodeProject" -ForegroundColor Green
 
 	SetProjectVars $selectedNodeProject
+	if ($selectedNodeProject -eq 'MeshCore' -and $selectedComPort -ne 'NA') {
+		$backupOnlyChoice = Read-Host 'Back up this MeshCore node only (no firmware selection or flash)? [y/N]'
+		if (([string]$backupOnlyChoice).Trim() -match '^(?i:y(?:es)?)$') {
+			Write-Progress -Activity ' ' -Status ' ' -Completed
+			return [pscustomobject]@{
+				ComPort = $selectedComPort
+				HWNameFile = $hwModelSlug
+				Role = 'auto'
+				Architecture = ''
+				Project = 'MeshCore'
+				UsbIdentity = $selectedUsbIdentity
+				BackupOnly = $true
+			}
+		}
+	}
 
 	if ($selectedNodeProject -eq "Meshtastic") {
 		MT_UpdateHardwareList
@@ -5245,9 +5260,12 @@ function Get-MeshCoreNrf52FlashAction {
 
 	$sel = Prompt-Menu `
 		-Title "Choose firmware action for $($hw.HWNameFile) on $($hw.ComPort):" `
-		-Options @("flash-update       (write only)", "flash-wipe + flash (erase, then write)") `
+		-Options @("flash-update       (write only)", "flash-wipe + flash (erase, then write)", "backup only         (do not flash)") `
 		-Prompt "Choice"
 
+	if ($sel.Index -eq 3) {
+		return 'backup-only'
+	}
 	if ($sel.Index -eq 2) {
 		return 'flash-wipe'
 	}
@@ -6868,12 +6886,30 @@ function Request-MeshCoreUsbBackupBeforeFlash {
 		return $true
 	}
 
+	# A DFU bootloader can accept firmware, but cannot answer the running
+	# companion's logical-backup API. Identify the selected physical radio
+	# before offering a backup that cannot succeed; leave flash consent intact.
+	$currentIdentity = Get-UsbComPortIdentity -ComPort $ComPort
+	if ($null -ne $currentIdentity -and
+		(Test-UsbComPortIdentityMatch -Expected $UsbIdentity -Actual $currentIdentity) -and
+		(Test-UsbIdentityIsNrf52Dfu -Identity $currentIdentity)) {
+		Write-Warning "$ComPort is already in nRF52 DFU mode. A MeshCore logical USB backup cannot be made from the bootloader; it requires the running MeshCore firmware. No backup was attempted. If the application can start, restart into it and rerun to back up first."
+		$result = [pscustomobject]@{ Requested = $false; Verified = $false; SafeForWipe = $false; Unavailable = $true }
+		if ($Action -eq 'backup-only') { return $result }
+		return (Confirm-MeshCoreUsbBackupForAction -BackupResult $result -Action $Action)
+	}
+
 	Write-Host ''
 	Write-Host 'The logical backup uses the existing MeshCore USB APIs (nRF52 and ESP32).'
 	Write-Host 'It includes private identity and channel secrets when exposed by the current role and firmware.' -ForegroundColor Yellow
 	Write-Host 'The archive is stored beside firmware.cmd as mc.config_backup.<device>.<port>.<timestamp>.json.' -ForegroundColor Yellow
+	$backupPrompt = if ($Hardware.BackupOnly) {
+		'Create and verify a logical USB backup now? [Y/n]'
+	} else {
+		'Create and verify a logical USB backup before flashing? [Y/n]'
+	}
 	do {
-		$choice = Read-Host 'Create and verify a logical USB backup before flashing? [Y/n]'
+		$choice = Read-Host $backupPrompt
 		$normalizedChoice = ([string]$choice).Trim()
 		$validChoice = [string]::IsNullOrWhiteSpace($normalizedChoice) -or
 			$normalizedChoice -match '^(?i:y(?:es)?|n(?:o)?)$'
@@ -6892,7 +6928,7 @@ function Request-MeshCoreUsbBackupBeforeFlash {
 				-ComPort $ComPort `
 				-UsbIdentity $UsbIdentity `
 				-DeviceHint ([string]$Hardware.HWNameFile) `
-				-RoleHint 'auto'
+				-RoleHint ([string]$Hardware.Role)
 		}
 		catch {
 			Write-Warning "MeshCore USB backup failed: $($_.Exception.Message)"
@@ -6964,7 +7000,7 @@ function Confirm-MeshCoreUsbBackupForAction {
 			throw 'MeshCore flash-wipe aborted because no complete verified backup is available.'
 		}
 	}
-	elseif ($BackupResult.Requested) {
+	elseif ($BackupResult.Requested -or $BackupResult.Unavailable) {
 		$continue = Read-Host 'Continue the write-only update without a complete backup? [y/N]'
 		if ($continue.Trim() -notmatch '^y(?:es)?$') {
 			throw 'MeshCore flash-update aborted because the requested backup did not complete.'
@@ -7013,6 +7049,15 @@ function flashMeshCoreNrf52 {
 		-UsbIdentity $usbIdentity `
 		-Action 'backup-only'
 	$action = Get-MeshCoreNrf52FlashAction -hw $hw
+	if ($action -eq 'backup-only') {
+		if ($backupResult.Verified) {
+			Write-Host "Backup-only complete: $($hw.MeshCoreBackupPath)" -ForegroundColor Green
+		}
+		else {
+			Write-Warning 'No verified backup was created. No firmware was written.'
+		}
+		return 'backup-only'
+	}
 	$null = Confirm-MeshCoreUsbBackupForAction -BackupResult $backupResult -Action $action
 	if (-not (Confirm-MeshCoreFlash -Hardware $hw -Action $action)) { return $false }
 	Write-Host "Running $action..."
@@ -7062,6 +7107,25 @@ function flashMeshCoreNrf52 {
 	return $true
 }
 
+function Invoke-MeshCoreBackupOnly {
+	param([Parameter(Mandatory)][pscustomobject]$hw)
+
+	if ($null -eq $hw.UsbIdentity) {
+		throw "Could not identify the selected USB radio on $($hw.ComPort); no backup was attempted."
+	}
+	$hw.ComPort = Resolve-LiveUsbComPort -PreferredComPort $hw.ComPort `
+		-Purpose 'MeshCore backup only' -UsbIdentity $hw.UsbIdentity -IdentityTimeoutSec 45
+	$result = Request-MeshCoreUsbBackupBeforeFlash -Hardware $hw -ComPort $hw.ComPort `
+		-UsbIdentity $hw.UsbIdentity -Action 'backup-only'
+	if ($result.Verified) {
+		Write-Host "Backup-only complete: $($hw.MeshCoreBackupPath)" -ForegroundColor Green
+	}
+	else {
+		Write-Warning 'No verified backup was created. No firmware was written.'
+	}
+	return 'backup-only'
+}
+
 
 function InvokeFlash {
     param(
@@ -7071,7 +7135,10 @@ function InvokeFlash {
 
 	try {
 		$result = $null
-		if ($hw.Architecture -like '*esp32*') {
+		if ($hw.Project -eq 'MeshCore' -and $hw.BackupOnly) {
+			$result = Invoke-MeshCoreBackupOnly -hw $hw
+		}
+		elseif ($hw.Architecture -like '*esp32*') {
 			$result = flashESP32 -hw $hw
 		}
 		elseif ($hw.Project -eq "Meshtastic" -and $hw.Architecture -like '*nrf52*') {
@@ -7087,11 +7154,15 @@ function InvokeFlash {
 		if ($false -eq $result) {
 			return $false
 		}
+		if ($result -eq 'backup-only') {
+			return 'backup-only'
+		}
 
 		Write-Host "Flash completed."
 	}
 	catch {
-		Write-Warning "Flash failed: $_"
+		$operation = if ($hw.BackupOnly) { 'Backup' } else { 'Flash' }
+		Write-Warning "$operation failed: $_"
 		return $false
 	}
 	finally {
@@ -7110,6 +7181,7 @@ $hw = GetHW
 $again = $true
 while ($again) {
 	$x = InvokeFlash $hw
+	if ($x -eq 'backup-only') { break }
 	
 	if ($hw.Architecture -like 'esp32*' -or $hw.Architecture -like 'nrf52*') {
 		$choice = Read-Host "`nEverything OK?  [Y]es / [R]etry / change [C]OM port / [E]xit"

@@ -46,7 +46,7 @@ from typing import Any, Awaitable, Callable, Mapping, Optional
 
 SCHEMA = "org.meshfirmware.meshcore-backup/v1"
 ARCHIVE_KIND = "meshcore-logical-usb"
-TOOL_VERSION = "0.2.2"
+TOOL_VERSION = "0.2.3"
 MIN_MESHCORE_VERSION = (2, 3, 9)
 MIN_MESHCORE_CLI_VERSION = (1, 6, 3)
 MIN_PYNACL_VERSION = (1, 5, 0)
@@ -996,12 +996,36 @@ async def collect_text_cli(request: BackupRequest, cli_module: Any = None) -> di
         except (ImportError, ModuleNotFoundError) as exc:
             raise BackupError(ExitCode.DEPENDENCY, "meshcore-cli is not installed") from exc
 
-    serial_port = await cli_module.setup_repeater_serial(request.port, request.baud)
+    serial_port = None
+    open_diagnostic = ""
+    # The binary companion probe closes its async transport on failure, but
+    # Windows may not release the COM handle before this fallback opens it.
+    # Retry briefly without changing the node's mode or resetting its port.
+    retry_delays = (0.2, 0.5, 1.0)
+    for attempt in range(len(retry_delays) + 1):
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            serial_port = await cli_module.setup_repeater_serial(request.port, request.baud)
+        if serial_port is not None:
+            break
+        open_diagnostic = ANSI_RE.sub("", captured.getvalue()).strip()
+        if attempt < len(retry_delays):
+            await asyncio.sleep(retry_delays[attempt])
     if serial_port is None:
-        raise BackupError(ExitCode.UNSUPPORTED, "CommonCLI serial connection failed")
+        detail = f": {open_diagnostic}" if open_diagnostic else ""
+        raise BackupError(
+            ExitCode.UNSUPPORTED,
+            f"CommonCLI serial connection failed on {request.port}{detail}",
+        )
     try:
         replies: dict[str, dict[str, Any]] = {}
-        for command in ("ver", "get role", "get public.key", "get prv.key", *TEXT_SETTINGS, "get acl", "region"):
+        ok, text = await _meshcore_cli_query(cli_module, serial_port, "get public.key")
+        if not HEX_32_RE.search(text):
+            # A binary companion can accept text on the port without answering
+            # CommonCLI. Do not wait through every other text query in that case.
+            raise BackupError(ExitCode.UNSUPPORTED, "device did not answer as CommonCLI")
+        replies["get public.key"] = {"ok": ok, "text": text}
+        for command in ("ver", "get role", "get prv.key", *TEXT_SETTINGS, "get acl", "region"):
             ok, text = await _meshcore_cli_query(cli_module, serial_port, command)
             replies[command] = {"ok": ok, "text": text}
         _, final_public_text = await _meshcore_cli_query(cli_module, serial_port, "get public.key")
@@ -1758,8 +1782,8 @@ async def create_backup(
         if request.role_hint in ("repeater", "room-server", "sensor")
         else (try_companion, try_text)
     )
-    first_error: Optional[BackupError] = None
-    for probe in probes:
+    errors: list[BackupError] = []
+    for index, probe in enumerate(probes):
         try:
             payload = await probe()
             break
@@ -1768,10 +1792,17 @@ async def create_backup(
             # same port through another protocol.
             if exc.code in (ExitCode.NODE_IDENTITY, ExitCode.USB_IDENTITY):
                 raise
-            if first_error is None:
-                first_error = exc
+            errors.append(exc)
+            if index + 1 < len(probes):
+                await asyncio.sleep(0.2)  # let an async serial close release COM
     else:
-        raise first_error or BackupError(ExitCode.UNSUPPORTED, "no supported MeshCore USB API responded")
+        detail = "; ".join(error.reason for error in errors)
+        raise BackupError(
+            ExitCode.DEPENDENCY if any(error.code == ExitCode.DEPENDENCY for error in errors)
+            else ExitCode.UNSUPPORTED,
+            f"no supported MeshCore USB API responded on {request.port}: {detail}"
+            if detail else "no supported MeshCore USB API responded",
+        )
 
     archive = make_archive(payload)
     path = _choose_output_path(request, payload)

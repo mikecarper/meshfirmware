@@ -192,18 +192,25 @@ class FakeSerial:
 
 
 class FakeTextCli:
-    def __init__(self, *, connect=True):
+    def __init__(self, *, connect=True, open_failures=0, public_key=PUBLIC_KEY):
         self.connect = connect
+        self.open_failures = open_failures
+        self.open_attempts = 0
+        self.public_key = public_key
         self.serial = FakeSerial()
         self.commands = []
 
     async def setup_repeater_serial(self, port, baud):
+        self.open_attempts += 1
+        if self.open_attempts <= self.open_failures:
+            print("Error opening serial port: Access is denied.")
+            return None
         return self.serial if self.connect else None
 
     async def process_repeater_line(self, serial_port, command, echo=False):
         self.commands.append(command)
         if command == "get public.key":
-            print(f"  -> > {PUBLIC_KEY}")
+            print(f"  -> > {self.public_key}")
         elif command == "get prv.key":
             print(f"  -> > {PRIVATE_KEY}")
         elif command == "get role":
@@ -545,6 +552,33 @@ class MeshCoreBackupTests(unittest.TestCase):
                 archive["payload"]["source"]["capture_api"],
                 "meshcore-cli-common-cli",
             )
+
+    def test_repeater_probe_retries_transient_windows_port_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            text_cli = FakeTextCli(open_failures=3)
+
+            async def no_companion(_request):
+                self.fail("repeater hint should probe CommonCLI first")
+
+            outcome = run(
+                backup.create_backup(
+                    self.make_request(directory, role_hint="repeater"),
+                    companion_connector=no_companion,
+                    text_cli_module=text_cli,
+                )
+            )
+            self.assertEqual(outcome.role, "repeater")
+            self.assertEqual(text_cli.open_attempts, 4)
+            self.assertTrue(text_cli.serial.closed)
+
+    def test_common_cli_rejects_binary_node_after_first_text_query(self):
+        with tempfile.TemporaryDirectory() as directory:
+            text_cli = FakeTextCli(public_key="not-a-key")
+            with self.assertRaises(backup.BackupError) as raised:
+                run(backup.collect_text_cli(self.make_request(directory), text_cli))
+            self.assertEqual(raised.exception.code, backup.ExitCode.UNSUPPORTED)
+            self.assertEqual(text_cli.commands, ["get public.key"])
+            self.assertTrue(text_cli.serial.closed)
 
     def test_tamper_detection_and_overwrite_protection(self):
         with tempfile.TemporaryDirectory() as directory:
