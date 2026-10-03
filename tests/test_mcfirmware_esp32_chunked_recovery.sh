@@ -57,6 +57,7 @@ ESP32_FLASH_RECOVERY_CHUNK_BYTES=16384
 
 selected_flash_serial_port() { printf '%s\n' "$fixture_live_port"; }
 esp32_port_uses_native_usb() { return 0; }
+esp32_native_usb_mode() { printf '%s\n' hardware_jtag; }
 raw_esptool_mac_probe() {
 	printf '%s\n' "$*" >>"$recovery_log"
 	return 0
@@ -157,3 +158,45 @@ if esptool_output_transport_interrupted 'A fatal error occurred: invalid image h
 fi
 
 echo "PASS: interrupted ESP32 writes recover in identity-gated verified chunks"
+
+# A hardware/JTAG reset timeout may leave a different USB mode at the same
+# identity. The no-reset fallback must classify it again before sending SLIP.
+reset_failed_marker="${tmp_dir}/reset-failed.marker"
+ESP32_FLASH_RECOVERY_ATTEMPTS=1
+sleep() { return 0; }
+esp32_native_usb_mode() {
+	if [[ -e "$reset_failed_marker" ]]; then
+		printf '%s\n' "$fixture_candidate_mode"
+	else
+		printf '%s\n' hardware_jtag
+	fi
+}
+raw_esptool_mac_probe() {
+	printf '%s\n' "$*" >>"$recovery_log"
+	if [[ " $* " == *' --before usb-reset '* ]]; then
+		: >"$reset_failed_marker"
+		return 42
+	fi
+	return 0
+}
+for fixture_candidate_mode in tinyusb unknown; do
+	rm -f -- "$reset_failed_marker"
+	: >"$recovery_log"
+	ESP32_NATIVE_ROM_READY=1
+	if esp32_recover_interrupted_transport "$live_port" \
+		>"${tmp_dir}/candidate-mode.out" 2>"${tmp_dir}/candidate-mode.err"; then
+		echo 'FAIL: non-hardware recovery candidate authorized another write' >&2
+		exit 1
+	fi
+	[[ "$ESP32_NATIVE_ROM_READY" -eq 0 && "$(wc -l <"$recovery_log")" -eq 1 ]]
+	! grep -q -- '--before no-reset' "$recovery_log"
+done
+echo 'PASS: interrupted hardware-reset recovery reclassifies candidates before no-reset SLIP'
+
+rm -f -- "$reset_failed_marker"
+: >"$recovery_log"
+fixture_candidate_mode=hardware_jtag
+esp32_recover_interrupted_transport "$live_port" >"${tmp_dir}/hardware-candidate.out"
+[[ "$ESP32_NATIVE_ROM_READY" -eq 1 && "$(wc -l <"$recovery_log")" -eq 2 ]]
+grep -Fq -- '--before no-reset' "$recovery_log"
+echo 'PASS: a proven hardware/JTAG recovery candidate retains the bounded no-reset fallback'

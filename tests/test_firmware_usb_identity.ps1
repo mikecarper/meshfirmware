@@ -53,6 +53,10 @@ foreach ($functionName in @(
 	'Get-UsbIdentityDisplayText',
 	'Resolve-UsbComPortForIdentity',
 	'Resolve-EspUsbComPort',
+	'Get-EspUsbBootloaderStrategy',
+	'Get-Esp32RomBeforeMode',
+	'Get-Esp32WriteAfterMode',
+	'Assert-Esp32FinishCapability',
 	'Install-SimpleMergedEspImage',
 	'Resolve-Nrf52PrimaryUsbSelection',
 	'Resolve-LiveUsbComPort',
@@ -649,7 +653,7 @@ foreach ($functionName in @('updateFlashViaEspTool', 'Install-SimpleMergedEspIma
 	$resolverCalls = @($definition.FindAll({
 		param($node)
 		$node -is [System.Management.Automation.Language.CommandAst] -and
-		$node.GetCommandName() -eq 'Resolve-EspUsbComPort'
+		$node.GetCommandName() -in @('Resolve-EspUsbComPort', 'Enter-Esp32Bootloader', 'Assert-Esp32RomChipIdentity')
 	}, $true))
 	Assert-True `
 		-Condition ($resolverCalls.Count -ge 2) `
@@ -713,7 +717,20 @@ function get_esptool_cmd {
 	$script:ESPTOOL_ERASE_FLASH = 'erase_flash'
 	$script:ESPTOOL_WRITE_FLASH = 'write_flash'
 	$script:ESPTOOL_CHIP_ID = 'chip_id'
+	$script:ESPTOOL_NO_RESET = 'no_reset'
+	$script:ESPTOOL_HARD_RESET = 'hard_reset'
+	$script:ESPTOOL_DEFAULT_RESET = 'default_reset'
 	return 'esptool'
+}
+function Enter-Esp32Bootloader {
+	param($ComPort, $UsbIdentity, $EspToolCommand)
+	$script:espCommands += "HANDOFF --port $ComPort"
+	return $ComPort
+}
+function Assert-Esp32RomChipIdentity {
+	param($ComPort, $UsbIdentity, $EspToolCommand, $Purpose)
+	return (Resolve-EspUsbComPort -PreferredComPort $ComPort `
+		-UsbIdentity $UsbIdentity -TimeoutMs 12000 -Purpose $Purpose)
 }
 $script:espCommands = @()
 function run_cmd {
@@ -733,9 +750,27 @@ foreach ($resolverCall in $script:espResolveCalls) {
 		-Message 'Merged ESP32 install lost the selected V4 identity during COM resolution.'
 }
 Assert-Equal -Expected 3 -Actual $script:espCommands.Count -Message 'Merged ESP32 install issued an unexpected command count.'
-Assert-True -Condition ($script:espCommands[0] -match '--port COM7 chip_id') -Message 'ESP32 reset did not start on the selected live V4 port.'
-Assert-True -Condition ($script:espCommands[1] -match '--port COM22 erase_flash') -Message 'ESP32 erase did not follow the selected V4 after its first COM change.'
-Assert-True -Condition ($script:espCommands[2] -match '--port COM24 write_flash 0x00') -Message 'ESP32 merged write did not follow the selected V4 after erase.'
+Assert-True -Condition ($script:espCommands[0] -match 'HANDOFF --port COM7') -Message 'ESP32 handoff did not start on the selected live V4 port.'
+Assert-True -Condition ($script:espCommands[1] -match '--port COM22 --before no_reset --after no_reset erase_flash') -Message 'ESP32 erase did not follow the selected V4 in ROM mode after its first COM change.'
+Assert-True -Condition ($script:espCommands[2] -match '--port COM24 --before no_reset --after hard_reset write_flash 0x00') -Message 'ESP32 merged write did not follow the selected V4 after erase.'
+
+# UART bridges need their qualified default reset on each esptool reopen,
+# including both destructive phases. Native USB retains no-reset instead.
+$uartIdentity = [pscustomobject]@{
+	SerialNumber = 'UART-BRIDGE-01'
+	LocationPath = 'PCIROOT(0)#USBROOT(0)#USB(9)'
+	ParentInstanceId = 'USB\VID_10C4&PID_EA60\UART-BRIDGE-01'
+	BusReportedDescription = 'Silicon Labs CP2102 USB to UART Bridge Controller'
+	InterfaceNumber = ''
+}
+$script:espResolveCalls = @()
+$script:espCommands = @()
+$null = Install-SimpleMergedEspImage -ImagePath $firmwarePath `
+	-ComPort 'COM7' -UsbIdentity $uartIdentity
+Assert-True -Condition ($script:espCommands[1] -match '--before default_reset --after no_reset erase_flash') `
+	-Message 'UART erase omitted its qualified default-reset on reopen.'
+Assert-True -Condition ($script:espCommands[2] -match '--before default_reset --after hard_reset write_flash') `
+	-Message 'UART merged write omitted its qualified default-reset on reopen.'
 
 # A failed erase is terminal: do not re-resolve or write an image after esptool
 # says the destructive prerequisite did not complete.
@@ -801,7 +836,7 @@ catch {
 Assert-True -Condition $writeFailureRejected -Message 'Merged ESP32 install reported success after write failure.'
 Assert-Equal -Expected 3 -Actual $script:espCommands.Count -Message 'Merged ESP32 write-failure orchestration issued an unexpected command count.'
 
-# If the selected identity disappears after the 1200-baud command, abort before
+# If the selected identity disappears after the bootloader handoff, abort before
 # erase rather than substituting one of the other attached radios.
 $script:espResolveCalls = @()
 function Resolve-EspUsbComPort {
@@ -828,7 +863,7 @@ catch {
 }
 Assert-True -Condition $missingAfterTouchRejected -Message 'Merged ESP32 install did not fail closed when the selected V4 disappeared after touch.'
 Assert-Equal -Expected 1 -Actual $script:espCommands.Count -Message 'Merged ESP32 install issued erase/write after losing the selected identity.'
-Assert-True -Condition ($script:espCommands[0] -match 'chip_id') -Message 'Unexpected command ran before the missing post-touch identity was rejected.'
+Assert-True -Condition ($script:espCommands[0] -match '^HANDOFF') -Message 'Unexpected command ran before the missing post-handoff identity was rejected.'
 
 # Full Companion interface 00 can already be in framed Binary mode when the
 # inventory probe opens it. Verify the bounded control-line handoff recognizes

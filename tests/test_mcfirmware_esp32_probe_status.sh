@@ -133,6 +133,8 @@ udev_device_property() {
 nrf52_usb_path_stem() { printf '%s\n' "$1"; }
 nrf52_port_instance() { printf '%s\n' instance-uart; }
 esp32_port_uses_native_usb() { return 1; }
+esp32_native_usb_mode() { printf '%s\n' hardware_jtag; }
+verify_esp32_mac_matches_usb_serial() { return 0; }
 raw_esptool_mac_probe() { return 1; }
 uart_probe_args=""
 probe_esptool_mac() {

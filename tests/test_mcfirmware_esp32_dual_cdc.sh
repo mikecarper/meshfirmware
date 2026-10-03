@@ -19,6 +19,7 @@ extract_function() {
 
 for function_name in \
 	selected_flash_serial_port prepare_esp32_flash_session finish_esp32_flash_session \
+	esp32_require_native_s3_watchdog_reset \
 	offer_identity_safe_1200_touch offer_serial_port_recovery; do
 	definition="$(extract_function "$function_name")"
 	[[ "$definition" == "${function_name}() {"* ]] || {
@@ -87,6 +88,19 @@ nrf52_usb_path_stem() { printf '%s\n' "$1"; }
 nrf52_port_instance() { printf 'instance-%s\n' "$(basename "$1")"; }
 serial_port_has_secondary_cdc() { [[ "$1" == "$primary_port" ]]; }
 esp32_port_uses_native_usb() { [[ "$1" == "$primary_port" || "$1" == "$rom_port" ]]; }
+fixture_candidate_mode=hardware_jtag
+fixture_post_touch_mode=hardware_jtag
+usb_reset_attempted=0
+esp32_native_usb_mode() {
+	if [[ "$1" == "$rom_port" ]]; then
+		printf '%s\n' "$fixture_post_touch_mode"
+	elif (( usb_reset_attempted && ! usb_reset_succeeds )); then
+		printf '%s\n' "$fixture_candidate_mode"
+	else
+		printf '%s\n' hardware_jtag
+	fi
+}
+verify_esp32_mac_matches_usb_serial() { return 0; }
 
 touched_port=""
 rom_ready=0
@@ -124,6 +138,7 @@ raw_esptool_mac_probe() {
 		previous="$arg"
 	done
 	if [[ "$before" == "$USBRESET" ]]; then
+		usb_reset_attempted=1
 		probe_modes+=("$before")
 		usb_reset_invocation="$*"
 		if (( usb_reset_succeeds )); then
@@ -261,6 +276,50 @@ prepare_esp32_flash_session "$logging_port" "Heltec V4"
 	exit 1
 }
 echo "PASS: a dropped matched-ROM probe recovers the same USB identity"
+
+# An unsuccessful hardware reset may return software TinyUSB or an unknown
+# descriptor. Only proven hardware USB/JTAG may get a fallback SLIP probe or
+# the legacy touch; VID/PID and a matched tty alone do not authorize them.
+for fixture_candidate_mode in tinyusb unknown; do
+	usb_reset_attempted=0
+	usb_reset_succeeds=0
+	fixture_post_touch_mode=hardware_jtag
+	rom_ready=0
+	touched_port=''
+	probe_modes=()
+	if prepare_esp32_flash_session "$logging_port" "Heltec V4" \
+		>"${tmp_dir}/candidate-mode.out" 2>"${tmp_dir}/candidate-mode.err"; then
+		echo "FAIL: non-hardware reset candidate reached a flash-ready session" >&2
+		exit 1
+	fi
+	[[ "${#probe_modes[@]}" -eq 1 && "${probe_modes[0]}" == "$USBRESET" ]]
+	[[ -z "$touched_port" && "$ESP32_NATIVE_ROM_READY" -eq 0 ]]
+	grep -Fq 'not a verified hardware USB/JTAG interface' "${tmp_dir}/candidate-mode.err"
+done
+echo 'PASS: hardware-reset fallback rejects TinyUSB and unknown candidates before SLIP or touch'
+
+for fixture_post_touch_mode in tinyusb unknown; do
+	usb_reset_attempted=0
+	usb_reset_succeeds=0
+	fixture_candidate_mode=hardware_jtag
+	rom_ready=0
+	touched_port=''
+	probe_modes=()
+	expected_rom_port="$rom_port"
+	if prepare_esp32_flash_session "$logging_port" "Heltec V4" \
+		>"${tmp_dir}/post-touch-mode.out" 2>"${tmp_dir}/post-touch-mode.err"; then
+		echo "FAIL: non-hardware post-touch port reached a flash-ready session" >&2
+		exit 1
+	fi
+	[[ "$touched_port" == "$primary_port" && "$ESP32_NATIVE_ROM_READY" -eq 0 ]]
+	[[ "${#probe_modes[@]}" -eq 2 ]]
+	[[ "${probe_modes[0]}" == "$USBRESET" && "${probe_modes[1]}" == "$NORESET" ]]
+	[[ "$probed_port" == "$primary_port" ]]
+	grep -Fq 'recovery port is not a verified hardware USB/JTAG interface' "${tmp_dir}/post-touch-mode.err"
+done
+echo 'PASS: post-touch application or unknown descriptors cannot receive a ROM sync probe'
+fixture_candidate_mode=hardware_jtag
+fixture_post_touch_mode=hardware_jtag
 
 esp32_port_is_rom_usb_jtag() { [[ "$1" == "$rom_port" ]]; }
 esp32_verified_destructive_port() { printf '%s\n' "$1"; }

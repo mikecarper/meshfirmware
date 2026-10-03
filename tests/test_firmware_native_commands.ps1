@@ -6,7 +6,7 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$to
 if ($parseErrors.Count) { throw $parseErrors }
 foreach ($definition in $ast.EndBlock.Statements) {
     if ($definition -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-        $definition.Name -in @('run_cmd', 'Split-CommandLine')) {
+        $definition.Name -in @('run_cmd', 'Split-CommandLine', 'Get-EspRomMac')) {
         Invoke-Expression $definition.Extent.Text
     }
     if ($definition -is [System.Management.Automation.Language.IfStatementAst] -and
@@ -32,4 +32,20 @@ if (-not $failed) { throw 'A native failure was not reported with its exit code/
 $failed = $false
 try { $null = run_cmd 'meshfirmware-nonexistent-executable-394205 --version' } catch { $failed = $true }
 if (-not $failed) { throw 'A missing executable was silently accepted.' }
+
+# A read-mac child can print a valid MAC before a later fatal failure. Exercise
+# the actual capture/exit-code helper and ROM parser together, not a fake exit
+# status. The child only prints fixtures; COM999 is never opened.
+$script:ESPTOOL_NO_RESET = 'no-reset'
+$script:ESPTOOL_READ_MAC = 'read-mac'
+$fakeEspTool = '"' + $child + '" -NoProfile -Command "& { [Console]::WriteLine(''MAC: 44:1b:f6:69:c9:c0''); [Console]::Error.WriteLine(''A fatal error occurred: simulated failure''); exit 9 }"'
+$failed = $false
+try {
+    $null = Get-EspRomMac -ComPort 'COM999' -EspToolCommand $fakeEspTool -Before 'no-reset'
+} catch {
+    $failed = $_.Exception.Message -match 'exit 9' -and
+        $_.Exception.Message -match 'MAC: 44:1b:f6:69:c9:c0' -and
+        $_.Exception.Message -match 'simulated failure'
+}
+if (-not $failed) { throw 'An early valid MAC bypassed a later native command failure.' }
 Write-Host 'PASS native stderr/exit-code regression tests'

@@ -401,17 +401,28 @@ function get_esptool_cmd() {
 	$script:ESPTOOL_ERASE_FLASH = "erase_flash"
 	$script:ESPTOOL_READ_FLASH_STATUS = "read_flash_status"
 	$script:ESPTOOL_CHIP_ID = "chip_id"
+	$script:ESPTOOL_READ_MAC = "read_mac"
+	$script:ESPTOOL_WRITE_MEM = "write_mem"
 	$script:ESPTOOL_NO_RESET = "no_reset"
 	$script:ESPTOOL_HARD_RESET = "hard_reset"
-	if ($esptoolVersion -match '(?i)\besptool\s+v(\d+)') {
+	# esptool 4.8 does not support watchdog_reset. Native S3 requires v5+.
+	$script:ESPTOOL_WATCHDOG_RESET = ""
+	$script:ESPTOOL_USB_RESET = "usb_reset"
+	$script:ESPTOOL_DEFAULT_RESET = "default_reset"
+	if ($esptoolVersion -match '(?im)(?:\besptool(?:\.py)?\s+v?|^\s*)(\d+)\.') {
 		$majorVersion = [int]$matches[1]
 		if ($majorVersion -ge 5) {
 			$script:ESPTOOL_WRITE_FLASH = "write-flash"
 			$script:ESPTOOL_ERASE_FLASH = "erase-flash"
 			$script:ESPTOOL_READ_FLASH_STATUS = "read-flash-status"
 			$script:ESPTOOL_CHIP_ID = "chip-id"
+			$script:ESPTOOL_READ_MAC = "read-mac"
+			$script:ESPTOOL_WRITE_MEM = "write-mem"
 			$script:ESPTOOL_NO_RESET = "no-reset"
 			$script:ESPTOOL_HARD_RESET = "hard-reset"
+			$script:ESPTOOL_WATCHDOG_RESET = "watchdog-reset"
+			$script:ESPTOOL_USB_RESET = "usb-reset"
+			$script:ESPTOOL_DEFAULT_RESET = "default-reset"
 		}
 	}
 	if ($pythonVersion) {
@@ -4469,18 +4480,78 @@ function Get-EspRuntimeStorageLayout {
 function Complete-Esp32FlashSession {
 	param(
 		[Parameter(Mandatory)][string]$ComPort,
-		[Parameter(Mandatory)][psobject]$UsbIdentity
+		[Parameter(Mandatory)][psobject]$UsbIdentity,
+		[switch]$SkipApplicationVerification
 	)
 
 	$lastPort = $ComPort
-	$lastResolvedPort = ''
-	$resetAttempted = $false
+	$sessionProperty = $UsbIdentity.PSObject.Properties['Esp32RomSessionActive']
+	if ($null -ne $sessionProperty -and $sessionProperty.Value -eq $true) {
+		# A missing CLI reply or fixed USB/JTAG descriptor is not ROM evidence.
+		# Only an uninterrupted, explicitly retained ROM session may be queried.
+		try {
+			$lastPort = Resolve-EspUsbComPort -PreferredComPort $lastPort `
+				-UsbIdentity $UsbIdentity -Purpose 'ESP32 verified ROM session finish'
+			$actualIdentity = Get-UsbComPortIdentity -ComPort $lastPort
+			if ($null -eq $actualIdentity -or
+				-not (Test-UsbComPortIdentityMatch -Expected $UsbIdentity -Actual $actualIdentity) -or
+				[string]$UsbIdentity.Esp32RomSessionStamp -ne
+					(Get-Esp32RomSessionStamp -ComPort $lastPort -UsbIdentity $actualIdentity)) {
+				throw 'The selected ESP32 ROM session changed; refusing bootloader commands. Application boot is unverified.'
+			}
+			if ([string]$UsbIdentity.Esp32ChipMac -notmatch '^[0-9A-Fa-f]{12}$') {
+				throw 'No previously verified ESP32 chip MAC is bound; refusing the final reset. Application boot is unverified.'
+			}
+			$esptool = get_esptool_cmd
+			$lastPort = Assert-Esp32RomChipIdentity -ComPort $lastPort `
+				-UsbIdentity $UsbIdentity -EspToolCommand $esptool -Purpose 'ESP32 final reset'
+			$mode = Get-EspUsbBootloaderStrategy -UsbIdentity $actualIdentity
+			if ($UsbIdentity.Esp32ChipType -eq 'ESP32-S3' -and $mode -in @('tinyusb', 'usb-jtag')) {
+				Assert-Esp32FinishCapability -UsbIdentity $UsbIdentity
+				Write-Host "Clearing the verified ESP32-S3 download flag and requesting a watchdog reset on $lastPort."
+				$resetCommand = "$esptool --baud 115200 --port $lastPort --before $script:ESPTOOL_NO_RESET --after $script:ESPTOOL_WATCHDOG_RESET $script:ESPTOOL_WRITE_MEM 0x6000812c 0x0 0x1"
+			} elseif ($mode -eq 'uart') {
+				Write-Host "Requesting a hardware reset of the verified ESP32 UART session on $lastPort."
+				$resetCommand = "$esptool --baud 115200 --port $lastPort --before $script:ESPTOOL_DEFAULT_RESET --after $script:ESPTOOL_HARD_RESET run"
+			} else {
+				throw 'No qualified final reset is available for this retained ESP32 ROM session. Application boot is unverified.'
+			}
+			# Invalidate before issuing any reset: even an error can mean that it
+			# was accepted. Never retry SLIP against the possible application.
+			$UsbIdentity.Esp32RomSessionActive = $false
+			$resetExitCode = run_cmd $resetCommand -Stream
+			if ($resetExitCode -ne 0) {
+				throw "ESP32 final reset failed on $lastPort (exit $resetExitCode). Application boot is unverified; no bootloader retry was sent."
+			}
+		} catch {
+			throw "ESP32 final reset was not confirmed. Application boot is unverified; no bootloader retry was sent. $($_.Exception.Message)"
+		} finally {
+			$UsbIdentity.Esp32RomSessionActive = $false
+		}
+	}
+
+	if ($SkipApplicationVerification) {
+		$lastPort = Resolve-EspUsbComPort -PreferredComPort $lastPort `
+			-UsbIdentity $UsbIdentity -TimeoutMs 12000 -Purpose 'ESP32 USB identity after reset request'
+		$actualIdentity = Get-UsbComPortIdentity -ComPort $lastPort
+		if ($null -eq $actualIdentity -or
+			-not (Test-UsbComPortIdentityMatch -Expected $UsbIdentity -Actual $actualIdentity)) {
+			throw 'The selected ESP32 USB identity changed after the reset request. Application boot is unverified.'
+		}
+		Write-Host "Matched the selected ESP32 USB identity on $lastPort. Application boot is unverified until its CLI answers."
+		return $lastPort
+	}
+
 	for ($attempt = 0; $attempt -lt 8; $attempt++) {
 		try {
 			$lastPort = Resolve-EspUsbComPort -PreferredComPort $lastPort `
 				-UsbIdentity $UsbIdentity -TimeoutMs 2000 `
 				-Purpose 'ESP32 application reboot verification'
-			$lastResolvedPort = $lastPort
+			$actualIdentity = Get-UsbComPortIdentity -ComPort $lastPort
+			if ($null -eq $actualIdentity -or
+				-not (Test-UsbComPortIdentityMatch -Expected $UsbIdentity -Actual $actualIdentity)) {
+				throw 'The selected ESP32 USB identity changed during application verification.'
+			}
 			$layout = Get-EspRuntimeStorageLayout -ComPort $lastPort
 			if ($layout) {
 				Write-Host "ESP32 application returned on $lastPort`: $layout"
@@ -4491,23 +4562,9 @@ function Complete-Esp32FlashSession {
 			# Native USB can disappear briefly between ROM and application modes.
 		}
 
-		if ($attempt -eq 1 -and -not $resetAttempted -and $lastResolvedPort) {
-			$resetAttempted = $true
-			$esptool = get_esptool_cmd
-			Write-Host "ESP32 application did not answer; hard-resetting $lastResolvedPort out of ROM mode."
-			try {
-				$resetExitCode = run_cmd "$esptool --baud 115200 --port $lastResolvedPort --before $script:ESPTOOL_NO_RESET --after $script:ESPTOOL_HARD_RESET run" -Stream
-			}
-			catch {
-				$resetExitCode = 1
-			}
-			if ($resetExitCode -ne 0) {
-				Write-Warning "ESP32 ROM hard-reset command failed on $lastResolvedPort (exit $resetExitCode); checking whether the application returned anyway."
-			}
-		}
 		Start-Sleep -Milliseconds 500
 	}
-	throw "ESP32 firmware was written, but its application did not answer on the selected USB device after reset. Check its boot log before reporting this flash as successful."
+	throw "ESP32 firmware was written, but its application did not answer on the selected USB device after reset. Application boot is unverified; no bootloader retry was sent. Check its boot log before reporting this flash as successful."
 }
 
 function flashESP32() {
@@ -4533,6 +4590,8 @@ function flashESP32() {
 
 	if ($hw.Project -eq 'MeshCore') {
 		$usbIdentity = Get-SelectedUsbIdentityForFlash -Hardware $hw
+		# Keep one session object across the nested install/update functions.
+		$hw | Add-Member -NotePropertyName UsbIdentity -NotePropertyValue $usbIdentity -Force
 		$hw.ComPort = Resolve-EspUsbComPort -PreferredComPort $hw.ComPort `
 			-UsbIdentity $usbIdentity -Purpose 'MeshCore USB backup'
 		$storageLayout = Get-EspRuntimeStorageLayout -ComPort $hw.ComPort
@@ -4617,65 +4676,34 @@ function updateFlashViaEspTool {
 	Write-Host ""
 
 
-	$attempt      = 0          # counter for Write-Progress
-	$delaySeconds = 3          # pause between retries
-
-	# Wake up port
-	while ($true) {
-		$attempt++
-
-		if ($attempt -gt 5) {
-			Write-Progress -Status "Unplug and replug the device" -Activity "Waiting for $selectedComPort. Attempt: $attempt"
-		}
-		else {
-			Write-Progress -Status "Putting device into 1200 baud update mode" -Activity "Waiting for $selectedComPort. Attempt: $attempt"
-		}
-
-		# run esptool and capture *all* output
-		$output = run_cmd "$ESPTOOL_CMD --baud 1200 --port $selectedComPort $script:ESPTOOL_CHIP_ID"
-
-		if ($output -match 'device attached to the system is not') {
-			if ($attempt -eq 5) {
-				Write-Host $output             # echo the error so the user sees it
-				Write-Warning "Turn on the screen on the device"
-				Write-Warning "Unplug and repug the device"
-				
-				[console]::Beep()
-				Read-Host "Press enter to Continue"
-
-			}
-			Start-Sleep -Seconds $delaySeconds
-			
-			$selectedComPort = Resolve-EspUsbComPort `
-				-PreferredComPort $selectedComPort `
-				-UsbIdentity $usbIdentity `
-				-TimeoutMs 5000 `
-				-Purpose "ESP32 firmware update retry"
-			
-			continue
-		}
-			
-		Write-Progress -Completed -Activity " " -Status "Port ready after $attempt attempt(s)"
-		#Write-Host $output
-		break       
-	}
-
-		
-	$selectedComPortPart2 = Resolve-EspUsbComPort `
-		-PreferredComPort $selectedComPort `
-		-UsbIdentity $usbIdentity `
-		-TimeoutMs 12000 `
-		-Purpose "ESP32 firmware update after 1200-baud reset"
+	$selectedComPortPart2 = Enter-Esp32Bootloader -ComPort $selectedComPort `
+		-UsbIdentity $usbIdentity -EspToolCommand $ESPTOOL_CMD
 	$updateOffsets = if ($hw.PSObject.Properties['EspUpdateOffsets']) {
 		@($hw.EspUpdateOffsets)
 	} else { @('0x10000') }
 	$writePairs = ($updateOffsets | ForEach-Object { "$_ `"$SelectedFirmwareFile`"" }) -join ' '
+	$selectedComPortPart2 = Assert-Esp32RomChipIdentity -ComPort $selectedComPortPart2 `
+		-UsbIdentity $usbIdentity -EspToolCommand $ESPTOOL_CMD -Purpose 'ESP32 application write'
+	$beforeMode = Get-Esp32RomBeforeMode -UsbIdentity $usbIdentity
+	$afterMode = Get-Esp32WriteAfterMode -UsbIdentity $usbIdentity
+	if ($afterMode -ne $script:ESPTOOL_NO_RESET) {
+		$usbIdentity | Add-Member -NotePropertyName Esp32RomSessionActive -NotePropertyValue $false -Force
+	}
 	Write-Host "Flashing $SelectedFirmwareFile to app slot(s): $($updateOffsets -join ', ')."
-	Write-Host "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $WriteFlashCommand $writePairs"
+	$writeCommand = "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 --before $beforeMode --after $afterMode $WriteFlashCommand $writePairs"
+	Write-Host $writeCommand
 	Write-Host ""
-	$writeExitCode = run_cmd "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $WriteFlashCommand $writePairs" -Stream
+	try { $writeExitCode = run_cmd $writeCommand -Stream } catch {
+		$usbIdentity | Add-Member -NotePropertyName Esp32RomSessionActive -NotePropertyValue $false -Force
+		throw
+	}
 	if ($writeExitCode -ne 0) {
+		$usbIdentity | Add-Member -NotePropertyName Esp32RomSessionActive -NotePropertyValue $false -Force
 		throw "ESP32 application firmware write failed on $selectedComPortPart2 with exit code $writeExitCode."
+	}
+	if ($afterMode -eq $script:ESPTOOL_NO_RESET) {
+		$hw.ComPort = Complete-Esp32FlashSession -ComPort $selectedComPortPart2 `
+			-UsbIdentity $usbIdentity -SkipApplicationVerification
 	}
 
 	
@@ -4718,6 +4746,256 @@ function Resolve-EspUsbComPort {
 		-Purpose $Purpose `
 		-UsbIdentity $UsbIdentity `
 		-IdentityTimeoutSec $timeoutSec)
+}
+
+function Get-EspUsbBootloaderStrategy {
+	param([Parameter(Mandatory)][psobject]$UsbIdentity)
+
+	# TinyUSB applications and the fixed-function USB/JTAG controller can both
+	# report 303A:1001. Only their product descriptor distinguishes the reset
+	# protocols; VID/PID is never a physical identity or a reset-mode verdict.
+	$descriptionProperty = $UsbIdentity.PSObject.Properties['BusReportedDescription']
+	$description = if ($null -ne $descriptionProperty) { [string]$descriptionProperty.Value } else { '' }
+	$interfaceDescription = $UsbIdentity.PSObject.Properties['InterfaceReportedDescription']
+	if ($null -ne $interfaceDescription) { $description += ' ' + [string]$interfaceDescription.Value }
+	if ($description -match '(?i)TinyUSB') { return 'tinyusb' }
+	if ($description -match '(?i)\b(?:Espressif\s+)?USB[ -]JTAG[/ -](?:serial|debug)|\bUSB\s+Serial[/ -]JTAG\b') {
+		return 'usb-jtag'
+	}
+	if ($description -match '(?i)\bCP210[0-9x]*[a-z]*\b|\bCH(?:340|341|343|910[0-9]*)[a-z]*\b|\bFT(?:232|2232|4232|231)[a-z]*\b|\bFTDI\b') {
+		return 'uart'
+	}
+	return 'unknown'
+}
+
+function Get-Esp32RomBeforeMode {
+	param([Parameter(Mandatory)][psobject]$UsbIdentity)
+	$mode = Get-EspUsbBootloaderStrategy -UsbIdentity $UsbIdentity
+	if ($mode -eq 'uart') {
+		# Reopening a UART bridge can change DTR/RTS and leave download mode.
+		# Its qualified hardware reset must run in every new esptool process.
+		return $script:ESPTOOL_DEFAULT_RESET
+	}
+	if ($mode -in @('tinyusb', 'usb-jtag')) { return $script:ESPTOOL_NO_RESET }
+	throw 'The selected ESP32 USB protocol is unknown. Refusing a ROM query or flash without a qualified transport.'
+}
+
+function Get-Esp32RomSessionStamp {
+	param(
+		[Parameter(Mandatory)][string]$ComPort,
+		[Parameter(Mandatory)][psobject]$UsbIdentity
+	)
+	# Bind the uninterrupted ROM endpoint, not just its reusable VID/PID label.
+	return (ConvertTo-Json -Compress -InputObject @(
+		$ComPort.ToUpperInvariant(), [string]$UsbIdentity.ParentInstanceId,
+		[string]$UsbIdentity.LocationPath, [string]$UsbIdentity.SerialNumber,
+		(Get-UsbIdentityInterfaceNumber -Identity $UsbIdentity)))
+}
+
+function Assert-Esp32FinishCapability {
+	param([Parameter(Mandatory)][psobject]$UsbIdentity)
+	if ($UsbIdentity.Esp32ChipType -eq 'ESP32-S3' -and
+		$UsbIdentity.Esp32RomTransport -in @('tinyusb', 'usb-jtag') -and
+		($script:ESPTOOL_WRITE_MEM -ne 'write-mem' -or
+			$script:ESPTOOL_WATCHDOG_RESET -ne 'watchdog-reset')) {
+		throw 'Native USB ESP32-S3 flashing requires esptool 5 or newer for its safe watchdog reset. Upgrade esptool before erasing or writing firmware.'
+	}
+}
+
+function Get-Esp32WriteAfterMode {
+	param([Parameter(Mandatory)][psobject]$UsbIdentity)
+	Assert-Esp32FinishCapability -UsbIdentity $UsbIdentity
+	if ($UsbIdentity.Esp32RomSessionActive -eq $true -and
+		$UsbIdentity.Esp32ChipType -eq 'ESP32-S3' -and
+		$UsbIdentity.Esp32RomTransport -in @('tinyusb', 'usb-jtag')) {
+		return $script:ESPTOOL_NO_RESET
+	}
+	return $script:ESPTOOL_HARD_RESET
+}
+
+function New-EspUsbTouchSerialPort {
+	param([Parameter(Mandatory)][string]$ComPort)
+	$serialPort = [System.IO.Ports.SerialPort]::new($ComPort, 1200,
+		[System.IO.Ports.Parity]::None, 8, [System.IO.Ports.StopBits]::One)
+	$serialPort.Handshake = [System.IO.Ports.Handshake]::None
+	$serialPort.DtrEnable = $false
+	$serialPort.RtsEnable = $false
+	$serialPort.ReadTimeout = 300
+	$serialPort.WriteTimeout = 300
+	return $serialPort
+}
+
+function Invoke-EspTinyUsbTouch1200 {
+	param(
+		[Parameter(Mandatory)][string]$ComPort,
+		[Parameter(Mandatory)][psobject]$UsbIdentity
+	)
+
+	# Do not reuse the nRF52 touch: it asserts both control lines. TinyUSB
+	# handles SET_LINE_CODING(1200) in software, whereas USB/JTAG uses a
+	# different hardware DTR/RTS sequence. A disconnect may make Open fail
+	# after the reset was accepted; only a verified ROM reply proves success.
+	$serialPort = New-EspUsbTouchSerialPort -ComPort $ComPort
+	try {
+		# Constructing a SerialPort does not open it. Validate the selected USB
+		# identity at the last possible point before Open sends line coding.
+		$null = Assert-UsbComPortIdentityFor1200Touch -ComPort $ComPort `
+			-ExpectedIdentity $UsbIdentity -Stage 'ESP32 TinyUSB 1200-baud handoff'
+		try {
+			$serialPort.Open()
+			Start-Sleep -Milliseconds 150
+		}
+		catch {
+			Write-Warning 'TinyUSB handoff did not complete normally; checking the same device for a ROM response.'
+		}
+	}
+	finally {
+		# Losing the native port while closing is another expected consequence
+		# of the handoff. The following ROM/MAC check remains authoritative.
+		try { if ($serialPort.IsOpen) { $serialPort.Close() } } catch {}
+		try { $serialPort.Dispose() } catch {}
+	}
+}
+
+function Get-EspRomMac {
+	param(
+		[Parameter(Mandatory)][string]$ComPort,
+		[Parameter(Mandatory)][string]$EspToolCommand,
+		[Parameter(Mandatory)][string]$Before,
+		[AllowNull()][psobject]$UsbIdentity = $null
+	)
+	# Captured stdout is returned only when the native process exits zero.
+	# Never accept an early MAC line from an esptool command that later fails.
+	$output = run_cmd "$EspToolCommand --baud 115200 --port $ComPort --before $Before --after $script:ESPTOOL_NO_RESET $script:ESPTOOL_READ_MAC"
+	if ([string]$output -match '(?i)\b(?:A fatal error occurred|Fatal error):') {
+		throw "ESP32 ROM MAC query reported a fatal error on $ComPort; refusing an unchecked flash."
+	}
+	$macs = @([regex]::Matches([string]$output, '(?im)^\s*MAC:\s*([0-9a-f]{2}(?::[0-9a-f]{2}){5})\s*$') |
+		ForEach-Object { $_.Groups[1].Value.Replace(':', '').ToUpperInvariant() } |
+		Select-Object -Unique)
+	if ($macs.Count -ne 1) {
+		throw "ESP32 ROM did not report exactly one chip MAC on $ComPort; refusing an unchecked flash."
+	}
+	if ($null -ne $UsbIdentity) {
+		$chipType = if ([string]$output -match '(?im)^\s*(?:Chip(?:\s+type)?\s*(?:is|:)|Connected to)\s+ESP32-S3\b') { 'ESP32-S3' } else { 'other' }
+		$UsbIdentity | Add-Member -NotePropertyName Esp32ChipType -NotePropertyValue $chipType -Force
+	}
+	return [string]$macs[0]
+}
+
+function Set-Esp32VerifiedChipMac {
+	param(
+		[Parameter(Mandatory)][string]$Mac,
+		[Parameter(Mandatory)][string]$ComPort,
+		[Parameter(Mandatory)][psobject]$UsbIdentity
+	)
+	$macProperty = $UsbIdentity.PSObject.Properties['Esp32ChipMac']
+	$expectedMac = if ($null -ne $macProperty) { [string]$macProperty.Value } else { '' }
+	if ([string]::IsNullOrWhiteSpace($expectedMac)) {
+		# Native S3 CDC descriptors express the chip MAC with or without colons.
+		# A UART bridge's own USB serial is not the ESP32 chip MAC.
+		$mode = Get-EspUsbBootloaderStrategy -UsbIdentity $UsbIdentity
+		$serialMac = ([string]$UsbIdentity.SerialNumber -replace '[:\-]', '').ToUpperInvariant()
+		if ($mode -in @('tinyusb', 'usb-jtag') -and $serialMac -match '^[0-9A-F]{12}$') {
+			$expectedMac = $serialMac
+		}
+	}
+	if (-not [string]::IsNullOrWhiteSpace($expectedMac) -and $Mac -ne $expectedMac) {
+		throw "ESP32 ROM chip MAC changed on $ComPort; refusing to flash a different radio."
+	}
+	$UsbIdentity | Add-Member -NotePropertyName Esp32ChipMac -NotePropertyValue $Mac -Force
+}
+
+function Assert-Esp32RomChipIdentity {
+	param(
+		[Parameter(Mandatory)][string]$ComPort,
+		[Parameter(Mandatory)][psobject]$UsbIdentity,
+		[Parameter(Mandatory)][string]$EspToolCommand,
+		[string]$Purpose = 'ESP32 ROM identity verification'
+	)
+	$UsbIdentity | Add-Member -NotePropertyName Esp32RomSessionActive -NotePropertyValue $false -Force
+	$livePort = Resolve-EspUsbComPort -PreferredComPort $ComPort `
+		-UsbIdentity $UsbIdentity -TimeoutMs 12000 -Purpose $Purpose
+	$actualIdentity = Get-UsbComPortIdentity -ComPort $livePort
+	if ($null -eq $actualIdentity -or
+		-not (Test-UsbComPortIdentityMatch -Expected $UsbIdentity -Actual $actualIdentity)) {
+		throw "The selected ESP32 USB identity could not be verified on $livePort. Refusing $Purpose."
+	}
+	# The USB interface number may change between TinyUSB and ROM (S2 OTG
+	# versus S3 JTAG). Keep the physical identity gate and require ROM/MAC;
+	# do not require the application's interface number in the bootloader.
+	$beforeMode = Get-Esp32RomBeforeMode -UsbIdentity $UsbIdentity
+	$mac = Get-EspRomMac -ComPort $livePort -EspToolCommand $EspToolCommand `
+		-Before $beforeMode -UsbIdentity $UsbIdentity
+	Set-Esp32VerifiedChipMac -Mac $mac -ComPort $livePort -UsbIdentity $UsbIdentity
+	$confirmedIdentity = Get-UsbComPortIdentity -ComPort $livePort
+	if ($null -eq $confirmedIdentity -or
+		-not (Test-UsbComPortIdentityMatch -Expected $UsbIdentity -Actual $confirmedIdentity) -or
+		(Get-Esp32RomSessionStamp -ComPort $livePort -UsbIdentity $actualIdentity) -ne
+			(Get-Esp32RomSessionStamp -ComPort $livePort -UsbIdentity $confirmedIdentity)) {
+		throw "The selected ESP32 USB endpoint changed after its MAC query. Refusing $Purpose."
+	}
+	$transport = Get-EspUsbBootloaderStrategy -UsbIdentity $confirmedIdentity
+	if ($transport -eq 'unknown') {
+		throw 'The selected ESP32 ROM USB transport is unknown. Refusing erase, write, or reset without a qualified transport.'
+	}
+	$UsbIdentity | Add-Member -NotePropertyName Esp32RomTransport -NotePropertyValue $transport -Force
+	$UsbIdentity | Add-Member -NotePropertyName Esp32RomSessionStamp `
+		-NotePropertyValue (Get-Esp32RomSessionStamp -ComPort $livePort -UsbIdentity $confirmedIdentity) -Force
+	$UsbIdentity | Add-Member -NotePropertyName Esp32RomSessionActive -NotePropertyValue $true -Force
+	return $livePort
+}
+
+function Enter-Esp32Bootloader {
+	param(
+		[Parameter(Mandatory)][string]$ComPort,
+		[Parameter(Mandatory)][psobject]$UsbIdentity,
+		[Parameter(Mandatory)][string]$EspToolCommand
+	)
+	# Explicit entry is the only way to start a new trusted ROM session.
+	$UsbIdentity | Add-Member -NotePropertyName Esp32RomSessionActive -NotePropertyValue $false -Force
+	$livePort = Resolve-EspUsbComPort -PreferredComPort $ComPort `
+		-UsbIdentity $UsbIdentity -TimeoutMs 5000 -Purpose 'ESP32 bootloader handoff'
+	$actualIdentity = Assert-UsbComPortIdentityFor1200Touch -ComPort $livePort `
+		-ExpectedIdentity $UsbIdentity -Stage 'ESP32 bootloader handoff'
+	$mode = Get-EspUsbBootloaderStrategy -UsbIdentity $actualIdentity
+	switch ($mode) {
+		'tinyusb' {
+			Write-Host "Entering the selected ESP32 TinyUSB bootloader at 1200 baud on $livePort."
+			Invoke-EspTinyUsbTouch1200 -ComPort $livePort -UsbIdentity $actualIdentity
+			Start-Sleep -Milliseconds 1500
+		}
+		'usb-jtag' {
+			Write-Host "Entering the selected ESP32 USB/JTAG bootloader on $livePort."
+			try {
+				$resetMac = Get-EspRomMac -ComPort $livePort -EspToolCommand $EspToolCommand `
+					-Before $script:ESPTOOL_USB_RESET
+				Set-Esp32VerifiedChipMac -Mac $resetMac -ComPort $livePort -UsbIdentity $UsbIdentity
+			}
+			catch {
+				if ($_.Exception.Message -notmatch '(?i)Native command failed|No serial data received|Failed to connect|device attached to the system is not|could not open port') { throw }
+				# The reset may already have succeeded before the old COM number
+				# disappeared. Re-resolve only the selected physical USB identity,
+				# then require a no-reset ROM/MAC reply below before any write.
+				Write-Warning 'USB/JTAG handoff lost its serial transport; checking the same device for a ROM response.'
+			}
+		}
+		'uart' {
+			Write-Host "Entering the selected ESP32 bootloader through its UART bridge on $livePort."
+			$resetMac = Get-EspRomMac -ComPort $livePort -EspToolCommand $EspToolCommand `
+				-Before $script:ESPTOOL_DEFAULT_RESET
+			Set-Esp32VerifiedChipMac -Mac $resetMac -ComPort $livePort -UsbIdentity $UsbIdentity
+		}
+		default {
+			# A raw SLIP probe also writes bytes to an application port. Do not
+			# send it when the product/interface descriptors identify no mode.
+			throw 'The selected ESP32 USB protocol is unknown. Refusing to reset or send bootloader commands to an unqualified application port.'
+		}
+	}
+	$livePort = Assert-Esp32RomChipIdentity -ComPort $livePort -UsbIdentity $UsbIdentity `
+		-EspToolCommand $EspToolCommand -Purpose 'ESP32 ROM verification after handoff'
+	Assert-Esp32FinishCapability -UsbIdentity $UsbIdentity
+	return $livePort
 }
 
 function Get-EspFileNameMode {
@@ -4859,33 +5137,43 @@ function Install-SimpleMergedEspImage {
 		Write-Host ""
 		Write-Host ""
 		Write-Host ""
-		Write-Host "Setting baud to 1200 for firmware update mode. $ESPTOOL_CMD --baud 1200 --port $ComPort $script:ESPTOOL_CHIP_ID"
-		$null = run_cmd "$ESPTOOL_CMD --baud 1200 --port $ComPort $script:ESPTOOL_CHIP_ID"
-		$selectedComPortPart2 = Resolve-EspUsbComPort `
-			-PreferredComPort $ComPort `
-			-UsbIdentity $UsbIdentity `
-			-TimeoutMs 12000 `
-			-Purpose "ESP32 full install after 1200-baud reset"
+		$selectedComPortPart2 = Enter-Esp32Bootloader -ComPort $ComPort `
+			-UsbIdentity $UsbIdentity -EspToolCommand $ESPTOOL_CMD
 
+		$selectedComPortPart2 = Assert-Esp32RomChipIdentity -ComPort $selectedComPortPart2 `
+			-UsbIdentity $UsbIdentity -EspToolCommand $ESPTOOL_CMD -Purpose 'ESP32 flash erase'
+		$beforeMode = Get-Esp32RomBeforeMode -UsbIdentity $UsbIdentity
 		Write-Host "Erasing the flash."
-		Write-Host "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $EraseFlashCommand"
-		$eraseExitCode = run_cmd "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $EraseFlashCommand" -Stream
+		$eraseCommand = "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 --before $beforeMode --after $script:ESPTOOL_NO_RESET $EraseFlashCommand"
+		Write-Host $eraseCommand
+		$eraseExitCode = run_cmd $eraseCommand -Stream
 		if ($eraseExitCode -ne 0) {
 			throw "ESP32 flash erase failed on $selectedComPortPart2 with exit code $eraseExitCode. Firmware was not written."
 		}
-		$selectedComPortPart2 = Resolve-EspUsbComPort `
-			-PreferredComPort $selectedComPortPart2 `
-			-UsbIdentity $UsbIdentity `
-			-TimeoutMs 12000 `
-			-Purpose "ESP32 merged-image write after erase"
+		$selectedComPortPart2 = Assert-Esp32RomChipIdentity -ComPort $selectedComPortPart2 `
+			-UsbIdentity $UsbIdentity -EspToolCommand $ESPTOOL_CMD -Purpose 'ESP32 merged-image write after erase'
+		$beforeMode = Get-Esp32RomBeforeMode -UsbIdentity $UsbIdentity
+		$afterMode = Get-Esp32WriteAfterMode -UsbIdentity $UsbIdentity
+		if ($afterMode -ne $script:ESPTOOL_NO_RESET) {
+			$UsbIdentity | Add-Member -NotePropertyName Esp32RomSessionActive -NotePropertyValue $false -Force
+		}
 
 		Write-Host ""
 		Write-Host "Flashing $ImagePath at 0x00. Write merged firmware image."
-		Write-Host "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $WriteFlashCommand 0x00 $ImagePath"
+		$writeCommand = "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 --before $beforeMode --after $afterMode $WriteFlashCommand 0x00 `"$ImagePath`""
+		Write-Host $writeCommand
 		Write-Host ""
-		$writeExitCode = run_cmd "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $WriteFlashCommand 0x00 $ImagePath" -Stream
+		try { $writeExitCode = run_cmd $writeCommand -Stream } catch {
+			$UsbIdentity | Add-Member -NotePropertyName Esp32RomSessionActive -NotePropertyValue $false -Force
+			throw
+		}
 		if ($writeExitCode -ne 0) {
+			$UsbIdentity | Add-Member -NotePropertyName Esp32RomSessionActive -NotePropertyValue $false -Force
 			throw "ESP32 merged-image write failed on $selectedComPortPart2 with exit code $writeExitCode."
+		}
+		if ($afterMode -eq $script:ESPTOOL_NO_RESET) {
+			$null = Complete-Esp32FlashSession -ComPort $selectedComPortPart2 `
+				-UsbIdentity $UsbIdentity -SkipApplicationVerification
 		}
 
 		Write-Host ""
@@ -5036,24 +5324,25 @@ function installFlashViaEspTool {
 	Write-Host ""
 	Write-Host ""
 	Write-Host ""
-	Write-Host "Setting baud to 1200 for firmware update mode. $ESPTOOL_CMD --baud 1200 --port $selectedComPort $script:ESPTOOL_CHIP_ID"
-	$a = run_cmd "$ESPTOOL_CMD --baud 1200 --port $selectedComPort $script:ESPTOOL_CHIP_ID"
-	$selectedComPortPart2 = Resolve-EspUsbComPort `
-		-PreferredComPort $selectedComPort `
-		-UsbIdentity $usbIdentity `
-		-TimeoutMs 12000 `
-		-Purpose "ESP32 full install after 1200-baud reset"
+	$selectedComPortPart2 = Enter-Esp32Bootloader -ComPort $selectedComPort `
+		-UsbIdentity $usbIdentity -EspToolCommand $ESPTOOL_CMD
+	$selectedComPortPart2 = Assert-Esp32RomChipIdentity -ComPort $selectedComPortPart2 `
+		-UsbIdentity $usbIdentity -EspToolCommand $ESPTOOL_CMD -Purpose 'ESP32 flash erase'
+	$beforeMode = Get-Esp32RomBeforeMode -UsbIdentity $usbIdentity
 	Write-Host "Erasing the flash."
-	Write-Host "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $EraseFlashCommand"
-	$eraseExitCode = run_cmd "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $EraseFlashCommand" -Stream
+	$eraseCommand = "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 --before $beforeMode --after $script:ESPTOOL_NO_RESET $EraseFlashCommand"
+	Write-Host $eraseCommand
+	$eraseExitCode = run_cmd $eraseCommand -Stream
 	if ($eraseExitCode -ne 0) {
 		throw "ESP32 flash erase failed on $selectedComPortPart2 with exit code $eraseExitCode. Firmware was not written."
 	}
-	$selectedComPortPart2 = Resolve-EspUsbComPort `
-		-PreferredComPort $selectedComPortPart2 `
-		-UsbIdentity $usbIdentity `
-		-TimeoutMs 12000 `
-		-Purpose "ESP32 companion-image write after erase"
+	$selectedComPortPart2 = Assert-Esp32RomChipIdentity -ComPort $selectedComPortPart2 `
+		-UsbIdentity $usbIdentity -EspToolCommand $ESPTOOL_CMD -Purpose 'ESP32 companion-image write after erase'
+	$beforeMode = Get-Esp32RomBeforeMode -UsbIdentity $usbIdentity
+	$afterMode = Get-Esp32WriteAfterMode -UsbIdentity $usbIdentity
+	if ($afterMode -ne $script:ESPTOOL_NO_RESET) {
+		$usbIdentity | Add-Member -NotePropertyName Esp32RomSessionActive -NotePropertyValue $false -Force
+	}
 	Write-Host ""
 	$installLeaf = Split-Path -Leaf $installImage
 	$otaLeaf = Split-Path -Leaf $OTA_FILENAME
@@ -5063,12 +5352,20 @@ function installFlashViaEspTool {
 	Write-Host "  0x00000000 -> $installLeaf"
 	Write-Host "  $OTA_OFFSET -> $otaLeaf"
 	Write-Host "  $SPIFFS_OFFSET -> $spiffsLeaf"
-	$combinedWriteCommand = "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 $WriteFlashCommand 0x00 `"$installLeaf`" $OTA_OFFSET `"$otaLeaf`" $SPIFFS_OFFSET `"$spiffsLeaf`""
+	$combinedWriteCommand = "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 --before $beforeMode --after $afterMode $WriteFlashCommand 0x00 `"$installLeaf`" $OTA_OFFSET `"$otaLeaf`" $SPIFFS_OFFSET `"$spiffsLeaf`""
 	Write-Host $combinedWriteCommand
 	Write-Host ""
-	$writeExitCode = run_cmd $combinedWriteCommand -Stream
+	try { $writeExitCode = run_cmd $combinedWriteCommand -Stream } catch {
+		$usbIdentity | Add-Member -NotePropertyName Esp32RomSessionActive -NotePropertyValue $false -Force
+		throw
+	}
 	if ($writeExitCode -ne 0) {
+		$usbIdentity | Add-Member -NotePropertyName Esp32RomSessionActive -NotePropertyValue $false -Force
 		throw "ESP32 install-image write failed on $selectedComPortPart2 with exit code $writeExitCode."
+	}
+	if ($afterMode -eq $script:ESPTOOL_NO_RESET) {
+		$hw.ComPort = Complete-Esp32FlashSession -ComPort $selectedComPortPart2 `
+			-UsbIdentity $usbIdentity -SkipApplicationVerification
 	}
 	
 	
@@ -5431,6 +5728,13 @@ function Get-UsbComPortIdentity {
 		catch {
 			$busReportedDescription = ""
 		}
+		$interfaceReportedDescription = ""
+		try {
+			$interfaceReportedDescription = [string](Get-PnpDeviceProperty -InstanceId $portInstanceId -KeyName 'DEVPKEY_Device_BusReportedDeviceDesc' -ErrorAction Stop).Data
+		}
+		catch {
+			$interfaceReportedDescription = ""
+		}
 
 		if ([string]::IsNullOrWhiteSpace($serialNumber) -and [string]::IsNullOrWhiteSpace($locationPath)) {
 			return $null
@@ -5441,6 +5745,7 @@ function Get-UsbComPortIdentity {
 			LocationPath          = $locationPath
 			ParentInstanceId      = $usbParentInstanceId
 			BusReportedDescription = $busReportedDescription
+			InterfaceReportedDescription = $interfaceReportedDescription
 			InterfaceNumber       = $interfaceNumber
 		}
 	}

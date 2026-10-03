@@ -577,6 +577,8 @@ MESHCORE_BACKUP_TOOL_VERSION="0.2.3"
 MESHCORE_BACKUP_TOOL_SHA256="b4a957e05ea3c00be7f46ddb6269874e4167c8f5bf42976487425696af2140cd"
 MESHCORE_USB_RESET_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_usb_reset.py"
 MESHCORE_USB_RESET_TOOL_SHA256="364de4c2e100df3ec2be795fc6079722ce1790416ba5a2d04d0c53e6c87c7083"
+MESHCORE_ESP32_BOOTLOADER_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_esp32_bootloader.py"
+MESHCORE_ESP32_BOOTLOADER_TOOL_SHA256="8c48512a650892b9c8d024d926a4c7c85d9e9d30db0fddc990be6c0c108b4ea0"
 USB_RESET_EXPECTED_IDENTITY=""
 USB_RESET_FAILED=0
 USB_RESET_RECOVERED_PORT=""
@@ -1448,6 +1450,129 @@ resolve_meshcore_usb_reset_tool() {
 		return 1
 	fi
 	printf '%s\n' "$cached_tool"
+}
+
+meshcore_esp32_bootloader_tool_hash_matches() {
+	local tool=$1 actual_hash=""
+	[[ -f "$tool" ]] || return 1
+	actual_hash="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read().replace(b"\r\n", b"\n")).hexdigest())' "$tool" 2>/dev/null)" || return 1
+	[[ "$actual_hash" == "$MESHCORE_ESP32_BOOTLOADER_TOOL_SHA256" ]]
+}
+
+resolve_meshcore_esp32_bootloader_tool() {
+	local local_tool="${PWD_SCRIPT}/tools/meshcore_esp32_bootloader.py"
+	local tool_dir="${FIRMWARE_ROOT}/tools"
+	local cached_tool="${tool_dir}/meshcore_esp32_bootloader.py" partial_tool="" identity_helper=""
+	# The new helper shares the existing, pinned physical-identity/owner checks.
+	identity_helper="$(resolve_meshcore_usb_reset_tool)" || return 1
+	if [[ -f "$local_tool" ]]; then
+		if meshcore_esp32_bootloader_tool_hash_matches "$local_tool" \
+			&& [[ "$(dirname "$identity_helper")" == "$(dirname "$local_tool")" ]]; then
+			printf '%s\n' "$local_tool"
+			return 0
+		fi
+		echo "The bundled ESP32 bootloader helpers do not match this script; refusing to run them." >&2
+		return 1
+	fi
+	[[ "$(dirname "$identity_helper")" == "$tool_dir" ]] || {
+		echo "Keep both USB helper files together with the flasher; refusing a mixed helper installation." >&2
+		return 1
+	}
+	if meshcore_esp32_bootloader_tool_hash_matches "$cached_tool"; then
+		printf '%s\n' "$cached_tool"
+		return 0
+	fi
+	mkdir -p "$tool_dir" || return 1
+	partial_tool="$(mktemp "${cached_tool}.partial.XXXXXX")" || return 1
+	if ! curl -fL --retry 2 --connect-timeout 10 --max-time 30 \
+		-o "$partial_tool" "$MESHCORE_ESP32_BOOTLOADER_TOOL_URL" \
+		|| ! meshcore_esp32_bootloader_tool_hash_matches "$partial_tool"; then
+		echo "The ESP32 bootloader helper could not be downloaded and verified." >&2
+		rm -f -- "$partial_tool"
+		return 1
+	fi
+	if ! mv -f -- "$partial_tool" "$cached_tool"; then
+		rm -f -- "$partial_tool"
+		return 1
+	fi
+	printf '%s\n' "$cached_tool"
+}
+
+esp32_native_usb_mode() {
+	local helper="" output=""
+	helper="$(resolve_meshcore_esp32_bootloader_tool)" || return 1
+	output="$(python3 "$helper" --port "$1" --inspect)" || return 1
+	python3 -c '
+import json, sys
+r = json.loads(sys.argv[1])
+mode = r.get("native_mode")
+if r.get("status") != "inspected" or mode not in ("tinyusb", "hardware_jtag", "unknown"):
+    raise SystemExit(1)
+print(mode)
+' "$output"
+}
+
+request_esp32_tinyusb_bootloader() {
+	local port=$1 helper="" snapshot="" result="" usb_path="" path_stem=""
+	if no_sudo_mode; then
+		echo "MCFIRMWARE_NO_SUDO=1: direct TinyUSB bootloader entry requires elevated USB access and is disabled." >&2
+		return 1
+	fi
+	helper="$(resolve_meshcore_esp32_bootloader_tool)" || return 1
+	snapshot="$(python3 "$helper" --port "$port" --inspect)" || return 1
+	# A tty number can be recycled between discovery and recovery. Bind this
+	# fresh helper snapshot to the ORIGINAL selected serial and physical path,
+	# not merely to itself, before issuing any USB control request.
+	usb_path="$(python3 -c '
+import json, re, sys
+r = json.loads(sys.argv[1])
+identity = r.get("identity", {})
+normalize = lambda s: re.sub(r"[^a-z0-9]", "", s.lower())
+serial = identity.get("usb_serial", "")
+path = identity.get("usb_path", "")
+expected = sys.argv[2]
+if r.get("status") != "inspected" or r.get("native_mode") != "tinyusb" or not expected:
+    raise SystemExit(1)
+if not isinstance(serial, str) or normalize(serial) != normalize(expected):
+    raise SystemExit(1)
+if not isinstance(path, str) or not path.startswith("/sys/devices/") or any(c.isspace() for c in path):
+    raise SystemExit(1)
+print(path)
+' "$snapshot" "${ESP32_FLASH_EXPECTED_SERIAL:-}")" || {
+		echo "The TinyUSB snapshot does not match the selected ESP32 serial; refusing its bootloader request." >&2
+		return 1
+	}
+	path_stem="$(udevadm info --query=property --path="$usb_path" 2>/dev/null \
+		| sed -n 's/^ID_PATH=//p' | head -n1)"
+	# This is a USB DEVICE node: ID_PATH already omits its CDC interface.
+	# Applying the tty stem helper here would mistake a two-level port number
+	# (for example 0:1.2) for an interface and remove part of the physical path.
+	if [[ -z "${ESP32_FLASH_EXPECTED_PATH_STEM:-}" \
+		|| "$path_stem" != "$ESP32_FLASH_EXPECTED_PATH_STEM" ]]; then
+		echo "The TinyUSB snapshot does not match the selected ESP32 physical USB path; refusing its bootloader request." >&2
+		return 1
+	fi
+	# No tty open, SLIP bytes, USB bus reset, or hub power operation. A request
+	# acknowledgement (or reset-induced disconnect) is NOT proof of a ROM session.
+	result="$(timeout --kill-after=2 10 sudo -n python3 "$helper" \
+		--port "$port" --expected-identity "$snapshot" --timeout 5)" || return 1
+	python3 -c '
+import json, sys
+r, saved = map(json.loads, sys.argv[1:])
+if r.get("status") != "request_issued" or r.get("native_mode") != "tinyusb" or r.get("identity") != saved.get("identity"):
+    raise SystemExit(1)
+' "$result" "$snapshot"
+}
+
+verify_esp32_mac_matches_usb_serial() {
+	local serial=""
+	serial="$(normalize_usb_serial_identity "$1")"
+	# Native Espressif USB serials are the chip MAC, sometimes with colons.
+	# Board-defined non-MAC serials still retain the existing physical USB gates.
+	if [[ "$serial" =~ ^[[:xdigit:]]{12}$ && "${serial,,}" != "${ESP32_FLASH_EXPECTED_MAC:-}" ]]; then
+		echo "ESP32 ROM MAC does not match the selected native USB serial; refusing to flash." >&2
+		return 1
+	fi
 }
 
 capture_selected_usb_reset_identity() {
@@ -5030,8 +5155,15 @@ esptool_set_variables() {
 	# extract its first version without a producer/consumer pipeline.
 	resolve_esptool_pipx_app || return 1
 	version_output="$ESPTOOL_VERSION_OUTPUT"
-	if [[ "$version_output" =~ ([0-9]+(\.[0-9]+)+) ]]; then
+	# pipx/uv notices can mention Python 3.x before the real esptool banner.
+	# Do not select reset/command spellings from an unrelated dotted value.
+	if [[ "$version_output" =~ esptool([[:space:]]+|\.py[[:space:]]+)v?([0-9]+(\.[0-9]+)+) ]]; then
+		ver="${BASH_REMATCH[2]}"
+	elif [[ "$version_output" =~ ^[[:space:]]*([0-9]+(\.[0-9]+)+)[[:space:]]*$ ]]; then
 		ver="${BASH_REMATCH[1]}"
+	else
+		echo "Unable to identify the esptool version; refusing unqualified reset commands." >&2
+		return 1
 	fi
 	major="${ver%%.*}"
 	
@@ -5499,7 +5631,7 @@ esp32_replace_after_mode() {
 
 esp32_recover_interrupted_transport() {
 	local requested_port=$1
-	local live_port="" reset_port="" candidate_port=""
+	local live_port="" reset_port="" candidate_port="" native_mode="" original_instance=""
 	local attempts="${ESP32_FLASH_RECOVERY_ATTEMPTS:-3}"
 	local attempt
 
@@ -5521,6 +5653,32 @@ esp32_recover_interrupted_transport() {
 			# bridge and ROM settle before that identity-gated retry.
 			sleep 2
 			return 0
+		fi
+		native_mode="$(esp32_native_usb_mode "$live_port")" || return 1
+		if [[ "$native_mode" == tinyusb ]]; then
+			echo "The verified ESP32 returned in TinyUSB application mode; requesting its CDC bootloader handoff."
+			ESP32_NATIVE_ROM_READY=0
+			original_instance="$(nrf52_port_instance "$live_port")"
+			request_esp32_tinyusb_bootloader "$live_port" || true
+			candidate_port="$(wait_for_nrf52_bootloader_port "$live_port" \
+				"${ESP32_FLASH_SELECTED_BY_ID:-}" "${ESP32_FLASH_EXPECTED_SERIAL:-}" \
+				"${ESP32_FLASH_EXPECTED_PATH_STEM:-}" "$original_instance" \
+				"ESP32 ROM serial port" || true)"
+			if [[ -n "$candidate_port" ]] \
+				&& [[ "$(esp32_native_usb_mode "$candidate_port")" == hardware_jtag ]]; then
+				ESP32_NATIVE_ROM_READY=1
+				if raw_esptool_mac_probe --port "$candidate_port" --before "$NORESET" \
+					--after "$NORESET" --baud 115200 "$READMAC"; then
+					DEVICE_PORT="$candidate_port"
+					return 0
+				fi
+			fi
+			ESP32_NATIVE_ROM_READY=0
+			sleep 2
+			continue
+		elif [[ "$native_mode" != hardware_jtag ]]; then
+			echo "The verified ESP32 returned with an unknown USB mode; refusing a guessed recovery reset." >&2
+			return 1
 		fi
 
 		reset_port="${ESP32_FLASH_SELECTED_BY_ID:-$live_port}"
@@ -5545,6 +5703,7 @@ esp32_recover_interrupted_transport() {
 		ESP32_NATIVE_ROM_READY=1
 		candidate_port="$(selected_flash_serial_port "$live_port" 2>/dev/null || true)"
 		if [[ -n "$candidate_port" ]] \
+			&& [[ "$(esp32_native_usb_mode "$candidate_port")" == hardware_jtag ]] \
 			&& raw_esptool_mac_probe --port "$candidate_port" --before "$NORESET" \
 				--after "$NORESET" --baud 115200 "$READMAC"; then
 			DEVICE_PORT="$candidate_port"
@@ -6066,11 +6225,22 @@ raw_esptool_mac_probe() {
 	esp32_record_and_verify_probe_output "$output"
 }
 
+esp32_require_native_s3_watchdog_reset() {
+	[[ "${ESP32_SESSION_IS_S3:-0}" -eq 1 ]] || return 0
+	# esptool 4 has write_mem, but no --after watchdog_reset implementation.
+	# Do not erase/write an S3 native USB target unless its finish is supported.
+	if [[ "${NORESET:-}" != no-reset || "${WATCHDOGRESET:-}" != watchdog-reset ]]; then
+		echo "Native ESP32-S3 USB flashing requires esptool 5 or newer for a qualified watchdog reset; upgrade esptool before erasing or writing." >&2
+		return 1
+	fi
+	return 0
+}
+
 prepare_esp32_flash_session() {
 	local port="$1"
 	local device="$2"
 	local preferred_port selected_by_id selected_live_port expected_serial expected_path_stem reset_port
-	local original_instance bootloader_port candidate_port
+	local original_instance bootloader_port candidate_port native_mode
 
 	# Native USB remains on the identity-verified ROM port, while an ordinary
 	# UART bridge may need a fresh DTR/RTS bootloader reset for every command.
@@ -6103,9 +6273,10 @@ prepare_esp32_flash_session() {
 	ESP32_FLASH_EXPECTED_SERIAL="$expected_serial"
 	ESP32_FLASH_EXPECTED_PATH_STEM="$expected_path_stem"
 
-	# Native-USB ESP32 applications, including both single-CDC firmware and Full
-	# Companion's interface 00/02 pair, use esptool's USB-JTAG reset sequence to
-	# enter the ROM. Never send an ordinary no-reset sync probe first: a damaged
+	# Native USB is not one reset protocol: software TinyUSB applications
+	# (including Meshtastic) need CDC line coding; hardware USB/JTAG needs the
+	# USB/JTAG reset sequence. VID/PID 303a:1001 alone cannot distinguish them.
+	# Never send an ordinary no-reset sync probe first: a damaged
 	# application can leave USB-Serial/JTAG enumerated without servicing CDC OUT,
 	# and writing SLIP sync bytes to that dead endpoint can wedge a DWC USB host.
 	# USB-reset is also safe when the selected device is already in ROM. Prefer
@@ -6114,6 +6285,42 @@ prepare_esp32_flash_session() {
 	# different product name and serial punctuation; in either case, match the
 	# captured physical USB identity before allowing any erase or write.
 	if esp32_port_uses_native_usb "$port"; then
+		native_mode="$(esp32_native_usb_mode "$port")" || return 1
+		if [[ "$native_mode" == tinyusb ]]; then
+			echo "Setting ${device} on ${port} into ROM with the TinyUSB 1200-baud control request."
+			if ! request_esp32_tinyusb_bootloader "${selected_by_id:-$port}"; then
+				# Reset may interrupt the USB status stage. Never infer ROM success
+				# from that error: only a matching hardware USB/JTAG descriptor may
+				# receive the subsequent no-reset MAC probe.
+				echo "The TinyUSB request was not acknowledged; checking only the same physical USB identity."
+			fi
+			if ! bootloader_port="$(wait_for_nrf52_bootloader_port "$port" \
+				"$selected_by_id" "$expected_serial" "$expected_path_stem" \
+				"$original_instance" "ESP32 ROM serial port")"; then
+				return 1
+			fi
+			if [[ "$(esp32_native_usb_mode "$bootloader_port")" != hardware_jtag ]]; then
+				echo "The selected TinyUSB application did not return as a verified ROM USB/JTAG interface; no flash operation was started." >&2
+				return 1
+			fi
+			ESP32_NATIVE_ROM_READY=1
+			if ! raw_esptool_mac_probe --port "$bootloader_port" --before "$NORESET" \
+				--after "$NORESET" --baud 115200 "$READMAC" \
+				|| ! verify_esp32_mac_matches_usb_serial "$expected_serial"; then
+				ESP32_NATIVE_ROM_READY=0
+				echo "The matched TinyUSB-to-ROM port did not pass its chip identity probe; no flash operation was started." >&2
+				return 1
+			fi
+			save_selected_serial_port "$bootloader_port" || return 1
+			BOOTLOADER_PROBE_PORT="$bootloader_port"
+			esp32_require_native_s3_watchdog_reset || return 1
+			echo "TinyUSB bootloader handoff verified; ROM flashing session is ready."
+			rm -f "$DOWNLOAD_DIR/CURRENT.BAK"
+			return 0
+		elif [[ "$native_mode" != hardware_jtag ]]; then
+			echo "Unknown native ESP32 USB mode; refusing a guessed reset sequence. Reselect an enumerated application or ROM port." >&2
+			return 1
+		fi
 		reset_port="${selected_by_id:-$port}"
 		if [[ -n "$selected_by_id" ]]; then
 			selected_live_port="$(readlink -f "$selected_by_id" 2>/dev/null || true)"
@@ -6151,6 +6358,7 @@ prepare_esp32_flash_session() {
 			# restore the pre-ROM guard if it did not answer.
 			ESP32_NATIVE_ROM_READY=1
 			if [[ -n "$candidate_port" ]] \
+				&& [[ "$(esp32_native_usb_mode "$candidate_port")" == hardware_jtag ]] \
 				&& raw_esptool_mac_probe --port "$candidate_port" --before "$NORESET" \
 					--after "$NORESET" --baud 115200 "$READMAC"; then
 				bootloader_port="$candidate_port"
@@ -6160,6 +6368,10 @@ prepare_esp32_flash_session() {
 					echo "The selected ESP32 USB identity disappeared after the reset attempt; refusing to touch another serial port." >&2
 					return 1
 				}
+				if [[ "$(esp32_native_usb_mode "$candidate_port")" != hardware_jtag ]]; then
+					echo "The reset candidate is not a verified hardware USB/JTAG interface; refusing a guessed recovery or serial probe." >&2
+					return 1
+				fi
 				port="$candidate_port"
 				original_instance="$(nrf52_port_instance "$port")"
 				if ! offer_identity_safe_1200_touch "$port" "ESP32 ROM recovery"; then
@@ -6169,6 +6381,10 @@ prepare_esp32_flash_session() {
 				if ! bootloader_port="$(wait_for_nrf52_bootloader_port "$port" \
 					"$selected_by_id" "$expected_serial" "$expected_path_stem" \
 					"$original_instance" "ESP32 ROM serial port")"; then
+					return 1
+				fi
+				if [[ "$(esp32_native_usb_mode "$bootloader_port")" != hardware_jtag ]]; then
+					echo "The recovery port is not a verified hardware USB/JTAG interface; no flash operation was started." >&2
 					return 1
 				fi
 				ESP32_NATIVE_ROM_READY=1
@@ -6187,7 +6403,9 @@ prepare_esp32_flash_session() {
 		if ! save_selected_serial_port "$bootloader_port"; then
 			return 1
 		fi
+		verify_esp32_mac_matches_usb_serial "$expected_serial" || return 1
 		BOOTLOADER_PROBE_PORT="$bootloader_port"
+		esp32_require_native_s3_watchdog_reset || return 1
 		echo "ESP chip responded; ROM flashing session is ready."
 		rm -f "$DOWNLOAD_DIR/CURRENT.BAK"
 		echo
@@ -6234,7 +6452,7 @@ esp32_write_after_mode() {
 
 finish_esp32_flash_session() {
 	local port="${1:-${DEVICE_PORT:-}}"
-	local rom_instance="" runtime_port="" live_port="" native_usb=0
+	local runtime_port="" live_port="" native_usb=0
 
 	if [[ -z "$port" ]]; then
 		echo "The verified ESP32 port disappeared before the flash session could be finished: ${port:-unknown}" >&2
@@ -6252,7 +6470,6 @@ finish_esp32_flash_session() {
 	fi
 	if esp32_port_is_rom_usb_jtag "$port"; then
 		native_usb=1
-		rom_instance="$(nrf52_port_instance "$port")"
 	fi
 	if [[ "${ESP32_SESSION_IS_S3:-0}" -eq 1 ]] || (( native_usb )); then
 		if ! port="$(esp32_verified_destructive_port "$port" "ESP32 session finish")"; then
@@ -6261,12 +6478,35 @@ finish_esp32_flash_session() {
 		DEVICE_PORT="$port"
 	fi
 
-	if [[ "${ESP32_SESSION_IS_S3:-0}" -eq 1 ]]; then
-		# A no-reset `run` only leaves the verified image in the ROM/stub. The
-		# Station G2 demonstrated this in production: both slots verified, but
-		# the USB identity stayed "USB JTAG/serial debug unit" until a hard reset.
+	if (( native_usb )); then
+		esp32_require_native_s3_watchdog_reset || return 1
+		# USB may disconnect after reset took effect but before esptool reports
+		# success. End automatic ROM cleanup authority before attempting reset;
+		# on failure, require a fresh identity/ROM handoff rather than blind SLIP.
+		# Keep ROM_READY only for this command's already-qualified serial open.
+		BOOTLOADER_PROBE_ACTIVE=0
+		BOOTLOADER_PROBE_PORT=""
+	fi
+	if [[ "${ESP32_SESSION_IS_S3:-0}" -eq 1 ]] && (( native_usb )); then
+		# USB/JTAG RTS reset does not re-sample the download boot straps. A
+		# watchdog does, but USB-reset also sets FORCE_DOWNLOAD_BOOT. Clear only
+		# bit 0 of S3 RTC_CNTL_OPTION1 (preserving other bits), then watchdog reset
+		# in the same identity/MAC-qualified ROM command without another USB reset.
+		echo "Native ESP32-S3 operation complete; clearing forced download mode and watchdog-resetting."
+		# Do not use run_esptool's automatic transport recovery here: a reset
+		# can already have started the app even when its final USB reply is lost.
+		if ! invoke_esptool_timeout "${ESP32_PROBE_TIMEOUT_SECONDS:-12}s" \
+			--port "$port" --before "$NORESET" --after "$WATCHDOGRESET" \
+			write-mem 0x6000812c 0x0 0x1; then
+			ESP32_NATIVE_ROM_READY=0
+			echo "Warning: native ESP32-S3 forced-download clear/watchdog reset failed; application boot is not confirmed." >&2
+			return 1
+		fi
+	elif [[ "${ESP32_SESSION_IS_S3:-0}" -eq 1 ]]; then
+		# UART bridges retain the ordinary DTR/RTS reset, including esptool 4.
 		echo "ESP32-S3 operation complete; hard-resetting out of the ROM stub."
 		if ! run_esp32_session_esptool "$port" --after "$HARDRESET" run; then
+			ESP32_NATIVE_ROM_READY=0
 			echo "Warning: the ESP32-S3 hard reset failed; press RESET once to start the application." >&2
 			return 1
 		fi
@@ -6274,6 +6514,7 @@ finish_esp32_flash_session() {
 		echo "ESP32 native USB ROM port is still active; safely hard-resetting into the application."
 		if ! invoke_esptool_timeout "${ESP32_PROBE_TIMEOUT_SECONDS:-12}s" \
 			--port "$port" --before "$NORESET" --after "$HARDRESET" "$READMAC"; then
+			ESP32_NATIVE_ROM_READY=0
 			echo "Warning: the ESP32 native USB safe hard reset failed; press RESET once to start the application." >&2
 			return 1
 		fi
@@ -6281,27 +6522,37 @@ finish_esp32_flash_session() {
 		return 0
 	fi
 
+	# Reset has ended the verified ROM session, even if the application keeps
+	# the same USB endpoint or its USB identity fails to return. A failed wait
+	# must not let the exit trap send ROM/SLIP commands to an unverified app.
+	BOOTLOADER_PROBE_ACTIVE=0
+	BOOTLOADER_PROBE_PORT=""
+	ESP32_NATIVE_ROM_READY=0
+
 	if (( native_usb )); then
+		# The identity-bound reset command above completed successfully.
+		# HW USB/JTAG can keep its tty and fixed hardware descriptors when the
+		# application starts. Neither an inode change nor a different product
+		# string is required, and the descriptors do not prove ROM/runtime state.
+		# Passing no old instance permits the same endpoint, while the ordinary
+		# USB serial/path matcher still rejects missing or ambiguous identities.
 		if ! runtime_port="$(wait_for_nrf52_bootloader_port "$port" \
 			"${ESP32_FLASH_SELECTED_BY_ID:-}" \
 			"${ESP32_FLASH_EXPECTED_SERIAL:-}" \
-			"${ESP32_FLASH_EXPECTED_PATH_STEM:-}" "$rom_instance" \
-			"ESP32 runtime primary CDC port")"; then
+			"${ESP32_FLASH_EXPECTED_PATH_STEM:-}" "" \
+			"ESP32 primary USB port after reset")"; then
 			echo "The flashed ESP32 did not return on its verified USB identity." >&2
 			return 1
 		fi
 		if [[ -z "$runtime_port" ]]; then
-			echo "The flashed ESP32 returned no verified runtime USB port." >&2
-			return 1
-		fi
-		if esp32_port_is_rom_usb_jtag "$runtime_port"; then
-			echo "The flashed ESP32 is still in ROM mode; application USB did not return." >&2
+			echo "The flashed ESP32 returned no verified physical USB port after reset." >&2
 			return 1
 		fi
 		if ! save_selected_serial_port "$runtime_port"; then
 			return 1
 		fi
-		echo "Matched ESP32 runtime port: $runtime_port"
+		echo "Matched ESP32 physical USB port after reset: $runtime_port"
+		echo "Application boot is not confirmed by USB descriptors; verify it through the application CLI."
 	fi
 }
 

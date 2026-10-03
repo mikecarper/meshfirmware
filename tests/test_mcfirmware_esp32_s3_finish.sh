@@ -21,6 +21,7 @@ for function_name in \
 	record_esp32_chip_from_esptool_output esp32_mac_from_esptool_output \
 	esp32_probe_output_has_mac \
 	run_esp32_session_esptool esp32_write_after_mode \
+	esp32_require_native_s3_watchdog_reset \
 	finish_esp32_flash_session; do
 	definition="$(extract_function "$function_name")"
 	[[ "$definition" == "${function_name}() {"* ]] || {
@@ -50,6 +51,7 @@ touch "$uart_port" "$native_port" "$expected_runtime_port"
 
 NORESET="no-reset"
 HARDRESET="hard-reset"
+WATCHDOGRESET="watchdog-reset"
 READMAC="read-mac"
 ESP32_PROBE_TIMEOUT_SECONDS=12
 ESP32_FLASH_SELECTED_BY_ID="${tmp_dir}/by-id-v4"
@@ -59,7 +61,10 @@ DEVICE_PORT=""
 
 esp32_port_is_rom_usb_jtag() { [[ "$1" == "$native_port" ]]; }
 nrf52_port_instance() { printf 'instance-%s\n' "$(basename "$1")"; }
-wait_for_nrf52_bootloader_port() { printf '%s\n' "$expected_runtime_port"; }
+wait_for_nrf52_bootloader_port() {
+	[[ -z "$5" ]] || return 1
+	printf '%s\n' "$expected_runtime_port"
+}
 save_selected_serial_port() { DEVICE_PORT="$1"; }
 selected_flash_serial_port() { printf '%s\n' "$1"; }
 esp32_verified_destructive_port() { printf '%s\n' "$1"; }
@@ -85,17 +90,46 @@ grep -Fq 'operation complete; hard-resetting out of the ROM stub' \
 echo "PASS: ESP32-S3 UART exits the stub with hard-reset run"
 
 : >"$operation_log"
+: >"$invoke_log"
 ESP32_OPERATION_BEFORE="no-reset"
 DEVICE_PORT=""
 [[ "$(esp32_write_after_mode "$native_port")" == "no-reset" ]]
 finish_esp32_flash_session "$native_port" >"${tmp_dir}/native-s3-finish-output"
-grep -Fxq -- "--port $native_port --before no-reset --after hard-reset run" \
-	"$operation_log"
-[[ "$DEVICE_PORT" == "$expected_runtime_port" ]] || {
-	echo "FAIL: native S3 hard reset did not follow the runtime USB identity" >&2
+grep -Fxq -- "12s --port $native_port --before no-reset --after watchdog-reset write-mem 0x6000812c 0x0 0x1" \
+	"$invoke_log"
+[[ ! -s "$operation_log" ]] || {
+	echo 'FAIL: native S3 finish entered the generic retry/recovery wrapper' >&2
 	exit 1
 }
-echo "PASS: native ESP32-S3 uses hard reset and follows re-enumeration"
+[[ "$DEVICE_PORT" == "$expected_runtime_port" ]] || {
+	echo "FAIL: native S3 watchdog reset did not follow the runtime USB identity" >&2
+	exit 1
+}
+grep -Fq 'Application boot is not confirmed by USB descriptors' \
+	"${tmp_dir}/native-s3-finish-output"
+echo "PASS: only native ESP32-S3 clears FORCE_DOWNLOAD bit 0 and watchdog resets without claiming application boot"
+
+# esptool 4 retains its UART command spellings, but cannot watchdog reset a
+# native S3. Never manufacture the unsupported --after watchdog_reset option.
+: >"$operation_log"
+NORESET=no_reset
+HARDRESET=hard_reset
+WATCHDOGRESET=watchdog_reset
+ESP32_OPERATION_BEFORE=default_reset
+finish_esp32_flash_session "$uart_port" >"${tmp_dir}/uart-old-finish-output"
+grep -Fxq -- "--port $uart_port --before default_reset --after hard_reset run" "$operation_log"
+: >"$operation_log"
+: >"$invoke_log"
+if finish_esp32_flash_session "$native_port" >"${tmp_dir}/native-old-finish-output" 2>"${tmp_dir}/native-old-finish-error"; then
+	echo 'FAIL: native S3 finish accepted unsupported esptool 4 watchdog reset' >&2
+	exit 1
+fi
+[[ ! -s "$operation_log" && ! -s "$invoke_log" ]]
+grep -Fq 'requires esptool 5 or newer' "${tmp_dir}/native-old-finish-error"
+echo 'PASS: old UART reset spellings remain supported; native S3 esptool 4 fails closed'
+NORESET=no-reset
+HARDRESET=hard-reset
+WATCHDOGRESET=watchdog-reset
 
 : >"$operation_log"
 : >"$invoke_log"
@@ -132,7 +166,7 @@ if finish_esp32_flash_session "$native_port" \
 	exit 1
 fi
 grep -Fq 'did not return on its verified USB identity' "${tmp_dir}/missing-runtime.err"
-echo "PASS: native ESP32 finish requires verified runtime re-enumeration"
+echo "PASS: native ESP32 finish requires the verified physical USB identity"
 
 [[ "$(rg -c 'ESP32_WRITE_AFTER="\$\(esp32_write_after_mode "\$DEVICE_PORT"\)"' "$script_path")" -eq 2 ]] || {
 	echo "FAIL: an ESP32 write/update path bypasses the S3 finish policy" >&2

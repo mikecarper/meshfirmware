@@ -248,6 +248,59 @@ combines a 1200-baud touch with DTR/RTS: after a failed connection it offers one
 identity-resolved DTR/RTS toggle, default **No**. Native ESP32 1200-baud fallback
 is also explicitly confirmed before it can re-enumerate a device.
 
+### Button-free ESP32-S3 handoff from Meshtastic/TinyUSB
+
+The MeshCore flashers distinguish **software TinyUSB CDC** from **hardware
+USB-Serial/JTAG** using the USB product/interface descriptors. Both can use
+VID/PID `303a:1001`, so those numbers alone do not select a reset method.
+
+For a confirmed TinyUSB application, such as Meshtastic, `mcfirmware.sh` sends
+the CDC **1200-baud line-coding request directly** after the flash is confirmed.
+It does not open the tty first, so serial-open DTR/RTS handling cannot prevent
+that request. The dependency-free Linux helper uses only the selected CDC
+interface, checks its physical identity and all sibling tty owners, and
+restores any detached driver if no handoff occurs. This control request is not
+a whole-device or host USB reset; the `dwc_otg` reset restriction stays in place.
+
+`firmware.cmd` uses an identity-guarded 1200-baud serial touch for TinyUSB on
+Windows. Hardware USB/JTAG keeps its own reset sequence; external UART bridges
+keep the normal UART reset. Unknown native modes stop instead of guessing.
+No Windows USB driver replacement is required.
+
+A request acknowledgement or disconnect is **not** considered a successful
+flash session. The flasher must find the same physical radio after the handoff
+and verify its ROM chip MAC before erase/write. Native 12-hex USB serials are
+also checked against that MAC. Each later destructive phase retains its
+existing identity gate.
+
+For native ESP32-S3 USB/JTAG, automatic return to the application requires
+**esptool 5 or newer**. The flasher clears only the `FORCE_DOWNLOAD_BOOT` bit
+and uses an RTC watchdog reset, which re-samples the boot strapping pins.
+An ordinary USB/JTAG RTS reset can leave the radio in download mode. External
+UART bridges keep their normal hard-reset behavior.
+
+The hardware USB/JTAG product name and tty can remain unchanged when an
+application boots. They identify the transport, not whether ROM or application
+code is running. A successful final reset ends the verified ROM session;
+the flasher must not send another blind ROM probe just because an application
+reply is missing. Confirm application startup through its CLI. This reset path
+was tested on a Heltec V4 with byte-for-byte partition and both app-slot
+readbacks, followed by the expected running-image hash through the MeshCore CLI.
+
+See Espressif's [USB/JTAG reset/strapping explanation](https://github.com/espressif/esptool/issues/970#issuecomment-2056650681).
+
+This TinyUSB behavior comes from Espressif's
+[1200-baud bootloader hook](https://github.com/espressif/arduino-esp32/blob/2.0.17/cores/esp32/USBCDC.cpp)
+and [ESP32-S3 ROM handoff](https://github.com/espressif/arduino-esp32/blob/2.0.17/cores/esp32/esp32-hal-tinyusb.c).
+It is separate from Meshtastic's nRF52 DFU and firmware OTA commands.
+
+If Linux cannot enumerate the USB device at all (for example descriptor error
+`-71`), there is no CDC interface to send this request to. Changing reset
+syntax cannot repair that condition. Re-establish the selected device's USB
+connection first; do not reset a whole hub or replace the Pi's USB host driver.
+A battery or second supply can keep the radio CPU running even when USB power
+is removed. A missing device is never replaced with another cached tty.
+
 ### nRF52 RAK board safety check
 
 `mcfirmware.sh` checks RAK3401 and RAK4631/WisMesh Tag firmware before any

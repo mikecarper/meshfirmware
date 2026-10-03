@@ -25,8 +25,12 @@ done
 
 fake_esptool_major=5
 fake_esptool_app=esptool
+fake_esptool_prefix=''
 pipx() {
 	[[ "${4:-}" == "$fake_esptool_app" ]] || return 1
+	if [[ -n "$fake_esptool_prefix" ]]; then
+		printf '%s\n' "$fake_esptool_prefix"
+	fi
 	printf 'esptool v%s.4.0\n' "$fake_esptool_major"
 	if [[ "$fake_esptool_major" == 5 ]]; then
 		# The old pipx|grep -m1 pipeline closed while this producer was still
@@ -56,3 +60,21 @@ esptool_set_variables >/dev/null
 [[ "$NORESET" == no_reset && "$WRITEFLASH" == write_flash ]]
 [[ "$ESPTOOL_PIPX_APP" == esptool.py ]]
 echo "PASS: esptool 4 falls back to its esptool.py entry point"
+
+# Python/dependency warnings can contain an earlier dotted version. Only the
+# actual esptool banner may select the underscore versus hyphen command form.
+for fake_esptool_major in 4 5; do
+	fake_esptool_app=esptool
+	fake_esptool_prefix=$'Python 3.11 is deprecated\nWarning: helper v3.12.9 requires maintenance'
+	NORESET=unset
+	WRITEFLASH=unset
+	ESPTOOL_PIPX_APP=''
+	ESPTOOL_VERSION_OUTPUT=''
+	esptool_set_variables >/dev/null
+	if [[ "$fake_esptool_major" == 5 ]]; then
+		[[ "$NORESET" == no-reset && "$WRITEFLASH" == write-flash ]]
+	else
+		[[ "$NORESET" == no_reset && "$WRITEFLASH" == write_flash ]]
+	fi
+done
+echo 'PASS: Python and helper version warnings cannot override the esptool banner'
