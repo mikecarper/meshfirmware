@@ -18,6 +18,7 @@ function Load-FirmwareFunction {
     return $definition.Extent.Text
 }
 foreach ($name in @(
+    'Wait-FirmwareToolUpdates', 'Enter-FirmwareToolUse',
     'Get-EspUsbBootloaderStrategy', 'Get-Esp32RomBeforeMode', 'New-EspUsbTouchSerialPort',
     'Invoke-EspTinyUsbTouch1200', 'Get-EspRomMac', 'Set-Esp32VerifiedChipMac',
     'Assert-Esp32RomChipIdentity', 'Enter-Esp32Bootloader',

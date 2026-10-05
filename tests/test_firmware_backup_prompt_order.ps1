@@ -8,7 +8,8 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile(
 if ($parseErrors.Count) { throw "Parse errors: $parseErrors" }
 foreach ($name in @('Request-MeshCoreUsbBackupBeforeFlash', 'Confirm-MeshCoreUsbBackupForAction',
     'Confirm-MeshCoreFlash', 'Test-CachedMeshCoreUsbBackup', 'flashMeshCoreNrf52',
-    'Invoke-MeshCoreBackupOnly', 'InvokeFlash', 'flashESP32')) {
+    'Invoke-MeshCoreBackupOnly', 'InvokeFlash', 'flashESP32',
+    'Wait-FirmwareToolUpdates', 'Enter-FirmwareToolUse')) {
     $definition = $ast.Find({ param($n)
         $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name
     }, $true)
@@ -39,6 +40,7 @@ function Get-UsbComPortIdentity { param($ComPort) return $identity }
 function Test-UsbIdentityIsNrf52Dfu { param($Identity) return $script:dfuMode }
 function Start-Sleep { param($Seconds) }
 function Cleanup-ScriptTempArtifacts { param([switch]$Quiet) }
+function Start-FirmwareToolUpdates { }
 function Get-MeshCoreNrf52FlashAction { param($hw) $script:events.Add('action'); return $script:action }
 function Get-EspFlashStrategy {
     param($Path)

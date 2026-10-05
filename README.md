@@ -6,6 +6,25 @@ Scripts that automates the process of selecting, downloading, and applying firmw
 Make sure file is named firmware.cmd and not firmware.cmd.txt  
 double click and run the file firmware.cmd  
 
+On an existing installation, startup checks the local tools without waiting
+for package upgrades. After device detection, upgrades run in the background
+while you choose firmware. Backups, flashing, and reconnect probes wait for
+the updater if it is still running. Missing tools are installed before first
+use. Updater diagnostics are saved in `.tmp/firmware-tool-update.<pid>.log`;
+failed upgrades are reported and available installed tools can still be used.
+Firmware windows share a lock to keep upgrades from changing tools during
+another window's device operation.
+
+USB identification uses short, read-only MeshCore/Meshtastic protocol queries
+instead of starting the full Meshtastic CLI for every port. Independent radios
+are scanned in parallel (up to eight at a time); interfaces on the same radio
+are kept sequential. Confirmed DFU devices and MeshCore logging-only siblings
+skip application queries. USB descriptions and the last successful protocol
+only choose query order, never prove firmware type. A silent device remains
+Unknown; selecting it runs the slower compatibility check for that port only.
+USB enumeration is reused and Windows identity properties are read in batches
+without loading the slower PnP module on the normal path.
+
 The Windows flasher recognizes the serial-only Seeed XIAO/XIAO Sense DFU
 products (`2886:0044` / `2886:0045`) as well as T1000-E (`2886:0057`), while
 still rejecting their application-mode IDs and rechecking the selected USB
@@ -26,6 +45,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_usb_iden
 powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_native_commands.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_backup_dependencies.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_backup_prompt_order.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_background_updates.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_protocol_probe.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_parallel_probe.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_protocol_inventory.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_usb_properties.ps1
 ```
 
 ## MeshCore backup before flashing

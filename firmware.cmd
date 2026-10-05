@@ -38,6 +38,10 @@ if ([string]::IsNullOrEmpty($ScriptPath)) {
 }
 
 $pythonCommand = ""
+$script:FirmwareToolUpdatesStarted = $false
+$script:FirmwareToolUpdateJob = $null
+$script:FirmwareToolUseMutex = $null
+$script:FirmwareToolUseLocked = $false
 $PORTABLE_PYTHON_DIR="${ScriptPath}\winpython"
 $PORTABLE_PYTHON_URL="https://api.github.com/repos/winpython/winpython/releases/latest"
 
@@ -374,6 +378,7 @@ function Get-LatestPythonVersion {
 }
 
 function get_esptool_cmd() {
+	Wait-FirmwareToolUpdates
 	$esptoolPath = Get-Command esptool -ErrorAction SilentlyContinue
 	if ($esptoolPath) {
 		# If esptool is found, set the ESPTOOL command
@@ -520,125 +525,204 @@ function run_cmd {
 }
 
 
+function Enter-FirmwareToolUse {
+	if (-not $script:FirmwareToolUseMutex -or $script:FirmwareToolUseLocked) { return }
+	Write-Progress -Id 43 -Activity 'Waiting for firmware tools'
+	try {
+		while (-not $script:FirmwareToolUseMutex.WaitOne(1000)) { }
+		$script:FirmwareToolUseLocked = $true
+	}
+	catch [System.Threading.AbandonedMutexException] {
+		# Windows gives this process ownership when the previous window exited.
+		$script:FirmwareToolUseLocked = $true
+	}
+	finally { Write-Progress -Id 43 -Activity 'Waiting for firmware tools' -Completed }
+}
+
+function Exit-FirmwareToolUse {
+	if ($script:FirmwareToolUseMutex -and $script:FirmwareToolUseLocked) {
+		$script:FirmwareToolUseMutex.ReleaseMutex()
+		$script:FirmwareToolUseLocked = $false
+	}
+}
+
+function Invoke-FirmwareToolUpdates {
+	param(
+		[string]$PythonCommand,
+		[bool]$UsePipx,
+		[string]$PipxPath,
+		[bool]$UpdatePipx,
+		[string]$LogPath,
+		[string]$MutexName
+	)
+	# This body also runs in a separate PowerShell process via Start-Job.
+	$ErrorActionPreference = 'Continue'
+	$ProgressPreference = 'SilentlyContinue'
+	$PSNativeCommandUseErrorActionPreference = $false
+	$mutex = $null
+	$locked = $false
+	try {
+		if ($MutexName) {
+			$mutex = New-Object System.Threading.Mutex($false, $MutexName)
+			try { $locked = $mutex.WaitOne() }
+			catch [System.Threading.AbandonedMutexException] { $locked = $true }
+		}
+		$packages = @('pip', 'meshtastic[cli]', 'esptool')
+		if ($UpdatePipx) { $packages += 'pipx' }
+		if (-not $UsePipx) { $packages += 'adafruit-nrfutil' }
+		foreach ($package in $packages) {
+			$output = @(& $PythonCommand -m pip install --upgrade --disable-pip-version-check --no-warn-script-location --timeout 10 --retries 1 $package 2>&1)
+			$exitCode = $LASTEXITCODE
+			@("=== $package (exit $exitCode) ===") + @($output | ForEach-Object { [string]$_ }) | Add-Content -LiteralPath $LogPath
+			[pscustomobject]@{ Tool = $package; Success = ($exitCode -eq 0) }
+		}
+		if ($UsePipx) {
+			$exe = if ($PipxPath) { $PipxPath } else { $PythonCommand }
+			$prefix = if ($PipxPath) { @() } else { @('-m', 'pipx') }
+			$output = @(& $exe @prefix upgrade adafruit-nrfutil --pip-args '--disable-pip-version-check --timeout 10 --retries 1' 2>&1)
+			$exitCode = $LASTEXITCODE
+			@("=== adafruit-nrfutil (exit $exitCode) ===") + @($output | ForEach-Object { [string]$_ }) | Add-Content -LiteralPath $LogPath
+			[pscustomobject]@{ Tool = 'adafruit-nrfutil'; Success = ($exitCode -eq 0) }
+		}
+	}
+	finally {
+		if ($locked) { $mutex.ReleaseMutex() }
+		if ($mutex) { $mutex.Dispose() }
+	}
+}
+
+function Start-FirmwareToolUpdates {
+	[CmdletBinding()]
+	param()
+	if ($script:FirmwareToolUpdatesStarted) { return }
+	$script:FirmwareToolUpdatesStarted = $true
+	# Inventory has closed its USB/Python sessions. Menus use PowerShell only.
+	Exit-FirmwareToolUse
+	try {
+		$logDir = Join-Path $ScriptPath '.tmp'
+		New-Item -ItemType Directory -Path $logDir -Force -ErrorAction Stop | Out-Null
+		$script:FirmwareToolUpdateLog = Join-Path $logDir ("firmware-tool-update.$PID.log")
+		$script:FirmwareToolUpdateJob = Start-Job -Name "FirmwareToolUpdates-$PID" `
+			-ScriptBlock ${function:Invoke-FirmwareToolUpdates} `
+			-ArgumentList $pythonCommand, $script:FirmwareToolUpdateUsePipx, $script:FirmwareToolUpdatePipxPath,
+				$script:FirmwareToolUpdateUpdatePipx, $script:FirmwareToolUpdateLog, $script:FirmwareToolMutexName `
+			-ErrorAction Stop
+		Write-Host 'Updating firmware tools in the background while you choose firmware...'
+	}
+	catch {
+		Write-Warning "Background tool updates could not start; using installed tools. $($_.Exception.Message)"
+	}
+}
+
+function Wait-FirmwareToolUpdates {
+	[CmdletBinding()]
+	param()
+	$job = $script:FirmwareToolUpdateJob
+	if ($job) {
+		if ($job.State -notin @('Completed', 'Failed', 'Stopped')) {
+			Write-Host 'Finishing background tool updates before using the firmware tools...'
+		}
+		try {
+			# Do not kill an installer midway through changing its package files.
+			while ($job.State -notin @('Completed', 'Failed', 'Stopped')) {
+				$null = Wait-Job -Job $job -Timeout 1
+			}
+			$results = @(Receive-Job -Job $job -ErrorAction SilentlyContinue)
+			$failed = @($results | Where-Object { $_.Success -eq $false } | ForEach-Object { $_.Tool })
+			if ($job.State -ne 'Completed' -or $job.ChildJobs[0].Error.Count -gt 0 -or $failed.Count -gt 0) {
+				$detail = if ($failed.Count) { $failed -join ', ' } else { [string]$job.State }
+				Write-Warning "Tool updates did not fully complete ($detail); using available installed tools. Log: $script:FirmwareToolUpdateLog"
+			}
+		}
+		finally {
+			Remove-Job -Job $job -ErrorAction SilentlyContinue
+			$script:FirmwareToolUpdateJob = $null
+		}
+	}
+	Enter-FirmwareToolUse
+}
+
 function check_requirements() {
-	# Check if Python is installed
-	$null = & python --version 2>$null
-	if ($LASTEXITCODE -eq 0) {
-		$global:pythonCommand = "python"
+	# Local readiness only: upgrades wait until USB inventory is finished.
+	$python = Get-Command python -ErrorAction SilentlyContinue
+	if ($python) {
+		$pythonFile = if ($python.Source) { $python.Source } else { $python.Name }
+		$null = & $pythonFile --version 2>$null
+		if ($LASTEXITCODE -eq 0) { $global:pythonCommand = $pythonFile }
 	}
-	else {
+	if ([string]::IsNullOrWhiteSpace($global:pythonCommand)) {
 		$testPythonCommand = "$PORTABLE_PYTHON_DIR\python\python.exe"
-		if (Test-Path -Path $testPythonCommand -PathType Leaf) {
-			$null = & $testPythonCommand --version 2>$null
-			if ($LASTEXITCODE -eq 0) {
-				$global:pythonCommand = $testPythonCommand
-			}
-		}
-		if ([string]::IsNullOrWhiteSpace($global:pythonCommand)) {
-			GetPortablePython
-
-			$testPythonCommand = "$PORTABLE_PYTHON_DIR\python\python.exe"
-			
-			$null = & $testPythonCommand --version 2>$null
-			if ($LASTEXITCODE -eq 0) {
-				$global:pythonCommand = $testPythonCommand
-			}
+		if (-not (Test-Path -LiteralPath $testPythonCommand -PathType Leaf)) { GetPortablePython }
+		$null = & $testPythonCommand --version 2>$null
+		if ($LASTEXITCODE -ne 0) { throw 'A working Python installation is required.' }
+		$global:pythonCommand = $testPythonCommand
+	}
+	# pipx environments may be shared even by windows using different Python
+	# interpreters, so protect all of this user's flasher tool use together.
+	$currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+	try { $key = $currentUser.User.Value }
+	finally { $currentUser.Dispose() }
+	$script:FirmwareToolMutexName = "Local\MeshFirmwareTools-$key"
+	$script:FirmwareToolUseMutex = New-Object System.Threading.Mutex($false, $script:FirmwareToolMutexName)
+	Enter-FirmwareToolUse
+	$probe = @'
+import importlib.metadata, json
+tools = {}
+for name, package in (('pip', 'pip'), ('meshtastic', 'meshtastic'), ('esptool', 'esptool'), ('pipx', 'pipx'), ('nordicsemi', 'adafruit-nrfutil')):
+    try:
+        importlib.metadata.version(package)
+        tools[name] = True
+    except importlib.metadata.PackageNotFoundError:
+        tools[name] = False
+print(json.dumps(tools))
+'@
+	$probeJson = @(& $pythonCommand -c $probe 2>$null)
+	if ($LASTEXITCODE -ne 0) { throw 'Could not check installed firmware tools.' }
+	$tools = ($probeJson -join '') | ConvertFrom-Json
+	if (-not $tools.pip) {
+		Write-Host 'Installing pip...'
+		& $pythonCommand -m ensurepip *> $null
+		if ($LASTEXITCODE -ne 0) { throw 'Could not install pip.' }
+	}
+	foreach ($package in @('meshtastic', 'esptool')) {
+		if (-not $tools.$package) {
+			$spec = if ($package -eq 'meshtastic') { 'meshtastic[cli]' } else { $package }
+			Write-Host "$package is not installed. Installing..."
+			& $pythonCommand -m pip install --disable-pip-version-check --no-warn-script-location $spec | Out-Host
+			if ($LASTEXITCODE -ne 0) { throw "Could not install $package." }
 		}
 	}
-	Write-Progress -Activity "Update pip command line tool"
-	& $pythonCommand -m ensurepip --upgrade *> $null
-    & $pythonCommand -m pip install --upgrade pip *> $null
-
-	# Check if meshtastic is installed
-	& $pythonCommand -m pip show meshtastic *> $null
-	$meshtasticInstalled = ($LASTEXITCODE -eq 0)
-	if (-not $meshtasticInstalled) {
-		Write-Host "Meshtastic is not installed. Installing..."
-
-		# Install or upgrade meshtastic using pip3
-		& $pythonCommand -m pip install --upgrade --no-warn-script-location "meshtastic[cli]"
-	}
-	else {
-		Write-Progress -Activity "Update meshtastic command line tool"
-		& $pythonCommand -m pip install --upgrade --no-warn-script-location "meshtastic[cli]" | out-null
-	}
-	
-	# Check if esptool is installed
-	& $pythonCommand -m pip show esptool *> $null
-	$meshtasticInstalled = ($LASTEXITCODE -eq 0)
-	if (-not $meshtasticInstalled) {
-		Write-Host "esptool is not installed. Installing..."
-
-		# Install or upgrade esptool using pip3
-		& $pythonCommand -m pip install --upgrade --no-warn-script-location "esptool"
-	}
-	else {
-		Write-Progress -Activity "Update esptool command line tool"
-		& $pythonCommand -m pip install --upgrade --no-warn-script-location "esptool" | out-null
-	}
-
-	# Check if adafruit-nrfutil is installed
-	$pipxAvailable = $false
-	$pipxCmd = Get-Command pipx -ErrorAction SilentlyContinue
-	if ($pipxCmd) {
-		$pipxAvailable = $true
-	}
-	else {
-		try {
-			& $pythonCommand -m pipx --version *> $null
-			$pipxAvailable = ($LASTEXITCODE -eq 0)
+	$pipx = Get-Command pipx -ErrorAction SilentlyContinue
+	$script:FirmwareToolUpdatePipxPath = if ($pipx) { $pipx.Source } else { '' }
+	$script:FirmwareToolUpdateUpdatePipx = [bool]$tools.pipx
+	$script:FirmwareToolUpdateUsePipx = -not [bool]$tools.nordicsemi
+	if (-not (Get-Command adafruit-nrfutil -ErrorAction SilentlyContinue) -and -not $tools.nordicsemi) {
+		if (-not $pipx -and -not $tools.pipx) {
+			Write-Host 'pipx is not installed. Installing...'
+			& $pythonCommand -m pip install --disable-pip-version-check --no-warn-script-location pipx | Out-Host
+			if ($LASTEXITCODE -ne 0) { throw 'Could not install pipx.' }
+			$script:FirmwareToolUpdateUpdatePipx = $true
 		}
-		catch {
-			$pipxAvailable = $false
-		}
+		$exe = if ($pipx) { $pipx.Source } else { $pythonCommand }
+		$prefix = if ($pipx) { @() } else { @('-m', 'pipx') }
+		Write-Host 'adafruit-nrfutil is not installed. Installing...'
+		& $exe @prefix install adafruit-nrfutil | Out-Host
+		if ($LASTEXITCODE -ne 0) { throw 'Could not install adafruit-nrfutil.' }
+		& $exe @prefix ensurepath *> $null
 	}
-
-	if (-not $pipxAvailable) {
-		Write-Host "pipx is not installed. Installing..."
-		& $pythonCommand -m pip install --upgrade --no-warn-script-location "pipx"
-		try {
-			& $pythonCommand -m pipx ensurepath *> $null
-		}
-		catch {
-		}
-		try {
-			& $pythonCommand -m pipx --version *> $null
-			$pipxAvailable = ($LASTEXITCODE -eq 0)
-		}
-		catch {
-			$pipxAvailable = $false
-		}
-	}
-
-	if ($pipxAvailable) {
-		Write-Progress -Activity "Update adafruit-nrfutil command line tool"
-		& $pythonCommand -m pipx upgrade adafruit-nrfutil *> $null
-		if ($LASTEXITCODE -ne 0) {
-			Write-Progress -Activity "Install adafruit-nrfutil command line tool"
-			& $pythonCommand -m pipx install adafruit-nrfutil | Out-Null
-		}
-	}
-	else {
-		& $pythonCommand -m pip show adafruit-nrfutil *> $null
-		$nrfutilInstalled = ($LASTEXITCODE -eq 0)
-		if (-not $nrfutilInstalled) {
-			Write-Host "adafruit-nrfutil is not installed. Installing..."
-			& $pythonCommand -m pip install --upgrade --no-warn-script-location "adafruit-nrfutil"
-		}
-		else {
-			Write-Progress -Activity "Update adafruit-nrfutil command line tool"
-			& $pythonCommand -m pip install --upgrade --no-warn-script-location "adafruit-nrfutil" | out-null
-		}
-	}
-
-	Write-Progress -Activity " " -Status " " -Completed
 }
 
 
 function getallUSBCom($output) {
-	# Get all Serial Ports and filter for USB serial devices by checking Description and DeviceID
-	#$comDevices = Get-WmiObject Win32_SerialPort
-	$comDevices = Get-WmiObject -Class Win32_PnPEntity | Where-Object { $_.DeviceID -like "*USB*" -and $_.Name -like "*(com*" }
+	# Enumerate just USB serial devices once, and reuse these devnodes for
+	# physical identity instead of rescanning the entire PnP tree per COM port.
+	$filter = "Name LIKE '%(COM%' AND PNPDeviceID LIKE 'USB%'"
+	$comDevices = if (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) {
+		Get-CimInstance -ClassName Win32_PnPEntity -Filter $filter
+	} else {
+		Get-WmiObject -Class Win32_PnPEntity -Filter $filter
+	}
+	$comDevices = @($comDevices | Where-Object { $_.Present -ne $false -and ($null -eq $_.ConfigManagerErrorCode -or [int]$_.ConfigManagerErrorCode -eq 0) })
 	
 	# Initialize the array for storing the results
 	$usbComDevices = @()
@@ -667,15 +751,17 @@ function getallUSBCom($output) {
 			friendly_name     = $device.Name
 			firmware_revision = "--"
 			_com_sort         = $comNum   # temp sort key
+			PnpDevice         = $device
 		}
 	}
 
 	return $usbComDevices |
 		Sort-Object @{ Expression = { if ($null -ne $_._com_sort) { $_._com_sort } else { [int]::MaxValue } } }, friendly_name |
-		Select-Object drive_letter, device_name, friendly_name, firmware_revision
+		Select-Object drive_letter, device_name, friendly_name, firmware_revision, PnpDevice
 }
 
 function runMeshtasticCommand($selectedComPort, $command) {
+	Wait-FirmwareToolUpdates
 	# Define a temporary file to capture the output
 	$tempOutputFile = Join-Path -Path $ScriptPath -ChildPath "meshtastic_output$selectedComPort.txt"
 	$tempErrorFile = Join-Path -Path $ScriptPath -ChildPath "meshtastic_error$selectedComPort.txt"
@@ -1162,7 +1248,8 @@ function Open-SerialPort {
     $sp.DtrEnable    = $Dtr
     $sp.RtsEnable    = $Rts
 
-    $sp.Open()
+    try { $sp.Open() }
+    catch { $sp.Dispose(); throw }
 
     # Give CDC/firmware a beat after open / DTR assert
     Start-Sleep -Milliseconds 120
@@ -1206,7 +1293,7 @@ function Invoke-MeshCoreBinaryCommand {
 				if ($bytes[$i] -ne 0x3e) { continue }
 				$length = [int]$bytes[$i + 1] -bor ([int]$bytes[$i + 2] -shl 8)
 				if ($length -lt 1 -or $length -gt 2048) { continue }
-				if ($i + 3 + $length -gt $bytes.Length) { break }
+				if ($i + 3 + $length -gt $bytes.Length) { continue }
 
 				[byte[]]$response = New-Object byte[] $length
 				[Array]::Copy($bytes, $i + 3, $response, 0, $length)
@@ -1270,6 +1357,427 @@ function Get-MeshCoreCompanionInfo {
 		Version = $version
 		Protocol = $protocol
 	}
+}
+
+function Read-ProtobufVarint {
+	param([byte[]]$Bytes, [ref]$Offset)
+	[uint64]$value = 0
+	for ($i = 0; $i -lt 10; $i++) {
+		if ($Offset.Value -ge $Bytes.Length) { throw 'Truncated protobuf varint.' }
+		$byte = $Bytes[$Offset.Value]
+		$Offset.Value++
+		if ($i -eq 9 -and $byte -gt 1) { throw 'Protobuf varint overflow.' }
+		$value = $value -bor ([uint64]($byte -band 0x7f) -shl (7 * $i))
+		if (($byte -band 0x80) -eq 0) { return $value }
+	}
+	throw 'Unterminated protobuf varint.'
+}
+
+function ConvertFrom-ProtobufMessage {
+	param([AllowEmptyCollection()][byte[]]$Bytes)
+	$fields = @{}
+	$offset = 0
+	while ($offset -lt $Bytes.Length) {
+		$key = Read-ProtobufVarint -Bytes $Bytes -Offset ([ref]$offset)
+		if ($key -lt 8 -or $key -gt [uint32]::MaxValue) { throw 'Invalid protobuf field.' }
+		$field = [int]($key -shr 3)
+		$wire = [int]($key -band 7)
+		if ($wire -eq 0) {
+			$value = Read-ProtobufVarint -Bytes $Bytes -Offset ([ref]$offset)
+		}
+		else {
+			switch ($wire) {
+				1 { $length = [uint64]8 }
+				2 { $length = Read-ProtobufVarint -Bytes $Bytes -Offset ([ref]$offset) }
+				5 { $length = [uint64]4 }
+				default { throw 'Unsupported protobuf wire type.' }
+			}
+			if ($length -gt ($Bytes.Length - $offset)) { throw 'Truncated protobuf field.' }
+			$value = New-Object byte[] ([int]$length)
+			if ($length) { [Array]::Copy($Bytes, $offset, $value, 0, [int]$length) }
+			$offset += [int]$length
+		}
+		$fields[$field] = [pscustomobject]@{ WireType = $wire; Value = $value }
+	}
+	return $fields
+}
+
+function Get-MeshtasticIdentityFromPayload {
+	param([byte[]]$Payload)
+	try {
+		$fields = ConvertFrom-ProtobufMessage -Bytes $Payload
+		$utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+		$board = ''; $version = ''; $model = -1; [uint64]$node = 0
+		if ($fields.ContainsKey(3) -and $fields[3].WireType -eq 2) {
+			$info = ConvertFrom-ProtobufMessage -Bytes $fields[3].Value
+			if ($info.ContainsKey(1) -and $info[1].WireType -eq 0 -and $info[1].Value -le [uint32]::MaxValue) {
+				$node = $info[1].Value
+			}
+			if ($info.ContainsKey(13) -and $info[13].WireType -eq 2) {
+				$board = Get-UsableSerialResponse -Text $utf8.GetString($info[13].Value) -Kind Board -MaxLength 120
+			}
+		}
+		if ($fields.ContainsKey(13) -and $fields[13].WireType -eq 2) {
+			$metadata = ConvertFrom-ProtobufMessage -Bytes $fields[13].Value
+			if ($metadata.ContainsKey(1) -and $metadata[1].WireType -eq 2) {
+				$version = Get-UsableSerialResponse -Text $utf8.GetString($metadata[1].Value) -Kind Version -MaxLength 120
+			}
+			if ($metadata.ContainsKey(9) -and $metadata[9].WireType -eq 0 -and
+				$metadata[9].Value -gt 0 -and $metadata[9].Value -le [int]::MaxValue) {
+				$model = [int]$metadata[9].Value
+			}
+		}
+		if (-not $board -and -not $version -and $model -lt 0 -and $node -eq 0) { return $null }
+		return [pscustomobject]@{ Board = $board; Version = $version; HardwareModel = $model; NodeNumber = $node; Name = '' }
+	}
+	catch { return $null }
+}
+
+function Invoke-MeshtasticInfoProbe {
+	param($SerialPort, [int]$TotalMs = 750)
+	$identity = $null
+	try {
+		$SerialPort.DiscardInBuffer()
+		# Wake/resynchronize the stream, then ask for local configuration only
+		# (official NODELESS_WANT_CONFIG_ID 69420). No radio packet is sent.
+		[byte[]]$wake = @(0xc3) * 32
+		$SerialPort.Write($wake, 0, $wake.Length)
+		[byte[]]$query = @(0x94, 0xc3, 0x00, 0x04, 0x18, 0xac, 0x9e, 0x04)
+		$SerialPort.Write($query, 0, $query.Length)
+		$received = New-Object 'System.Collections.Generic.List[byte]'
+		$sw = [Diagnostics.Stopwatch]::StartNew()
+		$processed = @{}
+		while ($sw.ElapsedMilliseconds -lt $TotalMs) {
+			$available = [Math]::Min(4096, $SerialPort.BytesToRead)
+			if ($available -gt 0) {
+				[byte[]]$chunk = New-Object byte[] $available
+				$count = $SerialPort.Read($chunk, 0, $chunk.Length)
+				for ($j = 0; $j -lt $count; $j++) { $received.Add($chunk[$j]) }
+			}
+			[byte[]]$bytes = $received.ToArray()
+			for ($i = 0; $i + 4 -le $bytes.Length; $i++) {
+				if ($processed.ContainsKey($i) -or $bytes[$i] -ne 0x94 -or $bytes[$i + 1] -ne 0xc3) { continue }
+				$length = ([int]$bytes[$i + 2] -shl 8) -bor [int]$bytes[$i + 3]
+				if ($length -lt 1 -or $length -gt 512 -or $i + 4 + $length -gt $bytes.Length) { continue }
+				$processed[$i] = $true
+				[byte[]]$payload = New-Object byte[] $length
+				[Array]::Copy($bytes, $i + 4, $payload, 0, $length)
+				$reply = Get-MeshtasticIdentityFromPayload -Payload $payload
+				if ($reply) {
+					if (-not $identity) { $identity = $reply }
+					else {
+						if ($reply.Board) { $identity.Board = $reply.Board }
+						if ($reply.Version) { $identity.Version = $reply.Version }
+						if ($reply.HardwareModel -ge 0) { $identity.HardwareModel = $reply.HardwareModel }
+						if ($reply.NodeNumber) { $identity.NodeNumber = $reply.NodeNumber }
+					}
+				}
+				$i += 3 + $length
+			}
+			if ($identity -and $identity.Version -and ($identity.Board -or $identity.HardwareModel -ge 0)) { return $identity }
+			# A continuously logging or busy device must not grow this buffer forever.
+			if ($received.Count -gt 8192) { $received.RemoveRange(0, $received.Count - 1024); $processed.Clear() }
+			Start-Sleep -Milliseconds 5
+		}
+	}
+	catch { Write-Verbose "Quick Meshtastic probe: $($_.Exception.Message)" }
+	finally {
+		if ($identity -and $SerialPort.IsOpen) {
+			# Balance this API session, but never send an MT disconnect to an
+			# unidentified device or flush settings/perform a reset.
+			try {
+				[byte[]]$disconnect = @(0x94, 0xc3, 0x00, 0x02, 0x20, 0x01)
+				$SerialPort.Write($disconnect, 0, $disconnect.Length)
+			} catch { }
+		}
+	}
+	return $identity
+}
+
+function Read-QuickSerialResponse {
+	param($SerialPort, [string]$Command, [string]$Kind, [int]$TotalMs = 250)
+	$SerialPort.DiscardInBuffer()
+	$SerialPort.WriteLine($Command)
+	$buffer = New-Object Text.StringBuilder
+	$sw = [Diagnostics.Stopwatch]::StartNew()
+	while ($sw.ElapsedMilliseconds -lt $TotalMs) {
+		$chunk = $SerialPort.ReadExisting()
+		if ($chunk) { [void]$buffer.Append($chunk) }
+		$text = $buffer.ToString()
+		$parts = $text -split "`n"
+		for ($i = 0; $i -lt $parts.Count - 1; $i++) {
+			$line = (Strip-Prefix $parts[$i]).Trim()
+			if (-not $line -or $line -eq $Command -or $line -match '(?i)^(unknown command|error|invalid command|command not found)') { continue }
+			$value = Get-UsableSerialResponse -Text $line -Kind $Kind -MaxLength 120
+			if ($value) { return $value }
+		}
+		if ($parts.Count -gt 1) { [void]$buffer.Clear(); [void]$buffer.Append($parts[-1]) }
+		if ($buffer.Length -gt 4096) { [void]$buffer.Clear() }
+		Start-Sleep -Milliseconds 5
+	}
+	return ''
+}
+
+function Get-MeshCoreTextInfoProbe {
+	param($SerialPort, [int]$TotalMs = 750)
+	# Discard a partial command left by an unsuccessful binary probe. Empty
+	# CR is harmless on both protocols and keeps 'board' from becoming '<board'.
+	$SerialPort.WriteLine('')
+	$budget = [Math]::Max(1, [int]($TotalMs / 3))
+	$board = Read-QuickSerialResponse -SerialPort $SerialPort -Command 'board' -Kind Board -TotalMs $budget
+	if (-not $board) { return $null }
+	$version = Read-QuickSerialResponse -SerialPort $SerialPort -Command 'version' -Kind Version -TotalMs $budget
+	if (-not $version) {
+		$version = Read-QuickSerialResponse -SerialPort $SerialPort -Command 'ver' -Kind Version -TotalMs $budget
+	}
+	if (-not $version) { return $null }
+	return [pscustomobject]@{ Board = $board; Version = $version; Name = '' }
+}
+
+function Get-FirmwareProbeOrder {
+	param([psobject]$UsbIdentity)
+	$description = [string]$UsbIdentity.BusReportedDescription
+	if ($description -match '(?i)meshtastic') { return @('Meshtastic', 'MeshCore') }
+	if ($description -match '(?i)meshcore') { return @('MeshCore', 'Meshtastic') }
+	if ($null -eq $script:FirmwareProtocolHints) {
+		$script:FirmwareProtocolHints = @{}
+		$path = Join-Path $ScriptPath '.tmp\firmware-protocol-hints.json'
+		if (Test-Path -LiteralPath $path) {
+			try {
+				$cache = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+				foreach ($property in $cache.PSObject.Properties) {
+					if ($property.Value -in @('MeshCore', 'Meshtastic')) { $script:FirmwareProtocolHints[$property.Name] = $property.Value }
+				}
+			} catch { }
+		}
+	}
+	$key = ([string]$UsbIdentity.SerialNumber).Trim().ToLowerInvariant()
+	if ($key -and $script:FirmwareProtocolHints[$key] -eq 'Meshtastic') { return @('Meshtastic', 'MeshCore') }
+	return @('MeshCore', 'Meshtastic')
+}
+
+function Save-FirmwareProbeHint {
+	param([psobject]$UsbIdentity, [string]$Project)
+	$key = ([string]$UsbIdentity.SerialNumber).Trim().ToLowerInvariant()
+	if (-not $key -or $Project -notin @('MeshCore', 'Meshtastic')) { return }
+	if ($null -eq $script:FirmwareProtocolHints) { $null = Get-FirmwareProbeOrder -UsbIdentity $null }
+	$script:FirmwareProtocolHints[$key] = $Project
+	try {
+		$dir = Join-Path $ScriptPath '.tmp'
+		New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null
+		$script:FirmwareProtocolHints | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $dir 'firmware-protocol-hints.json') -ErrorAction Stop
+	} catch { Write-Verbose "Could not save protocol probe order: $($_.Exception.Message)" }
+}
+
+function Get-MeshtasticHardwareName {
+	param([int]$Model)
+	# Enum names come from the installed official SDK instead of a static board
+	# table. Only a confirmed MT reply needs this small metadata lookup.
+	try {
+		$output = @(& $pythonCommand -c "from meshtastic.protobuf.mesh_pb2 import HardwareModel; print(HardwareModel.Name($Model))" 2>$null)
+		if ($LASTEXITCODE -eq 0 -and $output.Count -and [string]$output[-1] -match '^[A-Z0-9_]+$') { return [string]$output[-1] }
+	} catch { }
+	return "Meshtastic model $Model"
+}
+
+function Get-QuickFirmwareNodeInfo {
+	param([string]$ComPort, [psobject]$UsbIdentity, [int]$TotalMs = 750)
+	$result = [pscustomobject]@{
+		Success = $false; ComPort = $ComPort; Baud = 115200; Project = ''
+		ExtraInfo = ''; HWName = ''; HWNameShort = ''; FWVersion = ''; ProbeState = 'unknown'
+	}
+	if ($UsbIdentity -and (Test-UsbIdentityIsNrf52Dfu -Identity $UsbIdentity)) {
+		$result.ProbeState = 'dfu'; $result.ExtraInfo = 'DFU bootloader; application protocol unavailable'
+		return $result
+	}
+	$controlLines = -not ($UsbIdentity -and
+		$UsbIdentity.ParentInstanceId -match '^USB\\VID_303A&PID_1001(?:\\|&)' -and
+		$UsbIdentity.BusReportedDescription -eq 'USB JTAG/serial debug unit')
+	$sp = $null
+	try {
+		try { $sp = Open-SerialPort -ComPort $ComPort -Baud 115200 -ReadTimeoutMs 250 -WriteTimeoutMs 500 -Dtr $controlLines -Rts $controlLines }
+		catch {
+			$exception = $_.Exception
+			while ($exception -and $exception -isnot [System.UnauthorizedAccessException]) { $exception = $exception.InnerException }
+			if ($exception) { $result.ProbeState = 'busy'; $result.ExtraInfo = 'Serial port in use; close the other connection' }
+			else { $result.ProbeState = 'unavailable'; $result.ExtraInfo = "Cannot open serial port: $($_.Exception.Message)" }
+			return $result
+		}
+		foreach ($project in @(Get-FirmwareProbeOrder -UsbIdentity $UsbIdentity)) {
+			$info = $null
+			if ($project -eq 'MeshCore') {
+				$info = Get-MeshCoreCompanionInfo -SerialPort $sp -TotalMs $TotalMs
+				if (-not $info) { $info = Get-MeshCoreTextInfoProbe -SerialPort $sp -TotalMs $TotalMs }
+			}
+			else { $info = Invoke-MeshtasticInfoProbe -SerialPort $sp -TotalMs $TotalMs }
+			if (-not $info) { continue }
+			$board = $info.Board
+			if ($project -eq 'Meshtastic' -and -not $board -and $info.HardwareModel -ge 0) {
+				$board = Get-MeshtasticHardwareName -Model $info.HardwareModel
+			}
+			$result.Success = $true; $result.Project = $project; $result.ProbeState = 'identified'
+			$result.HWName = $board; $result.HWNameShort = $board; $result.FWVersion = $info.Version
+			$result.ExtraInfo = 'Quick serial identification; baud 115200'
+			return $result
+		}
+	}
+	catch { Write-Verbose "Quick firmware probe on ${ComPort}: $($_.Exception.Message)" }
+	finally {
+		if ($sp) {
+			try { $sp.Close() } catch { Write-Verbose "Serial close on ${ComPort}: $($_.Exception.Message)" }
+			try { $sp.Dispose() } catch { Write-Verbose "Serial disposal on ${ComPort}: $($_.Exception.Message)" }
+		}
+	}
+	return $result
+}
+
+function Get-UsbNodeInfo {
+	param([string]$ComPort, [psobject]$UsbIdentity, [switch]$QuickOnly)
+	$info = Get-QuickFirmwareNodeInfo -ComPort $ComPort -UsbIdentity $UsbIdentity
+	if ($QuickOnly -or $info.Success -or $info.ProbeState -in @('dfu', 'busy', 'unavailable')) { return $info }
+	# Inventory is quick-only; waking/legacy probes are for the selected port.
+	foreach ($project in @(Get-FirmwareProbeOrder -UsbIdentity $UsbIdentity)) {
+		$legacy = if ($project -eq 'MeshCore') { getMeshCore -ComPort $ComPort } else { getMeshtasticNodeInfo $ComPort }
+		if ($legacy.Success) { return $legacy }
+	}
+	return $info
+}
+
+function Invoke-UsbNodeProbes {
+    param([AllowEmptyCollection()][psobject[]]$Devices = @(), [switch]$QuickOnly)
+
+    $results = @{}
+    $uniqueDevices = @{}
+    $targets = @($Devices | Where-Object {
+        $port = ([string]$_.ComPort).Trim()
+        if (-not $port -or $uniqueDevices.ContainsKey($port)) { return $false }
+        $uniqueDevices[$port] = $true
+        return $true
+    })
+    if (-not $targets.Count) { return $results }
+    if ($targets.Count -eq 1) {
+        $device = $targets[0]
+        try {
+            $arguments = @{ ComPort = $device.ComPort; UsbIdentity = $device.UsbIdentity }
+            if ($QuickOnly) { $arguments.QuickOnly = $true }
+            $results[$device.ComPort] = Get-UsbNodeInfo @arguments
+        }
+        catch {
+            $results[$device.ComPort] = [pscustomobject]@{
+                Success = $false; ComPort = $device.ComPort; Baud = 115200; Project = ''
+                ExtraInfo = "Serial probe failed: $($_.Exception.Message)"
+                HWName = ''; HWNameShort = ''; FWVersion = ''; ProbeState = 'unavailable'
+            }
+        }
+        return $results
+    }
+
+    # Each worker owns one serial port. MT and MC are still attempted in order
+    # on that port, while independent radios can respond at the same time.
+    $state = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    foreach ($name in @(
+        'Get-UsbNodeInfo', 'Get-QuickFirmwareNodeInfo', 'Get-FirmwareProbeOrder',
+        'Open-SerialPort', 'Invoke-MeshCoreBinaryCommand', 'Get-MeshCoreCompanionInfo',
+        'Get-MeshCoreTextInfoProbe', 'Read-QuickSerialResponse',
+        'Invoke-MeshtasticInfoProbe', 'Get-MeshtasticIdentityFromPayload',
+        'ConvertFrom-ProtobufMessage', 'Read-ProtobufVarint', 'Get-MeshtasticHardwareName',
+        'getMeshCore', 'getMeshtasticNodeInfo', 'runMeshtasticCommand',
+        'Invoke-SerialCommand', 'Invoke-SerialCommandWithRetry',
+        'Enter-MeshCoreTerminalForProbe', 'Exit-MeshCoreTerminalAfterProbe',
+        'Get-UsableSerialResponse', 'Get-VersionTokenFromText',
+        'Remove-Ansi', 'Strip-Prefix', 'Test-IsLogLine',
+        'Test-UsbIdentityIsNrf52Dfu', 'Get-UsbComPortIdentity',
+        'Test-IsWindowsHost', 'Resolve-UsbParentInstanceId', 'Get-UsbInterfaceNumberFromInstanceId',
+        'Get-UsbPnpProperties'
+    )) {
+        $definition = Get-Item -LiteralPath "Function:\$name" -ErrorAction SilentlyContinue
+        if ($definition) {
+            $entry = New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry `
+                -ArgumentList $name, $definition.Definition
+            $state.Commands.Add($entry)
+        }
+    }
+    # Inventory holds the tool-use lock for the whole pool. Updater jobs and
+    # their thread-owned mutex must stay in the parent runspace.
+    $state.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry `
+        -ArgumentList 'Wait-FirmwareToolUpdates', ''))
+    $hints = @{}
+    if ($script:FirmwareProtocolHints) {
+        foreach ($key in $script:FirmwareProtocolHints.Keys) { $hints[$key] = $script:FirmwareProtocolHints[$key] }
+    }
+    $context = [pscustomobject]@{
+        PythonCommand = [string]$global:pythonCommand
+        ScriptPath = [string]$ScriptPath
+        TimeoutMeshtastic = $timeoutMeshtastic
+        ProtocolHints = $hints
+        QuickOnly = [bool]$QuickOnly
+    }
+    $worker = {
+        param($Device, $Context)
+        $ErrorActionPreference = 'Stop'
+        $ProgressPreference = 'SilentlyContinue'
+        $global:pythonCommand = $Context.PythonCommand
+        $script:ScriptPath = $Context.ScriptPath
+        $script:timeoutMeshtastic = $Context.TimeoutMeshtastic
+        $script:FirmwareProtocolHints = @{}
+        foreach ($key in $Context.ProtocolHints.Keys) { $script:FirmwareProtocolHints[$key] = $Context.ProtocolHints[$key] }
+        try {
+            $arguments = @{ ComPort = $Device.ComPort; UsbIdentity = $Device.UsbIdentity }
+            if ($Context.QuickOnly) { $arguments.QuickOnly = $true }
+            Get-UsbNodeInfo @arguments
+        }
+        catch {
+            [pscustomobject]@{
+                Success = $false; ComPort = $Device.ComPort; Baud = 115200; Project = ''
+                ExtraInfo = "Serial probe failed: $($_.Exception.Message)"
+                HWName = ''; HWNameShort = ''; FWVersion = ''; ProbeState = 'unavailable'
+            }
+        }
+    }
+    $pool = $null
+    $workers = New-Object 'System.Collections.Generic.List[object]'
+    try {
+        $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(
+            1, [Math]::Min(8, $targets.Count), $state, $Host)
+        $pool.Open()
+        foreach ($device in $targets) {
+            $command = [powershell]::Create()
+            try {
+                $command.RunspacePool = $pool
+                $null = $command.AddScript($worker.ToString()).AddArgument($device).AddArgument($context)
+                $pending = $command.BeginInvoke()
+                $workers.Add([pscustomobject]@{ ComPort = $device.ComPort; Command = $command; Pending = $pending; Ended = $false })
+            }
+            catch { $command.Dispose(); throw }
+        }
+        foreach ($item in $workers) {
+            try {
+                $output = @($item.Command.EndInvoke($item.Pending))
+                if ($output.Count) { $results[$item.ComPort] = $output[-1] }
+                else { throw 'The serial probe returned no result.' }
+            }
+            catch {
+                $results[$item.ComPort] = [pscustomobject]@{
+                    Success = $false; ComPort = $item.ComPort; Baud = 115200; Project = ''
+                    ExtraInfo = "Serial probe failed: $($_.Exception.Message)"
+                    HWName = ''; HWNameShort = ''; FWVersion = ''; ProbeState = 'unavailable'
+                }
+            }
+            finally { $item.Ended = $true }
+        }
+    }
+    finally {
+        foreach ($item in $workers) {
+            # Let started probes finish their serial cleanup even if launch or
+            # collection failed; stopping a pipeline could strand a USB session.
+            if (-not $item.Ended) {
+                try { $null = $item.Command.EndInvoke($item.Pending) } catch { }
+            }
+            $item.Command.Dispose()
+        }
+        if ($pool) { $pool.Dispose() }
+    }
+    return $results
 }
 
 function Invoke-SerialCommandWithRetry {
@@ -1487,25 +1995,82 @@ function getUsbComDevices {
     param(
         [switch] $SkipInfo = $false
     )
+	if (-not $SkipInfo) { Wait-FirmwareToolUpdates }
 
     $usbComDevices = @()
-    $comDevices = getallUSBCom
+    $comDevices = @(getallUSBCom)
+	$identities = @{}
+	if (-not $SkipInfo -and (Test-IsWindowsHost)) {
+		foreach ($device in $comDevices) {
+			if ($device.PnpDevice) { $identities[$device.drive_letter] = Get-UsbComPortIdentity -ComPort $device.drive_letter -PnpDevice $device.PnpDevice }
+			else { $identities[$device.drive_letter] = Get-UsbComPortIdentity -ComPort $device.drive_letter }
+		}
+	}
+	# Probe primary interfaces first, even if a sibling logging COM number is
+	# lower, so confirmed output-only siblings need no protocol queries.
+	$comDevices = @($comDevices | Sort-Object { if ((Get-UsbIdentityInterfaceNumber -Identity $identities[$_.drive_letter]) -eq '02') { 1 } else { 0 } })
+	$probeResults = @{}
+	if (-not $SkipInfo) {
+		$null = Get-FirmwareProbeOrder -UsbIdentity $null # Load order hints once, before cloning workers.
+		Write-Progress -Status 'Checking USB devices in parallel' -Activity 'Identifying firmware'
+		try {
+			# First identify primaries, then omit confirmed output-only logging
+			# siblings. Unknown secondary interfaces still get a real probe.
+			foreach ($phase in @(0, 1)) {
+				$pending = @()
+				foreach ($device in $comDevices) {
+					$identity = $identities[$device.drive_letter]
+					$isSecondary = (Get-UsbIdentityInterfaceNumber -Identity $identity) -eq '02'
+					if (($phase -eq 0 -and $isSecondary) -or ($phase -eq 1 -and -not $isSecondary)) { continue }
+					$primary = @()
+					if ($isSecondary -and $identity) {
+						$primary = @($comDevices | Where-Object {
+							$primaryIdentity = $identities[$_.drive_letter]
+							$primaryInfo = $probeResults[$_.drive_letter]
+							$primaryIdentity -and $primaryInfo.Success -and $primaryInfo.Project -eq 'MeshCore' -and
+							(Get-UsbIdentityInterfaceNumber -Identity $primaryIdentity) -eq '00' -and
+							(Test-UsbComPortIdentityMatch -Expected $identity -Actual $primaryIdentity)
+						})
+					}
+					if ($primary.Count -eq 1) {
+						$primaryPort = $primary[0].drive_letter
+						$primaryInfo = $probeResults[$primaryPort]
+						$probeResults[$device.drive_letter] = [pscustomobject]@{
+							Success = $true; Project = 'MeshCore'; HWName = $primaryInfo.HWName
+							FWVersion = $primaryInfo.FWVersion; ProbeState = 'logging'
+							ExtraInfo = "USB logging interface 02; flashing uses $primaryPort"
+						}
+					}
+					else { $pending += [pscustomobject]@{ ComPort = $device.drive_letter; UsbIdentity = $identity } }
+				}
+				while ($pending.Count) {
+					$batch = @(); $deferred = @()
+					foreach ($device in $pending) {
+						# Two interfaces of one physical radio must never compete
+						# for its parser, even when neither is a known logging port.
+						$siblings = @($batch | Where-Object {
+							$device.UsbIdentity -and $_.UsbIdentity -and
+							(Test-UsbComPortIdentityMatch -Expected $device.UsbIdentity -Actual $_.UsbIdentity)
+						})
+						if ($siblings.Count) { $deferred += $device } else { $batch += $device }
+					}
+					$batchResults = Invoke-UsbNodeProbes -Devices $batch -QuickOnly
+					foreach ($port in $batchResults.Keys) { $probeResults[$port] = $batchResults[$port] }
+					$pending = $deferred
+				}
+			}
+		}
+		finally { Write-Progress -Activity 'Identifying firmware' -Completed }
+	}
 
     foreach ($d in $comDevices) {
         $deviceInfo = $null
 		$usbIdentity = $null
-		if (-not $SkipInfo -and (Test-IsWindowsHost)) {
-			$usbIdentity = Get-UsbComPortIdentity -ComPort $d.drive_letter
-		}
+		$usbIdentity = $identities[$d.drive_letter]
 
         if (-not $SkipInfo) {
-            Write-Progress -Status "Checking USB Devices" -Activity "Checking for Meshtastic on $($d.drive_letter)"
-            $deviceInfo = getMeshtasticNodeInfo $d.drive_letter
-
-            if (-not $deviceInfo.Success) {
-                Write-Progress -Status "Checking USB Devices" -Activity "Checking for MeshCore on $($d.drive_letter)"
-                $deviceInfo = getMeshCore -ComPort $d.drive_letter
-            }
+			$deviceInfo = $probeResults[$d.drive_letter]
+			if ($deviceInfo.Success) { Save-FirmwareProbeHint -UsbIdentity $usbIdentity -Project $deviceInfo.Project }
 
             # optional debug print only (does not affect returned rows)
             #Write-Host ($deviceInfo | ConvertTo-Json -Compress)
@@ -1527,10 +2092,11 @@ function getUsbComDevices {
             $usbComDevices += [pscustomobject]@{
                 ComPort         = $d.drive_letter
                 DeviceName      = $d.device_name
-                Project         = $d.friendly_name
+                Project         = $(if ($SkipInfo) { $d.friendly_name } elseif ($deviceInfo.ProbeState -eq 'dfu') { 'DFU' } else { 'Unknown' })
                 FirmwareVersion = $d.firmware_revision
-                ExtraInfo       = ""
+                ExtraInfo       = [string]$deviceInfo.ExtraInfo
 				UsbIdentity     = $usbIdentity
+				ProbeState      = $deviceInfo.ProbeState
             }
         }
         else {
@@ -1541,6 +2107,7 @@ function getUsbComDevices {
                 FirmwareVersion = $(if ([string]::IsNullOrWhiteSpace($deviceInfo.FWVersion)) { $d.firmware_revision } else { $deviceInfo.FWVersion })
                 ExtraInfo       = $deviceInfo.ExtraInfo
 				UsbIdentity     = $usbIdentity
+				ProbeState      = $deviceInfo.ProbeState
             }
         }
     }
@@ -1590,6 +2157,8 @@ function getUSBComPort() {
 		else {
 			$usbComDevices = getUsbComDevices
 		}
+		# No tool is running while waiting for a device or a COM-port choice.
+		Exit-FirmwareToolUse
 		$usbComDevices = $usbComDevices | Sort-Object @{ Expression = { [int](($_.ComPort -replace '^[^\d]*','')) } }
 		#Write-Host $usbComDevices
 
@@ -1641,6 +2210,30 @@ function getUSBComPort() {
 
 	} while ($usbComDevices.Count -eq 0 -and $selectedComPort -eq 0)  # Continue looping until we have at least one valid COM device
 
+	# Do not make every silent/legacy device delay the initial inventory. Only
+	# the chosen unknown port gets the full CLI / terminal compatibility path.
+	if (-not $SkipInfo) {
+		$selectedDevice = $usbComDevices | Where-Object { $_.ComPort -eq $selectedComPort } | Select-Object -First 1
+		if ($selectedDevice.Project -eq 'Unknown' -and $selectedDevice.ProbeState -eq 'unknown') {
+			Wait-FirmwareToolUpdates
+			try {
+				Write-Host "Checking older firmware on selected port $selectedComPort..."
+				$info = Get-UsbNodeInfo -ComPort $selectedComPort -UsbIdentity $selectedDevice.UsbIdentity
+				if ($info.Success) {
+					$selectedDevice.Project = $info.Project
+					if ($info.HWName) { $selectedDevice.DeviceName = $info.HWName }
+					if ($info.FWVersion) { $selectedDevice.FirmwareVersion = $info.FWVersion }
+					$selectedDevice.ExtraInfo = $info.ExtraInfo
+					$selectedDevice.ProbeState = 'identified'
+					Save-FirmwareProbeHint -UsbIdentity $selectedDevice.UsbIdentity -Project $info.Project
+					$hwModelSlug = $selectedDevice.DeviceName
+					$FirmwareVersion = $selectedDevice.FirmwareVersion
+					$selectedNodeProject = $selectedDevice.Project
+				}
+			}
+			finally { Exit-FirmwareToolUse }
+		}
+	}
 	return $selectedComPort, $hwModelSlug, $FirmwareVersion, $usbComDevices, $selectedNodeProject
 }
 
@@ -2294,6 +2887,7 @@ function MakeConfigBackup {
         [Parameter(Mandatory)]
         $selectedComPort
     )
+	Wait-FirmwareToolUpdates
 	
 	Write-Host "Making a config backup"
 
@@ -3134,6 +3728,7 @@ function GetHW() {
 			}
 
 			Write-Host "$selectedComPort. Device: $hwModelSlug. Firmware: $FirmwareVersion."
+			Start-FirmwareToolUpdates
 			$selectedNodeProject = Select-FlashTarget -MonitorComPort $selectedComPort -CheckIntervalMs 2000
 			if ($selectedNodeProject) {
 				break
@@ -3144,6 +3739,7 @@ function GetHW() {
 	}
 	if ($DFU_node) {
 		Write-Host "$selectedComPort. Device: $hwModelSlug. Firmware: $FirmwareVersion."
+		Start-FirmwareToolUpdates
 		$selectedNodeProject = Select-FlashTarget
 	}
 	if ($detectedNodeProject -eq "MeshCore") {
@@ -5444,6 +6040,7 @@ function Get-NrfutilExecutable {
 }
 
 function Get-NrfutilCommand {
+	Wait-FirmwareToolUpdates
 	$directExe = Get-Command adafruit-nrfutil -ErrorAction SilentlyContinue
 	if ($directExe) {
 		return [pscustomobject]@{
@@ -5655,9 +6252,39 @@ function Get-UsbIdentityInterfaceNumber {
 	return ([string]$property.Value).ToUpperInvariant()
 }
 
+function Get-UsbPnpProperties {
+	param([string]$InstanceId, [string[]]$KeyNames, [psobject]$CimDevice)
+	# This is the same Windows getter used by Get-PnpDeviceProperty, but
+	# batching keys avoids repeated per-property wrapper queries.
+	try {
+		$device = if ($CimDevice -is [Microsoft.Management.Infrastructure.CimInstance]) { $CimDevice } else {
+			New-CimInstance -ClassName Win32_PnPEntity -Property @{ DeviceID = $InstanceId } -Key DeviceID -ClientOnly -ErrorAction Stop
+		}
+		$result = Invoke-CimMethod -InputObject $device -MethodName GetDeviceProperties `
+			-Arguments @{ devicePropertyKeys = [string[]]$KeyNames } -ErrorAction Stop
+		if ([int]$result.ReturnValue -ne 0) { throw "Device properties getter failed: $($result.ReturnValue)" }
+		$properties = @{}
+		foreach ($property in @($result.deviceProperties)) { $properties[[string]$property.KeyName] = $property.Data }
+		return $properties
+	}
+	catch {
+		# Older providers retain the existing property-query path. Neither
+		# path changes a device or weakens physical-identity verification.
+		$properties = @{}
+		$firstError = $null
+		foreach ($key in $KeyNames) {
+			try { $properties[$key] = (Get-PnpDeviceProperty -InstanceId $InstanceId -KeyName $key -ErrorAction Stop).Data }
+			catch { if (-not $firstError) { $firstError = $_ } }
+		}
+		if (-not $properties.Count -and $firstError) { throw $firstError }
+		return $properties
+	}
+}
+
 function Get-UsbComPortIdentity {
 	param(
-		[Parameter(Mandatory)][string]$ComPort
+		[Parameter(Mandatory)][string]$ComPort,
+		[psobject]$PnpDevice
 	)
 
 	if (-not (Test-IsWindowsHost)) {
@@ -5673,12 +6300,9 @@ function Get-UsbComPortIdentity {
 		if (-not (Get-Command Get-CimInstance -ErrorAction SilentlyContinue)) {
 			Import-Module CimCmdlets -ErrorAction Stop | Out-Null
 		}
-		if (-not (Get-Command Get-PnpDeviceProperty -ErrorAction SilentlyContinue)) {
-			Import-Module PnpDevice -ErrorAction Stop | Out-Null
-		}
-
 		$escapedPort = [regex]::Escape($normalizedPort)
-		$portDevice = Get-CimInstance Win32_PnPEntity -ErrorAction Stop |
+		$portDevice = if ($PnpDevice) { $PnpDevice } else { Get-CimInstance Win32_PnPEntity -ErrorAction Stop }
+		$portDevice = $portDevice |
 			Where-Object {
 				$_.Name -match ("\({0}\)$" -f $escapedPort) -and
 				$_.Present -ne $false -and
@@ -5691,11 +6315,15 @@ function Get-UsbComPortIdentity {
 
 		$portInstanceId = [string]$portDevice.PNPDeviceID
 		$interfaceNumber = Get-UsbInterfaceNumberFromInstanceId -InstanceId $portInstanceId
+		$portProperties = Get-UsbPnpProperties -InstanceId $portInstanceId -CimDevice $portDevice `
+			-KeyNames @('DEVPKEY_Device_Parent', 'DEVPKEY_Device_BusReportedDeviceDesc')
 		$usbParentInstanceId = Resolve-UsbParentInstanceId `
 			-InitialInstanceId $portInstanceId `
 			-ParentResolver {
 				param($instanceId)
-				return [string](Get-PnpDeviceProperty -InstanceId $instanceId -KeyName 'DEVPKEY_Device_Parent' -ErrorAction Stop).Data
+				if ($instanceId -eq $portInstanceId) { return [string]$portProperties['DEVPKEY_Device_Parent'] }
+				$properties = Get-UsbPnpProperties -InstanceId $instanceId -KeyNames @('DEVPKEY_Device_Parent')
+				return [string]$properties['DEVPKEY_Device_Parent']
 			}
 
 		if ([string]::IsNullOrWhiteSpace($usbParentInstanceId)) {
@@ -5713,28 +6341,21 @@ function Get-UsbComPortIdentity {
 		}
 
 		$locationPath = ""
+		$parentProperties = @{}
 		try {
-			$locationData = (Get-PnpDeviceProperty -InstanceId $usbParentInstanceId -KeyName 'DEVPKEY_Device_LocationPaths' -ErrorAction Stop).Data
-			$locationPath = [string](@($locationData) | Select-Object -First 1)
+			$parentProperties = Get-UsbPnpProperties -InstanceId $usbParentInstanceId `
+				-KeyNames @('DEVPKEY_Device_LocationPaths', 'DEVPKEY_Device_BusReportedDeviceDesc')
+			$locationData = $parentProperties['DEVPKEY_Device_LocationPaths']
+			$firstLocation = @($locationData) | Select-Object -First 1
+			$locationPath = if ($null -ne $firstLocation) { [string]$firstLocation } else { '' }
 		}
 		catch {
 			$locationPath = ""
 		}
 
 		$busReportedDescription = ""
-		try {
-			$busReportedDescription = [string](Get-PnpDeviceProperty -InstanceId $usbParentInstanceId -KeyName 'DEVPKEY_Device_BusReportedDeviceDesc' -ErrorAction Stop).Data
-		}
-		catch {
-			$busReportedDescription = ""
-		}
-		$interfaceReportedDescription = ""
-		try {
-			$interfaceReportedDescription = [string](Get-PnpDeviceProperty -InstanceId $portInstanceId -KeyName 'DEVPKEY_Device_BusReportedDeviceDesc' -ErrorAction Stop).Data
-		}
-		catch {
-			$interfaceReportedDescription = ""
-		}
+		$busReportedDescription = [string]$parentProperties['DEVPKEY_Device_BusReportedDeviceDesc']
+		$interfaceReportedDescription = [string]$portProperties['DEVPKEY_Device_BusReportedDeviceDesc']
 
 		if ([string]::IsNullOrWhiteSpace($serialNumber) -and [string]::IsNullOrWhiteSpace($locationPath)) {
 			return $null
@@ -6146,6 +6767,7 @@ function Invoke-PythonSerialTouch1200 {
 	param(
 		[Parameter(Mandatory)][string]$ComPort
 	)
+	Wait-FirmwareToolUpdates
 
 	if ([string]::IsNullOrWhiteSpace($pythonCommand)) {
 		throw "Python is not available for the 1200-baud fallback touch."
@@ -6962,6 +7584,7 @@ function Test-MeshCoreBackupToolVersion {
 }
 
 function Resolve-MeshCoreBackupTool {
+	Wait-FirmwareToolUpdates
 	$localTool = Join-Path $ScriptPath 'tools\meshcore_backup.py'
 	if (Test-Path -LiteralPath $localTool -PathType Leaf) {
 		if (Test-MeshCoreBackupToolVersion -Path $localTool) {
@@ -7004,6 +7627,7 @@ function Resolve-MeshCoreBackupTool {
 
 function Ensure-MeshCoreBackupDependencies {
 	param([Parameter(Mandatory)][string]$ToolPath)
+	Wait-FirmwareToolUpdates
 
 	if ([string]::IsNullOrWhiteSpace([string]$pythonCommand)) {
 		throw 'Python is not available for the MeshCore USB backup.'
@@ -7436,6 +8060,7 @@ function InvokeFlash {
     param(
         [Parameter(Mandatory)][pscustomobject]$hw      # must expose Architecture, SelectedFirmwareFile, selectedComPort/Drive
     )
+	Wait-FirmwareToolUpdates
 	Write-Progress -Activity " " -Status " " -Completed
 
 	try {
@@ -7479,6 +8104,7 @@ function InvokeFlash {
 
 
 # Get release info
+try {
 Cleanup-ScriptTempArtifacts -Quiet
 check_requirements
 $hw = GetHW
@@ -7525,6 +8151,20 @@ while ($again) {
 }
 
    
+# Complete any updater even if a menu or device operation failed. Releasing
+# the environment before the exit prompt lets another window use its tools.
+}
+finally {
+	try { Wait-FirmwareToolUpdates }
+	finally {
+		Exit-FirmwareToolUse
+		if ($script:FirmwareToolUseMutex) {
+			$script:FirmwareToolUseMutex.Dispose()
+			$script:FirmwareToolUseMutex = $null
+		}
+	}
+}
+
 # When the user finally hits Enter, the script will exit naturally.
 $scriptOver = $true
 Read-Host 'Press Enter to exit (via end of script)'

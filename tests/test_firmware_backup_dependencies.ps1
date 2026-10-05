@@ -7,7 +7,8 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $rep
 if ($parseErrors.Count) { throw $parseErrors }
 foreach ($definition in $ast.EndBlock.Statements) {
     if ($definition -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-        $definition.Name -in @('Ensure-MeshCoreBackupDependencies', 'Test-MeshCoreBackupToolVersion', 'Resolve-MeshCoreBackupTool')) {
+        $definition.Name -in @('Ensure-MeshCoreBackupDependencies', 'Test-MeshCoreBackupToolVersion', 'Resolve-MeshCoreBackupTool',
+            'Wait-FirmwareToolUpdates', 'Enter-FirmwareToolUse')) {
         Invoke-Expression $definition.Extent.Text
     }
     if ($definition -is [System.Management.Automation.Language.AssignmentStatementAst] -and

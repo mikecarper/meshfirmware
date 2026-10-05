@@ -34,6 +34,8 @@ if ($parseErrors.Count -ne 0) {
 }
 
 foreach ($functionName in @(
+	'Wait-FirmwareToolUpdates',
+	'Enter-FirmwareToolUse',
 	'Test-IsWindowsHost',
 	'get_esptool_cmd',
 	'Enter-MeshCoreTerminalForProbe',
@@ -1040,11 +1042,25 @@ function Get-UsbComPortIdentity {
 	if ($ComPort -eq 'COM21') { return $t096Logging }
 	return $null
 }
+function Get-FirmwareProbeOrder { param($UsbIdentity) return @('MeshCore', 'Meshtastic') }
+function Save-FirmwareProbeHint { param($UsbIdentity, $Project) }
+$script:inventoryProbedPorts = @()
+function Invoke-UsbNodeProbes {
+	param($Devices, [switch]$QuickOnly)
+	Assert-True -Condition $QuickOnly -Message 'Initial inventory requested slow legacy probes.'
+	$results = @{}
+	foreach ($device in $Devices) {
+		$script:inventoryProbedPorts += $device.ComPort
+		$results[$device.ComPort] = getMeshCore -ComPort $device.ComPort
+	}
+	return $results
+}
 $dualCdcInventory = @(getUsbComDevices)
 $loggingInventoryRow = $dualCdcInventory | Where-Object { $_.ComPort -eq 'COM21' }
 Assert-Equal -Expected 'Heltec T096' -Actual $loggingInventoryRow.DeviceName -Message 'Logging interface 02 remained a generic VID/PID inventory row.'
 Assert-Equal -Expected 'MeshCore' -Actual $loggingInventoryRow.Project -Message 'Logging interface 02 was not associated with its MeshCore primary.'
 Assert-Equal -Expected 'v1.17.1' -Actual $loggingInventoryRow.FirmwareVersion -Message 'Logging interface 02 did not inherit its primary firmware version.'
+Assert-True -Condition ($script:inventoryProbedPorts.Count -eq 1 -and $script:inventoryProbedPorts[0] -eq 'COM9') -Message 'Inventory unnecessarily probed the confirmed logging interface.'
 Assert-True `
 	-Condition ($loggingInventoryRow.ExtraInfo -match 'interface 02' -and $loggingInventoryRow.ExtraInfo -match 'COM9') `
 	-Message 'Logging inventory row did not explain its primary flashing port.'
