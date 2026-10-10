@@ -193,14 +193,33 @@ prepare_esp32_flash_session "$app_port" 'Heltec V4' >"$fixture_dir/disconnect.ou
 [[ "$(grep -c '^probe ' "$event_log")" == 1 ]]
 echo 'PASS: request-stage timeout is accepted only after descriptor and MAC prove ROM handoff'
 
-for wrong_mode in tinyusb unknown; do
+for non_jtag_mode in tinyusb unknown; do
 	fresh_fixture
-	fixture_request_status=124
-	fixture_rom_mode="$wrong_mode"
-	expect_prepare_failure
-	! grep -q '^probe ' "$event_log"
+	fixture_rom_mode="$non_jtag_mode"
+	prepare_esp32_flash_session "$app_port" 'UnitEng/BQ Voyage Station G3' \
+		>"$fixture_dir/non-jtag-${non_jtag_mode}.out"
+	[[ "$ESP32_NATIVE_ROM_READY" == 1 && "$DEVICE_PORT" == "$rom_port" ]]
+	[[ "$(grep -c '^probe ' "$event_log")" == 1 ]]
+	grep -Fq 'using one no-reset MAC probe as ROM proof' \
+		"$fixture_dir/non-jtag-${non_jtag_mode}.out"
 done
-echo 'PASS: unacknowledged request never sends SLIP to an application or unknown USB interface'
+echo 'PASS: an acknowledged, re-enumerated TinyUSB handoff can prove ROM by MAC despite a non-JTAG descriptor'
+
+for non_jtag_mode in tinyusb unknown; do
+	fresh_fixture
+	fixture_rom_mode="$non_jtag_mode"
+	fixture_probe_status=42
+	expect_prepare_failure
+	[[ "$(grep -c '^probe ' "$event_log")" == 1 ]]
+done
+echo 'PASS: a non-JTAG descriptor without a successful MAC probe cannot arm flashing'
+
+fresh_fixture
+fixture_request_status=124
+fixture_rom_mode=tinyusb
+expect_prepare_failure
+! grep -q '^probe ' "$event_log"
+echo 'PASS: an unacknowledged request never sends a serial probe to a non-JTAG descriptor'
 
 fresh_fixture
 fixture_wait_status=124
@@ -260,7 +279,10 @@ for recovery_failure in wrong-mac unknown-app unknown-rom wait-timeout; do
 	case "$recovery_failure" in
 		wrong-mac) fixture_mac=d8:3b:da:75:23:ac ;;
 		unknown-app) fixture_app_mode=unknown ;;
-		unknown-rom) fixture_rom_mode=unknown ;;
+		unknown-rom)
+			fixture_rom_mode=unknown
+			fixture_probe_status=42
+			;;
 		wait-timeout) fixture_wait_status=124 ;;
 	esac
 	if esp32_recover_interrupted_transport "$app_port" >"$fixture_dir/recovery-failure.out" 2>&1; then
@@ -269,11 +291,11 @@ for recovery_failure in wrong-mac unknown-app unknown-rom wait-timeout; do
 		exit 1
 	fi
 	[[ ! -s "$operation_log" && "$ESP32_NATIVE_ROM_READY" == 0 ]]
-	if [[ "$recovery_failure" != wrong-mac ]]; then
+	if [[ "$recovery_failure" != wrong-mac && "$recovery_failure" != unknown-rom ]]; then
 		! grep -q '^probe ' "$event_log"
 	fi
 done
-echo 'PASS: TinyUSB recovery rejects unknown descriptors, a changed chip MAC and a timed-out identity wait'
+echo 'PASS: TinyUSB recovery rejects an unproven descriptor, a changed chip MAC and a timed-out identity wait'
 
 # Independently exercise the real JSON wrappers with a fake pinned helper.
 # The real interpreter still validates JSON; no USB implementation is invoked.

@@ -5631,9 +5631,9 @@ esp32_replace_after_mode() {
 
 esp32_recover_interrupted_transport() {
 	local requested_port=$1
-	local live_port="" reset_port="" candidate_port="" native_mode="" original_instance=""
+	local live_port="" reset_port="" candidate_port="" native_mode="" candidate_mode="" original_instance=""
 	local attempts="${ESP32_FLASH_RECOVERY_ATTEMPTS:-3}"
-	local attempt
+	local attempt tinyusb_request_confirmed
 
 	if [[ ! "$attempts" =~ ^[1-5]$ ]]; then
 		echo "ESP32_FLASH_RECOVERY_ATTEMPTS must be between 1 and 5." >&2
@@ -5659,13 +5659,25 @@ esp32_recover_interrupted_transport() {
 			echo "The verified ESP32 returned in TinyUSB application mode; requesting its CDC bootloader handoff."
 			ESP32_NATIVE_ROM_READY=0
 			original_instance="$(nrf52_port_instance "$live_port")"
-			request_esp32_tinyusb_bootloader "$live_port" || true
+			tinyusb_request_confirmed=0
+			if request_esp32_tinyusb_bootloader "$live_port"; then
+				tinyusb_request_confirmed=1
+			fi
 			candidate_port="$(wait_for_nrf52_bootloader_port "$live_port" \
 				"${ESP32_FLASH_SELECTED_BY_ID:-}" "${ESP32_FLASH_EXPECTED_SERIAL:-}" \
 				"${ESP32_FLASH_EXPECTED_PATH_STEM:-}" "$original_instance" \
 				"ESP32 ROM serial port" || true)"
-			if [[ -n "$candidate_port" ]] \
-				&& [[ "$(esp32_native_usb_mode "$candidate_port")" == hardware_jtag ]]; then
+			candidate_mode=""
+			if [[ -n "$candidate_port" ]]; then
+				candidate_mode="$(esp32_native_usb_mode "$candidate_port" 2>/dev/null || true)"
+			fi
+			if [[ -n "$candidate_port" \
+				&& ( "$candidate_mode" == hardware_jtag \
+					|| ( "$tinyusb_request_confirmed" == 1 \
+						&& ( "$candidate_mode" == tinyusb || "$candidate_mode" == unknown ) ) ) ]]; then
+				if [[ "$candidate_mode" != hardware_jtag ]]; then
+					echo "The identity-matched TinyUSB handoff kept a non-JTAG descriptor; using one no-reset MAC probe as ROM proof."
+				fi
 				ESP32_NATIVE_ROM_READY=1
 				if raw_esptool_mac_probe --port "$candidate_port" --before "$NORESET" \
 					--after "$NORESET" --baud 115200 "$READMAC"; then
@@ -6240,7 +6252,8 @@ prepare_esp32_flash_session() {
 	local port="$1"
 	local device="$2"
 	local preferred_port selected_by_id selected_live_port expected_serial expected_path_stem reset_port
-	local original_instance bootloader_port candidate_port native_mode
+	local original_instance bootloader_port candidate_port native_mode candidate_mode
+	local tinyusb_request_confirmed
 
 	# Native USB remains on the identity-verified ROM port, while an ordinary
 	# UART bridge may need a fresh DTR/RTS bootloader reset for every command.
@@ -6288,7 +6301,10 @@ prepare_esp32_flash_session() {
 		native_mode="$(esp32_native_usb_mode "$port")" || return 1
 		if [[ "$native_mode" == tinyusb ]]; then
 			echo "Setting ${device} on ${port} into ROM with the TinyUSB 1200-baud control request."
-			if ! request_esp32_tinyusb_bootloader "${selected_by_id:-$port}"; then
+			tinyusb_request_confirmed=0
+			if request_esp32_tinyusb_bootloader "${selected_by_id:-$port}"; then
+				tinyusb_request_confirmed=1
+			else
 				# Reset may interrupt the USB status stage. Never infer ROM success
 				# from that error: only a matching hardware USB/JTAG descriptor may
 				# receive the subsequent no-reset MAC probe.
@@ -6299,9 +6315,15 @@ prepare_esp32_flash_session() {
 				"$original_instance" "ESP32 ROM serial port")"; then
 				return 1
 			fi
-			if [[ "$(esp32_native_usb_mode "$bootloader_port")" != hardware_jtag ]]; then
+			candidate_mode="$(esp32_native_usb_mode "$bootloader_port" 2>/dev/null || true)"
+			if [[ "$candidate_mode" != hardware_jtag \
+				&& ( "$tinyusb_request_confirmed" != 1 \
+					|| ( "$candidate_mode" != tinyusb && "$candidate_mode" != unknown ) ) ]]; then
 				echo "The selected TinyUSB application did not return as a verified ROM USB/JTAG interface; no flash operation was started." >&2
 				return 1
+			fi
+			if [[ "$candidate_mode" != hardware_jtag ]]; then
+				echo "The identity-matched TinyUSB handoff kept a non-JTAG descriptor; using one no-reset MAC probe as ROM proof."
 			fi
 			ESP32_NATIVE_ROM_READY=1
 			if ! raw_esptool_mac_probe --port "$bootloader_port" --before "$NORESET" \
