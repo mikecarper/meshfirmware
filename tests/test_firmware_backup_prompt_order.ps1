@@ -56,6 +56,7 @@ function Invoke-NrfutilSerialDfu {
 }
 function installFlashViaEspTool { param($hw) $script:events.Add('write'); return $true }
 function updateFlashViaEspTool { param($hw) $script:events.Add('write'); return $true }
+function Invoke-EspPartitionExpansion { param($Hardware) $script:events.Add('physical-partition-check'); return $false }
 function Complete-Esp32FlashSession {
     param($ComPort, $UsbIdentity)
     Assert-True ($UsbIdentity.SerialNumber -eq 'selected-radio') 'Reboot check lost USB identity.'
@@ -129,7 +130,10 @@ try {
             Assert-True (-not $script:events.Contains('backup-prompt')) 'Same-node retry duplicated the backup prompt.'
             Assert-Order verify flash-confirm
             Assert-Order flash-confirm write
-            if ($entry -eq 'flashESP32') { Assert-Order write reboot-verified }
+            if ($entry -eq 'flashESP32') {
+                if ($action -eq 'flash-update') { Assert-Order flash-confirm physical-partition-check; Assert-Order physical-partition-check write }
+                Assert-Order write reboot-verified
+            }
 
             Reset-Case partial $action @('y', '')
             $blocked = $false

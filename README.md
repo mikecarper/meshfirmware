@@ -128,13 +128,56 @@ With esptool 4, use `esptool.py` and `read_flash` instead. On native USB,
 the ROM device may enumerate with a different by-id name; verify its MAC
 address before using that port.
 
-Both flashers print the running `get storage.layout` reply before a MeshCore
-ESP32 update. They refuse an app-only image that exceeds the smallest reported
-app slot. `mcfirmware.sh` also reads and prints the physical table at `0x8000`
-before selecting any app write offset, and stops if the table is incomplete
-or the image does not fit. `firmware.cmd` requires a readable running layout
-before its app-only update; use the ROM download-mode command above if the
-application is unresponsive.
+Both flashers print `get storage.layout` when available, then verify the actual
+ROM-readable partition table, physical flash capacity, OTA selection and NVS
+migration state before a confirmed MeshCore app-only update. A silent serial
+console is not evidence that expansion is necessary. An image that already
+fits uses the normal checked, inactive-first/active-last write path.
+
+When expansion is necessary, Windows and Linux select the exact board/role
+migration package matching the selected Full application's release and SHA-256.
+They offer its verified **USB migration bridge** as a middle step, without a
+full-chip erase. The bridge stages private identity and supported configuration,
+expands partitions, reboots and verifies restoration. Native ESP32-S3/C3 USB
+returns itself to ROM download mode; classic ESP32 reports settled status over
+its USB-UART adapter before the host requests ROM mode. No physical BOOT-button
+step is used. Native USB can disappear temporarily during this process.
+
+The final image is written only after the original USB identity/chip MAC, exact
+expanded table and NVS restoration records verify. Interrupted runs keep a
+public per-device recovery record and cannot bypass unfinished restoration by
+selecting another image or moving the device to another host. Temporary NVS
+snapshots are removed after use. Logs and unsupported optional files are not
+preserved; keep a logical backup and stable power. Partition-table replacement
+is not power-loss atomic and a power failure can still require physical recovery.
+
+If an exact package or USB-safe bridge is unavailable, the update stops with a
+reason; it never substitutes a Wi-Fi-only bridge that might require physical
+BOOT access. `MESHFIRMWARE_PARTITION_PACKAGE` can select an exact local migration
+ZIP; it is subject to the same checks. Merged images remain a separately
+confirmed new install that erases settings. Echo-only mode never runs a bridge.
+
+For existing releases whose exact migration ZIP contains only the Wi-Fi bridge,
+the helper automatically downloads a qualified, versioned six-profile USB
+utility set. Its release URL and archive SHA-256 are pinned in the helper;
+it never follows an untested `latest` bridge. The download happens only after
+the exact Full package qualifies and only when expansion needs that bridge.
+Cached ZIPs are checksum-verified again before use.
+
+For offline use or an explicitly selected set, set
+`MESHFIRMWARE_USB_MIGRATION_SET` to that ZIP, or put it at
+`tools/meshcore-usb-partition-bridges.zip` beside the flasher. The set has its own
+source provenance and checksums; it does not relabel or replace the selected
+Full application's release. Its chip/flash header, NVS startup guard and all six
+profile hashes are checked before use.
+
+In the MeshCore checkout, build only this utility set on Linux/WSL with:
+
+```bash
+python3 scripts/build_esp32_partition_migration.py --usb-only
+```
+
+This builds the six intermediate images serially, not every Full application.
 
 After writing, the flashers confirm that the selected ESP32 returns as a
 running application. If it stays in ROM download mode, they issue an esptool

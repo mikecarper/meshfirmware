@@ -19,6 +19,9 @@
 __pycache__/
 *.py[cod]
 
+# Generated USB migration utility set (rebuild from the MeshCore recipe)
+/tools/meshcore-usb-partition-bridges.zip
+
 # Local device configuration and backups (may contain credentials)
 /config.yaml
 /config_backup.*.yaml*

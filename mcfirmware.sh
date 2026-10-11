@@ -39,6 +39,9 @@ cleanup() {
 		&& -f "${ESP32_MERGED_OTA_IMAGE:-}" ]]; then
 		rm -f -- "$ESP32_MERGED_OTA_IMAGE"
 	fi
+	if declare -F remove_esp32_expansion_scratch >/dev/null; then
+		remove_esp32_expansion_scratch
+	fi
 }
 error_handler() {
   local lineno=$1
@@ -98,6 +101,7 @@ BOOTLOADER_PROBE_ACTIVE=0
 NRF52_BOARD_GUARD_PASSED=0
 ESP32_FLASH_EXPECTED_MAC=""
 ESP32_MERGED_OTA_IMAGE=""
+ESP32_PARTITION_EXPANSION_SCRATCH=""
 FAST_IDENTITY_ATTEMPTED_PORT=""
 DETECTED_NODE_BOARD=""
 DETECTED_NODE_VERSION=""
@@ -579,6 +583,8 @@ MESHCORE_USB_RESET_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfi
 MESHCORE_USB_RESET_TOOL_SHA256="364de4c2e100df3ec2be795fc6079722ce1790416ba5a2d04d0c53e6c87c7083"
 MESHCORE_ESP32_BOOTLOADER_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_esp32_bootloader.py"
 MESHCORE_ESP32_BOOTLOADER_TOOL_SHA256="8c48512a650892b9c8d024d926a4c7c85d9e9d30db0fddc990be6c0c108b4ea0"
+MESHCORE_PARTITION_EXPANSION_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_partition_expansion.py"
+MESHCORE_PARTITION_EXPANSION_TOOL_SHA256="f53774a5226aa29ed0cfe869e4664db0a42a0087bbd76d00c6f6e0b656332c14"
 USB_RESET_EXPECTED_IDENTITY=""
 USB_RESET_FAILED=0
 USB_RESET_RECOVERED_PORT=""
@@ -591,6 +597,7 @@ ESP32_OPERATION_BEFORE="$NORESET"
 ESP32_SESSION_IS_S3=0
 ESP32_NATIVE_ROM_READY=0
 READMAC="read-mac"
+FLASHID="flash-id"
 READFLASH="read-flash"
 WRITEFLASH="write-flash"
 ERASEFLASH="erase-flash"
@@ -1457,6 +1464,45 @@ meshcore_esp32_bootloader_tool_hash_matches() {
 	[[ -f "$tool" ]] || return 1
 	actual_hash="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read().replace(b"\r\n", b"\n")).hexdigest())' "$tool" 2>/dev/null)" || return 1
 	[[ "$actual_hash" == "$MESHCORE_ESP32_BOOTLOADER_TOOL_SHA256" ]]
+}
+
+meshcore_partition_expansion_tool_hash_matches() {
+	local tool=$1 actual_hash=""
+	[[ -f "$tool" ]] || return 1
+	actual_hash="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read().replace(b"\r\n", b"\n")).hexdigest())' "$tool" 2>/dev/null)" || return 1
+	[[ "$actual_hash" == "$MESHCORE_PARTITION_EXPANSION_TOOL_SHA256" ]]
+}
+
+resolve_meshcore_partition_expansion_tool() {
+	local local_tool="${PWD_SCRIPT}/tools/meshcore_partition_expansion.py"
+	local tool_dir="${FIRMWARE_ROOT}/tools"
+	local cached_tool="${tool_dir}/meshcore_partition_expansion.py" partial_tool=""
+	if [[ -f "$local_tool" ]]; then
+		if meshcore_partition_expansion_tool_hash_matches "$local_tool"; then
+			printf '%s\n' "$local_tool"
+			return 0
+		fi
+		echo "The bundled partition-expansion helper does not match this script; refusing to run it." >&2
+		return 1
+	fi
+	if meshcore_partition_expansion_tool_hash_matches "$cached_tool"; then
+		printf '%s\n' "$cached_tool"
+		return 0
+	fi
+	mkdir -p "$tool_dir" || return 1
+	partial_tool="$(mktemp "${cached_tool}.partial.XXXXXX")" || return 1
+	if ! curl -fL --retry 2 --connect-timeout 10 --max-time 30 \
+		-o "$partial_tool" "$MESHCORE_PARTITION_EXPANSION_TOOL_URL" \
+		|| ! meshcore_partition_expansion_tool_hash_matches "$partial_tool"; then
+		echo "The partition-expansion helper could not be downloaded and verified." >&2
+		rm -f -- "$partial_tool"
+		return 1
+	fi
+	if ! mv -f -- "$partial_tool" "$cached_tool"; then
+		rm -f -- "$partial_tool"
+		return 1
+	fi
+	printf '%s\n' "$cached_tool"
 }
 
 resolve_meshcore_esp32_bootloader_tool() {
@@ -5173,6 +5219,7 @@ esptool_set_variables() {
 	  DEFAULTRESET="default-reset"
 	  USBRESET="usb-reset"
 	  READMAC="read-mac"
+	  FLASHID="flash-id"
 	  READFLASH="read-flash"
 	  WRITEFLASH="write-flash"
 	  ERASEFLASH="erase-flash"
@@ -5183,6 +5230,7 @@ esptool_set_variables() {
 	  DEFAULTRESET="default_reset"
 	  USBRESET="usb_reset"
 	  READMAC="read_mac"
+	  FLASHID="flash_id"
 	  READFLASH="read_flash"
 	  WRITEFLASH="write_flash"
 	  ERASEFLASH="erase_flash"
@@ -6453,6 +6501,11 @@ esp32_write_after_mode() {
 finish_esp32_flash_session() {
 	local port="${1:-${DEVICE_PORT:-}}"
 	local runtime_port="" live_port="" native_usb=0
+	local finish_kind="${2:-}"
+	case "$finish_kind" in
+		""|partition-expansion) ;;
+		*) echo "Unknown ESP32 session finish mode; refusing a guessed reset." >&2; return 1 ;;
+	esac
 
 	if [[ -z "$port" ]]; then
 		echo "The verified ESP32 port disappeared before the flash session could be finished: ${port:-unknown}" >&2
@@ -6528,6 +6581,13 @@ finish_esp32_flash_session() {
 	BOOTLOADER_PROBE_ACTIVE=0
 	BOOTLOADER_PROBE_PORT=""
 	ESP32_NATIVE_ROM_READY=0
+	if [[ "$finish_kind" == partition-expansion ]]; then
+		# The pinned bridge deliberately disables native USB CDC while editing
+		# flash. Its safe reset completed, but a runtime CDC endpoint is neither
+		# expected nor proof of migration. The caller waits for automatic ROM
+		# return or settled UART status, then verifies the raw restoration proof.
+		return 0
+	fi
 
 	if (( native_usb )); then
 		# The identity-bound reset command above completed successfully.
@@ -6894,6 +6954,8 @@ esp32_runtime_storage_preflight() {
 			return 0
 		fi
 		echo "Warning: the app-only image is too large for the currently reported ESP32 app partition." >&2
+		echo "A confirmed app-only update will check for a verified intermediate partition-expansion firmware before writing the selected app." >&2
+		echo "A merged install is an optional erase-and-replace alternative, not the automatic update path." >&2
 		alternate="$(esp_merged_sibling_selection "$selection" 2>/dev/null || true)"
 		if [[ -n "$alternate" ]]; then
 			ESP32_PREFLIGHT_ALTERNATE="$alternate"
@@ -6923,7 +6985,7 @@ esp32_runtime_storage_preflight() {
 			fi
 		fi
 	else
-		echo "The merged image's app payload is too large for the current app partition; a merged install is required to use this build." >&2
+		echo "The merged image's app payload is too large for the current app partition. An app-only update can check for a supported intermediate partition expansion; this merged install instead erases settings and replaces the layout." >&2
 	fi
 }
 
@@ -7174,8 +7236,371 @@ esp32_firmware_fits_app_partition() {
 
 	echo "ERROR: firmware is ${firmware_size} bytes, but the ESP32 app partition at ${offset} is only ${partition_size} bytes (${partition_size_hex})." >&2
 	echo "The app-only image cannot be flashed safely with the device's current partition table." >&2
-	echo "Use the matching -merged.bin firmware as a new install to replace the partition layout (this erases device settings), or use a smaller app-only image." >&2
+	echo "A verified intermediate partition-expansion firmware may support this board and layout. Otherwise use a smaller app-only image or an explicitly confirmed matching -merged.bin new install (which erases settings)." >&2
 	return 1
+}
+
+remove_esp32_expansion_scratch() {
+	local scratch="${ESP32_PARTITION_EXPANSION_SCRATCH:-}"
+	[[ -n "$scratch" && -d "$scratch" ]] || return 0
+	# Only remove this transaction's known temporary reads. In particular, keep
+	# its cached package and pending record for an interrupted migration retry.
+	rm -f -- "$scratch/old-table.bin" "$scratch/new-table.bin" \
+		"$scratch/nvs.bin" "$scratch/otadata.bin" "$scratch/flash-id.txt"
+	rmdir -- "$scratch" 2>/dev/null || true
+	ESP32_PARTITION_EXPANSION_SCRATCH=""
+}
+
+esp32_partition_expansion_plan_fields() {
+	python3 -c '
+import json, os, re, sys
+p = json.loads(sys.argv[1])
+if p.get("ok") is not True or not isinstance(p.get("needed"), bool):
+    raise SystemExit("Invalid partition-expansion plan")
+firmware_hash = p.get("firmware_sha256", "")
+if not isinstance(firmware_hash, str) or not re.fullmatch("[0-9a-f]{64}", firmware_hash):
+    raise SystemExit("Partition-expansion plan has no verified final firmware hash")
+if not p["needed"]:
+    print("false\t" + firmware_hash)
+    raise SystemExit(0)
+chip = p.get("chip")
+if isinstance(chip, bool) or not isinstance(chip, int) or chip not in (0, 5, 9) or p.get("usb_safe") is not True \
+        or p.get("automatic_rom_return") is not (chip != 0) \
+        or p.get("uart_completion_status") is not (chip == 0):
+    raise SystemExit("Partition-expansion plan does not describe a reviewed USB-safe bridge")
+keys = ("bridge_file", "target_table_file", "plan_file")
+paths = [p.get(k) for k in keys]
+if any(not isinstance(v, str) or not os.path.isabs(v) or not os.path.isfile(v)
+       or "\t" in v or "\n" in v or "\r" in v for v in paths):
+    raise SystemExit("Partition-expansion plan contains invalid files")
+nums = [p.get(k) for k in ("nvs_offset", "nvs_size", "ota_offset", "ota_size")]
+if any(isinstance(v, bool) or not isinstance(v, int) or v <= 0 for v in nums):
+    raise SystemExit("Partition-expansion plan contains invalid read geometry")
+if nums[0:2] != [0x9000, 0x5000] or nums[2:4] != [0xe000, 0x2000]:
+    raise SystemExit("Partition-expansion plan changed the stable proof geometry")
+print("\t".join(["true", firmware_hash] + paths + [str(v) for v in nums]
+                + ["1" if p.get("resume") is True else "0", str(chip)]))
+' "$1"
+}
+
+parse_esp32_expansion_nvs_partition() {
+	python3 - "$1" <<'PY'
+import struct, sys
+d = open(sys.argv[1], "rb").read()
+parts = []
+found = 0
+for i in range(0, min(len(d), 0x1000), 32):
+    e = d[i:i+32]
+    if len(e) != 32 or e[:2] == b"\xff\xff":
+        break
+    if e[:2] == b"\xaa\x50" and e[2:4] == b"\x01\x02":
+        found += 1
+        if e[12:28].split(b"\x00", 1)[0] == b"nvs":
+            parts.append(struct.unpack_from("<II", e, 4))
+if not found:
+    raise SystemExit(0)
+if found != 1 or len(parts) != 1:
+    raise SystemExit("Cannot identify one unambiguous ESP32 NVS partition; refusing an unchecked app update")
+offset, size = parts[0]
+if not offset or offset % 0x1000 or not 0x1000 <= size <= 0x100000 or size % 0x1000:
+    raise SystemExit("Invalid ESP32 NVS read geometry; refusing an unchecked app update")
+print(f"0x{offset:x}\t0x{size:x}")
+PY
+}
+
+esp32_read_partition_expansion_region() {
+	local requested_port=$1 offset=$2 length=$3 output_file=$4
+	local verified_port="" actual_size=""
+	verified_port="$(esp32_verified_destructive_port "$requested_port" \
+		"partition-expansion proof read")" || return 1
+	if ! run_esp32_session_esptool "$verified_port" --after "$NORESET" \
+		--baud "${ESP32_SAFE_BAUD:-115200}" "$READFLASH" \
+		"$offset" "$length" "$output_file" >/dev/null; then
+		echo "Could not read the partition-expansion proof at $offset; the final firmware was not written." >&2
+		return 1
+	fi
+	actual_size="$(stat -c '%s' "$output_file" 2>/dev/null || true)"
+	if [[ "$actual_size" != "$((length))" ]]; then
+		echo "Partition-expansion read at $offset returned ${actual_size:-0} of $((length)) bytes; refusing the final firmware." >&2
+		return 1
+	fi
+}
+
+esp32_require_planned_firmware_hash() {
+	local firmware_file=$1 expected="${ESP32_PLANNED_FIRMWARE_SHA256:-}" actual=""
+	if [[ ! "$expected" =~ ^[0-9a-f]{64}$ || ! -f "$firmware_file" ]]; then
+		echo "No verified final firmware hash is bound; refusing the app write." >&2
+		return 1
+	fi
+	actual="$(sha256sum -- "$firmware_file")" || return 1
+	actual="${actual%% *}"
+	if [[ "$actual" != "$expected" ]]; then
+		echo "The selected final firmware changed after partition planning; refusing the app write." >&2
+		return 1
+	fi
+}
+
+resolve_meshcore_partition_uart_python() {
+	local candidate="${FIRMWARE_ROOT}/tools/meshcore-backup-venv/bin/python"
+	local version_check='import sys,serial; raise SystemExit(0 if sys.version_info >= (3,10) else 1)'
+	# Reuse an already provisioned serial-capable interpreter. Do not create or
+	# repair a backup venv, or try system pip after installing the bridge.
+	if [[ -x "$candidate" ]] && "$candidate" -c "$version_check" >/dev/null 2>&1; then
+		printf '%s\n' "$candidate"
+		return 0
+	fi
+	if python3 -c "$version_check" >/dev/null 2>&1; then
+		command -v python3
+		return 0
+	fi
+	# esptool was already successfully provisioned for the current ROM session;
+	# its existing pipx environment includes pyserial. Resolve that executable
+	# now, before begin/first helper write, and keep using it through UART wait.
+	candidate="$(pipx run --spec esptool python -c \
+		'import sys,serial; assert sys.version_info >= (3,10); print(sys.executable)' 2>/dev/null)" || return 1
+	if [[ "$candidate" != /* || "$candidate" == *$'\n'* || ! -x "$candidate" ]] \
+		|| ! "$candidate" -c "$version_check" >/dev/null 2>&1; then
+		echo "No existing Python 3.10+ environment with pyserial is available for safe UART completion; no bridge will be written." >&2
+		return 1
+	fi
+	printf '%s\n' "$candidate"
+}
+
+esp32_wait_partition_expansion_rom() {
+	local requested_port=$1 original_by_id=$2 original_serial=$3 original_path=$4
+	local original_mac=$5 chip=$6 candidate="" confirmed=""
+	local deadline=$((SECONDS + 180))
+	ESP32_EXPANSION_ROM_PORT=""
+	echo "Waiting up to 180 seconds for this USB-safe bridge to finish and return the same board to ROM. Keep power connected; no BOOT button or reset is needed."
+	while (( SECONDS < deadline )); do
+		candidate="$(find_reenumerated_nrf52_port "$requested_port" "$original_by_id" \
+			"$original_serial" "$original_path" "" 2>/dev/null || true)"
+		# The bridge itself enters ROM after it has settled. Never send a USB
+		# reset/DTR handoff to an application still changing flash or settings.
+		if [[ -n "$candidate" ]] && raw_esptool_mac_probe --port "$candidate" \
+			--before "$NORESET" --after "$NORESET" --baud 115200 "$READMAC"; then
+			if [[ "$ESP32_FLASH_EXPECTED_MAC" != "$original_mac" ]]; then
+				ESP32_FLASH_EXPECTED_MAC="$original_mac"
+				echo "The ESP32 chip MAC changed after partition expansion; refusing the final firmware." >&2
+				return 1
+			fi
+			confirmed="$(find_reenumerated_nrf52_port "$candidate" "$original_by_id" \
+				"$original_serial" "$original_path" "" 2>/dev/null || true)"
+			if [[ "$confirmed" != "$candidate" ]]; then
+				echo "The same physical ESP32 USB identity changed during its ROM probe; refusing the final firmware." >&2
+				return 1
+			fi
+			save_selected_serial_port "$candidate" || return 1
+			DEVICE_PORT="$candidate"
+			ESP32_OPERATION_BEFORE="$NORESET"
+			ESP32_NATIVE_ROM_READY=1
+			ESP32_SESSION_IS_S3=0
+			if [[ "$chip" == 9 ]]; then ESP32_SESSION_IS_S3=1; fi
+			BOOTLOADER_PROBE_ACTIVE=1
+			BOOTLOADER_PROBE_PORT="$candidate"
+			ESP32_EXPANSION_ROM_PORT="$candidate"
+			return 0
+		fi
+		sleep 1
+	done
+	echo "The same ESP32 USB identity did not confirm ROM mode in time. No reset or final write was attempted; keep power connected and retry." >&2
+	return 1
+}
+
+esp32_prepare_partition_expansion_if_needed() {
+	local requested_port=$1 firmware_file=$2 device=$3
+	local original_mac="${ESP32_FLASH_EXPECTED_MAC:-}"
+	local original_by_id="${ESP32_FLASH_SELECTED_BY_ID:-}"
+	local original_serial="${ESP32_FLASH_EXPECTED_SERIAL:-}"
+	local original_path="${ESP32_FLASH_EXPECTED_PATH_STEM:-}"
+	local helper="" scratch="" cache_dir="" firmware_sha="" chip="" uart_python=""
+	local plan_output="" fields="" needed="" bridge_file="" target_table="" plan_file=""
+	local nvs_offset="" nvs_size="" ota_offset="" ota_size="" choice=""
+	local bridge_offsets_output="" write_after="" slot_after="" verified_port="" live_port=""
+	local completion_output="" begin_output="" uart_output="" source_ota_layout="" source_nvs_layout="" resumed=0 i
+	local -a bridge_offsets=()
+	local -a source_ota_args=()
+	local -a source_nvs_args=() package_args=() usb_set_args=()
+
+	# This guard also protects direct callers and hermetic echo-only tests.
+	if [[ "${EXECUTION_MODE:-run}" == echo ]]; then
+		echo "Echo-only selected; partition expansion will not run."
+		return 0
+	fi
+	ESP32_PLANNED_FIRMWARE_SHA256=""
+	if [[ ! "$original_mac" =~ ^[0-9a-f]{12}$ ]]; then
+		echo "No original ESP32 chip MAC is bound; refusing partition expansion." >&2
+		return 1
+	fi
+	[[ -f "$firmware_file" ]] || return 1
+	helper="$(resolve_meshcore_partition_expansion_tool)" || return 1
+	if [[ -n "${MESHFIRMWARE_PARTITION_PACKAGE:-}" ]]; then
+		package_args=(--package "$MESHFIRMWARE_PARTITION_PACKAGE")
+	fi
+	if [[ -n "${MESHFIRMWARE_USB_MIGRATION_SET:-}" ]]; then
+		usb_set_args=(--usb-set "$MESHFIRMWARE_USB_MIGRATION_SET")
+	elif [[ -f "${PWD_SCRIPT:-}/tools/meshcore-usb-partition-bridges.zip" ]]; then
+		usb_set_args=(--usb-set "$PWD_SCRIPT/tools/meshcore-usb-partition-bridges.zip")
+	fi
+	remove_esp32_expansion_scratch
+	scratch="$(mktemp -d)" || return 1
+	ESP32_PARTITION_EXPANSION_SCRATCH="$scratch"
+	cache_dir="${FIRMWARE_ROOT}/partition-expansion/${original_mac}"
+	mkdir -p "$cache_dir" || return 1
+	# Plan every confirmed app-only update. The helper's persisted started/
+	# completed records prevent an already-expanded app-fit result (or a newly
+	# selected final image) from bypassing an interrupted settings restoration.
+	esp32_read_partition_expansion_region "$requested_port" 0x8000 0x1000 \
+		"$scratch/old-table.bin" || return 1
+	# Device-side markers also guard cross-host retries where this host has no
+	# local pending plan. App fit/table match alone must not hide a migration
+	# whose identity or saved configuration is still waiting for restoration.
+	source_nvs_layout="$(parse_esp32_expansion_nvs_partition "$scratch/old-table.bin")" || return 1
+	if [[ -n "$source_nvs_layout" ]]; then
+		read -r nvs_offset nvs_size <<< "$source_nvs_layout"
+		esp32_read_partition_expansion_region "$requested_port" "$nvs_offset" "$nvs_size" \
+			"$scratch/nvs.bin" || return 1
+		source_nvs_args=(--nvs "$scratch/nvs.bin")
+	fi
+	if python3 -c '
+import sys
+d = open(sys.argv[1], "rb").read()
+found = any(d[i:i+2] == b"\xaa\x50" and d[i+2] == 0 and 0x10 <= d[i+3] <= 0x1f
+            for i in range(0, len(d)-31, 32))
+raise SystemExit(0 if found else 1)
+' "$scratch/old-table.bin"; then
+		source_ota_layout="$(parse_esp32_ota_data_partition "$scratch/old-table.bin")" || return 1
+		read -r ota_offset ota_size <<< "$source_ota_layout"
+		esp32_read_partition_expansion_region "$requested_port" "$ota_offset" "$ota_size" \
+			"$scratch/otadata.bin" || return 1
+		source_ota_args=(--otadata "$scratch/otadata.bin")
+	fi
+	verified_port="$(esp32_verified_destructive_port "$requested_port" \
+		"partition-expansion capacity check")" || return 1
+	if ! run_esp32_session_esptool "$verified_port" --after "$NORESET" \
+		--baud "${ESP32_SAFE_BAUD:-115200}" "${FLASHID:-flash-id}" \
+		>"$scratch/flash-id.txt"; then
+		echo "Could not verify the ESP32 flash capacity; the final firmware was not written." >&2
+		return 1
+	fi
+	if ! plan_output="$(python3 "$helper" plan --firmware "$firmware_file" \
+		--partition-table "$scratch/old-table.bin" "${source_nvs_args[@]}" "${source_ota_args[@]}" \
+		--flash-id-output "$scratch/flash-id.txt" --output-dir "$cache_dir" \
+		--device-mac "$original_mac" "${package_args[@]}" "${usb_set_args[@]}")"; then
+		echo "No verified partition-expansion plan is available; the final firmware was not written." >&2
+		return 1
+	fi
+	fields="$(esp32_partition_expansion_plan_fields "$plan_output")" || return 1
+	IFS=$'\t' read -r needed firmware_sha bridge_file target_table plan_file \
+		nvs_offset nvs_size ota_offset ota_size resumed chip <<< "$fields"
+	ESP32_PLANNED_FIRMWARE_SHA256="$firmware_sha"
+	esp32_require_planned_firmware_hash "$firmware_file" || return 1
+	if [[ "$needed" == false ]]; then
+		remove_esp32_expansion_scratch
+		return 0
+	fi
+
+	if (( ! resumed )); then
+		echo "The selected app needs larger partitions; a verified intermediate partition-expansion firmware is available."
+		echo "This changes the partition table without a chip erase. The helper stages and verifies identity and supported configuration; unsupported stored files may not survive." >&2
+		echo "Partition-table replacement is not power-loss atomic: an interruption at that stage may require recovery." >&2
+		echo "Keep stable power throughout both helper boots. The selected final firmware is written only after the new layout and saved-state recovery verify." >&2
+		if ! read -r -p "Run the intermediate partition expansion, then continue this update? [y/N] " \
+			choice < "${MESHFIRMWARE_TTY:-/dev/tty}" \
+			|| [[ ! "$choice" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+			echo "Partition expansion cancelled; no helper or final app was written." >&2
+			return 1
+		fi
+		if [[ "$chip" == 0 ]] && ! uart_python="$(resolve_meshcore_partition_uart_python)"; then
+			echo "USB-UART completion dependencies are unavailable; no helper or final app was written." >&2
+			return 1
+		fi
+		# Select only existing OTA app slots, validate helper fit and retain the
+		# established inactive-first/active-last verified write ordering.
+		if ! bridge_offsets_output="$(esp32_update_flash_offsets "$requested_port" "$bridge_file")" \
+			|| [[ -z "$bridge_offsets_output" ]]; then
+			return 1
+		fi
+		mapfile -t bridge_offsets <<< "$bridge_offsets_output"
+		# The shared helper persists started=true before the first write. A plan
+		# made for a declined update is never marked as an unfinished migration.
+		if ! begin_output="$(python3 "$helper" begin --plan "$plan_file")" \
+			|| ! python3 -c 'import json,sys; r=json.loads(sys.argv[1]); raise SystemExit(0 if r.get("ok") is True else 1)' "$begin_output"; then
+			echo "Could not persist the partition-expansion recovery record; no helper was written." >&2
+			return 1
+		fi
+		write_after="$(esp32_write_after_mode "$requested_port")" || return 1
+		for ((i=0; i<${#bridge_offsets[@]}; i++)); do
+			slot_after="$NORESET"
+			if (( i + 1 == ${#bridge_offsets[@]} )); then slot_after="$write_after"; fi
+			if ! run_esp32_session_esptool "$requested_port" --after "$slot_after" \
+				--baud "${ESP32_SAFE_BAUD:-115200}" "$WRITEFLASH" \
+				"${bridge_offsets[i]}" "$bridge_file"; then
+				echo "The intermediate firmware write failed; the final app was not written. Its pending recovery record was retained." >&2
+				return 1
+			fi
+		done
+		finish_esp32_flash_session "$requested_port" partition-expansion || return 1
+		BOOTLOADER_PROBE_ACTIVE=0
+		BOOTLOADER_PROBE_PORT=""
+		ESP32_NATIVE_ROM_READY=0
+		if [[ "$chip" == 0 ]]; then
+			live_port="$(find_reenumerated_nrf52_port "$requested_port" "$original_by_id" \
+				"$original_serial" "$original_path" "" 2>/dev/null || true)"
+			if [[ -z "$live_port" ]]; then
+				echo "The same physical USB-UART identity did not return; refusing a guessed reset or final firmware." >&2
+				return 1
+			fi
+			echo "Waiting up to 180 seconds for the USB-UART bridge to report settled restoration before software bootloader entry. Keep power connected."
+			if ! uart_output="$("$uart_python" "$helper" wait-uart --port "$live_port" \
+				--device-mac "$original_mac" --timeout 180)" \
+				|| ! python3 -c 'import json,sys; r=json.loads(sys.argv[1]); raise SystemExit(0 if r.get("ok") is True and r.get("settled") is True and r.get("device_mac", "").lower() == sys.argv[2] else 1)' "$uart_output" "$original_mac"; then
+				echo "The same USB-UART bridge did not report a verified settled identity; no reset or final firmware was attempted." >&2
+				return 1
+			fi
+			# A settled UART status permits a DTR/RTS ROM handoff, not final app
+			# writing. The raw table/NVS/OTA proof below remains mandatory.
+			if [[ "$(find_reenumerated_nrf52_port "$live_port" "$original_by_id" \
+				"$original_serial" "$original_path" "" 2>/dev/null || true)" != "$live_port" ]]; then
+				echo "The same physical USB-UART identity changed after its settled status; refusing reset or final firmware." >&2
+				return 1
+			fi
+			save_selected_serial_port "$live_port" || return 1
+			if ! prepare_esp32_flash_session "$live_port" "$device"; then
+				ESP32_FLASH_EXPECTED_MAC="$original_mac"
+				return 1
+			fi
+			if [[ "$ESP32_FLASH_EXPECTED_MAC" != "$original_mac" ]]; then
+				ESP32_FLASH_EXPECTED_MAC="$original_mac"
+				echo "The ESP32 chip MAC changed after partition expansion; refusing the final firmware." >&2
+				return 1
+			fi
+			requested_port="${DEVICE_PORT:-$live_port}"
+		else
+			esp32_wait_partition_expansion_rom "$requested_port" "$original_by_id" \
+				"$original_serial" "$original_path" "$original_mac" "$chip" || return 1
+			requested_port="$ESP32_EXPANSION_ROM_PORT"
+		fi
+	else
+		echo "An unfinished partition expansion is recorded for this ESP32; verifying preserved-state recovery before any final app write."
+	fi
+
+	esp32_read_partition_expansion_region "$requested_port" 0x8000 0x1000 \
+		"$scratch/new-table.bin" || return 1
+	esp32_read_partition_expansion_region "$requested_port" "$nvs_offset" "$nvs_size" \
+		"$scratch/nvs.bin" || return 1
+	esp32_read_partition_expansion_region "$requested_port" "$ota_offset" "$ota_size" \
+		"$scratch/otadata.bin" || return 1
+	if ! completion_output="$(python3 "$helper" verify --plan "$plan_file" \
+		--partition-table "$scratch/new-table.bin" --nvs "$scratch/nvs.bin" \
+		--otadata "$scratch/otadata.bin")" \
+		|| ! python3 -c 'import json,sys; r=json.loads(sys.argv[1]); raise SystemExit(0 if r.get("ok") is True else 1)' "$completion_output"; then
+		echo "Partition expansion or saved-state recovery did not verify; the final firmware was not written. Keep the pending record and let the intermediate firmware finish recovery." >&2
+		return 1
+	fi
+	remove_esp32_expansion_scratch
+	esp32_require_planned_firmware_hash "$firmware_file" || return 1
+	echo "Partition expansion and preserved-state recovery verified. Continuing with the selected final firmware."
 }
 
 esp32_device_image_present_at_offset() {
@@ -7986,7 +8411,7 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 	else
 		echo "  serial preparation and identity-safe native USB handoff"
 		echo "  $ESPTOOL_CMD --port <matching-port> --before <session-reset> --after <safe-reset> --baud 115200 $WRITEFLASH <device app offset> \"${DOWNLOADED_FILE}\""
-		echo "The ESP32 partition table will be read from the device. The update will stop if the image does not fit; every OTA app slot will be updated, including empty slots."
+		echo "The actual ESP32 layout and flash capacity will be read. If necessary, a supported, verified intermediate partition-expansion firmware will be offered before the selected app; unsupported expansion stops without writing the final app. Every OTA app slot is updated, including empty slots."
 		confirm_meshcore_usb_backup_for_action flash-update || exit 1
 		EXECUTION_MODE="$(choose_flash_execution_mode "UPDATE ${DEVICE} on ${DEVICE_PORT}")"
 		if [[ "$EXECUTION_MODE" == "echo" ]]; then
@@ -7996,6 +8421,10 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 		fi
 		prepare_esp32_flash_session "${DEVICE_PORT}" "${DEVICE}"
 		echo "ESP32 operation reset mode: $ESP32_OPERATION_BEFORE"
+		if ! esp32_prepare_partition_expansion_if_needed \
+			"${DEVICE_PORT}" "${DOWNLOADED_FILE}" "${DEVICE}"; then
+			exit 1
+		fi
 		ESP32_UPDATE_OFFSETS_OUTPUT=""
 		if ! ESP32_UPDATE_OFFSETS_OUTPUT="$(esp32_update_flash_offsets "${DEVICE_PORT}" "${DOWNLOADED_FILE}")"; then
 			exit 1
@@ -8007,6 +8436,7 @@ if [[ "$ARCHITECTURE" =~ esp32 ]]; then
 		mapfile -t ESP32_UPDATE_OFFSETS <<< "$ESP32_UPDATE_OFFSETS_OUTPUT"
 		ESP32_WRITE_AFTER="$(esp32_write_after_mode "$DEVICE_PORT")"
 		for ((i=0; i<${#ESP32_UPDATE_OFFSETS[@]}; i++)); do
+			esp32_require_planned_firmware_hash "${DOWNLOADED_FILE}" || exit 1
 			flash_offset="${ESP32_UPDATE_OFFSETS[i]}"
 			ESP32_SLOT_WRITE_AFTER="$NORESET"
 			if (( i + 1 == ${#ESP32_UPDATE_OFFSETS[@]} )); then

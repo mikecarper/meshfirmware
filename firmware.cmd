@@ -59,6 +59,8 @@ $KEYMIND_CASCADE_LOGGING_FALLBACK_URL = "$KEYMIND_RAW_BASE_URL/mesh-america/keym
 $MESHCORE_BACKUP_TOOL_URL = "https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_backup.py"
 $MESHCORE_BACKUP_TOOL_VERSION = '0.2.3'
 $MESHCORE_BACKUP_TOOL_SHA256 = 'b4a957e05ea3c00be7f46ddb6269874e4167c8f5bf42976487425696af2140cd'
+$MESHCORE_PARTITION_TOOL_URL = 'https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_partition_expansion.py'
+$MESHCORE_PARTITION_TOOL_SHA256 = 'f53774a5226aa29ed0cfe869e4664db0a42a0087bbd76d00c6f6e0b656332c14'
 
 $timeoutMeshtastic = 10 # Timeout duration in seconds
 $baud = 1200 # 115200
@@ -405,6 +407,8 @@ function get_esptool_cmd() {
 	$script:ESPTOOL_WRITE_FLASH = "write_flash"
 	$script:ESPTOOL_ERASE_FLASH = "erase_flash"
 	$script:ESPTOOL_READ_FLASH_STATUS = "read_flash_status"
+	$script:ESPTOOL_READ_FLASH = "read_flash"
+	$script:ESPTOOL_FLASH_ID = "flash_id"
 	$script:ESPTOOL_CHIP_ID = "chip_id"
 	$script:ESPTOOL_READ_MAC = "read_mac"
 	$script:ESPTOOL_WRITE_MEM = "write_mem"
@@ -420,6 +424,8 @@ function get_esptool_cmd() {
 			$script:ESPTOOL_WRITE_FLASH = "write-flash"
 			$script:ESPTOOL_ERASE_FLASH = "erase-flash"
 			$script:ESPTOOL_READ_FLASH_STATUS = "read-flash-status"
+			$script:ESPTOOL_READ_FLASH = "read-flash"
+			$script:ESPTOOL_FLASH_ID = "flash-id"
 			$script:ESPTOOL_CHIP_ID = "chip-id"
 			$script:ESPTOOL_READ_MAC = "read-mac"
 			$script:ESPTOOL_WRITE_MEM = "write-mem"
@@ -5077,7 +5083,8 @@ function Complete-Esp32FlashSession {
 	param(
 		[Parameter(Mandatory)][string]$ComPort,
 		[Parameter(Mandatory)][psobject]$UsbIdentity,
-		[switch]$SkipApplicationVerification
+		[switch]$SkipApplicationVerification,
+		[switch]$PartitionBridgeBoot
 	)
 
 	$lastPort = $ComPort
@@ -5126,6 +5133,14 @@ function Complete-Esp32FlashSession {
 		}
 	}
 
+	if ($PartitionBridgeBoot) {
+		if (-not $SkipApplicationVerification) { throw 'Partition bridge boot must use its separate verified handoff check.' }
+		# The reviewed bridge disables native USB during partition writes.
+		# Disappearance is expected, not completion; the caller will verify
+		# the physical table AND the NVS restoration record before proceeding.
+		Write-Host 'Partition bridge reset requested. Keep power connected while it migrates and restores settings.'
+		return $lastPort
+	}
 	if ($SkipApplicationVerification) {
 		$lastPort = Resolve-EspUsbComPort -PreferredComPort $lastPort `
 			-UsbIdentity $UsbIdentity -TimeoutMs 12000 -Purpose 'ESP32 USB identity after reset request'
@@ -5163,6 +5178,247 @@ function Complete-Esp32FlashSession {
 	throw "ESP32 firmware was written, but its application did not answer on the selected USB device after reset. Application boot is unverified; no bootloader retry was sent. Check its boot log before reporting this flash as successful."
 }
 
+function Resolve-PartitionExpansionTool {
+	Wait-FirmwareToolUpdates
+	$bundled = Join-Path $ScriptPath 'tools\meshcore_partition_expansion.py'
+	$cache = Join-Path $ScriptPath '.tmp\meshcore_partition_expansion.py'
+	foreach ($path in @($bundled, $cache)) {
+		if ((Test-Path -LiteralPath $path) -and
+			(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -eq $MESHCORE_PARTITION_TOOL_SHA256) { return $path }
+	}
+	if (Test-Path -LiteralPath $bundled) { throw 'The bundled partition-expansion helper does not match this flasher; update both together.' }
+	New-Item -ItemType Directory -Path (Split-Path $cache -Parent) -Force | Out-Null
+	$partial = "$cache.$PID.partial"
+	try {
+		Invoke-WebRequest -Uri $MESHCORE_PARTITION_TOOL_URL -OutFile $partial -UseBasicParsing
+		if ((Get-FileHash -LiteralPath $partial -Algorithm SHA256).Hash.ToLowerInvariant() -ne $MESHCORE_PARTITION_TOOL_SHA256) {
+			throw 'The downloaded partition-expansion helper failed its checksum check.'
+		}
+		Move-Item -LiteralPath $partial -Destination $cache -Force
+		return $cache
+	}
+	finally { if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Force } }
+}
+
+function Invoke-PartitionExpansionTool {
+	param([string[]]$Arguments)
+	$tool = Resolve-PartitionExpansionTool
+	$previousPreference = $ErrorActionPreference
+	try {
+		$ErrorActionPreference = 'Continue'
+		$output = (& $pythonCommand $tool @Arguments 2>&1 | Out-String)
+		$exitCode = $LASTEXITCODE
+	}
+	finally { $ErrorActionPreference = $previousPreference }
+	try { $result = $output | ConvertFrom-Json -ErrorAction Stop }
+	catch { throw 'The partition-expansion helper did not return a valid result. No unchecked firmware write is permitted.' }
+	if ($exitCode -ne 0 -or -not $result.ok) { throw "Partition expansion stopped: $($result.error)" }
+	return $result
+}
+
+function Read-EspPartitionSnapshot {
+	param([string]$ComPort, [psobject]$UsbIdentity, [string]$EspToolCommand,
+		[string]$Offset, [int]$Length, [string]$Path)
+	$port = Assert-Esp32RomChipIdentity -ComPort $ComPort -UsbIdentity $UsbIdentity `
+		-EspToolCommand $EspToolCommand -Purpose 'ESP32 partition migration read-only proof'
+	$before = Get-Esp32RomBeforeMode -UsbIdentity $UsbIdentity
+	$null = run_cmd "$EspToolCommand --baud 115200 --port $port --before $before --after $script:ESPTOOL_NO_RESET $script:ESPTOOL_READ_FLASH $Offset $Length `"$Path`""
+	if (-not (Test-Path -LiteralPath $Path) -or (Get-Item -LiteralPath $Path).Length -ne $Length) {
+		throw "ESP32 read at $Offset did not return exactly $Length bytes; refusing the update."
+	}
+}
+
+function Get-EspOtadataSnapshot {
+	param([string]$PartitionTable, [string]$ComPort, [psobject]$UsbIdentity,
+		[string]$EspToolCommand, [string]$Path)
+	$bytes = [System.IO.File]::ReadAllBytes($PartitionTable)
+	if ($bytes.Length -ne 4096) { throw 'A complete physical partition table is required.' }
+	$otaEntries = @()
+	for ($offset = 0; $offset -lt $bytes.Length; $offset += 32) {
+		if ($bytes[$offset] -eq 0xff -and $bytes[$offset + 1] -eq 0xff) { break }
+		if ($bytes[$offset] -ne 0xaa -or $bytes[$offset + 1] -ne 0x50) { continue }
+		if ($bytes[$offset + 2] -eq 1 -and $bytes[$offset + 3] -eq 0) {
+			$otaEntries += [pscustomobject]@{
+				Offset = [BitConverter]::ToUInt32($bytes, $offset + 4)
+				Size = [BitConverter]::ToUInt32($bytes, $offset + 8)
+			}
+		}
+	}
+	if (-not $otaEntries.Count) { return $null }
+	if ($otaEntries.Count -ne 1 -or $otaEntries[0].Size -lt 8192) { throw 'The OTA metadata geometry is ambiguous or incomplete.' }
+	Read-EspPartitionSnapshot -ComPort $ComPort -UsbIdentity $UsbIdentity -EspToolCommand $EspToolCommand `
+		-Offset ('0x{0:x}' -f $otaEntries[0].Offset) -Length 8192 -Path $Path
+	return $Path
+}
+
+function Get-EspNvsSnapshot {
+	param([string]$PartitionTable, [string]$ComPort, [psobject]$UsbIdentity,
+		[string]$EspToolCommand, [string]$Path)
+	$bytes = [System.IO.File]::ReadAllBytes($PartitionTable)
+	if ($bytes.Length -ne 4096) { throw 'A complete physical partition table is required.' }
+	$entries = @()
+	for ($offset = 0; $offset -lt $bytes.Length; $offset += 32) {
+		if ($bytes[$offset] -eq 0xff -and $bytes[$offset + 1] -eq 0xff) { break }
+		if ($bytes[$offset] -ne 0xaa -or $bytes[$offset + 1] -ne 0x50) { continue }
+		if ($bytes[$offset + 2] -eq 1 -and $bytes[$offset + 3] -eq 2) {
+			$entries += [pscustomobject]@{
+				Offset = [BitConverter]::ToUInt32($bytes, $offset + 4)
+				Size = [BitConverter]::ToUInt32($bytes, $offset + 8)
+			}
+		}
+	}
+	if (-not $entries.Count) { return $null }
+	if ($entries.Count -ne 1 -or $entries[0].Offset -lt 4096 -or $entries[0].Offset % 4096 -ne 0 -or
+		$entries[0].Size -lt 4096 -or $entries[0].Size -gt 1048576 -or $entries[0].Size % 4096 -ne 0) {
+		throw 'The primary NVS geometry is ambiguous or invalid.'
+	}
+	Read-EspPartitionSnapshot -ComPort $ComPort -UsbIdentity $UsbIdentity -EspToolCommand $EspToolCommand `
+		-Offset ('0x{0:x}' -f $entries[0].Offset) -Length ([int]$entries[0].Size) -Path $Path
+	return $Path
+}
+
+function Wait-EspPartitionBridgeRom {
+	param([string]$ComPort, [psobject]$UsbIdentity, [string]$EspToolCommand,
+		[int]$TimeoutSeconds = 180)
+	# Never reset a bridge merely because a timer elapsed or a USB descriptor
+	# is present. It returns itself to ROM after restoring data (or refusing a
+	# migration). Only a no-reset ROM reply on this physical device is evidence.
+	$UsbIdentity.Esp32RomSessionActive = $false
+	$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+	$lastNotice = [DateTime]::MinValue
+	do {
+		if (([DateTime]::UtcNow - $lastNotice).TotalSeconds -ge 30) {
+			Write-Host 'Waiting for the USB migration bridge to return itself to download mode; keep power connected. No BOOT-button press is needed.'
+			$lastNotice = [DateTime]::UtcNow
+		}
+		$candidate = $null
+		try { $candidate = Resolve-EspUsbComPort -PreferredComPort $ComPort -UsbIdentity $UsbIdentity -TimeoutMs 0 -Purpose 'Automatic USB migration return' }
+		catch { }
+		if ($candidate) {
+			$actual = Get-UsbComPortIdentity -ComPort $candidate
+			if ($null -eq $actual -or -not (Test-UsbComPortIdentityMatch -Expected $UsbIdentity -Actual $actual)) {
+				throw 'The physical USB device changed during migration; refusing the final firmware.'
+			}
+			$mode = Get-EspUsbBootloaderStrategy -UsbIdentity $actual
+			if ($mode -in @('usb-jtag', 'uart')) {
+				$mac = $null
+				try { $mac = Get-EspRomMac -ComPort $candidate -EspToolCommand $EspToolCommand -Before $script:ESPTOOL_NO_RESET -UsbIdentity $UsbIdentity }
+				catch { }
+				if ($mac) {
+					Set-Esp32VerifiedChipMac -Mac $mac -ComPort $candidate -UsbIdentity $UsbIdentity
+					# Also verify that the endpoint did not change during the query.
+					return (Assert-Esp32RomChipIdentity -ComPort $candidate -UsbIdentity $UsbIdentity -EspToolCommand $EspToolCommand -Purpose 'USB migration ROM return verification')
+				}
+			}
+		}
+		Start-Sleep -Seconds 2
+	} while ([DateTime]::UtcNow -lt $deadline)
+	throw 'The USB migration bridge did not return a verified ROM response in time. The final firmware was not written; retain its recovery record and keep power connected.'
+}
+
+function Invoke-EspPartitionExpansion {
+	param([Parameter(Mandatory)][psobject]$Hardware)
+	$identity = $Hardware.UsbIdentity
+	$esptool = get_esptool_cmd
+	$port = Enter-Esp32Bootloader -ComPort $Hardware.ComPort -UsbIdentity $identity -EspToolCommand $esptool
+	$Hardware.ComPort = $port
+	$originalMac = [string]$identity.Esp32ChipMac
+	if ($originalMac -notmatch '^[0-9a-fA-F]{12}$') { throw 'Partition expansion requires the verified original chip MAC.' }
+	$cacheDir = Join-Path $ScriptPath ('.tmp\partition-expansion\' + $originalMac.ToUpperInvariant())
+	New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
+	$temporaryPath = Join-Path ([System.IO.Path]::GetTempPath()) ('meshfirmware-partition-' + [guid]::NewGuid().ToString('N'))
+	$tempDir = (New-Item -ItemType Directory -Path $temporaryPath -ErrorAction Stop).FullName
+	try {
+		$oldTable = Join-Path $tempDir 'before-partitions.bin'
+		$flashIdFile = Join-Path $tempDir 'flash-id.txt'
+		$otaFile = Join-Path $tempDir 'otadata.bin'
+		Read-EspPartitionSnapshot -ComPort $port -UsbIdentity $identity -EspToolCommand $esptool `
+			-Offset '0x8000' -Length 4096 -Path $oldTable
+		$port = Assert-Esp32RomChipIdentity -ComPort $port -UsbIdentity $identity -EspToolCommand $esptool -Purpose 'ESP32 physical flash capacity'
+		$before = Get-Esp32RomBeforeMode -UsbIdentity $identity
+		$flashId = run_cmd "$esptool --baud 115200 --port $port --before $before --after $script:ESPTOOL_NO_RESET $script:ESPTOOL_FLASH_ID"
+		[System.IO.File]::WriteAllText($flashIdFile, [string]$flashId)
+		$ota = Get-EspOtadataSnapshot -PartitionTable $oldTable -ComPort $port -UsbIdentity $identity -EspToolCommand $esptool -Path $otaFile
+		$sourceNvs = Get-EspNvsSnapshot -PartitionTable $oldTable -ComPort $port -UsbIdentity $identity -EspToolCommand $esptool -Path (Join-Path $tempDir 'source-nvs.bin')
+		$arguments = @('plan', '--firmware', $Hardware.FirmwareFile, '--partition-table', $oldTable,
+			'--flash-id-output', $flashIdFile, '--output-dir', $cacheDir, '--device-mac', $originalMac)
+		if ($ota) { $arguments += @('--otadata', $ota) }
+		if ($sourceNvs) { $arguments += @('--nvs', $sourceNvs) }
+		if ($env:MESHFIRMWARE_PARTITION_PACKAGE) { $arguments += @('--package', $env:MESHFIRMWARE_PARTITION_PACKAGE) }
+		$usbSet = if ($env:MESHFIRMWARE_USB_MIGRATION_SET) { $env:MESHFIRMWARE_USB_MIGRATION_SET } else { Join-Path $ScriptPath 'tools\meshcore-usb-partition-bridges.zip' }
+		if ($env:MESHFIRMWARE_USB_MIGRATION_SET -or (Test-Path -LiteralPath $usbSet)) { $arguments += @('--usb-set', $usbSet) }
+		$plan = Invoke-PartitionExpansionTool -Arguments $arguments
+		if ([string]$plan.firmware_sha256 -notmatch '^[0-9a-f]{64}$') { throw 'No verified final-image checksum was returned.' }
+		$Hardware | Add-Member -NotePropertyName EspUpdateFirmwareSha256 -NotePropertyValue $plan.firmware_sha256 -Force
+		if (-not $plan.needed) {
+			$offsets = @($plan.app_offsets | ForEach-Object { '0x{0:x}' -f [int64]$_ })
+			if (-not $offsets.Count) { throw 'No verified app write offsets were returned.' }
+			$Hardware | Add-Member -NotePropertyName EspUpdateOffsets -NotePropertyValue ([string[]]$offsets) -Force
+			Write-Host 'The selected image fits the physical app partitions; no expansion firmware is needed.'
+			return $false
+		}
+		if ($plan.usb_safe -ne $true -or
+			(-not $plan.automatic_rom_return -and -not ($plan.chip -eq 0 -and $plan.uart_completion_status -eq $true))) {
+			throw 'This is not a verified USB-safe automatic-return bridge; refusing an update that could require physical BOOT access.'
+		}
+		if (-not $plan.resume) {
+			if ($plan.chip -eq 0) { $null = Invoke-PartitionExpansionTool -Arguments @('preflight-uart') }
+			Write-Warning 'This update needs an intermediate partition-expansion firmware. It preserves supported identity/settings, not logs or every optional file. Keep power stable; interruption while replacing the table may require USB recovery.'
+			$answer = Read-Host 'Run the verified partition expansion, then the selected firmware? [y/N]'
+			if ($answer.Trim() -notmatch '^(?i:y|yes)$') { throw 'Partition expansion cancelled. The selected firmware was not written.' }
+			if ((Get-FileHash -LiteralPath $plan.bridge_file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $plan.bridge_sha256) {
+				throw 'The partition bridge changed after verification; refusing to write it.'
+			}
+			if ((Get-FileHash -LiteralPath $Hardware.FirmwareFile -Algorithm SHA256).Hash.ToLowerInvariant() -ne $plan.firmware_sha256) {
+				throw 'The selected firmware changed after verification.'
+			}
+			$null = Invoke-PartitionExpansionTool -Arguments @('begin', '--plan', $plan.plan_file)
+			$port = Assert-Esp32RomChipIdentity -ComPort $port -UsbIdentity $identity -EspToolCommand $esptool -Purpose 'Verified intermediate partition bridge write'
+			$before = Get-Esp32RomBeforeMode -UsbIdentity $identity
+			$after = Get-Esp32WriteAfterMode -UsbIdentity $identity
+			$pairs = (@($plan.app_offsets) | ForEach-Object { ('0x{0:x} "{1}"' -f [int64]$_, $plan.bridge_file) }) -join ' '
+			if (-not $pairs) { throw 'No verified intermediate app slots were returned.' }
+			if ($after -ne $script:ESPTOOL_NO_RESET) { $identity.Esp32RomSessionActive = $false }
+			$exitCode = run_cmd "$esptool --baud 115200 --port $port --before $before --after $after $script:ESPTOOL_WRITE_FLASH $pairs" -Stream
+			if ($exitCode -ne 0) { throw 'The intermediate partition firmware write failed; the final firmware was not written.' }
+			$null = Complete-Esp32FlashSession -ComPort $port -UsbIdentity $identity -SkipApplicationVerification -PartitionBridgeBoot
+			if ($plan.chip -eq 0) {
+				$port = Resolve-EspUsbComPort -PreferredComPort $port -UsbIdentity $identity -Purpose 'USB-UART migration completion'
+				if ((Get-EspUsbBootloaderStrategy -UsbIdentity $identity) -ne 'uart') { throw 'Classic ESP32 migration requires its verified USB-UART transport.' }
+				Write-Host 'Waiting for the USB-UART bridge to finish migration before requesting download mode; keep power connected.'
+				$null = Invoke-PartitionExpansionTool -Arguments @('wait-uart', '--port', $port, '--device-mac', $originalMac)
+				$port = Enter-Esp32Bootloader -ComPort $port -UsbIdentity $identity -EspToolCommand $esptool
+			}
+			else { $port = Wait-EspPartitionBridgeRom -ComPort $port -UsbIdentity $identity -EspToolCommand $esptool }
+			if ([string]$identity.Esp32ChipMac -ne $originalMac) { throw 'The ESP32 chip changed during partition expansion.' }
+		}
+		$Hardware.ComPort = $port
+		$newTable = Join-Path $tempDir 'after-partitions.bin'
+		$nvsFile = Join-Path $tempDir 'nvs.bin'
+		Read-EspPartitionSnapshot -ComPort $port -UsbIdentity $identity -EspToolCommand $esptool -Offset '0x8000' -Length 4096 -Path $newTable
+		Read-EspPartitionSnapshot -ComPort $port -UsbIdentity $identity -EspToolCommand $esptool `
+			-Offset ('0x{0:x}' -f [int64]$plan.nvs_offset) -Length ([int]$plan.nvs_size) -Path $nvsFile
+		Read-EspPartitionSnapshot -ComPort $port -UsbIdentity $identity -EspToolCommand $esptool `
+			-Offset ('0x{0:x}' -f [int64]$plan.ota_offset) -Length ([int]$plan.ota_size) -Path $otaFile
+		$proof = Invoke-PartitionExpansionTool -Arguments @('verify', '--plan', $plan.plan_file,
+			'--partition-table', $newTable, '--nvs', $nvsFile, '--otadata', $otaFile)
+		$offsets = @($proof.app_offsets | ForEach-Object { '0x{0:x}' -f [int64]$_ })
+		if (-not $offsets.Count) { throw 'Expansion proof returned no checked app offsets.' }
+		$Hardware | Add-Member -NotePropertyName EspUpdateOffsets -NotePropertyValue ([string[]]$offsets) -Force
+		Write-Host 'Expanded partitions and completed identity/settings restoration verified. Continuing with the selected firmware.'
+		return $true
+	}
+	finally {
+		# NVS can contain private staging data. Keep only public plan/artifact
+		# hashes in the cache, and delete our exact temporary snapshots.
+		foreach ($name in @('before-partitions.bin', 'after-partitions.bin', 'flash-id.txt', 'nvs.bin', 'source-nvs.bin', 'otadata.bin')) {
+			$path = Join-Path $tempDir $name
+			if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+		}
+		Remove-Item -LiteralPath $tempDir -Force
+	}
+}
+
 function flashESP32() {
     param(
         [Parameter(Mandatory)][pscustomobject]$hw      # must expose Architecture, SelectedFirmwareFile, selectedComPort/Drive
@@ -5196,38 +5452,34 @@ function flashESP32() {
 		}
 		if ($strategy.SelectedMode -eq 'update') {
 			if (-not $storageLayout) {
-				throw 'Could not read ESP32 partition layout from the running firmware; refusing an unchecked app update.'
+				Write-Host 'Running storage layout unavailable; the physical table and OTA metadata must pass ROM checks before any app write.'
 			}
-			$appSlots = @([regex]::Matches($storageLayout,
+			$appSlots = @([regex]::Matches([string]$storageLayout,
 				'(?:app[0-9]+|ota_[0-9]+|factory)(\*)?@(0x[0-9a-fA-F]+)\+([0-9]+)K') |
 				ForEach-Object { [pscustomobject]@{
 					Active = $_.Groups[1].Success
 					Offset = $_.Groups[2].Value
 					Size = [int64]$_.Groups[3].Value * 1024
 				} })
-			if ($appSlots.Count -eq 0) {
-				throw 'ESP32 partition layout has no parseable application slot; refusing update.'
+			if ($appSlots.Count) {
+				$smallestApp = ($appSlots | Measure-Object -Property Size -Minimum).Minimum
+				$appBytes = (Get-Item -LiteralPath $hw.FirmwareFile).Length
+				Write-Host "ESP32 image: $appBytes bytes; smallest reported app slot: $smallestApp bytes."
+				if ($appBytes -gt $smallestApp) {
+					Write-Host 'The update needs more space. A verified matching partition-expansion bridge will be checked before offering any write.'
+				}
 			}
-			$activeSlots = @($appSlots | Where-Object { $_.Active })
-			if ($activeSlots.Count -ne 1) {
-				throw 'ESP32 partition layout does not identify exactly one active app slot; refusing update.'
-			}
-			$smallestApp = ($appSlots | Measure-Object -Property Size -Minimum).Minimum
-			$appBytes = (Get-Item -LiteralPath $hw.FirmwareFile).Length
-			Write-Host "ESP32 image: $appBytes bytes; smallest app slot: $smallestApp bytes."
-			if ($appBytes -gt $smallestApp) {
-				throw 'ESP32 app image does not fit the current partition layout; use the board-specific migration procedure.'
-			}
-			$updateOffsets = @($appSlots | Where-Object { -not $_.Active } |
-				ForEach-Object { $_.Offset }) + @($activeSlots[0].Offset)
-			$hw | Add-Member -NotePropertyName EspUpdateOffsets `
-				-NotePropertyValue ([string[]]$updateOffsets) -Force
-			Write-Host "ESP32 update order: $($updateOffsets -join ', ') (active slot last)."
 		}
 		$action = if ($strategy.SelectedMode -eq 'install') { 'flash-wipe' } else { 'flash-update' }
 		$null = Request-MeshCoreUsbBackupBeforeFlash -Hardware $hw -ComPort $hw.ComPort `
 			-UsbIdentity $usbIdentity -Action $action
 		if (-not (Confirm-MeshCoreFlash -Hardware $hw -Action $action)) { return $false }
+		if ($strategy.SelectedMode -eq 'update') {
+			# Always inspect the physical table, including an interrupted bridge
+			# handoff. Runtime silence or newly enlarged slots cannot bypass its
+			# saved-settings completion proof on a resumed update.
+			$null = Invoke-EspPartitionExpansion -Hardware $hw
+		}
 	}
 
 	$written = if ($strategy.SelectedMode -eq 'install') {
@@ -5257,6 +5509,10 @@ function updateFlashViaEspTool {
 		-Purpose "ESP32 firmware update"
 	$fi = Get-Item $hw.FirmwareFile
 	$baseName = $fi.Name
+	if ($hw.PSObject.Properties['EspUpdateFirmwareSha256'] -and
+		(Get-FileHash -LiteralPath $SelectedFirmwareFile -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hw.EspUpdateFirmwareSha256) {
+		throw 'The selected firmware changed after the physical partition check; refusing the update.'
+	}
 
 	
 	$destFolder = Split-Path $SelectedFirmwareFile -Parent
@@ -5289,8 +5545,15 @@ function updateFlashViaEspTool {
 	$writeCommand = "$ESPTOOL_CMD --baud 115200 --port $selectedComPortPart2 --before $beforeMode --after $afterMode $WriteFlashCommand $writePairs"
 	Write-Host $writeCommand
 	Write-Host ""
-	try { $writeExitCode = run_cmd $writeCommand -Stream } catch {
+	try {
+		if ($hw.PSObject.Properties['EspUpdateFirmwareSha256'] -and
+			(Get-FileHash -LiteralPath $SelectedFirmwareFile -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hw.EspUpdateFirmwareSha256) {
+			throw 'The selected firmware changed before the verified app write.'
+		}
+		$writeExitCode = run_cmd $writeCommand -Stream
+	} catch {
 		$usbIdentity | Add-Member -NotePropertyName Esp32RomSessionActive -NotePropertyValue $false -Force
+		Pop-Location
 		throw
 	}
 	if ($writeExitCode -ne 0) {
