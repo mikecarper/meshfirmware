@@ -320,6 +320,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", required=True, help="Selected USB tty or /dev/serial/by-id alias")
     parser.add_argument("--inspect", action="store_true", help="Capture stable USB identity without resetting")
+    parser.add_argument("--check-unused", action="store_true",
+                        help="With --inspect and --expected-identity, verify all sibling serial owners without opening a port")
     parser.add_argument("--expected-identity", help="JSON previously returned by --inspect (required for reset)")
     parser.add_argument("--timeout", type=float, default=10, help="Reset and tty return deadline in seconds (1-30)")
     args = parser.parse_args(argv)
@@ -328,11 +330,28 @@ def main(argv: list[str] | None = None) -> int:
             raise ResetError("Device-only USB reset is supported on Linux only.")
         if not 1 <= args.timeout <= 30:
             raise ResetError("USB recovery timeout must be between 1 and 30 seconds.")
+        if args.check_unused and (not args.inspect or not args.expected_identity):
+            raise ResetError("Owner inspection requires --inspect and the previously captured --expected-identity.")
         if args.inspect:
             selected = inspect_port(args.port)
-            require_primary_port(selected, sibling_ports(selected))
+            ports = sibling_ports(selected)
+            require_primary_port(selected, ports)
+            if args.check_unused:
+                expected = parse_expected_identity(args.expected_identity)
+                verify_identity(selected, expected)
+                require_unused(ports, Path("/proc"))
+                final = inspect_port(args.port)
+                verify_identity(final, expected)
+                if (final.busnum, final.devnum) != (selected.busnum, selected.devnum):
+                    raise ResetError("USB address changed during owner inspection.")
             result = selected.result("inspected")
             result["host_controller"] = host_controller_driver(selected)
+            if args.check_unused:
+                info = selected.port.stat()
+                if not stat.S_ISCHR(info.st_mode):
+                    raise ResetError("USB tty disappeared during owner inspection.")
+                result.update(owners_checked=True, busnum=selected.busnum, devnum=selected.devnum,
+                              tty_instance=[info.st_dev, info.st_ino, info.st_rdev])
         else:
             if not args.expected_identity:
                 raise ResetError("Capture --inspect before resetting and provide its --expected-identity JSON.")

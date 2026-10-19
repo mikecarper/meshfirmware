@@ -128,11 +128,20 @@ grep -qx 'CACHED_STATE=False,False' <<<"$bootstrap_output"
 grep -qx 'OPEN_STATE=False,False' <<<"$bootstrap_output"
 echo "PASS: bootstrap sets idle DTR/RTS before the underlying port open"
 
-if rg -n 'pipx run( --spec esptool [^ ]+)? .*--port|pipx run( --spec esptool [^ ]+)? --port' "$script_path" >/dev/null; then
-	echo "FAIL: a device esptool call bypasses the guarded invocation" >&2
-	exit 1
-fi
-echo "PASS: device esptool calls do not bypass the guarded invocation"
+python3 - "$script_path" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+unsafe = re.compile(r'\bpipx run(?: esptool| --spec esptool \S+)\b[^\n]*--port')
+for direct in ('pipx run esptool --port "$port" read-mac',
+               'pipx run --spec esptool esptool --port "$port" read-mac',
+               'pipx run --spec esptool python -c "$code" --port "$port"'):
+    assert unsafe.search(direct), direct
+assert not unsafe.search('pipx run --spec adafruit-nrfutil python "$helper" --port "$selected"')
+assert not unsafe.search(Path(sys.argv[1]).read_text()), 'A device esptool call bypasses the guarded invocation'
+print('PASS: device esptool calls do not bypass the guarded invocation')
+PY
 
 if rg -n 'run_esptool --port "\$port" --before "\$NORESET"|run_esptool --port "\$\{DEVICE_PORT\}" --before "\$NORESET"|run_esptool --port "\$port" --after "\$NORESET".*"\$READFLASH"|run_esptool --port "\$\{DEVICE_PORT\}" --after' \
 	"$script_path" >/dev/null; then

@@ -7155,6 +7155,11 @@ function Assert-UsbComPortIdentityFor1200Touch {
 	return $actualIdentity
 }
 
+function New-Nrf52TouchSerialPort {
+	param([Parameter(Mandatory)][string]$ComPort)
+	return New-Object System.IO.Ports.SerialPort $ComPort, 1200, "None", 8, "One"
+}
+
 function Touch-ComPort1200 {
 	param(
 		[Parameter(Mandatory)][string]$ComPort,
@@ -7162,40 +7167,51 @@ function Touch-ComPort1200 {
 	)
 
 	$portsBeforeTouch = @(Get-AvailableComPorts)
-	$identityRevalidationInProgress = $false
+	$openAttempted = $false
+	$serialDisposed = $false
 	try {
-		$sp = New-Object System.IO.Ports.SerialPort $ComPort, 1200, "None", 8, "One"
+		$sp = New-Nrf52TouchSerialPort -ComPort $ComPort
 		$sp.ReadTimeout = 300
 		$sp.WriteTimeout = 300
 		$sp.Handshake = [System.IO.Ports.Handshake]::None
 		$sp.DtrEnable = $true
-		$sp.RtsEnable = $true
+		$sp.RtsEnable = $false
 		try {
-			# Open/close at 1200 baud is the destructive reset trigger. Resolve the
-			# COM devnode again at the last possible moment so a number reused after
-			# selection cannot be touched.
+			# Revalidate the original identity immediately before the one Open.
+			# A failed Open may already have delivered a reset request.
 			if ($null -ne $UsbIdentity) {
-				$identityRevalidationInProgress = $true
 				$null = Assert-UsbComPortIdentityFor1200Touch `
 					-ComPort $ComPort `
 					-ExpectedIdentity $UsbIdentity `
 					-Stage "direct 1200-baud touch"
-				$identityRevalidationInProgress = $false
 			}
+			$openAttempted = $true
 			$sp.Open()
 			Start-Sleep -Milliseconds 150
+			if ($null -ne $UsbIdentity) {
+				$null = Assert-UsbComPortIdentityFor1200Touch `
+					-ComPort $ComPort `
+					-ExpectedIdentity $UsbIdentity `
+					-Stage "direct DTR-low touch"
+			}
+			$sp.DtrEnable = $false
 		}
 		finally {
-			if ($sp -and $sp.IsOpen) {
-				$sp.Close()
+			try {
+				if ($sp -and $sp.IsOpen) { $sp.Close() }
 			}
-			if ($sp) {
-				$sp.Dispose()
+			finally {
+				if ($sp) {
+					$sp.Dispose()
+					$serialDisposed = $true
+				}
 			}
 		}
 	}
 	catch {
-		if ($identityRevalidationInProgress) {
+		if (-not $openAttempted -or -not $serialDisposed) {
+			# Construction/configuration or original identity failed before Open.
+			# An uncertain handle cleanup also stops before DFU or another backend.
 			throw
 		}
 		$transitionObserved = Wait-Nrf52DfuTransitionAfterFailedTouch `
@@ -7203,27 +7219,10 @@ function Touch-ComPort1200 {
 			-BeforePorts $portsBeforeTouch `
 			-UsbIdentity $UsbIdentity
 		if ($transitionObserved) {
-			Write-Host "1200-baud touch on $ComPort triggered a reset; waiting for the device to re-enumerate."
+			Write-Host "Observed a USB transition after the single touch on $ComPort; DFU is still unverified."
 		}
 		else {
-			# The failed open may have raced a disconnect/re-enumeration or COM
-			# reuse. Revalidate again before handing the same name to Python.
-			Write-Warning "Direct 1200-baud touch on $ComPort failed; trying python fallback."
-			if ($null -ne $UsbIdentity) {
-				$null = Assert-UsbComPortIdentityFor1200Touch `
-					-ComPort $ComPort `
-					-ExpectedIdentity $UsbIdentity `
-					-Stage "Python 1200-baud fallback"
-			}
-			try {
-				$exitCode = Invoke-PythonSerialTouch1200 -ComPort $ComPort
-				if ($exitCode -ne 0) {
-					Write-Warning "Python fallback touch failed on $ComPort with exit code $exitCode."
-				}
-			}
-			catch {
-				Write-Warning "1200-baud touch on $ComPort failed: $($_.Exception.Message)"
-			}
+			Write-Warning "The single 1200-baud touch on $ComPort was not acknowledged; waiting for the same radio's DFU port without another touch."
 		}
 	}
 
@@ -8351,7 +8350,12 @@ function InvokeFlash {
 			return 'backup-only'
 		}
 
-		Write-Host "Flash completed."
+		if ($hw.Architecture -like '*nrf52*') {
+			Write-Host "nRF52 firmware transfer completed. Application startup has not been verified."
+		}
+		else {
+			Write-Host "Flash completed."
+		}
 	}
 	catch {
 		$operation = if ($hw.BackupOnly) { 'Backup' } else { 'Flash' }

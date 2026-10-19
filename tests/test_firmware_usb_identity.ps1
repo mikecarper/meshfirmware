@@ -64,6 +64,7 @@ foreach ($functionName in @(
 	'Resolve-LiveUsbComPort',
 	'Wait-Nrf52DfuTransitionAfterFailedTouch',
 	'Assert-UsbComPortIdentityFor1200Touch',
+	'New-Nrf52TouchSerialPort',
 	'Touch-ComPort1200',
 	'Resolve-Nrf52DfuComPort',
 	'Test-CachedMeshCoreUsbBackup',
@@ -1106,6 +1107,48 @@ $touchDefinition = $firmwareAst.Find({
 	$node.Name -eq 'Touch-ComPort1200'
 }, $true)
 Invoke-Expression $touchDefinition.Extent.Text
+# Exercise the production touch with an unopened fake serial object. These
+# cases never open a host COM port or invoke the Python backend.
+$script:touchMockMode = 'open-error'
+$script:touchOpenCalls = 0
+$script:touchCloseCalls = 0
+$script:touchDisposeCalls = 0
+$script:touchControlEvents = [System.Collections.Generic.List[string]]::new()
+function New-Nrf52TouchSerialPort {
+	param([string]$ComPort)
+	$serial = [pscustomobject]@{
+		IsOpen = $false; ReadTimeout = 0; WriteTimeout = 0
+		Handshake = 0; RtsEnable = $false; CachedDtr = $false
+	}
+	$serial | Add-Member -MemberType ScriptProperty -Name DtrEnable -Value {
+		return $this.CachedDtr
+	} -SecondValue {
+		param($value)
+		$script:touchControlEvents.Add("DTR=$value")
+		$this.CachedDtr = $value
+	}
+	$serial | Add-Member -MemberType ScriptMethod -Name Open -Value {
+		$script:touchOpenCalls++
+		$script:touchControlEvents.Add('Open')
+		if ($script:touchMockMode -eq 'open-error') { throw 'Mock Open failed' }
+		$this.IsOpen = $true
+		if ($script:touchMockMode -eq 'open-after-state') { throw 'Mock Open failed after acquiring handle' }
+	}
+	$serial | Add-Member -MemberType ScriptMethod -Name Close -Value {
+		$script:touchCloseCalls++
+		$script:touchControlEvents.Add('Close')
+		$this.IsOpen = $false
+		if ($script:touchMockMode -eq 'close-error') { throw 'Mock Close failed after reset' }
+	}
+	$serial | Add-Member -MemberType ScriptMethod -Name Dispose -Value {
+		$script:touchDisposeCalls++
+		$script:touchControlEvents.Add('Dispose')
+		if ($script:touchMockMode -eq 'dispose-error') { throw 'Mock Dispose could not confirm handle cleanup' }
+		$this.IsOpen = $false
+	}
+	$script:lastTouchPort = $serial
+	return $serial
+}
 function Get-AvailableComPorts { return @('COM999') }
 $script:failedTouchWaitCalls = 0
 $script:pythonTouchCalls = 0
@@ -1142,50 +1185,82 @@ function Wait-Nrf52DfuTransitionAfterFailedTouch {
 $script:pythonTouchCalls = 0
 $script:touchIdentityChecks = 0
 Touch-ComPort1200 -ComPort 'COM999' -UsbIdentity $pocketRuntime
-Assert-Equal -Expected 1 -Actual $script:pythonTouchCalls -Message 'Python fallback was not retained for a genuine direct-touch failure with no transition.'
-Assert-Equal -Expected 2 -Actual $script:touchIdentityChecks -Message 'Identity was not revalidated before both direct touch and Python fallback.'
+Assert-Equal -Expected 0 -Actual $script:pythonTouchCalls -Message 'An uncertain direct Open triggered a second Python touch.'
+Assert-Equal -Expected 1 -Actual $script:touchIdentityChecks -Message 'An uncertain direct Open repeated COM identity selection for another backend.'
 
-# If the same COM number disappears or is reused after the direct open fails,
-# Python must never receive that stale name. This is the last point at which an
-# unrelated radio can race into the selected COM number.
-$script:fallbackReuseCheck = 0
+# A delayed transition or COM reuse after the one Open must never select a
+# second backend. The outer resolver still requires the original radio's DFU.
+foreach ($laterIdentity in @($t096Runtime, $null)) {
+	$script:fallbackReuseCheck = 0
+	$script:pythonTouchCalls = 0
+	function Get-UsbComPortIdentity {
+		param([string]$ComPort)
+		$script:fallbackReuseCheck++
+		if ($script:fallbackReuseCheck -eq 1) { return $pocketRuntime }
+		return $laterIdentity
+	}
+	Touch-ComPort1200 -ComPort 'COM999' -UsbIdentity $pocketRuntime
+	Assert-Equal -Expected 1 -Actual $script:fallbackReuseCheck -Message 'Uncertain Open reselected a later COM identity.'
+	Assert-Equal -Expected 0 -Actual $script:pythonTouchCalls -Message 'A delayed transition or reused COM triggered a second touch.'
+}
+
+# Successful, accepted-but-uncertain and close-error cases all consume one
+# Open. A failure after an acquired handle still disposes that same handle.
+foreach ($mode in @('success', 'open-after-state', 'close-error')) {
+	$script:touchMockMode = $mode
+	$script:touchOpenCalls = 0
+	$script:touchCloseCalls = 0
+	$script:touchDisposeCalls = 0
+	$script:pythonTouchCalls = 0
+	$script:touchControlEvents.Clear()
+	function Get-UsbComPortIdentity { param([string]$ComPort) return $pocketRuntime }
+	Touch-ComPort1200 -ComPort 'COM999' -UsbIdentity $pocketRuntime
+	Assert-Equal -Expected 1 -Actual $script:touchOpenCalls -Message "$mode repeated the serial Open."
+	Assert-Equal -Expected 1 -Actual $script:touchDisposeCalls -Message "$mode did not dispose its serial handle."
+	Assert-Equal -Expected 0 -Actual $script:pythonTouchCalls -Message "$mode selected a second touch backend."
+	Assert-True -Condition (-not $script:lastTouchPort.IsOpen) -Message "$mode left its serial handle open."
+	Assert-True -Condition (-not $script:lastTouchPort.RtsEnable) -Message "$mode asserted RTS."
+	$events = @($script:touchControlEvents)
+	Assert-True -Condition ($events -contains 'DTR=True' -and $events.IndexOf('DTR=True') -lt $events.IndexOf('Open')) -Message "$mode did not assert DTR before Open."
+	if ($mode -eq 'open-after-state') {
+		Assert-True -Condition ($events -notcontains 'DTR=False') -Message 'An uncertain Open sent an extra explicit DTR fall.'
+	}
+	else {
+		Assert-True -Condition ($events.IndexOf('Open') -lt $events.IndexOf('DTR=False')) -Message "$mode lacked an explicit DTR fall after Open."
+		Assert-True -Condition ($events.IndexOf('DTR=False') -lt $events.IndexOf('Close')) -Message "$mode dropped DTR only after Close."
+	}
+}
+
+$script:touchMockMode = 'success'
+$script:touchOpenCalls = 0
 $script:pythonTouchCalls = 0
+$script:touchControlEvents.Clear()
+$script:postOpenIdentityChecks = 0
 function Get-UsbComPortIdentity {
 	param([string]$ComPort)
-	$script:fallbackReuseCheck++
-	if ($script:fallbackReuseCheck -eq 1) { return $pocketRuntime }
+	$script:postOpenIdentityChecks++
+	if ($script:postOpenIdentityChecks -eq 1) { return $pocketRuntime }
 	return $t096Runtime
 }
-$fallbackReuseRejected = $false
-try {
-	Touch-ComPort1200 -ComPort 'COM999' -UsbIdentity $pocketRuntime
-}
-catch {
-	$fallbackReuseRejected = $_.Exception.Message -match 'now belongs to' -and
-		$_.Exception.Message -match 'Refusing Python 1200-baud fallback'
-}
-Assert-True -Condition $fallbackReuseRejected -Message 'Same-COM reuse before Python fallback did not fail closed.'
-Assert-Equal -Expected 0 -Actual $script:pythonTouchCalls -Message 'Python touched a COM number reused by another radio.'
+Touch-ComPort1200 -ComPort 'COM999' -UsbIdentity $pocketRuntime
+Assert-Equal -Expected 1 -Actual $script:touchOpenCalls -Message 'COM identity change after Open repeated the Open.'
+Assert-Equal -Expected 0 -Actual $script:pythonTouchCalls -Message 'COM identity change after Open selected Python fallback.'
+Assert-True -Condition ($script:touchControlEvents -notcontains 'DTR=False') -Message 'Explicit DTR-low ignored a post-Open identity mismatch.'
+Assert-True -Condition (-not $script:lastTouchPort.IsOpen) -Message 'Post-Open identity mismatch leaked its serial handle.'
 
-$script:fallbackMissingCheck = 0
+$script:touchMockMode = 'dispose-error'
+$script:touchOpenCalls = 0
 $script:pythonTouchCalls = 0
-function Get-UsbComPortIdentity {
-	param([string]$ComPort)
-	$script:fallbackMissingCheck++
-	if ($script:fallbackMissingCheck -eq 1) { return $pocketRuntime }
-	return $null
-}
-$fallbackMissingRejected = $false
-try {
-	Touch-ComPort1200 -ComPort 'COM999' -UsbIdentity $pocketRuntime
-}
-catch {
-	$fallbackMissingRejected = $_.Exception.Message -match 'Could not revalidate' -and
-		$_.Exception.Message -match 'Python 1200-baud fallback'
-}
-Assert-True -Condition $fallbackMissingRejected -Message 'Missing identity before Python fallback did not fail closed.'
-Assert-Equal -Expected 0 -Actual $script:pythonTouchCalls -Message 'Python touched a COM port whose identity disappeared.'
+function Get-UsbComPortIdentity { param([string]$ComPort) return $pocketRuntime }
+$cleanupFailureRejected = $false
+try { Touch-ComPort1200 -ComPort 'COM999' -UsbIdentity $pocketRuntime }
+catch { $cleanupFailureRejected = $true }
+Assert-True -Condition $cleanupFailureRejected -Message 'Unconfirmed serial cleanup continued into DFU recovery.'
+Assert-Equal -Expected 1 -Actual $script:touchOpenCalls -Message 'Cleanup failure repeated the serial Open.'
+Assert-Equal -Expected 0 -Actual $script:pythonTouchCalls -Message 'Cleanup failure selected a second touch backend.'
 
+$script:touchMockMode = 'open-error'
+$script:touchOpenCalls = 0
 $script:initialIdentityChecks = 0
 $script:pythonTouchCalls = 0
 function Get-UsbComPortIdentity {
@@ -1204,6 +1279,7 @@ catch {
 Assert-True -Condition $missingInitialIdentityRejected -Message 'Missing identity immediately before direct touch did not fail closed.'
 Assert-Equal -Expected 1 -Actual $script:initialIdentityChecks -Message 'Direct touch identity was checked an unexpected number of times.'
 Assert-Equal -Expected 0 -Actual $script:pythonTouchCalls -Message 'Missing direct-touch identity still reached Python fallback.'
+Assert-Equal -Expected 0 -Actual $script:touchOpenCalls -Message 'Missing direct-touch identity still opened a serial handle.'
 
 function Get-UsbComPortIdentity { param([string]$ComPort) return $pocketLogging }
 $wrongInterfaceRejected = $false

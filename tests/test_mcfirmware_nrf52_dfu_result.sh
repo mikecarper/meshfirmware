@@ -54,6 +54,7 @@ export PATH="${tmp_dir}/bin:${PATH}"
 export NRFUTIL_ARGUMENT_LOG="${tmp_dir}/arguments"
 
 nrf52_serial_port_access() { return 0; }
+describe_nrf52_dfu_package() { return 0; }
 package="${tmp_dir}/firmware.zip"
 port="${tmp_dir}/ttyACM0"
 touch "$package" "$port"

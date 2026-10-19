@@ -580,11 +580,13 @@ MESHCORE_BACKUP_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfirmw
 MESHCORE_BACKUP_TOOL_VERSION="0.2.3"
 MESHCORE_BACKUP_TOOL_SHA256="b4a957e05ea3c00be7f46ddb6269874e4167c8f5bf42976487425696af2140cd"
 MESHCORE_USB_RESET_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_usb_reset.py"
-MESHCORE_USB_RESET_TOOL_SHA256="364de4c2e100df3ec2be795fc6079722ce1790416ba5a2d04d0c53e6c87c7083"
+MESHCORE_USB_RESET_TOOL_SHA256="31d11f95f9155a51b66bb0f650b332f386cc5d74562d043969255a2900bc4656"
 MESHCORE_ESP32_BOOTLOADER_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_esp32_bootloader.py"
 MESHCORE_ESP32_BOOTLOADER_TOOL_SHA256="8c48512a650892b9c8d024d926a4c7c85d9e9d30db0fddc990be6c0c108b4ea0"
 MESHCORE_PARTITION_EXPANSION_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_partition_expansion.py"
 MESHCORE_PARTITION_EXPANSION_TOOL_SHA256="f53774a5226aa29ed0cfe869e4664db0a42a0087bbd76d00c6f6e0b656332c14"
+MESHCORE_SERIAL_TOUCH_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_serial_touch.py"
+MESHCORE_SERIAL_TOUCH_TOOL_SHA256="b2309b4aa49d04c5a7bc54f11c5d2175b7e8cd938e2beddcaa119619e5c580e7"
 USB_RESET_EXPECTED_IDENTITY=""
 USB_RESET_FAILED=0
 USB_RESET_RECOVERED_PORT=""
@@ -1459,6 +1461,52 @@ resolve_meshcore_usb_reset_tool() {
 	printf '%s\n' "$cached_tool"
 }
 
+meshcore_serial_touch_tool_hash_matches() {
+	local tool=$1 actual_hash=""
+	[[ -f "$tool" ]] || return 1
+	actual_hash="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read().replace(b"\r\n", b"\n")).hexdigest())' "$tool" 2>/dev/null)" || return 1
+	[[ "$actual_hash" == "$MESHCORE_SERIAL_TOUCH_TOOL_SHA256" ]]
+}
+
+resolve_meshcore_serial_touch_tool() {
+	local local_tool="${PWD_SCRIPT}/tools/meshcore_serial_touch.py"
+	local tool_dir="${FIRMWARE_ROOT}/tools"
+	local cached_tool="${tool_dir}/meshcore_serial_touch.py" partial_tool="" identity_helper=""
+	# The new helper shares the existing, pinned physical-identity/owner checks.
+	identity_helper="$(resolve_meshcore_usb_reset_tool)" || return 1
+	if [[ -f "$local_tool" ]]; then
+		if meshcore_serial_touch_tool_hash_matches "$local_tool" \
+			&& [[ "$(dirname "$identity_helper")" == "$(dirname "$local_tool")" ]]; then
+			printf '%s\n' "$local_tool"
+			return 0
+		fi
+		echo "The bundled serial-touch helpers do not match this script; refusing to run them." >&2
+		return 1
+	fi
+	[[ "$(dirname "$identity_helper")" == "$tool_dir" ]] || {
+		echo "Keep both USB helper files together with the flasher; refusing a mixed helper installation." >&2
+		return 1
+	}
+	if meshcore_serial_touch_tool_hash_matches "$cached_tool"; then
+		printf '%s\n' "$cached_tool"
+		return 0
+	fi
+	mkdir -p "$tool_dir" || return 1
+	partial_tool="$(mktemp "${cached_tool}.partial.XXXXXX")" || return 1
+	if ! curl -fL --retry 2 --connect-timeout 10 --max-time 30 \
+		-o "$partial_tool" "$MESHCORE_SERIAL_TOUCH_TOOL_URL" \
+		|| ! meshcore_serial_touch_tool_hash_matches "$partial_tool"; then
+		echo "The serial-touch helper could not be downloaded and verified." >&2
+		rm -f -- "$partial_tool"
+		return 1
+	fi
+	if ! mv -f -- "$partial_tool" "$cached_tool"; then
+		rm -f -- "$partial_tool"
+		return 1
+	fi
+	printf '%s\n' "$cached_tool"
+}
+
 meshcore_esp32_bootloader_tool_hash_matches() {
 	local tool=$1 actual_hash=""
 	[[ -f "$tool" ]] || return 1
@@ -2091,6 +2139,20 @@ nrf52_serial_port_access() {
 	sudo chmod a+rw "$port"
 }
 
+describe_nrf52_dfu_package() {
+	local helper output
+	helper="$(resolve_meshcore_serial_touch_tool)" || return 1
+	output="$(python3 "$helper" --inspect-package "$1")" || return 1
+	python3 -c '
+import json, sys
+r = json.loads(sys.argv[1])
+if r.get("application_only") is True:
+    print("Application-only DFU package: no bootloader or SoftDevice image is included.")
+else:
+    print("DFU package components: " + ", ".join(r["components"]) + ".")
+' "$output"
+}
+
 run_nrfutil_dfu_serial_checked() {
 	local package_file=$1
 	local port=$2
@@ -2119,6 +2181,7 @@ run_nrfutil_dfu_serial_checked() {
 	# 1200-baud touch is performed separately; do not pass --touch here.
 	command+=(-p "$port" -b 115200 --singlebank "$@")
 
+	describe_nrf52_dfu_package "$package_file" || return 1
 	nrf52_serial_port_access "$port" || return 1
 	output_file="$(mktemp)"
 
@@ -2668,6 +2731,35 @@ find_selected_nrf52_dfu_port_from_saved_identity() {
 	return 1
 }
 
+wait_for_selected_nrf52_port() {
+	local original_port=$1 selected_link live_port
+	local timeout_seconds="${MCFIRMWARE_NRF52_SELECTION_WAIT_SECONDS:-10}"
+	[[ "$timeout_seconds" =~ ^([0-9]|[12][0-9]|30)$ ]] || {
+		echo "MCFIRMWARE_NRF52_SELECTION_WAIT_SECONDS must be an integer from 0 to 30." >&2
+		return 1
+	}
+	local until=$((SECONDS + timeout_seconds))
+	selected_link="$(nrf52_selected_by_id_path)"
+	[[ -n "$selected_link" ]] || return 1
+	echo "Waiting up to ${timeout_seconds}s for the originally selected nRF52 USB device..." >&2
+	while (( SECONDS <= until )); do
+		if live_port="$(selected_flash_serial_port "$original_port" 2>/dev/null)"; then
+			printf '%s\n' "$live_port"
+			return 0
+		fi
+		if live_port="$(find_selected_nrf52_dfu_port_from_saved_identity "$selected_link")"; then
+			printf '%s\n' "$live_port"
+			return 0
+		elif (( $? == 2 )); then
+			return 2
+		fi
+		(( SECONDS >= until )) && break
+		sleep 0.05
+	done
+	echo "The original USB device did not return; reselect it or use its physical bootloader entry." >&2
+	return 1
+}
+
 nrf52_port_is_dfu_before_meshcore_backup() {
 	local port=$1
 	local selected_link="" expected_serial="" expected_path_stem=""
@@ -2683,25 +2775,48 @@ nrf52_port_is_dfu_before_meshcore_backup() {
 }
 
 trigger_nrf52_1200_touch() {
-	local port=$1
-	local preferred_port
-
-	preferred_port="$(preferred_flash_serial_port "$port")"
+	local port=$1 preferred_port helper selected_link snapshot output
+	local -a owner_args=()
+	preferred_port="$(preferred_flash_serial_port "$port")" || return 1
 	if [[ "$preferred_port" != "$port" ]]; then
 		echo "Refusing a DFU touch on secondary CDC port $port; use $preferred_port." >&2
 		return 1
 	fi
-
-	nrf52_serial_port_access "$port" || return 1
-	echo "Sending one 1200-baud touch to $port..."
-	bash -c '
-		port=$1
-		exec 3<>"$port"
-		stty -F "$port" 1200 hupcl
-		sleep 0.1
-		exec 3>&-
-		exec 3<&-
-	' _ "$port"
+	helper="$(resolve_meshcore_serial_touch_tool)" || return 1
+	selected_link="$(nrf52_selected_by_id_path)"
+	[[ -n "$selected_link" ]] || {
+		echo "A serial touch needs the original stable USB selection; reselect the radio." >&2
+		return 1
+	}
+	snapshot="${USB_RESET_EXPECTED_IDENTITY:-}"
+	if [[ -z "$snapshot" ]]; then
+		capture_selected_usb_reset_identity "$port" || return 1
+		snapshot="$USB_RESET_EXPECTED_IDENTITY"
+	fi
+	if [[ -e "$port" ]]; then
+		nrf52_serial_port_access "$port" || return 1
+	fi
+	if ! no_sudo_mode; then
+		owner_args+=(--owner-sudo)
+	fi
+	echo "Sending one identity-checked 1200-baud/DTR touch; waiting briefly for the selected CDC0 if needed..." >&2
+	output="$(pipx run --spec adafruit-nrfutil python "$helper" --port "$selected_link" \
+		--expected-identity "$snapshot" --timeout "${MCFIRMWARE_SERIAL_TOUCH_TIMEOUT_SECONDS:-10}" \
+		"${owner_args[@]}")" || return 1
+	python3 -c '
+import json, sys
+r = json.loads(sys.argv[1])
+expected = json.loads(sys.argv[2])
+expected = expected.get("identity", expected)
+if (r.get("identity") != expected or r.get("status") not in ("requested", "uncertain")
+        or r.get("open_attempts") != 1 or r.get("control_attempted") is not True
+        or r.get("port_closed") is not True or r.get("cleanup_review_required") is not False
+        or r.get("bootloader_verified") is not False
+        or r.get("application_bytes_written") != 0 or r.get("application_bytes_captured") != 0):
+    raise SystemExit(1)
+if r["status"] == "uncertain":
+    print("The touch was not acknowledged; checking only the same radio for DFU, without another touch.", file=sys.stderr)
+' "$output" "$snapshot"
 }
 
 offer_identity_safe_1200_touch() {
@@ -2954,10 +3069,9 @@ run_nrf52_dfu_package_buttonless() {
 		echo "nRF52 DFU package is not readable: $package_file" >&2
 		return 1
 	}
-	[[ -e "$runtime_port" ]] || {
-		echo "The selected nRF52 serial port is no longer present: $runtime_port" >&2
-		return 1
-	}
+	if [[ ! -e "$runtime_port" ]]; then
+		runtime_port="$(wait_for_selected_nrf52_port "$runtime_port")" || return 1
+	fi
 	if [[ -n "$NRF52_SELECTED_BY_ID" \
 		&& "$(readlink -f "$NRF52_SELECTED_BY_ID" 2>/dev/null || true)" == "$runtime_port" ]]; then
 		candidate_link="$NRF52_SELECTED_BY_ID"
@@ -3009,6 +3123,17 @@ run_nrf52_dfu_package_buttonless() {
 		echo "The matched nRF52 bootloader port disappeared before programming: $bootloader_port" >&2
 		return 1
 	}
+	candidate_link="$(serial_by_id_link_for_port "$bootloader_port" 2>/dev/null || true)"
+	# The matched bootloader may publish a different by-id product name. Recheck
+	# its relation to the original selection before classifying its new link.
+	if ! nrf52_candidate_matches_identity "$bootloader_port" "$candidate_link" \
+		"$NRF52_SELECTED_BY_ID" "$NRF52_RUNTIME_SERIAL" "$NRF52_RUNTIME_PATH_STEM" \
+		|| ! nrf52_port_is_dfu_bootloader "$bootloader_port" "$candidate_link" \
+		"$candidate_link" "$NRF52_RUNTIME_SERIAL" "$NRF52_RUNTIME_PATH_STEM" \
+		0 "$allow_unmatched_dfu"; then
+		echo "The same radio returned, but its DFU bootloader was not verified; no package was sent." >&2
+		return 1
+	fi
 	echo "Matched bootloader port: $bootloader_port"
 	echo "Flashing $package_file without another 1200-baud touch..."
 	if ! run_nrfutil_dfu_serial_live_port "$package_file" "$bootloader_port"; then
@@ -8483,10 +8608,8 @@ else
 	echo "nrf52 device"
 	echo "Downloaded firmware: $DOWNLOADED_FILE"
 	if ! NRF52_RUNTIME_PORT="$(selected_flash_serial_port "$DEVICE_PORT")"; then
-		if NRF52_RUNTIME_PORT="$(find_selected_nrf52_dfu_port_from_saved_identity \
-			"$(nrf52_selected_by_id_path)")"; then
-			echo "The selected nRF52 re-enumerated as its verified USB DFU bootloader on $NRF52_RUNTIME_PORT."
-			echo "A logical MeshCore USB backup is unavailable while the board is in DFU mode."
+		if NRF52_RUNTIME_PORT="$(wait_for_selected_nrf52_port "$DEVICE_PORT")"; then
+			echo "The originally selected nRF52 USB device returned on $NRF52_RUNTIME_PORT."
 			if ! save_selected_serial_port "$NRF52_RUNTIME_PORT"; then
 				exit 1
 			fi
@@ -8571,10 +8694,8 @@ else
 	if [[ -n "$NRF52_SELECTED_BY_ID" ]]; then
 		NRF52_RUNTIME_PORT="$(readlink -f "$NRF52_SELECTED_BY_ID" 2>/dev/null || true)"
 		if [[ -z "$NRF52_RUNTIME_PORT" || ! -e "$NRF52_RUNTIME_PORT" ]]; then
-			if NRF52_RUNTIME_PORT="$(find_selected_nrf52_dfu_port_from_saved_identity \
-				"$NRF52_SELECTED_BY_ID")"; then
-				echo "The selected nRF52 re-enumerated as its verified USB DFU bootloader on $NRF52_RUNTIME_PORT."
-				echo "The earlier MeshCore backup could not run because the board is now in DFU mode."
+			if NRF52_RUNTIME_PORT="$(wait_for_selected_nrf52_port "$DEVICE_PORT")"; then
+				echo "The originally selected nRF52 USB device returned on $NRF52_RUNTIME_PORT."
 				if ! save_selected_serial_port "$NRF52_RUNTIME_PORT"; then
 					exit 1
 				fi
@@ -8645,7 +8766,8 @@ else
 		fi
 	fi
 	echo
-	echo "Firmware ${ACTION} completed for ${DEVICE} on ${DEVICE_PORT}."
+	echo "DFU package transfer completed for ${DEVICE} on ${DEVICE_PORT}."
+	echo "Application startup has not been verified; confirm the selected radio returns normally."
 fi
 
 # Restart the stopped service.

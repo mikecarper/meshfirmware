@@ -175,24 +175,28 @@ expect_equal "ESP32 ROM matches the app serial despite punctuation and path chan
 	"210" "$esp_rom_rank"
 
 nrf52_serial_port_access() { return 0; }
-mock_bash_calls=0
-bash() {
-	mock_bash_calls=$((mock_bash_calls + 1))
-	return 0
+no_sudo_mode() { return 0; }
+touch_log="${tmp_dir}/touch.log"
+USB_RESET_EXPECTED_IDENTITY='{"identity":{"usb_serial":"TEST"}}'
+resolve_meshcore_serial_touch_tool() { printf '%s\n' /mock/touch.py; }
+pipx() {
+	printf 'call\n' >> "$touch_log"
+	printf '%s\n' '{"status":"requested","identity":{"usb_serial":"TEST"},"open_attempts":1,"control_attempted":true,"port_closed":true,"cleanup_review_required":false,"bootloader_verified":false,"application_bytes_written":0,"application_bytes_captured":0}'
 }
 
 if trigger_nrf52_1200_touch "$logging_port"; then
 	echo "FAIL: secondary logging CDC accepted a DFU touch" >&2
 	exit 1
 fi
-[[ "$mock_bash_calls" -eq 0 ]] || {
+[[ ! -s "$touch_log" ]] || {
 	echo "FAIL: secondary logging CDC reached the 1200-baud command" >&2
 	exit 1
 }
 echo "PASS: secondary logging CDC is rejected before the 1200-baud command"
 
+basename "$primary_link" > "$DEVICE_PORT_NAME_FILE"
 trigger_nrf52_1200_touch "$primary_port"
-[[ "$mock_bash_calls" -eq 1 ]] || {
+[[ "$(wc -l < "$touch_log")" -eq 1 ]] || {
 	echo "FAIL: primary CDC did not execute exactly one 1200-baud command" >&2
 	exit 1
 }

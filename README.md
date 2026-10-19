@@ -32,6 +32,13 @@ identity after COM-port changes. It selects esptool 4/5 command spellings
 automatically. Native stderr warnings do not abort successful operations in
 Windows PowerShell 5; a nonzero tool exit still stops the flash.
 
+Windows nRF52 bootloader entry attempts its serial touch once. An Open/close
+error can mean the radio has already started resetting, so it waits for the
+same radio's verified DFU port without sending a second Python touch. It keeps
+RTS deasserted, explicitly lowers DTR after the hold and identity check, and
+stops if serial-handle cleanup cannot be confirmed. A successful nRF52 transfer
+leaves application startup unverified in the final message.
+
 Normal MeshCore identification leaves DTR/RTS deasserted on native ESP32
 USB-Serial/JTAG devices (including Heltec V4), whose hardware interprets
 those signals as reset/download controls. This prevents the probe from
@@ -367,6 +374,45 @@ syntax cannot repair that condition. Re-establish the selected device's USB
 connection first; do not reset a whole hub or replace the Pi's USB host driver.
 A battery or second supply can keep the radio CPU running even when USB power
 is removed. A missing device is never replaced with another cached tty.
+
+### Linux nRF52 USB bootloader entry
+
+`mcfirmware.sh` keeps the original USB selection while a radio briefly
+disconnects or changes tty numbers. It waits up to ten seconds for that same
+selection, without choosing another available radio. Before a bootloader
+touch, the checksum-pinned helper requires CDC0, a matching physical by-path
+alias, and the same USB identity and opened character-device inode before
+changing line coding. It uses the existing adafruit-nrfutil Python environment
+and sends one 1200-baud/DTR transition, with no application payload or serial
+capture. The touch itself is bounded to ten seconds; read-only qualification
+can retry a disappearing candidate, but the serial open is attempted once.
+Complete serial-owner inspection includes the radio's logging siblings. Normal
+mode uses cached sudo only for that bounded, read-only inspection; serial
+controls still run as the user. No-sudo mode never elevates and refuses the
+touch if it cannot inspect every owner's descriptors. No package installation
+or helper download runs inside this privileged inspection.
+
+A disconnect during the touch can leave its delivery uncertain. The script
+then checks only that radio for a recognized DFU bootloader, without repeating
+the touch. A returning application or an unverified endpoint cannot authorize
+DFU. If the selected device does not return, use its physical bootloader entry
+and reselect it. `MCFIRMWARE_NRF52_SELECTION_WAIT_SECONDS` accepts 0-30 seconds;
+`MCFIRMWARE_SERIAL_TOUCH_TIMEOUT_SECONDS` accepts 1-30 seconds.
+
+The DFU manifest summary distinguishes application-only packages from packages
+containing bootloader or SoftDevice images. An application-only package contains
+neither bootloader nor SoftDevice replacement; intentional combined packages
+remain supported. Update/wipe choices and backup defaults are unchanged.
+Successful DFU output confirms the package transfer. The final message explicitly
+leaves application startup unverified, so a completed transfer is not mistaken
+for a working radio.
+
+Offline checks:
+
+```bash
+python3 -B tests/test_meshcore_serial_touch.py
+bash tests/test_mcfirmware_serial_touch.sh
+```
 
 ### nRF52 RAK board safety check
 

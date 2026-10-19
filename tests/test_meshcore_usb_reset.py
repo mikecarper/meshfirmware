@@ -348,6 +348,42 @@ class ResetExecutionTests(unittest.TestCase):
             **self.selected.result("inspected"),
             "host_controller": "unknown",
         })
+
+    def test_owner_inspection_cli_checks_all_siblings_without_device_open_or_reset(self):
+        output = io.StringIO()
+        node = types.SimpleNamespace(st_mode=stat.S_IFCHR, st_dev=1, st_ino=2, st_rdev=3)
+        with mock.patch.object(Path, "stat", return_value=node), contextlib.redirect_stdout(output):
+            code = usb.main(["--port", "/dev/ttyACM0", "--inspect", "--check-unused",
+                             "--expected-identity", json.dumps(self.selected.identity())])
+        self.assertEqual(code, 0)
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["owners_checked"])
+        self.assertEqual(result["tty_instance"], [1, 2, 3])
+        self.assertEqual((result["busnum"], result["devnum"]), (1, 9))
+        self.unused.assert_called_once_with([self.selected], Path("/proc"))
+        self.open.assert_not_called()
+        self.fake_fcntl.ioctl.assert_not_called()
+
+    def test_owner_inspection_refuses_busy_wrong_identity_or_changed_usb_address(self):
+        arguments = ["--port", "/dev/ttyACM0", "--inspect", "--check-unused",
+                     "--expected-identity", json.dumps(self.selected.identity())]
+        for scenario in ("busy", "identity", "address"):
+            self.unused.side_effect = usb.ResetError("busy") if scenario == "busy" else None
+            changed = usb.UsbPort(**dict(self.selected.__dict__,
+                **({"usb_serial": "OTHER"} if scenario == "identity" else {"devnum": 10})))
+            self.inspect.side_effect = [self.selected, changed] if scenario != "busy" else None
+            with self.subTest(scenario=scenario), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(usb.main(arguments), 1)
+            self.open.assert_not_called()
+            self.fake_fcntl.ioctl.assert_not_called()
+
+    def test_owner_flag_cannot_fall_through_into_reset(self):
+        for arguments in (["--port", "/dev/ttyACM0", "--check-unused"],
+                          ["--port", "/dev/ttyACM0", "--inspect", "--check-unused"]):
+            with self.subTest(arguments=arguments), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(usb.main(arguments), 1)
+        self.open.assert_not_called()
+        self.fake_fcntl.ioctl.assert_not_called()
         self.open.assert_not_called()
         self.uid.assert_not_called()
 
