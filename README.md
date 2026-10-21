@@ -186,10 +186,12 @@ python3 scripts/build_esp32_partition_migration.py --usb-only
 
 This builds the six intermediate images serially, not every Full application.
 
-After writing, the flashers confirm that the selected ESP32 returns as a
-running application. If it stays in ROM download mode, they issue an esptool
-hard reset and check the application serial console again. A verified flash
-write alone is not reported as a successful update when the app never starts.
+After writing, the flashers finish the identity-qualified ESP32 session using
+the reset method for its USB transport. Native ESP32-S3 USB/JTAG requires the
+masked forced-download clear and watchdog reset described below; UART bridges
+keep their ordinary hard reset. A verified flash write or a matching USB
+descriptor does not confirm application startup. Verify the expected firmware
+through its application CLI before treating the update as complete.
 
 ## MeshCore USB backup dependencies
 
@@ -360,6 +362,20 @@ the flasher must not send another blind ROM probe just because an application
 reply is missing. Confirm application startup through its CLI. This reset path
 was tested on a Heltec V4 with byte-for-byte partition and both app-slot
 readbacks, followed by the expected running-image hash through the MeshCore CLI.
+
+Native ESP32-S3 automation adapters that reuse the Linux session functions
+should keep writes and readbacks at `--after "$NORESET"`, then call
+`finish_esp32_flash_session "$DEVICE_PORT"` within the already identity-qualified
+session. Keep its immediate chip-MAC checks and guarded finish together; do not
+replace the native-S3 finish with `--after hard-reset run` or another ROM probe
+after reset.
+
+The short 8-12 second probe/reset timeout is not a bulk-transfer budget. An
+external adapter should allow at least 600 seconds for a roughly 2.56 MB
+application readback at 115200 baud, with a larger budget for larger images.
+The Linux data-read path does not impose the short probe timeout. Finish all
+readback comparisons before the guarded reset, then verify the running
+application separately through its CLI.
 
 See Espressif's [USB/JTAG reset/strapping explanation](https://github.com/espressif/esptool/issues/970#issuecomment-2056650681).
 
