@@ -50,6 +50,7 @@ expected_runtime_port="${tmp_dir}/ttyACM1"
 touch "$uart_port" "$native_port" "$expected_runtime_port"
 
 NORESET="no-reset"
+DEFAULTRESET="default-reset"
 HARDRESET="hard-reset"
 WATCHDOGRESET="watchdog-reset"
 READMAC="read-mac"
@@ -89,6 +90,16 @@ grep -Fq 'operation complete; hard-resetting out of the ROM stub' \
 	"${tmp_dir}/uart-finish-output"
 echo "PASS: ESP32-S3 UART exits the stub with hard-reset run"
 
+# prepare_esp32_flash_session retains no-reset if a UART chip already answers
+# in ROM. Finish must explicitly release DTR/BOOT before its final RTS pulse.
+: >"$operation_log"
+ESP32_OPERATION_BEFORE="no-reset"
+finish_esp32_flash_session "$uart_port" >"${tmp_dir}/uart-already-rom-output"
+grep -Fxq -- "--port $uart_port --before default-reset --after hard-reset run" \
+	"$operation_log"
+[[ "$ESP32_OPERATION_BEFORE" == "no-reset" ]]
+echo "PASS: already-ROM S3 UART finish releases BOOT without changing session policy"
+
 : >"$operation_log"
 : >"$invoke_log"
 ESP32_OPERATION_BEFORE="no-reset"
@@ -113,11 +124,18 @@ echo "PASS: only native ESP32-S3 clears FORCE_DOWNLOAD bit 0 and watchdog resets
 # native S3. Never manufacture the unsupported --after watchdog_reset option.
 : >"$operation_log"
 NORESET=no_reset
+DEFAULTRESET=default_reset
 HARDRESET=hard_reset
 WATCHDOGRESET=watchdog_reset
 ESP32_OPERATION_BEFORE=default_reset
 finish_esp32_flash_session "$uart_port" >"${tmp_dir}/uart-old-finish-output"
 grep -Fxq -- "--port $uart_port --before default_reset --after hard_reset run" "$operation_log"
+
+: >"$operation_log"
+ESP32_OPERATION_BEFORE=no_reset
+finish_esp32_flash_session "$uart_port" >"${tmp_dir}/uart-old-already-rom-output"
+grep -Fxq -- "--port $uart_port --before default_reset --after hard_reset run" "$operation_log"
+[[ "$ESP32_OPERATION_BEFORE" == no_reset ]]
 : >"$operation_log"
 : >"$invoke_log"
 if finish_esp32_flash_session "$native_port" >"${tmp_dir}/native-old-finish-output" 2>"${tmp_dir}/native-old-finish-error"; then
@@ -128,6 +146,7 @@ fi
 grep -Fq 'requires esptool 5 or newer' "${tmp_dir}/native-old-finish-error"
 echo 'PASS: old UART reset spellings remain supported; native S3 esptool 4 fails closed'
 NORESET=no-reset
+DEFAULTRESET=default-reset
 HARDRESET=hard-reset
 WATCHDOGRESET=watchdog-reset
 

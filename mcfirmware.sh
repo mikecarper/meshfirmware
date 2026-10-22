@@ -6703,9 +6703,13 @@ finish_esp32_flash_session() {
 			return 1
 		fi
 	elif [[ "${ESP32_SESSION_IS_S3:-0}" -eq 1 ]]; then
-		# UART bridges retain the ordinary DTR/RTS reset, including esptool 4.
+		# A UART chip already answering in ROM can retain a no-reset session.
+		# Reopening pySerial then asserts DTR/BOOT; hard-reset only pulses RTS.
+		# Explicit default-reset releases DTR before the final hard reset, even
+		# for an already-ROM session. Preserve its policy for unrelated calls.
 		echo "ESP32-S3 operation complete; hard-resetting out of the ROM stub."
-		if ! run_esp32_session_esptool "$port" --after "$HARDRESET" run; then
+		if ! ESP32_OPERATION_BEFORE="$DEFAULTRESET" \
+			run_esp32_session_esptool "$port" --after "$HARDRESET" run; then
 			ESP32_NATIVE_ROM_READY=0
 			echo "Warning: the ESP32-S3 hard reset failed; press RESET once to start the application." >&2
 			return 1

@@ -353,7 +353,10 @@ For native ESP32-S3 USB/JTAG, automatic return to the application requires
 **esptool 5 or newer**. The flasher clears only the `FORCE_DOWNLOAD_BOOT` bit
 and uses an RTC watchdog reset, which re-samples the boot strapping pins.
 An ordinary USB/JTAG RTS reset can leave the radio in download mode. External
-UART bridges keep their normal hard-reset behavior.
+UART bridges keep their normal hard-reset behavior. ESP32-S3 UART finish explicitly
+uses the default DTR/RTS reset before `run`, followed by hard reset, including
+when the chip was already in ROM. This releases BOOT instead of leaving the
+board in download mode after a no-reset serial reopen.
 
 The hardware USB/JTAG product name and tty can remain unchanged when an
 application boots. They identify the transport, not whether ROM or application
