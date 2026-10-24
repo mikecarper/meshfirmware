@@ -216,9 +216,12 @@ choose_serial() { printf '%s\n' "$native_port" >"$DEVICE_PORT_FILE"; }
 selected_flash_serial_port() { printf '%s\n' "$1"; }
 save_selected_serial_port() { return 0; }
 nrf52_usb_path_stem() { printf '%s\n' "$1"; }
+fixture_native_vendor=303a
+fixture_native_product=1001
 udev_device_property() {
 	case "$2" in
-		ID_VENDOR_ID) printf '%s\n' 303a ;;
+		ID_VENDOR_ID) printf '%s\n' "$fixture_native_vendor" ;;
+		ID_MODEL_ID) printf '%s\n' "$fixture_native_product" ;;
 		ID_SERIAL_SHORT) printf '%s\n' NATIVE-TEST ;;
 		ID_PATH) printf '%s\n' pci-test-usb-0:2:1.0 ;;
 	esac
@@ -228,7 +231,12 @@ get_espcmd() {
 	DEFAULTRESET="default-reset"
 	READMAC="read-mac"
 }
-prepare_esp32_flash_session() { return 55; }
+fixture_prepare_status=55
+fixture_prepare_calls=0
+prepare_esp32_flash_session() {
+	fixture_prepare_calls=$((fixture_prepare_calls + 1))
+	return "$fixture_prepare_status"
+}
 nrf_fallback_calls=0
 scan_and_maybe_mount() {
 	nrf_fallback_calls=$((nrf_fallback_calls + 1))
@@ -246,6 +254,57 @@ fi
 [[ "$nrf_fallback_calls" -eq 0 ]]
 grep -Fq 'refusing to treat it as nRF52' "${tmp_dir}/native-autodetect.err"
 echo "PASS: failed native ESP32 preparation cannot fall through to nRF52"
+
+# Stock XIAO S3 has one CDC under Seeed's VID. It must take the exact same
+# descriptor-qualified native preparation path, never a guessed UART reset.
+fixture_native_vendor=2886
+fixture_native_product=0059
+fixture_prepare_status=0
+fixture_prepare_calls=0
+fixture_raw_calls=0
+raw_esptool_mac_probe() {
+	fixture_raw_calls=$((fixture_raw_calls + 1))
+	return 1
+}
+# Stop at the first identity-gated application read after successful prepare.
+esp32_verified_destructive_port() { return 77; }
+restore_port_after_bootloader_probe() { return 0; }
+if autodetect_device >"${tmp_dir}/seeed-native.out" 2>"${tmp_dir}/seeed-native.err"; then
+	echo 'FAIL: fixture identity-read stop unexpectedly completed autodetection' >&2
+	exit 1
+fi
+[[ "$fixture_prepare_calls" -eq 1 && "$fixture_raw_calls" -eq 0 && "$nrf_fallback_calls" -eq 0 ]]
+grep -Fq 'ESP chip responded' "${tmp_dir}/seeed-native.out"
+fixture_prepare_status=55
+fixture_prepare_calls=0
+if autodetect_device >"${tmp_dir}/seeed-rejected.out" 2>"${tmp_dir}/seeed-rejected.err"; then
+	echo 'FAIL: rejected stock XIAO S3 native mode completed autodetection' >&2
+	exit 1
+fi
+[[ "$fixture_prepare_calls" -eq 1 && "$fixture_raw_calls" -eq 0 && "$nrf_fallback_calls" -eq 0 ]]
+grep -Fq 'refusing to treat it as nRF52' "${tmp_dir}/seeed-rejected.err"
+echo 'PASS: stock XIAO S3 autodetect uses native qualification and cannot fall back after rejection'
+
+# Known nRF52 products and other USB identities retain their previous path.
+# Stop that path at the first mocked volume scan without any reset or touch.
+list_usb_block_devs() { return 0; }
+scan_and_maybe_mount() {
+	nrf_fallback_calls=$((nrf_fallback_calls + 1))
+	return 3
+}
+for fixture_native_product in 0044 0045 0057 0058 1667 8044 ffff; do
+	fixture_prepare_calls=0
+	fixture_raw_calls=0
+	nrf_fallback_calls=0
+	if autodetect_device >"${tmp_dir}/seeed-other.out" 2>"${tmp_dir}/seeed-other.err"; then
+		echo 'FAIL: fixture nRF52 scan stop unexpectedly completed autodetection' >&2
+		exit 1
+	fi
+	[[ "$fixture_prepare_calls" -eq 0 && "$fixture_raw_calls" -eq 1 && "$nrf_fallback_calls" -eq 1 ]]
+done
+echo 'PASS: Seeed nRF52 and unknown PIDs are not promoted into ESP32 native autodetection'
+fixture_native_vendor=303a
+fixture_native_product=1001
 
 # autodetect_device is called from a conditional, so every safety-critical
 # operation inside it must propagate failure explicitly rather than relying on

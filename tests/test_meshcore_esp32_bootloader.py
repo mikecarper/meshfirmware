@@ -46,6 +46,47 @@ class NativeInspectionTests(unittest.TestCase):
         self.assertEqual(native.mode, "tinyusb")
         boot.require_tinyusb(native)
 
+    def test_stock_xiao_s3_single_cdc_is_identified(self):
+        self.write_attrs(self.physical, {"idVendor": "2886", "idProduct": "0059"})
+        self.descriptors(product="seeed-xiao-s3", label="TinyUSB CDC", protocol="00")
+        native = boot.inspect_native(self.inspect())
+        self.assertEqual(native.mode, "tinyusb")
+        boot.require_tinyusb(native)
+
+    def test_seeed_nrf52_and_unknown_products_are_not_esp32_tinyusb(self):
+        self.descriptors(product="seeed-xiao-s3", label="TinyUSB CDC", protocol="00")
+        for vendor, product in (("2886", "0044"), ("2886", "0045"), ("2886", "0057"),
+                                ("2886", "0058"), ("2886", "1667"), ("2886", "8044"),
+                                ("2886", "ffff"), ("239a", "0059")):
+            with self.subTest(vendor=vendor, product=product):
+                self.write_attrs(self.physical, {"idVendor": vendor, "idProduct": product})
+                native = boot.inspect_native(self.inspect())
+                self.assertEqual(native.mode, "unknown")
+                with self.assertRaises(boot.BootloaderError):
+                    boot.require_tinyusb(native)
+
+    def test_stock_xiao_s3_still_requires_unambiguous_tinyusb_cdc_descriptors(self):
+        self.write_attrs(self.physical, {"idVendor": "2886", "idProduct": "0059"})
+        cases = ({"label": "Serial"}, {"cls": "ff"}, {"subclass": "03"},
+                 {"protocol": "ff"}, {"product": "USB JTAG/serial debug unit"})
+        for changes in cases:
+            with self.subTest(changes=changes):
+                descriptors = {"product": "seeed-xiao-s3", "label": "TinyUSB CDC", "protocol": "00"}
+                descriptors.update(changes)
+                self.descriptors(**descriptors)
+                native = boot.inspect_native(self.inspect())
+                self.assertEqual(native.mode, "unknown")
+                with self.assertRaises(boot.BootloaderError):
+                    boot.require_tinyusb(native)
+
+    def test_seeed_tinyusb_identity_cannot_admit_a_hub(self):
+        self.write_attrs(self.physical, {"idVendor": "2886", "idProduct": "0059", "bDeviceClass": "09"})
+        self.descriptors(product="seeed-xiao-s3", label="TinyUSB CDC", protocol="00")
+        with mock.patch.object(boot.os, "open") as opened:
+            with self.assertRaisesRegex(boot.BootloaderError, "hub"):
+                boot.inspect_native(self.inspect())
+            opened.assert_not_called()
+
     def test_hardware_jtag_is_identified_and_refused(self):
         self.descriptors(product="USB JTAG/serial debug unit", label="CDC")
         native = boot.inspect_native(self.inspect())
@@ -118,25 +159,35 @@ class EntryExecutionTests(unittest.TestCase):
         self.native_inspect = patch(boot, "inspect_native", return_value=self.native)
         self.siblings = patch(usb, "sibling_ports", return_value=[self.selected])
         self.unused = patch(usb, "require_unused")
-        self.snapshot = patch(boot, "verify_snapshot", return_value=self.native)
+        self.claim_owned = False
+        def snapshot(_selected, _native):
+            return boot.NativeUsb(**dict(self.native.__dict__, driver="usbfs")) if self.claim_owned else self.native
+        self.snapshot = patch(boot, "verify_snapshot", side_effect=snapshot)
         patch(usb, "ioctl_deadline", side_effect=lambda _timeout: contextlib.nullcontext())
-        self.fcntl = types.SimpleNamespace(ioctl=mock.Mock(return_value=0))
+        def release(_descriptor, command, _value):
+            if command == boot.USBDEVFS_RELEASEINTERFACE:
+                self.claim_owned = False
+            return 0
+        self.fcntl = types.SimpleNamespace(ioctl=mock.Mock(side_effect=release))
         self.stack.enter_context(mock.patch.dict(sys.modules, {"fcntl": self.fcntl}))
         self.calls = []
 
         def ioctl(descriptor, command, value):
             data = ctypes.string_at(value.data, value.length) if isinstance(value, boot.ControlTransfer) else None
             self.calls.append((descriptor, command, value, data))
+            if command == boot.USBDEVFS_DISCONNECT_CLAIM:
+                self.claim_owned = True
             return len(data) if data is not None else 0
 
         self.ioctl = patch(boot, "ioctl_structure", side_effect=ioctl)
 
-    def enter(self, expected=None):
-        return boot.enter_bootloader(str(self.selected.port), expected or self.selected.identity())
+    def enter(self, expected=None, **kwargs):
+        return boot.enter_bootloader(str(self.selected.port), expected or self.selected.identity(), **kwargs)
 
     def test_exact_seven_byte_request_and_conditional_cdc_claim(self):
         result = self.enter()
         self.assertEqual(result["status"], "request_issued")
+        self.assertEqual(result["method"], "line-coding")
         self.assertFalse(result["rom_verified"])
         self.assertFalse(result["disconnected_during_request"])
         self.assertEqual(self.unused.call_count, 2)
@@ -152,6 +203,143 @@ class EntryExecutionTests(unittest.TestCase):
         self.fcntl.ioctl.assert_called_once_with(5, boot.USBDEVFS_RELEASEINTERFACE, b"\x00\x00\x00\x00")
         self.close.assert_called_once_with(5)
         self.assertNotIn(0x5514, [item[1] for item in self.calls])
+
+    def test_explicit_line_state_has_exact_zero_data_sequence_and_fresh_snapshots(self):
+        coding = self.patch(boot, "request_line_coding")
+        sleep = self.patch(boot.time, "sleep")
+        result = self.enter(method="line-state")
+        self.assertEqual(result["method"], "line-state")
+        self.assertEqual(result["status"], "request_issued")
+        self.assertFalse(result["rom_verified"])
+        self.assertFalse(result["disconnected_during_request"])
+        self.assertEqual(len(self.calls), 5)
+        self.assertEqual(self.calls[0][1], boot.USBDEVFS_DISCONNECT_CLAIM)
+        for call, expected_value in zip(self.calls[1:], (2, 3, 1, 0)):
+            descriptor, command, transfer, data = call
+            self.assertEqual((descriptor, command), (5, boot.USBDEVFS_CONTROL))
+            self.assertEqual((transfer.request_type, transfer.request, transfer.value,
+                              transfer.index, transfer.length, transfer.data),
+                             (0x21, 0x22, expected_value, 0, 0, None))
+            self.assertEqual(data, b"")
+            self.assertGreater(transfer.timeout, 0)
+        coding.assert_not_called()
+        # Before claim, after claim, each of four stages, and cleanup.
+        self.assertEqual(self.snapshot.call_count, 7)
+        self.assertEqual(sleep.call_args_list, [mock.call(0.1)] * 3)
+        self.fcntl.ioctl.assert_called_once_with(5, boot.USBDEVFS_RELEASEINTERFACE, b"\x00\x00\x00\x00")
+        self.close.assert_called_once_with(5)
+
+    def test_line_state_changed_identity_between_stages_blocks_remaining_requests(self):
+        self.patch(boot.time, "sleep")
+        owned = boot.NativeUsb(**dict(self.native.__dict__, driver="usbfs"))
+        self.snapshot.side_effect = [self.native, owned, owned,
+                                     boot.BootloaderError("identity changed"),
+                                     boot.BootloaderError("gone")]
+        with self.assertRaisesRegex(boot.BootloaderError, "identity changed"):
+            self.enter(method="line-state")
+        self.assertEqual([call[2].value for call in self.calls if call[1] == boot.USBDEVFS_CONTROL], [2])
+        self.close.assert_called_once_with(5)
+
+    def test_line_state_unexpected_driver_between_stages_blocks_remaining_requests(self):
+        self.patch(boot.time, "sleep")
+        changed = boot.NativeUsb(**dict(self.native.__dict__, driver="unrelated_driver"))
+        owned = boot.NativeUsb(**dict(self.native.__dict__, driver="usbfs"))
+        self.snapshot.side_effect = [self.native, owned, owned, changed,
+                                     boot.BootloaderError("gone")]
+        with self.assertRaisesRegex(boot.BootloaderError, "unexpected driver"):
+            self.enter(method="line-state")
+        self.assertEqual([call[2].value for call in self.calls if call[1] == boot.USBDEVFS_CONTROL], [2])
+
+    def test_line_state_deadline_between_stages_blocks_later_requests(self):
+        clock = self.patch(boot.time, "monotonic", return_value=0)
+        self.patch(boot.time, "sleep", side_effect=lambda _delay: setattr(clock, "return_value", 6))
+        with self.assertRaisesRegex(boot.BootloaderError, "deadline expired"):
+            self.enter(method="line-state", timeout=5)
+        self.assertEqual([call[2].value for call in self.calls if call[1] == boot.USBDEVFS_CONTROL], [2])
+        self.close.assert_called_once_with(5)
+
+    def test_line_state_failure_restores_only_original_cdc(self):
+        self.patch(boot.time, "sleep")
+        unbound = boot.NativeUsb(**dict(self.native.__dict__, driver=""))
+        self.snapshot.side_effect = [self.native, self.native, unbound, unbound, unbound]
+        original_ioctl = self.ioctl.side_effect
+        def fail_second(descriptor, command, value):
+            if command == boot.USBDEVFS_CONTROL and value.value == 3:
+                self.calls.append((descriptor, command, value, b""))
+                raise OSError(errno.EPIPE, "control failed")
+            return original_ioctl(descriptor, command, value)
+        self.ioctl.side_effect = fail_second
+        with self.assertRaisesRegex(boot.BootloaderError, "errno " + str(errno.EPIPE)):
+            self.enter(method="line-state")
+        self.assertEqual([call[2].value for call in self.calls if call[1] == boot.USBDEVFS_CONTROL], [2, 3])
+        self.assertEqual(self.calls[-1][1], boot.USBDEVFS_IOCTL)
+        self.assertEqual((self.calls[-1][2].interface, self.calls[-1][2].code), (0, boot.USBDEVFS_CONNECT))
+        self.close.assert_called_once_with(5)
+
+    def test_line_state_early_disconnect_is_incomplete_not_issued(self):
+        self.patch(boot.time, "sleep")
+        self.patch(boot, "request_line_state", side_effect=OSError(errno.ENODEV, "disconnected"))
+        owned = boot.NativeUsb(**dict(self.native.__dict__, driver="usbfs"))
+        self.snapshot.side_effect = [self.native, owned, owned, boot.BootloaderError("gone")]
+        with self.assertRaisesRegex(boot.BootloaderError, "errno " + str(errno.ENODEV)):
+            self.enter(method="line-state")
+        self.assertEqual([call[1] for call in self.calls], [boot.USBDEVFS_DISCONNECT_CLAIM])
+
+    def test_line_state_only_final_disconnect_is_issued_not_rom_proven(self):
+        self.patch(boot.time, "sleep")
+        request = self.patch(boot, "request_line_state", side_effect=[0, 0, 0, OSError(errno.ENODEV, "disconnected")])
+        owned = boot.NativeUsb(**dict(self.native.__dict__, driver="usbfs"))
+        self.snapshot.side_effect = [self.native] + [owned] * 5 + [boot.BootloaderError("gone")]
+        self.fcntl.ioctl.side_effect = OSError(errno.ENODEV, "disconnected")
+        result = self.enter(method="line-state")
+        self.assertTrue(result["disconnected_during_request"])
+        self.assertFalse(result["rom_verified"])
+        self.assertEqual([call.args[2] for call in request.call_args_list], [2, 3, 1, 0])
+        self.close.assert_called_once_with(5)
+
+    def test_line_state_nonzero_control_result_is_not_success(self):
+        self.patch(boot.time, "sleep")
+        request = self.patch(boot, "request_line_state", return_value=7)
+        with self.assertRaisesRegex(boot.BootloaderError, "unexpected data count"):
+            self.enter(method="line-state")
+        self.assertEqual(request.call_count, 1)
+
+    def test_line_state_usbfs_is_refused_before_claim(self):
+        self.native_inspect.return_value = boot.NativeUsb(**dict(self.native.__dict__, driver="usbfs"))
+        with self.assertRaisesRegex(boot.BootloaderError, "unexpected driver"):
+            self.enter(method="line-state")
+        self.open.assert_not_called()
+        self.ioctl.assert_not_called()
+
+    def test_line_state_without_successful_claim_is_refused(self):
+        with self.assertRaisesRegex(boot.BootloaderError, "owned USB claim"):
+            boot.request_line_state_sequence(5, self.selected, self.native, 100)
+        self.snapshot.assert_not_called()
+        self.ioctl.assert_not_called()
+
+    def test_line_state_rebound_kernel_driver_between_stages_is_refused(self):
+        self.patch(boot.time, "sleep")
+        owned = boot.NativeUsb(**dict(self.native.__dict__, driver="usbfs"))
+        self.snapshot.side_effect = [self.native, owned, owned, self.native, self.native]
+        with self.assertRaisesRegex(boot.BootloaderError, "unexpected driver"):
+            self.enter(method="line-state")
+        self.assertEqual([call[2].value for call in self.calls if call[1] == boot.USBDEVFS_CONTROL], [2])
+
+    def test_unknown_method_never_opens_usb(self):
+        with self.assertRaisesRegex(boot.BootloaderError, "Unknown USB"):
+            self.enter(method="guessed-reset")
+        self.open.assert_not_called()
+
+    def test_cli_explicit_line_state_reaches_guarded_entry_only_with_snapshot(self):
+        output = io.StringIO()
+        with self.patch(boot.time, "sleep"), contextlib.redirect_stdout(output):
+            result = boot.main(["--port", str(self.selected.port), "--method", "line-state",
+                                "--expected-identity", json.dumps(self.selected.identity())])
+        self.assertEqual(result, 0)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["method"], "line-state")
+        self.assertFalse(result["rom_verified"])
+        self.assertEqual([call[2].value for call in self.calls if call[1] == boot.USBDEVFS_CONTROL], [2, 3, 1, 0])
 
     def test_requires_root_before_opening_anything(self):
         self.uid.return_value = 1000

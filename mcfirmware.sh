@@ -582,7 +582,7 @@ MESHCORE_BACKUP_TOOL_SHA256="b4a957e05ea3c00be7f46ddb6269874e4167c8f5bf429764874
 MESHCORE_USB_RESET_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_usb_reset.py"
 MESHCORE_USB_RESET_TOOL_SHA256="31d11f95f9155a51b66bb0f650b332f386cc5d74562d043969255a2900bc4656"
 MESHCORE_ESP32_BOOTLOADER_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_esp32_bootloader.py"
-MESHCORE_ESP32_BOOTLOADER_TOOL_SHA256="8c48512a650892b9c8d024d926a4c7c85d9e9d30db0fddc990be6c0c108b4ea0"
+MESHCORE_ESP32_BOOTLOADER_TOOL_SHA256="da0b074ba01561917579cfcf5add75468a887d1dbf3bb21be8f7380cce32100d"
 MESHCORE_PARTITION_EXPANSION_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_partition_expansion.py"
 MESHCORE_PARTITION_EXPANSION_TOOL_SHA256="f53774a5226aa29ed0cfe869e4664db0a42a0087bbd76d00c6f6e0b656332c14"
 MESHCORE_SERIAL_TOUCH_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_serial_touch.py"
@@ -2322,10 +2322,18 @@ serial_port_has_secondary_cdc() {
 
 esp32_port_uses_native_usb() {
 	local port=$1
-	local vendor_id
+	local vendor_id product_id
 
 	vendor_id="$(udev_device_property "$port" ID_VENDOR_ID)"
 	if [[ "${vendor_id,,}" == "303a" ]]; then
+		return 0
+	fi
+	# Stock XIAO ESP32-S3 has one CDC interface and a Seeed USB identity.
+	# Do not generalize to Seeed nRF52 boards. Native mode is qualified by
+	# the pinned helper before any reset/probe; unknown descriptors must stay
+	# on that refusing path rather than fall back to ordinary UART probing.
+	product_id="$(udev_device_property "$port" ID_MODEL_ID)"
+	if [[ "${vendor_id,,}:${product_id,,}" == "2886:0059" ]]; then
 		return 0
 	fi
 	# Full Companion may use a board-specific VID/PID, but its second CDC
@@ -8158,7 +8166,7 @@ fast_detect_esp32_meshcore_identity() {
 
 autodetect_device() {
 	local -a DEVICES=()
-	local vendor_id="" esp32_ready=0 scan_status=0
+	local vendor_id="" product_id="" esp32_ready=0 scan_status=0
 	local selected_live_port="" selected_serial="" selected_path_stem=""
 	local DEVICE_BY_ID_NAME=""
 	local backup_size=""
@@ -8202,7 +8210,11 @@ autodetect_device() {
 	ESP32_SESSION_IS_S3=0
 	ESP32_FLASH_EXPECTED_MAC=""
 	vendor_id="$(udev_device_property "$DEVICE_PORT" ID_VENDOR_ID)"
-	if [[ "${vendor_id,,}" == "303a" ]]; then
+	product_id="$(udev_device_property "$DEVICE_PORT" ID_MODEL_ID)"
+	# Include only the known stock XIAO S3 identity, not the dual-CDC fallback:
+	# nRF52 boards also expose dual CDC. Native preparation still requires the
+	# qualified descriptor mode and same-radio ROM/MAC handoff before reads.
+	if [[ "${vendor_id,,}" == "303a" || "${vendor_id,,}:${product_id,,}" == "2886:0059" ]]; then
 		if prepare_esp32_flash_session "$DEVICE_PORT" "ESP32 autodetect"; then
 			esp32_ready=1
 		else

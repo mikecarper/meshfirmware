@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Request ROM entry on one identified Linux ESP32 TinyUSB CDC application.
 
-This sends only CDC SET_LINE_CODING at 1200 baud. It does not open a tty, send
-serial data, reset a USB device/controller, erase flash, or prove ROM entry.
+By default this sends CDC SET_LINE_CODING at 1200 baud. The explicit line-state
+method sends the Arduino CDC control-line sequence instead. Neither opens a
+tty, sends serial data, resets a USB device/controller, erases flash, or proves ROM entry.
 The flasher must independently reidentify the radio and verify its ROM MAC.
 """
 
@@ -29,6 +30,8 @@ import meshcore_usb_reset as usb
 
 BootloaderError = usb.ResetError
 LINE_CODING_1200 = struct.pack("<IBBB", 1200, 0, 0, 8)
+LINE_STATE_ROM_SEQUENCE = (2, 3, 1, 0)  # (DTR,RTS): 01 -> 11 -> 10 -> 00
+LINE_STATE_STAGE_DELAY = 0.1
 
 
 class ControlTransfer(ctypes.Structure):
@@ -107,11 +110,15 @@ def inspect_native(selected: usb.UsbPort) -> NativeUsb:
     cdc = cls == "02" and subclass == "02" and protocol in {"00", "01"}
     mode = "unknown"
     # VID/PID alone cannot distinguish Meshtastic TinyUSB from S3 hardware CDC.
-    # The Espressif VID is necessary here, but explicit descriptor evidence is
-    # also required. Unknown/custom descriptors never receive a boot request.
+    # Stock Seeed XIAO ESP32-S3 uses its board-specific 2886:0059 identity.
+    # Admit only that exact additional pair, still requiring TinyUSB CDC
+    # evidence. Other Seeed products include nRF52 boards and remain unknown.
+    # Unknown/custom descriptors never receive a boot request.
+    software_cdc_identity = selected.vendor_id == "303a" or \
+        (selected.vendor_id, selected.product_id) == ("2886", "0059")
     if selected.vendor_id == "303a" and hardware and not tinyusb:
         mode = "hardware_jtag"
-    elif selected.vendor_id == "303a" and tinyusb and not hardware and cdc:
+    elif software_cdc_identity and tinyusb and not hardware and cdc:
         mode = "tinyusb"
     driver_link = interface_path / "driver"
     try:
@@ -123,7 +130,7 @@ def inspect_native(selected: usb.UsbPort) -> NativeUsb:
 
 def require_tinyusb(native: NativeUsb) -> None:
     if native.mode != "tinyusb":
-        raise BootloaderError("1200-baud USB request requires an identified TinyUSB CDC application; "
+        raise BootloaderError("USB bootloader request requires an identified TinyUSB CDC application; "
                               "hardware USB JTAG/serial and unknown layouts are refused.")
     if native.driver not in {"", "cdc_acm"}:
         raise BootloaderError("Selected CDC interface has an unexpected driver; refusing to detach it.")
@@ -168,6 +175,47 @@ def request_line_coding(descriptor: int, interface: int, timeout: float) -> int:
     return ioctl_structure(descriptor, USBDEVFS_CONTROL, transfer)
 
 
+def request_line_state(descriptor: int, interface: int, value: int, timeout: float) -> int:
+    transfer = ControlTransfer(0x21, 0x22, value, interface, 0,
+                               max(1, int(timeout * 1000)), None)
+    return ioctl_structure(descriptor, USBDEVFS_CONTROL, transfer)
+
+
+def request_line_state_sequence(descriptor: int, selected: usb.UsbPort,
+                                native: NativeUsb, deadline: float, *, claim_owned: bool = False) -> bool:
+    """Return a final-stage disconnect flag, never evidence of ROM success."""
+    if not claim_owned:
+        raise BootloaderError("CDC line-state sequence requires the selected interface's owned USB claim.")
+    # Arduino-ESP32 2.0.17 USBCDC::_onLineState requires all four states.
+    # UnixTightReset skips (DTR,RTS)=(1,1), so cannot trigger this software hook.
+    for stage, value in enumerate(LINE_STATE_ROM_SEQUENCE):
+        if stage:
+            if deadline - time.monotonic() <= LINE_STATE_STAGE_DELAY:
+                raise BootloaderError("Bootloader entry deadline expired during the CDC line-state sequence.")
+            time.sleep(LINE_STATE_STAGE_DELAY)
+        # Claiming CDC removes its tty. Validate the original physical snapshot
+        # directly before EVERY control request, without reopening a tty.
+        current = verify_snapshot(selected, native)
+        # Only this path's successful DISCONNECT_CLAIM authorizes usbfs: the
+        # preclaim require_tinyusb() still refuses usbfs and unrelated owners.
+        if current.mode != "tinyusb" or current.driver not in {"", "usbfs"}:
+            raise BootloaderError("Claimed CDC interface has an unexpected driver; refusing another control request.")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise BootloaderError("Bootloader entry deadline expired during the CDC line-state sequence.")
+        try:
+            count = request_line_state(descriptor, int(selected.interface, 16), value, remaining)
+        except OSError as exc:
+            # Only the final state can deliberately reboot the application.
+            # An earlier disconnect is an incomplete sequence, not success.
+            if stage != len(LINE_STATE_ROM_SEQUENCE) - 1 or exc.errno not in DISCONNECT_ERRORS:
+                raise
+            return True
+        if count != 0:
+            raise BootloaderError("USB CDC line-state request returned an unexpected data count; ROM entry is unverified.")
+    return False
+
+
 def release_and_restore(descriptor: int, selected: usb.UsbPort, native: NativeUsb,
                         claim_attempted: bool, claimed: bool) -> None:
     """Never attach a driver to a replacement device or the newly entered ROM."""
@@ -204,7 +252,7 @@ def release_and_restore(descriptor: int, selected: usb.UsbPort, native: NativeUs
 
 def enter_bootloader(port: str | Path, expected: dict[str, str], timeout: float = 5,
                      sys_root: Path = Path("/sys"), dev_root: Path = Path("/dev"),
-                     proc_root: Path = Path("/proc")) -> dict[str, Any]:
+                     proc_root: Path = Path("/proc"), *, method: str = "line-coding") -> dict[str, Any]:
     if sys.platform != "linux":
         raise BootloaderError("Direct USB bootloader entry is supported on Linux only.")
     if os.geteuid() != 0:
@@ -214,6 +262,8 @@ def enter_bootloader(port: str | Path, expected: dict[str, str], timeout: float 
         raise BootloaderError("Unsupported Linux ioctl ABI; refusing direct USB bootloader entry.")
     if not math.isfinite(timeout) or not 1 <= timeout <= 30:
         raise BootloaderError("Bootloader entry timeout must be between 1 and 30 seconds.")
+    if method not in {"line-coding", "line-state"}:
+        raise BootloaderError("Unknown USB bootloader request method.")
     selected = usb.inspect_port(port, sys_root, dev_root)
     usb.verify_identity(selected, expected)
     native = inspect_native(selected)
@@ -259,17 +309,20 @@ def enter_bootloader(port: str | Path, expected: dict[str, str], timeout: float 
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise BootloaderError("Bootloader entry deadline expired; no request was issued.")
-            try:
-                count = request_line_coding(descriptor, int(selected.interface, 16), remaining)
-            except OSError as exc:
-                if exc.errno not in DISCONNECT_ERRORS:
-                    raise
-                # The callback can reboot before the USB status stage. This is
-                # only an issued request, not proof that the ROM is available.
-                disconnected = True
+            if method == "line-state":
+                disconnected = request_line_state_sequence(descriptor, selected, native, deadline, claim_owned=claimed)
             else:
-                if count != len(LINE_CODING_1200):
-                    raise BootloaderError("USB bootloader request was not fully accepted; ROM entry is unverified.")
+                try:
+                    count = request_line_coding(descriptor, int(selected.interface, 16), remaining)
+                except OSError as exc:
+                    if exc.errno not in DISCONNECT_ERRORS:
+                        raise
+                    # The callback can reboot before the USB status stage. This is
+                    # only an issued request, not proof that the ROM is available.
+                    disconnected = True
+                else:
+                    if count != len(LINE_CODING_1200):
+                        raise BootloaderError("USB bootloader request was not fully accepted; ROM entry is unverified.")
     except OSError as exc:
         raise BootloaderError("USB bootloader request failed (errno " + str(exc.errno) + "); "
                               "reselect the radio before retrying.") from exc
@@ -283,7 +336,7 @@ def enter_bootloader(port: str | Path, expected: dict[str, str], timeout: float 
             finally:
                 os.close(descriptor)
     result = native.result(selected, "request_issued")
-    result.update({"rom_verified": False, "disconnected_during_request": disconnected})
+    result.update({"method": method, "rom_verified": False, "disconnected_during_request": disconnected})
     return result
 
 
@@ -293,6 +346,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--inspect", action="store_true", help="Read USB identity and descriptor-based native mode")
     parser.add_argument("--expected-identity", help="JSON captured by --inspect (required for entry request)")
     parser.add_argument("--timeout", type=float, default=5, help="USB request deadline in seconds (1-30)")
+    parser.add_argument("--method", choices=("line-coding", "line-state"), default="line-coding",
+                        help="Explicit CDC request method; default line-coding sends 1200 baud")
     args = parser.parse_args(argv)
     try:
         if sys.platform != "linux":
@@ -306,7 +361,8 @@ def main(argv: list[str] | None = None) -> int:
         else:
             if not args.expected_identity:
                 raise BootloaderError("Capture --inspect and provide its --expected-identity JSON before bootloader entry.")
-            result = enter_bootloader(args.port, usb.parse_expected_identity(args.expected_identity), args.timeout)
+            result = enter_bootloader(args.port, usb.parse_expected_identity(args.expected_identity),
+                                      args.timeout, method=args.method)
         print(json.dumps(result, sort_keys=True))
         return 0
     except (BootloaderError, ValueError) as exc:
