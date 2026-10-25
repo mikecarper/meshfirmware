@@ -242,14 +242,21 @@ foreach ($pidValue in @('0044', '0045', '0057', '1667', '8044', '8045', '0046', 
 
 # Exercise actual version selection; do not require installed tools or hardware.
 $productionGetEsptool = (Get-Command get_esptool_cmd).ScriptBlock
-function esptool { param($operation) return "esptool v$script:mockEsptoolVersion" }
+function Invoke-FixtureEspPython {
+	Assert-Equal -Expected '-m esptool version' -Actual ($args -join ' ') -Message 'esptool did not use the selected Python module.'
+	$global:LASTEXITCODE = 0
+	return "esptool v$script:mockEsptoolVersion"
+}
+$savedTestPython = $pythonCommand
+$pythonCommand = 'Invoke-FixtureEspPython'
 foreach ($script:mockEsptoolVersion in @('4.8.1', '5.4.0')) {
 	$null = & $productionGetEsptool
 	$modern = $script:mockEsptoolVersion.StartsWith('5.')
 	Assert-Equal -Expected $(if ($modern) { 'chip-id' } else { 'chip_id' }) `
 		-Actual $script:ESPTOOL_CHIP_ID -Message 'Chip identification command does not match esptool major version.'
 }
-Remove-Item Function:esptool
+Remove-Item Function:Invoke-FixtureEspPython
+$pythonCommand = $savedTestPython
 
 $noTouchRuntimeRejected = $false
 try {

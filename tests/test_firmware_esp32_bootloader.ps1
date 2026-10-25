@@ -83,7 +83,12 @@ try {
 
 # Test command spelling with the banner and bare version output used by
 # esptool4/5. This mocked executable does not launch esptool or open a port.
-function esptool { param($Verb) return $script:versionOutput }
+function Invoke-FixtureEspPython {
+    Assert-True (($args -join ' ') -eq '-m esptool version') 'Version query did not use the selected Python module.'
+    $global:LASTEXITCODE = 0
+    return $script:versionOutput
+}
+$pythonCommand = 'Invoke-FixtureEspPython'
 foreach ($version in @('esptool.py v4.8.1', "esptool v5.1.0`n5.1.0", '5.1.0')) {
     $script:versionOutput = $version
     $null = get_esptool_cmd
@@ -97,6 +102,7 @@ foreach ($version in @('esptool.py v4.8.1', "esptool v5.1.0`n5.1.0", '5.1.0')) {
     Assert-True ($script:ESPTOOL_WATCHDOG_RESET -eq $(if ($newSyntax) { 'watchdog-reset' } else { '' })) `
         'Unsupported legacy watchdog-reset was advertised as usable.'
 }
+Remove-Item Function:Invoke-FixtureEspPython
 $script:ESPTOOL_READ_MAC = 'read-mac'
 $script:ESPTOOL_NO_RESET = 'no-reset'
 $script:ESPTOOL_USB_RESET = 'usb-reset'

@@ -381,29 +381,39 @@ function Get-LatestPythonVersion {
 
 function get_esptool_cmd() {
 	Wait-FirmwareToolUpdates
-	$esptoolPath = Get-Command esptool -ErrorAction SilentlyContinue
-	if ($esptoolPath) {
-		# If esptool is found, set the ESPTOOL command
-		$ESPTOOL_CMD = "esptool"  # Set esptool command
-		$versionOutput = (& esptool version 2>&1 | Out-String).TrimEnd()
-	} else {
-		try {
-			# Check if Python is installed and get the version
-			$pythonVersion = & $pythonCommand --version
-			Write-Progress -Status "Checking Versions" -Activity "Python interpreter found: $pythonVersion"
-			# Set the ESPTOOL command to use Python
-			$ESPTOOL_CMD = "$pythonCommand -m esptool"  # Construct as a single string
-			$versionOutput = (& $pythonCommand -m esptool version 2>&1 | Out-String).TrimEnd()
-		}
-
-		 catch {
-			$ESPTOOL_CMD = "python -m esptool"  # Fallback to Python esptool
-			$versionOutput = (& python -m esptool version 2>&1 | Out-String).TrimEnd()
-		}
+	# The updater installs into this interpreter, not necessarily the environment
+	# owning the first esptool.exe on PATH. Never probe one copy then flash another.
+	if ([string]::IsNullOrWhiteSpace([string]$pythonCommand)) {
+		throw 'Python is not configured for esptool. Restart firmware.cmd to check its tool installation.'
 	}
-	
+	try { $null = Get-Command $pythonCommand -ErrorAction Stop }
+	catch { throw "Cannot launch the selected esptool Python '$pythonCommand': $($_.Exception.Message)" }
+	$previousErrorPreference = $ErrorActionPreference
+	try {
+		$ErrorActionPreference = 'Continue'
+		$PSNativeCommandUseErrorActionPreference = $false
+		$global:LASTEXITCODE = -1
+		$output = @(& $pythonCommand -m esptool version 2>&1 | ForEach-Object {
+			if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { [string]$_ }
+		})
+		$exitCode = $LASTEXITCODE
+	}
+	catch { throw "Could not run esptool with Python '$pythonCommand': $($_.Exception.Message)" }
+	finally { $ErrorActionPreference = $previousErrorPreference }
+	$versionOutput = ($output -join "`n").Trim()
+	if ($exitCode -ne 0) {
+		throw "esptool version check failed with Python '$pythonCommand' (exit $exitCode): $versionOutput"
+	}
+	if ($versionOutput -notmatch '(?im)(?:\besptool(?:\.py)?\s+v?|^\s*)(\d+)\.(\d+(?:\.\d+)*)') {
+		throw "esptool returned no recognizable version with Python '$pythonCommand': $versionOutput"
+	}
+	$majorVersion = [int]$matches[1]
+	$detectedVersion = "$($matches[1]).$($matches[2])"
+	# run_cmd parses a Windows command line; quote the executable for paths with spaces.
+	$ESPTOOL_CMD = '"' + $pythonCommand + '" -m esptool'
 	$esptoolVersion = $versionOutput
 	$script:ESPTOOL_VERSION = $esptoolVersion
+	$script:ESPTOOL_PYTHON_COMMAND = $pythonCommand
 	$script:ESPTOOL_WRITE_FLASH = "write_flash"
 	$script:ESPTOOL_ERASE_FLASH = "erase_flash"
 	$script:ESPTOOL_READ_FLASH_STATUS = "read_flash_status"
@@ -418,32 +428,26 @@ function get_esptool_cmd() {
 	$script:ESPTOOL_WATCHDOG_RESET = ""
 	$script:ESPTOOL_USB_RESET = "usb_reset"
 	$script:ESPTOOL_DEFAULT_RESET = "default_reset"
-	if ($esptoolVersion -match '(?im)(?:\besptool(?:\.py)?\s+v?|^\s*)(\d+)\.') {
-		$majorVersion = [int]$matches[1]
-		if ($majorVersion -ge 5) {
-			$script:ESPTOOL_WRITE_FLASH = "write-flash"
-			$script:ESPTOOL_ERASE_FLASH = "erase-flash"
-			$script:ESPTOOL_READ_FLASH_STATUS = "read-flash-status"
-			$script:ESPTOOL_READ_FLASH = "read-flash"
-			$script:ESPTOOL_FLASH_ID = "flash-id"
-			$script:ESPTOOL_CHIP_ID = "chip-id"
-			$script:ESPTOOL_READ_MAC = "read-mac"
-			$script:ESPTOOL_WRITE_MEM = "write-mem"
-			$script:ESPTOOL_NO_RESET = "no-reset"
-			$script:ESPTOOL_HARD_RESET = "hard-reset"
-			$script:ESPTOOL_WATCHDOG_RESET = "watchdog-reset"
-			$script:ESPTOOL_USB_RESET = "usb-reset"
-			$script:ESPTOOL_DEFAULT_RESET = "default-reset"
-		}
+	if ($majorVersion -ge 5) {
+		$script:ESPTOOL_WRITE_FLASH = "write-flash"
+		$script:ESPTOOL_ERASE_FLASH = "erase-flash"
+		$script:ESPTOOL_READ_FLASH_STATUS = "read-flash-status"
+		$script:ESPTOOL_READ_FLASH = "read-flash"
+		$script:ESPTOOL_FLASH_ID = "flash-id"
+		$script:ESPTOOL_CHIP_ID = "chip-id"
+		$script:ESPTOOL_READ_MAC = "read-mac"
+		$script:ESPTOOL_WRITE_MEM = "write-mem"
+		$script:ESPTOOL_NO_RESET = "no-reset"
+		$script:ESPTOOL_HARD_RESET = "hard-reset"
+		$script:ESPTOOL_WATCHDOG_RESET = "watchdog-reset"
+		$script:ESPTOOL_USB_RESET = "usb-reset"
+		$script:ESPTOOL_DEFAULT_RESET = "default-reset"
 	}
-	if ($pythonVersion) {
-		Write-Progress -Status "Checking Versions" -Activity "Python interpreter found: $pythonVersion esptool version: $esptoolVersion"
+	$toolDisplay = "esptool $detectedVersion (Python: $pythonCommand)"
+	if ($script:LastEspToolDisplay -ne $toolDisplay) {
+		Write-Host "ESP32 tools: $toolDisplay"
+		$script:LastEspToolDisplay = $toolDisplay
 	}
-	else {
-		Write-Progress -Status "Checking Versions" -Activity "esptool version: $esptoolVersion"
-	}
-
-	
 	return $ESPTOOL_CMD
 }
 
@@ -5661,7 +5665,40 @@ function Assert-Esp32FinishCapability {
 		$UsbIdentity.Esp32RomTransport -in @('tinyusb', 'usb-jtag') -and
 		($script:ESPTOOL_WRITE_MEM -ne 'write-mem' -or
 			$script:ESPTOOL_WATCHDOG_RESET -ne 'watchdog-reset')) {
-		throw 'Native USB ESP32-S3 flashing requires esptool 5 or newer for its safe watchdog reset. Upgrade esptool before erasing or writing firmware.'
+		$version = if ($script:ESPTOOL_VERSION) { $script:ESPTOOL_VERSION.Trim() } else { 'unknown' }
+		$python = if ($script:ESPTOOL_PYTHON_COMMAND) { $script:ESPTOOL_PYTHON_COMMAND } else { $pythonCommand }
+		# Only probe the runtime on this failure path: normal flashing and startup
+		# do not pay for another Python process, and legacy UART stays supported.
+		$pythonVersion = 'unknown'
+		$pythonTooOld = $false
+		$previousErrorPreference = $ErrorActionPreference
+		try {
+			if (-not [string]::IsNullOrWhiteSpace([string]$python)) {
+				$null = Get-Command $python -ErrorAction Stop
+				$ErrorActionPreference = 'Continue'
+				$PSNativeCommandUseErrorActionPreference = $false
+				$global:LASTEXITCODE = -1
+				$runtimeOutput = @(& $python --version 2>&1 | ForEach-Object {
+					if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { [string]$_ }
+				})
+				if ($LASTEXITCODE -eq 0 -and ($runtimeOutput -join "`n") -match '(?im)^\s*Python\s+((\d+)\.(\d+)(?:\.[^\s]+)?)\s*$') {
+					$pythonVersion = $matches[1]
+					$pythonTooOld = [int]$matches[2] -lt 3 -or ([int]$matches[2] -eq 3 -and [int]$matches[3] -lt 10)
+				}
+			}
+		}
+		catch { } # A failed diagnostic must not hide the original capability failure.
+		finally { $ErrorActionPreference = $previousErrorPreference }
+		if ($pythonTooOld) {
+			$guidance = "Python $pythonVersion is too old for esptool 5. Upgrade Python to 3.10 or newer from https://www.python.org/downloads/windows/. Make the newer Python active on PATH, close and reopen the command window, then restart firmware.cmd. Upgrading esptool alone cannot fix this interpreter."
+		}
+		else {
+			$guidance = "Upgrade esptool in this interpreter with: `"$python`" -m pip install --upgrade `"esptool>=5`"."
+			if ($pythonVersion -eq 'unknown') {
+				$guidance = "Could not detect the selected Python version. esptool 5 requires Python 3.10 or newer; if yours is older, upgrade Python, make it active on PATH, reopen the command window, and restart firmware.cmd. Otherwise, $guidance"
+			}
+		}
+		throw "Native USB ESP32-S3 flashing requires esptool 5 or newer for its safe watchdog reset. Selected version: $version. Python $pythonVersion ('$python'). $guidance No flash erase or write was performed."
 	}
 }
 
@@ -7819,32 +7856,59 @@ function flashMeshtasticNrf52 {
 }
 
 function Test-MeshCoreBackupToolVersion {
-	param([Parameter(Mandatory)][string]$Path)
-
-	if ([string]::IsNullOrWhiteSpace([string]$pythonCommand) -or
-		-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-		return $false
-	}
+	param([Parameter(Mandatory)][string]$Path, [switch]$ThrowOnFailure)
+	# Cache probes still return a boolean; required files opt into the precise
+	# failure. Keep the hash gate before executing even the read-only version query.
 	try {
-		$actualHash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
-		if ($actualHash -cne $MESHCORE_BACKUP_TOOL_SHA256) {
-			return $false
+		if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+			throw "Backup helper file not found: '$Path'."
 		}
+		try { $actualHash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() }
+		catch { throw "Cannot read backup helper '$Path' for SHA-256 verification: $($_.Exception.Message)" }
+		if ($actualHash -cne $MESHCORE_BACKUP_TOOL_SHA256) {
+			throw "Backup helper SHA-256 mismatch for '$Path'. Expected $MESHCORE_BACKUP_TOOL_SHA256; found $actualHash. The helper was not executed. Update firmware.cmd and its tools together."
+		}
+		if ([string]::IsNullOrWhiteSpace([string]$pythonCommand)) {
+			throw 'Python is not configured for the MeshCore backup helper (Python 3.10 or newer is required).'
+		}
+		try { $null = Get-Command $pythonCommand -ErrorAction Stop }
+		catch { throw "Cannot launch backup Python '$pythonCommand': $($_.Exception.Message)" }
+		$previousErrorPreference = $ErrorActionPreference
+		try {
+			# PS5 wraps native stderr in ErrorRecords, including harmless warnings.
+			$ErrorActionPreference = 'Continue'
+			$PSNativeCommandUseErrorActionPreference = $false
+			$global:LASTEXITCODE = -1
+			$output = @(& $pythonCommand $Path version 2>&1 | ForEach-Object {
+				if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { [string]$_ }
+			})
+			$exitCode = $LASTEXITCODE
+		}
+		catch { throw "Backup helper could not run with Python '$pythonCommand': $($_.Exception.Message)" }
+		finally { $ErrorActionPreference = $previousErrorPreference }
+		$detail = ($output -join "`n").Trim()
+		if ($exitCode -ne 0) {
+			throw "Backup helper version query failed with Python '$pythonCommand' (exit $exitCode). Python 3.10 or newer is required. Output: $detail"
+		}
+		$jsonLines = @($output | Where-Object { $_.TrimStart().StartsWith('{') })
+		if ($jsonLines.Count -ne 1) {
+			throw "Backup helper returned no single JSON version report with Python '$pythonCommand'. Output: $detail"
+		}
+		try { $summary = $jsonLines[0] | ConvertFrom-Json -ErrorAction Stop }
+		catch { throw "Backup helper returned invalid JSON with Python '$pythonCommand'. Output: $detail" }
+		if ($summary.ok -ne $true) {
+			throw "Backup helper version query did not report success with Python '$pythonCommand'. Output: $detail"
+		}
+		if ([string]$summary.tool_version -ne $MESHCORE_BACKUP_TOOL_VERSION) {
+			throw "Backup helper version mismatch for '$Path': expected $MESHCORE_BACKUP_TOOL_VERSION; found '$($summary.tool_version)'."
+		}
+		if ([string]$summary.schema -ne 'org.meshfirmware.meshcore-backup/v1') {
+			throw "Backup helper schema mismatch for '$Path': expected org.meshfirmware.meshcore-backup/v1; found '$($summary.schema)'."
+		}
+		return $true
 	}
 	catch {
-		return $false
-	}
-	$output = @(& $pythonCommand $Path version 2>$null)
-	if ($LASTEXITCODE -ne 0 -or $output.Count -eq 0) {
-		return $false
-	}
-	try {
-		$summary = ([string]$output[-1]) | ConvertFrom-Json -ErrorAction Stop
-		return $summary.ok -eq $true -and
-			[string]$summary.tool_version -eq $MESHCORE_BACKUP_TOOL_VERSION -and
-			[string]$summary.schema -eq 'org.meshfirmware.meshcore-backup/v1'
-	}
-	catch {
+		if ($ThrowOnFailure) { throw }
 		return $false
 	}
 }
@@ -7853,10 +7917,9 @@ function Resolve-MeshCoreBackupTool {
 	Wait-FirmwareToolUpdates
 	$localTool = Join-Path $ScriptPath 'tools\meshcore_backup.py'
 	if (Test-Path -LiteralPath $localTool -PathType Leaf) {
-		if (Test-MeshCoreBackupToolVersion -Path $localTool) {
-			return $localTool
-		}
-		throw "The bundled MeshCore backup helper does not match required version $MESHCORE_BACKUP_TOOL_VERSION."
+		try { $null = Test-MeshCoreBackupToolVersion -Path $localTool -ThrowOnFailure }
+		catch { throw "Bundled MeshCore backup helper validation failed: $($_.Exception.Message)" }
+		return $localTool
 	}
 
 	if ([string]::IsNullOrWhiteSpace([string]$FIRMWARE_ROOT)) {
@@ -7865,21 +7928,24 @@ function Resolve-MeshCoreBackupTool {
 
 	$toolDir = Join-Path $FIRMWARE_ROOT 'tools'
 	$cachedTool = Join-Path $toolDir 'meshcore_backup.py'
-	if (Test-MeshCoreBackupToolVersion -Path $cachedTool) {
-		return $cachedTool
+	if (Test-Path -LiteralPath $cachedTool -PathType Leaf) {
+		try {
+			$null = Test-MeshCoreBackupToolVersion -Path $cachedTool -ThrowOnFailure
+			return $cachedTool
+		}
+		catch { Write-Warning "Cached MeshCore backup helper rejected: $($_.Exception.Message)" }
 	}
 
 	New-Item -ItemType Directory -Path $toolDir -Force | Out-Null
 	$partialTool = "$cachedTool.partial"
 	try {
 		Write-Host 'Downloading the MeshCore logical-backup helper...'
-		Invoke-WebRequest -Uri $MESHCORE_BACKUP_TOOL_URL -OutFile $partialTool -UseBasicParsing
+		Invoke-WebRequest -Uri $MESHCORE_BACKUP_TOOL_URL -OutFile $partialTool -UseBasicParsing -Headers @{ 'Cache-Control' = 'no-cache' }
 		if (-not (Test-Path -LiteralPath $partialTool -PathType Leaf) -or (Get-Item -LiteralPath $partialTool).Length -lt 1024) {
 			throw 'The downloaded backup helper is missing or unexpectedly small.'
 		}
-		if (-not (Test-MeshCoreBackupToolVersion -Path $partialTool)) {
-			throw "The downloaded MeshCore backup helper did not match required version $MESHCORE_BACKUP_TOOL_VERSION."
-		}
+		try { $null = Test-MeshCoreBackupToolVersion -Path $partialTool -ThrowOnFailure }
+		catch { throw "Downloaded MeshCore backup helper validation failed: $($_.Exception.Message)" }
 		Move-Item -LiteralPath $partialTool -Destination $cachedTool -Force
 	}
 	finally {
