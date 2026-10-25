@@ -1,227 +1,38 @@
-# Alt CLI firmware selector for MeshCore & Meshtastic projects
-Scripts that automates the process of selecting, downloading, and applying firmware updates from the [meshcore-dev/MeshCore](https://github.com/meshcore-dev/MeshCore) & [meshtastic/firmware](https://github.com/meshtastic/firmware) GitHub repository via the USB port.  
+# Mesh firmware updater
 
-# Windows Quick start - MeshCore & Meshtastic in one script
-[Download firmware.cmd (right click save)](https://github.com/mikecarper/meshfirmware/blob/main/firmware.cmd?raw=true)  
-Make sure file is named firmware.cmd and not firmware.cmd.txt  
-double click and run the file firmware.cmd  
+Select, download, and flash [MeshCore](https://github.com/meshcore-dev/MeshCore)
+or [Meshtastic](https://github.com/meshtastic/firmware) firmware over USB.
 
-On an existing installation, startup checks the local tools without waiting
-for package upgrades. After device detection, upgrades run in the background
-while you choose firmware. Backups, flashing, and reconnect probes wait for
-the updater if it is still running. Missing tools are installed before first
-use. Updater diagnostics are saved in `.tmp/firmware-tool-update.<pid>.log`;
-failed upgrades are reported and available installed tools can still be used.
-Firmware windows share a lock to keep upgrades from changing tools during
-another window's device operation.
+## Windows
 
-USB identification uses short, read-only MeshCore/Meshtastic protocol queries
-instead of starting the full Meshtastic CLI for every port. Independent radios
-are scanned in parallel (up to eight at a time); interfaces on the same radio
-are kept sequential. Confirmed DFU devices and MeshCore logging-only siblings
-skip application queries. USB descriptions and the last successful protocol
-only choose query order, never prove firmware type. A silent device remains
-Unknown; selecting it runs the slower compatibility check for that port only.
-USB enumeration is reused and Windows identity properties are read in batches
-without loading the slower PnP module on the normal path.
+1. [Download firmware.cmd](https://github.com/mikecarper/meshfirmware/blob/main/firmware.cmd?raw=true).
+2. Save it as `firmware.cmd`, not `firmware.cmd.txt`.
+3. Connect your node, double-click the file, and follow the menus.
 
-The Windows flasher recognizes the serial-only Seeed XIAO/XIAO Sense DFU
-products (`2886:0044` / `2886:0045`) as well as T1000-E (`2886:0057`), while
-still rejecting their application-mode IDs and rechecking the selected USB
-identity after COM-port changes. It selects esptool 4/5 command spellings
-automatically. Native stderr warnings do not abort successful operations in
-Windows PowerShell 5; a nonzero tool exit still stops the flash.
+Required tools are installed automatically; existing tools update in the background.
 
-Windows nRF52 bootloader entry attempts its serial touch once. An Open/close
-error can mean the radio has already started resetting, so it waits for the
-same radio's verified DFU port without sending a second Python touch. It keeps
-RTS deasserted, explicitly lowers DTR after the hold and identity check, and
-stops if serial-handle cleanup cannot be confirmed. A successful nRF52 transfer
-leaves application startup unverified in the final message.
+For Linux, see the [quick starts and videos below](#linux).
 
-Normal MeshCore identification leaves DTR/RTS deasserted on native ESP32
-USB-Serial/JTAG devices (including Heltec V4), whose hardware interprets
-those signals as reset/download controls. This prevents the probe from
-accidentally entering download mode. nRF52 CDC and USB-UART probing retain
-their existing control-line behavior; intentional flashing resets are unchanged.
+Merged/full installs and wipes erase stored settings. Back up first and keep
+the node powered until the operation finishes.
 
-Regression checks (no connected radio needed):
+## Backup and restore
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_usb_identity.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_native_commands.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_backup_dependencies.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_backup_prompt_order.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_background_updates.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_protocol_probe.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_parallel_probe.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_protocol_inventory.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_firmware_usb_properties.ps1
-```
+Windows offers a backup-only option; both platforms offer backup before flashing.
+Logical MeshCore backups require running firmware, not ROM/DFU mode.
 
-## MeshCore backup before flashing
+Windows saves backups beside `firmware.cmd`: `mc.config_backup.*.json` for
+MeshCore and `mt.config_backup.*.yaml` for Meshtastic. To restore a MeshCore
+companion, run [restore.cmd](restore.cmd) from the checkout. See
+[backup and restore details](docs/advanced.md#meshcore-backup-before-flashing)
+for Linux and moving settings to another board.
 
-Both `firmware.cmd` (Windows) and `mcfirmware.sh` (Linux) offer a verified
-logical USB backup for nRF52 and ESP32 before the final flash confirmation.
-For nRF52, the backup also precedes the update/wipe action menu. You can make
-a backup and then decline flashing (Windows) or choose echo-only (Linux);
-the backup is retained and no erase/write is performed.
+## More help
 
-The current firmware must expose a supported MeshCore USB API; a device
-already in ROM/DFU mode cannot provide a logical backup. Failed backups
-require explicit confirmation before updating, and a wipe without a complete
-wipe-safe backup still requires typing `WIPE WITHOUT BACKUP`. These are
-logical snapshots, not full flash images, and may contain private identity
-and channel secrets. Windows saves new backups at the checkout root as
-`mc.config_backup.*.json` (MeshCore) or `mt.config_backup.*.yaml`
-(Meshtastic); Linux keeps its existing backup location. Older MeshCore JSON
-backups in the current user's `.meshfirmware/backups` directory also remain
-usable.
-New companion archives keep Bluetooth name as `name` plus a boolean
-`default`, rather than embedding "(default from node name)" in a text value.
-They also retain `device_info.ver_full` from the read-only `version` command;
-the protocol's original 20-byte `ver` field remains unchanged. The restore
-tool accepts older text-format archives too.
-
-### Restore a MeshCore companion backup
-
-On Windows, double-click `restore.cmd`. It offers the newest JSON backup or
-lets you enter a full path, checks archive integrity, identifies the USB
-device, and asks before changing any settings. To move the backup to a
-different board, choose **different hardware**, enter its displayed USB
-serial, and explicitly approve identity replacement. The target must already
-run MeshCore companion firmware and have room for the saved populated
-channels and contacts. The new board's existing identity and matching
-settings will be overwritten; its unrelated contacts are not deleted. After
-restore, Bluetooth is cycled once if it was enabled, so the phone app can
-reconnect and reload settings.
-
-For Linux, use `python3 tools/meshcore_restore.py ports` to see available
-devices, then `probe --input BACKUP.json --target-serial SERIAL --new-hardware`
-and finally `restore --input BACKUP.json --target-serial SERIAL --new-hardware
---confirmed --replace-identity`. Omit the target-serial and new-hardware
-options to restore to the original USB device. Run `resync` with the same
-target options and `--confirmed` to cycle enabled Bluetooth after using the
-Python helper directly. This is a logical settings
-restore, not a firmware, unread-message, or every optional CLI-only setting restore.
-An unresponsive device in DFU or a non-companion role is never written.
-If a Full Companion is in its text terminal with USB logging on, the Windows
-launcher asks before temporarily switching that setting off to enter binary
-mode. A successful restore leaves USB logging at the state recorded in the
-backup. Use `--allow-mode-switch` for this behavior with the Python helper.
-
-Linux regression check: `bash tests/test_mcfirmware_backup_integration.sh`.
-
-## Check ESP32 partitions before an update
-
-On a running MeshCore Station G2, open its USB serial console at 115200 baud
-and enter `get storage.layout`. This is read-only and reports flash size,
-the active app slot (`*`), both app slot offsets and sizes, NVS, and the
-filesystem. For example, Bellevue's expanded 16 MB layout reports
-`app0@0x10000+6400K,app1@0x650000+6400K`. An app-only `.bin` must fit in
-the smallest app slot; use the partition migration procedure only if the
-existing slots cannot hold it. A merged `.bin` replaces the partition table
-and is a new install, not an in-place app update.
-
-If the application does not answer, put the ESP32 into its ROM download mode
-and read the physical table without erasing or writing:
-
-```bash
-esptool --chip esp32s3 --port /dev/serial/by-id/YOUR_DEVICE \
-  read-flash 0x8000 0x1000 partitions.bin
-```
-
-With esptool 4, use `esptool.py` and `read_flash` instead. On native USB,
-the ROM device may enumerate with a different by-id name; verify its MAC
-address before using that port.
-
-Both flashers print `get storage.layout` when available, then verify the actual
-ROM-readable partition table, physical flash capacity, OTA selection and NVS
-migration state before a confirmed MeshCore app-only update. A silent serial
-console is not evidence that expansion is necessary. An image that already
-fits uses the normal checked, inactive-first/active-last write path.
-
-When expansion is necessary, Windows and Linux select the exact board/role
-migration package matching the selected Full application's release and SHA-256.
-They offer its verified **USB migration bridge** as a middle step, without a
-full-chip erase. The bridge stages private identity and supported configuration,
-expands partitions, reboots and verifies restoration. Native ESP32-S3/C3 USB
-returns itself to ROM download mode; classic ESP32 reports settled status over
-its USB-UART adapter before the host requests ROM mode. No physical BOOT-button
-step is used. Native USB can disappear temporarily during this process.
-
-The final image is written only after the original USB identity/chip MAC, exact
-expanded table and NVS restoration records verify. Interrupted runs keep a
-public per-device recovery record and cannot bypass unfinished restoration by
-selecting another image or moving the device to another host. Temporary NVS
-snapshots are removed after use. Logs and unsupported optional files are not
-preserved; keep a logical backup and stable power. Partition-table replacement
-is not power-loss atomic and a power failure can still require physical recovery.
-
-If an exact package or USB-safe bridge is unavailable, the update stops with a
-reason; it never substitutes a Wi-Fi-only bridge that might require physical
-BOOT access. `MESHFIRMWARE_PARTITION_PACKAGE` can select an exact local migration
-ZIP; it is subject to the same checks. Merged images remain a separately
-confirmed new install that erases settings. Echo-only mode never runs a bridge.
-
-For existing releases whose exact migration ZIP contains only the Wi-Fi bridge,
-the helper automatically downloads a qualified, versioned six-profile USB
-utility set. Its release URL and archive SHA-256 are pinned in the helper;
-it never follows an untested `latest` bridge. The download happens only after
-the exact Full package qualifies and only when expansion needs that bridge.
-Cached ZIPs are checksum-verified again before use.
-
-For offline use or an explicitly selected set, set
-`MESHFIRMWARE_USB_MIGRATION_SET` to that ZIP, or put it at
-`tools/meshcore-usb-partition-bridges.zip` beside the flasher. The set has its own
-source provenance and checksums; it does not relabel or replace the selected
-Full application's release. Its chip/flash header, NVS startup guard and all six
-profile hashes are checked before use.
-
-In the MeshCore checkout, build only this utility set on Linux/WSL with:
-
-```bash
-python3 scripts/build_esp32_partition_migration.py --usb-only
-```
-
-This builds the six intermediate images serially, not every Full application.
-
-After writing, the flashers finish the identity-qualified ESP32 session using
-the reset method for its USB transport. Native ESP32-S3 USB/JTAG requires the
-masked forced-download clear and watchdog reset described below; UART bridges
-keep their ordinary hard reset. A verified flash write or a matching USB
-descriptor does not confirm application startup. Verify the expected firmware
-through its application CLI before treating the update as complete.
-
-## MeshCore USB backup dependencies
-
-Before a logical USB backup, both flashers display the selected Python
-interpreter and the installed, supported, and repair versions of each package:
-
-| Package | Supported stable versions | Pinned repair version |
-| --- | --- | --- |
-| MeshCore Python API (`meshcore`) | `>=2.3.9,<3` | `2.3.9.1` |
-| MeshCore CLI (`meshcore-cli`) | `>=1.6.3,<2` | `1.6.3` |
-| PyNaCl | `>=1.5,<2` | `1.6.2` |
-
-Python 3.10 or newer is required. Compatible installations are reused after
-checking that the USB backup APIs can be imported. Missing, incompatible, or
-broken packages trigger one repair attempt using the exact versions above,
-followed by a fresh-process API check. Installation failures remain visible
-and stop the backup; the existing explicit confirmation before continuing
-without a complete backup is unchanged. Linux uses its dedicated backup venv;
-Windows uses the Python interpreter selected by `firmware.cmd`.
-
-To display versions and check APIs without installing anything or connecting
-to a radio (use `python3` on Linux):
-
-```text
-python tools/meshcore_backup.py dependencies --text
-```
-
-Add `--install` to repair that interpreter's backup dependencies. The Windows
-launcher runs this helper as a file, avoiding Windows PowerShell 5's loss of
-embedded quotes in inline Python version checks.
+- [ESP32 partition expansion](docs/advanced.md#check-esp32-partitions-before-an-update)
+- [USB recovery and bootloader entry](docs/advanced.md#recover-a-stalled-usb-connection-linux)
+- [Python and backup dependencies](docs/advanced.md#meshcore-usb-backup-dependencies)
+- [Advanced usage, tests, and build instructions](docs/advanced.md)
 
 Windows Video
 -----
