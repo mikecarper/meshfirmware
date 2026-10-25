@@ -541,7 +541,7 @@ def make_plan(firmware: Path, table_path: Path, flash_output: Path,
     nvss = [part for part in parts if part["type"] == 1 and part["subtype"] == 2]
     if len(nvss) > 1:
         raise ExpansionError("ESP32 table has ambiguous NVS partitions for migration-state verification.")
-    markers = {"namespace_exists": False, "cfg-restored": False,
+    markers = {"namespace_exists": False, "namespace_empty": False, "cfg-restored": False,
                "cfg-pending": False, "id-pending": False}
     if nvss:
         if nvs_path is None:
@@ -588,7 +588,8 @@ def make_plan(firmware: Path, table_path: Path, flash_output: Path,
         return existing
     if fits:
         if (markers["cfg-pending"] or markers["id-pending"]
-                or (markers["namespace_exists"] and not markers["cfg-restored"])):
+                or (markers["namespace_exists"] and not markers["namespace_empty"]
+                    and not markers["cfg-restored"])):
             raise ExpansionError("Live NVS reports unfinished partition migration; restore the original bridge handoff before final flashing.")
         return {"ok": True, "needed": False, "firmware_sha256": firmware_hash,
                 "flash_bytes": flash_bytes, "app_bytes": len(image),
@@ -596,7 +597,8 @@ def make_plan(firmware: Path, table_path: Path, flash_output: Path,
                 "ota_offset": ota["offset"] if ota else None,
                 "ota_size": OTA_SIZE if ota else None,
                 "nvs_offset": nvss[0]["offset"] if nvss else None,
-                "nvs_size": nvss[0]["size"] if nvss else None}
+                "nvs_size": nvss[0]["size"] if nvss else None,
+                "nvs_migration": markers}
     if flash_bytes not in TARGET_LAYOUTS:
         raise ExpansionError("No reviewed partition expansion plan exists for this physical flash size.")
     if chip not in (0, 5, 9):
@@ -704,7 +706,7 @@ def parse_nvs_markers(data: bytes, *, allow_missing: bool = False,
         raise ExpansionError("Migration NVS read must contain exactly 20480 bytes.")
     if not data or len(data) % 4096:
         raise ExpansionError("NVS snapshot must contain complete flash sectors.")
-    absent = {"namespace_exists": False, "cfg-restored": False,
+    absent = {"namespace_exists": False, "namespace_empty": False, "cfg-restored": False,
               "cfg-pending": False, "id-pending": False}
     pages = []
     for offset in range(0, len(data), 4096):
@@ -781,7 +783,13 @@ def parse_nvs_markers(data: bytes, *, allow_missing: bool = False,
     if any(key != "mesh-pt-migrate" and kind == 1 and raw[0] == namespace
            for (ns, key), (kind, raw) in records.items() if ns == 0):
         raise ExpansionError("Partition migration NVS namespace identity is ambiguous.")
-    markers = {"namespace_exists": True}
+    # Old application identity probes opened this namespace read/write even
+    # before a migration, creating a legitimate empty namespace. A bridge must
+    # commit staged identity/pending state before publishing a partition table.
+    # Only zero validated live keys are harmless: false completion flags,
+    # pending flags, staged blobs and unknown keys all make it nonempty.
+    markers = {"namespace_exists": True,
+               "namespace_empty": not any(ns == namespace for ns, _key in records)}
     for key in ("cfg-restored", "cfg-pending", "id-pending"):
         item = records.get((namespace, key))
         if item is not None and (item[0] != 1 or item[1][0] not in (0, 1)):

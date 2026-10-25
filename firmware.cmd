@@ -60,7 +60,7 @@ $MESHCORE_BACKUP_TOOL_URL = "https://raw.githubusercontent.com/mikecarper/meshfi
 $MESHCORE_BACKUP_TOOL_VERSION = '0.2.3'
 $MESHCORE_BACKUP_TOOL_SHA256 = 'b4a957e05ea3c00be7f46ddb6269874e4167c8f5bf42976487425696af2140cd'
 $MESHCORE_PARTITION_TOOL_URL = 'https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_partition_expansion.py'
-$MESHCORE_PARTITION_TOOL_SHA256 = 'f53774a5226aa29ed0cfe869e4664db0a42a0087bbd76d00c6f6e0b656332c14'
+$MESHCORE_PARTITION_TOOL_SHA256 = 'fd1cc2c2198d31878587a2a7aa48f7ec49055b29af3cb5f2a9630ec2d8787df8'
 
 $timeoutMeshtastic = 10 # Timeout duration in seconds
 $baud = 1200 # 115200

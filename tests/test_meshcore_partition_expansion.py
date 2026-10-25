@@ -711,6 +711,45 @@ class ExpansionTests(unittest.TestCase):
         self.nvs.write_bytes(page + b"\xff" * (4 * 4096))
         self.assertFalse(self.plan(table_path=self.new)["needed"])
 
+    def test_legacy_empty_migration_namespace_is_not_an_unfinished_handoff(self):
+        page = nvs_page(1, [(nvs_entry(0, "wifi", 2), 2),
+                            (nvs_entry(2, "channel", 7), 2),
+                            (nvs_entry(0, "mesh-pt-migrate", 3), 2)])
+        self.nvs.write_bytes(page + b"\xff" * (4 * 4096))
+        # A normal small app update on both a legacy and already-expanded table.
+        self.firmware.write_bytes(esp_image(1024))
+        for layout in (self.old, self.new):
+            with self.subTest(layout=layout.name):
+                proof = self.plan(table_path=layout)
+                self.assertFalse(proof["needed"])
+                self.assertEqual(proof["nvs_migration"], {
+                    "namespace_exists": True, "namespace_empty": True,
+                    "cfg-restored": False, "cfg-pending": False, "id-pending": False})
+                self.assertTrue(all(type(value) is bool for value in proof["nvs_migration"].values()))
+                self.assertNotIn("channel", json.dumps(proof["nvs_migration"]))
+        self.assertFalse(self.cache.exists())
+
+    def test_nonempty_migration_namespace_without_completion_always_blocks(self):
+        for key in ("cfg-restored", "cfg-pending", "id-pending", "identity", "cfg-meta",
+                    "cfg-0", "resume-slot", "unknown-private"):
+            for value in (0, 1):
+                with self.subTest(key=key, value=value):
+                    if key == "cfg-restored" and value == 1:
+                        continue  # The existing legitimate completed state stays supported.
+                    page = nvs_page(1, [(nvs_entry(0, "mesh-pt-migrate", 3), 2),
+                                        (nvs_entry(3, key, value), 2)])
+                    self.nvs.write_bytes(page + b"\xff" * (4 * 4096))
+                    with self.assertRaisesRegex(EXP.ExpansionError, "Live NVS"):
+                        self.plan(table_path=self.new)
+        self.assertFalse(self.cache.exists())
+
+    def test_empty_namespace_never_proves_a_started_migration_complete(self):
+        started = self.started_plan()
+        page = nvs_page(1, [(nvs_entry(0, "mesh-pt-migrate", 3), 2)])
+        self.nvs.write_bytes(page + b"\xff" * (4 * 4096))
+        with self.assertRaisesRegex(EXP.ExpansionError, "not finished"):
+            self.verify(started)
+
     def test_actual_nonstandard_nvs_geometry_and_missing_snapshot(self):
         entries = legacy_entries()
         entries[0] = ("nvs", 1, 2, 0x9000, 0x3000, 0)
@@ -741,6 +780,31 @@ class ExpansionTests(unittest.TestCase):
 
 
 class NvsAndOtaTests(unittest.TestCase):
+    def test_empty_namespace_counts_only_validated_live_keys(self):
+        page = nvs_page(1, [(nvs_entry(0, "mesh-pt-migrate", 3), 2),
+                            (nvs_entry(3, "cfg-restored", 0), 0),
+                            (nvs_entry(3, "private-staged", 1), 0)])
+        flags = EXP.parse_nvs_markers(page + b"\xff" * (4 * 4096))
+        self.assertTrue(flags["namespace_exists"])
+        self.assertTrue(flags["namespace_empty"])
+        self.assertFalse(flags["cfg-restored"])
+        for key in ("cfg-restored", "cfg-pending", "id-pending", "private-staged"):
+            page = nvs_page(1, [(nvs_entry(0, "mesh-pt-migrate", 3), 2),
+                                (nvs_entry(3, key, 0), 2)])
+            with self.subTest(key=key):
+                self.assertFalse(EXP.parse_nvs_markers(page + b"\xff" * (4 * 4096))["namespace_empty"])
+
+    def test_empty_namespace_still_rejects_crc_or_ambiguous_identity(self):
+        page = nvs_page(1, [(nvs_entry(0, "mesh-pt-migrate", 3), 2)])
+        corrupted = bytearray(page + b"\xff" * (4 * 4096))
+        corrupted[64 + 24] ^= 1
+        with self.assertRaisesRegex(EXP.ExpansionError, "verification"):
+            EXP.parse_nvs_markers(bytes(corrupted))
+        alias = nvs_page(1, [(nvs_entry(0, "mesh-pt-migrate", 3), 2),
+                             (nvs_entry(0, "alias", 3), 2)])
+        with self.assertRaisesRegex(EXP.ExpansionError, "ambiguous"):
+            EXP.parse_nvs_markers(alias + b"\xff" * (4 * 4096))
+
     def test_namespace_and_erased_stale_flags(self):
         page = nvs_page(1, [(nvs_entry(0, "mesh-pt-migrate", 3), 2),
                             (nvs_entry(3, "cfg-restored", 1), 0),
@@ -779,7 +843,9 @@ class NvsAndOtaTests(unittest.TestCase):
         struct.pack_into("<I", parent, 4, zlib.crc32(parent[:4] + parent[8:], 0xFFFFFFFF) & 0xFFFFFFFF)
         page = nvs_page(1, [(nvs_entry(0, "mesh-pt-migrate", 3), 2),
                             (bytes(parent), 2), (child, 2)])
-        self.assertFalse(EXP.parse_nvs_markers(page + b"\xff" * (4 * 4096))["cfg-restored"])
+        flags = EXP.parse_nvs_markers(page + b"\xff" * (4 * 4096))
+        self.assertFalse(flags["cfg-restored"])
+        self.assertFalse(flags["namespace_empty"])
 
     def test_new_variable_marker_cannot_leave_old_bool_authoritative(self):
         child = b"not-a-completion-bool".ljust(32, b"\0")
