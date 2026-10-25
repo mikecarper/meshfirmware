@@ -4167,8 +4167,8 @@ function Pick-MatchingDevice {
     param(
         [Parameter(Mandatory=$true)][string]$UsbString,
         [Parameter(Mandatory=$true)][string[]]$Devices,
-        [Parameter(Mandatory=$true)][string]$VENDORLIST,
-        [Parameter(Mandatory=$true)][string]$RADIOLIST
+        [AllowEmptyString()][string]$VENDORLIST = 'elecrow|heltec|lilygo|seeed|seed|studio|rak|wireless|wisblock|wismesh|raspberry|pi|pico|waveshare|promicro|uniteng|sensecap|wio|xiao',
+        [AllowEmptyString()][string]$RADIOLIST = 'sx1262|sx126x|sx1276|sx127x'
     )
 
     $usbSlug = Normalize-Id $UsbString
@@ -4178,10 +4178,14 @@ function Pick-MatchingDevice {
         $base = Normalize-Id $name
 
         $core = $base
-        $core = [regex]::Replace($core, "\b($VENDORLIST)\b_?", "")
+        if (-not [string]::IsNullOrWhiteSpace($VENDORLIST)) {
+            $core = [regex]::Replace($core, "\b($VENDORLIST)\b_?", "")
+        }
         $core = [regex]::Replace($core, "_{2,}", "_").Trim("_")
 
-        $core = [regex]::Replace($core, "(^|_)($RADIOLIST)(_|$)", '$1$3')
+        if (-not [string]::IsNullOrWhiteSpace($RADIOLIST)) {
+            $core = [regex]::Replace($core, "(^|_)($RADIOLIST)(_|$)", '$1$3')
+        }
         $core = [regex]::Replace($core, "_{2,}", "_").Trim("_")
 
         if ([string]::IsNullOrWhiteSpace($core)) { $core = $base }
@@ -4198,9 +4202,9 @@ function Pick-MatchingDevice {
         if ($n -ge 2) { $cand2 = "{0}_{1}"     -f $toks[$n-2], $toks[$n-1] }
         if ($n -ge 1) { $cand1 = $toks[$n-1] }
 
-        if (Is-GoodTail $cand3 -and (Contains-Word $usbSlug $cand3)) { return [pscustomobject]@{ Match=$name; MatchIdx=$i+1 } }
-        if (Is-GoodTail $cand2 -and (Contains-Word $usbSlug $cand2)) { return [pscustomobject]@{ Match=$name; MatchIdx=$i+1 } }
-        if (Is-GoodTail $cand1 -and (Contains-Word $usbSlug $cand1)) { return [pscustomobject]@{ Match=$name; MatchIdx=$i+1 } }
+        if ((Is-GoodTail $cand3) -and (Contains-Word $usbSlug $cand3)) { return [pscustomobject]@{ Match=$name; MatchIdx=$i+1 } }
+        if ((Is-GoodTail $cand2) -and (Contains-Word $usbSlug $cand2)) { return [pscustomobject]@{ Match=$name; MatchIdx=$i+1 } }
+        if ((Is-GoodTail $cand1) -and (Contains-Word $usbSlug $cand1)) { return [pscustomobject]@{ Match=$name; MatchIdx=$i+1 } }
         if (Contains-Word $usbSlug $base)                             { return [pscustomobject]@{ Match=$name; MatchIdx=$i+1 } }
     }
 
@@ -4771,7 +4775,7 @@ function ChooseMeshCoreFirmware {
 			$deviceName = $script:COM_PORT
             $match = $null
             if (-not [string]::IsNullOrWhiteSpace($devicePortName)) {
-                $match = Pick-MatchingDevice -UsbString $devicePortName -Devices $devices -VENDORLIST $VENDORLIST -RADIOLIST $RADIOLIST
+                $match = Pick-MatchingDevice -UsbString $devicePortName -Devices $devices
             }
 
             while ([string]::IsNullOrWhiteSpace($script:DEVICE)) {
@@ -4805,7 +4809,7 @@ function ChooseMeshCoreFirmware {
                     $devicePortName = Read-TextFileIfExists $AUTODETECT_DEVICE_FILE
                     $match = $null
                     if (-not [string]::IsNullOrWhiteSpace($devicePortName)) {
-                        $match = Pick-MatchingDevice -UsbString $devicePortName -Devices $devices -VENDORLIST $VENDORLIST -RADIOLIST $RADIOLIST
+                        $match = Pick-MatchingDevice -UsbString $devicePortName -Devices $devices
                     }
                     $script:DEVICE = Read-TextFileIfExists $SELECTED_DEVICE_FILE
                     continue
