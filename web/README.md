@@ -75,6 +75,22 @@ bounds checks. Forced transfers still do not prove that the image will boot.
 
 ### nRF52 erase and recovery
 
+Bootloader recommendations use the latest stable release of our
+`mikecarper/Adafruit_nRF52_Bootloader_OTAFIX` fork, refreshed with the catalog
+on deployment and daily. Its checksum-verified release manifest supplies exact
+MeshCore hardware mappings and serial DFU ZIPs; the page checks the selected
+ZIP's published size and SHA-256 before loading. It does not guess profiles
+from USB IDs or similar board names. Missing, ambiguous or unqualified profiles
+have no automatic recommendation. If the latest-release check fails, only a
+validated last-known fork snapshot may be retained, with a catalog warning;
+old upstream bootloader links are not silently substituted.
+
+These combined SoftDevice/bootloader ZIPs require the exact compatible
+application to be reinstalled afterward. Application-owned data is not
+guaranteed; back up before DFU. Normal recommendations never select temporary
+`R_` recovery builds. Recovery remains a separate manual/custom-file workflow,
+and all existing payload/connected-board checks and overrides remain in force.
+
 Choose **Erase, reconnect, then write selected ZIP**. The final firmware and
 the selected board's erase ZIP are validated before erase. Use the published
 erase choice or its exact local ZIP if browser downloads are blocked. Only

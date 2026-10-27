@@ -10,7 +10,7 @@ import { BrowserPlanner } from './planner.js';
 import { waitForMigration } from './migration.js';
 
 const $ = id => document.getElementById(id);
-const state = { port: null, pkg: null, esp: null, plan: null, generation: 0, busy: false, items: [], restore: null, directory: null, archive:null, archiveContext:null, planner:null, migration:null, downloaded:new Set(),item:null,device:null,backupApproved:null,backup:null,recovery:null,espRecovery:null,verification:null,handoff:false };
+const state = { port: null, pkg: null, esp: null, plan: null, generation: 0, busy: false, items: [], restore: null, directory: null, archive:null, archiveContext:null, automaticSha:null, automaticShaName:null, planner:null, migration:null, downloaded:new Set(),item:null,device:null,backupApproved:null,backup:null,recovery:null,espRecovery:null,verification:null,handoff:false };
 try { const pending=JSON.parse(localStorage.getItem('meshfirmware.pendingMigration') || 'null'); if(pending && /^[a-f0-9:]{17}$/i.test(pending.mac) && /^[a-f0-9]{64}$/.test(pending.sha256)) state.migration=pending; } catch { /* The worker still fails closed on any actual NVS migration state. */ }
 for(const [key,field] of [['meshfirmware.nrfRecovery','recovery'],['meshfirmware.verifyApplication','verification']])try{const saved=JSON.parse(localStorage.getItem(key)||'null');if(saved&&/^[a-f0-9]{64}$/.test(saved.sha256))state[field]=field==='recovery'?{...saved,phase:'reselect-dfu',eraseComplete:saved.eraseComplete===true}:saved;}catch{}
 try{const saved=JSON.parse(localStorage.getItem('meshfirmware.espRecovery')||'null');if(saved)state.espRecovery=validateEspWriteRecovery(saved);}catch{/* Invalid retry state never authorizes a write. */}
@@ -173,7 +173,8 @@ async function loadFirmware(name, bytes, item = null) {
   const exact=item?.name===name?item:state.items.find(i=>i.hardware===$('hardware').value&&i.name===name),hints=item||exact||state.items.find(i=>i.hardware===$('hardware').value);
   // Board-wide erase/bootloader hints may be reused for a custom file, never
   // the first catalog entry's unrelated role, variant, version or provider.
-  item=exact|| (hints?{hardware:hints.hardware,erase:hints.erase||[],bootloader:hints.bootloader||[]}:null);
+  const bootloaderInfo=hints?.bootloaderInfo&&new URL(hints.bootloaderInfo.url).pathname.split('/').pop()===name?hints.bootloaderInfo:null;
+  item=exact|| (hints?{hardware:hints.hardware,erase:hints.erase||[],bootloader:hints.bootloader||[],...(bootloaderInfo?{bootloaderInfo}:{})}:null);
   const expected=$('expected-sha').value.trim().toLowerCase();
   if(expected&&(!/^[a-f0-9]{64}$/.test(expected)||expected!==hash(bytes)))fail('Published SHA-256 does not match the selected bytes.');
   $('image-name').textContent = 'No image loaded'; $('image-kind').textContent = '—'; $('image-size').textContent = '—'; $('image-sha').textContent = ''; $('expert-fields').hidden = true;
@@ -187,7 +188,7 @@ async function loadFirmware(name, bytes, item = null) {
     }
   }
   const pkg = inspectFirmware(name,bytes);
-  state.pkg = pkg;state.item=item;state.backupApproved=null; $('image-name').textContent = pkg.name; $('image-kind').textContent = pkg.kind; $('image-size').textContent = size(bytes.length); $('image-sha').textContent = pkg.sha256; $('image-warning').textContent = pkg.warnings.join(' ');
+  state.pkg = pkg;state.item=item;state.backupApproved=null; $('image-name').textContent = pkg.name; $('image-kind').textContent = pkg.kind; $('image-size').textContent = size(bytes.length); $('image-sha').textContent = pkg.sha256; $('image-warning').textContent = [...pkg.warnings,...(selectedBootloader(pkg)?[bootloaderReinstallWarning]:[])].join(' ');
   $('nrf-actions').hidden=pkg.architecture!=='nrf52';$('erase-source').replaceChildren(...(item?.erase||state.recovery?.eraseUrls||[]).map(url=>new Option(new URL(url).pathname.split('/').pop(),url)));
   if(pkg.architecture==='nrf52')$('transport-mode').value='nrf52';
   $('expert-fields').hidden = !pkg.expert;
@@ -202,7 +203,11 @@ function filterCatalog(changed = 'project') {
   try{localStorage.setItem('meshfirmware.selections',JSON.stringify(Object.fromEntries(['provider','hardware','role','version'].map(id=>[id,$(id).value]))));}catch{}
   updateDownload(); controls();
 }
-function updateDownload() { const item = $('artifact').value?state.items[Number($('artifact').value)]:null;$('bootloader-source').replaceChildren(...(item?.bootloader||[]).map(url=>new Option(new URL(url).pathname.split('/').pop(),url)));if (item) { $('download-firmware').href = item.url; $('download-firmware').removeAttribute('aria-disabled');$('catalog-detail').textContent=[item.subtitle,item.notice,item.releaseNotes].filter(Boolean).join('\n'); } else { $('download-firmware').removeAttribute('href'); $('download-firmware').setAttribute('aria-disabled','true');$('catalog-detail').textContent=''; } }
+const bootloaderReinstallWarning='This combined SoftDevice/bootloader DFU ZIP requires reinstalling the exact compatible application afterward. Application-owned data is not guaranteed; make a backup before entering DFU.';
+function selectedBootloader(pkg){const info=state.item?.bootloaderInfo;return info&&pkg.kind!=='application'&&pkg.sha256===info.sha256&&pkg.name===new URL(info.url).pathname.split('/').pop()?info:null;}
+function setAutomaticSha(value,name=null){$('expected-sha').value=value||'';state.automaticSha=value||null;state.automaticShaName=value?name:null;}
+function clearAutomaticSha(name=null){if(name&&name===state.automaticShaName)return;if(state.automaticSha&&$('expected-sha').value.trim().toLowerCase()===state.automaticSha)$('expected-sha').value='';state.automaticSha=null;state.automaticShaName=null;}
+function updateDownload() { const item = $('artifact').value?state.items[Number($('artifact').value)]:null,info=item?.bootloaderInfo,urls=item?.architecture==='nrf52'?(info?[info.url]:[]):item?.bootloader||[];$('bootloader-source').replaceChildren(...urls.map(url=>new Option(`${info?(info.cached?'Last verified ':'')+'OTAFIX '+info.version+' · ':''}${new URL(url).pathname.split('/').pop()}`,url)));$('bootloader-detail').textContent=info?`${info.cached?'Latest release could not be checked; using our last verified stable':'Our stable'} OTAFIX ${info.version} · ${info.profile}. SHA-256 is checked before loading. ${bootloaderReinstallWarning}`:item?.bootloaderUnavailable||'Select a firmware artifact for its exact board-specific bootloader recommendation.';if (item) { $('download-firmware').href = item.url; $('download-firmware').removeAttribute('aria-disabled');$('catalog-detail').textContent=[item.subtitle,item.notice,item.releaseNotes,item.bootloaderUnavailable].filter(Boolean).join('\n'); } else { $('download-firmware').removeAttribute('href'); $('download-firmware').setAttribute('aria-disabled','true');$('catalog-detail').textContent=''; } }
 async function boundedFetch(url) {
   const response = await fetch(httpsUrl(url),{signal:AbortSignal.timeout(120000),credentials:'omit'});
   if (!response.ok || Number(response.headers.get('Content-Length')) > (64 << 20)) fail('Firmware download failed or exceeds 64 MiB.');
@@ -227,19 +232,19 @@ $('select-port').onclick = () => operation(async () => {
 });
 $('transport-mode').onchange = () => operation(async () => { await closeEsp(); state.generation++; });
 for (const id of ['expert-offset','migration-package','usb-set','flash-action','erase-source','erase-file']) $(id).onchange = () => operation(async()=>{await closeEsp();state.generation++;});
-$('expected-sha').onchange = () => operation(async () => { await closeEsp(); state.generation++; if (state.pkg && $('expected-sha').value.trim() && $('expected-sha').value.trim().toLowerCase() !== state.pkg.sha256) fail('SHA-256 mismatch. Flash plan invalidated.'); });
-$('firmware-file').onchange = () => operation(async () => { const file = $('firmware-file').files[0]; if (!file) return; await clearFirmwareSelection();if (file.size > 64 << 20) fail('Firmware exceeds 64 MiB.'); await loadFirmware(file.name,new Uint8Array(await file.arrayBuffer())); });
+$('expected-sha').onchange = () => operation(async () => { state.automaticSha=null;state.automaticShaName=null;await closeEsp(); state.generation++; if (state.pkg && $('expected-sha').value.trim() && $('expected-sha').value.trim().toLowerCase() !== state.pkg.sha256) fail('SHA-256 mismatch. Flash plan invalidated.'); });
+$('firmware-file').onchange = () => operation(async () => { const file = $('firmware-file').files[0]; if (!file) return; clearAutomaticSha(file.name);await clearFirmwareSelection();if (file.size > 64 << 20) fail('Firmware exceeds 64 MiB.'); await loadFirmware(file.name,new Uint8Array(await file.arrayBuffer())); });
 $('load-entry').onclick = () => operation(async () => { const entry=$('archive-entry').value,archive=state.archive,item=state.archiveContext;await clearFirmwareSelection();if(!archive || !entry) fail('Select an archive entry.');const expected=$('expected-sha').value.trim().toLowerCase();if(expected&&(!/^[a-f0-9]{64}$/.test(expected)||hash(archive)!==expected))fail('Release ZIP SHA-256 does not match.');const files=checkedZip(archive,{maxEntries:8192,maxExpanded:512<<20,select:name=>name===entry});$('expected-sha').value='';await loadFirmware(entry.split('/').pop(),files[entry],item); });
-$('fetch-custom').onclick = () => operation(async () => { await clearFirmwareSelection();const url=httpsUrl($('custom-url').value); $('download-firmware').href=url; try { await loadFirmware(new URL(url).pathname.split('/').pop(),await boundedFetch(url)); } catch(error) { throw new Error(`${error.message} If this host blocks browser fetches, download it and select the local file.`); } });
+$('fetch-custom').onclick = () => operation(async () => { clearAutomaticSha();await clearFirmwareSelection();const url=httpsUrl($('custom-url').value); $('download-firmware').href=url; try { await loadFirmware(new URL(url).pathname.split('/').pop(),await boundedFetch(url)); } catch(error) { throw new Error(`${error.message} If this host blocks browser fetches, download it and select the local file.`); } });
 $('artifact').onchange = () => { updateDownload(); controls(); };
 $('bootloader-source').onchange=controls;
-$('load-bootloader').onclick=()=>operation(async()=>{const url=$('bootloader-source').value,item=$('artifact').value?state.items[Number($('artifact').value)]:null;await clearFirmwareSelection();if(!url||!item)fail('Choose an explicit board firmware artifact and its bootloader ZIP.');$('download-firmware').href=httpsUrl(url);try{$('expected-sha').value='';await loadFirmware(new URL(url).pathname.split('/').pop(),await boundedFetch(url),item);}catch(error){throw new Error(error.message+' If the host blocks fetching, download this exact bootloader ZIP and choose it locally.');}});
+$('load-bootloader').onclick=()=>operation(async()=>{const url=$('bootloader-source').value,item=$('artifact').value?state.items[Number($('artifact').value)]:null,info=item?.bootloaderInfo;await clearFirmwareSelection();if(!url||!item)fail('Choose an explicit board firmware artifact and its bootloader ZIP.');if(item.architecture==='nrf52'&&(!info||info.url!==url||!item.bootloader?.includes(url)))fail('No verified stable bootloader from our fork is available for this exact hardware. Select a custom ZIP manually if you intend a recovery.');$('download-firmware').href=httpsUrl(url);try{setAutomaticSha(info?.sha256||'',new URL(url).pathname.split('/').pop());const bytes=await boundedFetch(url);if(info&&bytes.length!==info.size)fail('Published bootloader size does not match the downloaded ZIP.');await loadFirmware(new URL(url).pathname.split('/').pop(),bytes,item);if(info)notice(`Our stable OTAFIX ${info.version} loaded and SHA-256 verified. ${bootloaderReinstallWarning}`);}catch(error){throw new Error(error.message+' If the host blocks fetching, download this exact bootloader ZIP and choose it locally.');}});
 for (const id of ['project','provider','hardware','role','version']) $(id).onchange = () => filterCatalog(id);
 $('fetch-firmware').onclick = () => operation(async () => {
   const item = $('artifact').value?state.items[Number($('artifact').value)]:null; if (!item) fail('Choose an artifact.');
   await clearFirmwareSelection();
   notice('Downloading firmware into browser memory…');
-  try { $('expected-sha').value=item.sha256||'';await loadFirmware(item.name,await boundedFetch(item.url),item); }
+  try { setAutomaticSha(item.sha256||'',item.name);await loadFirmware(item.name,await boundedFetch(item.url),item); }
   catch (error) { throw new Error(`${error.message} If the firmware host blocks browser downloads (CORS), use Download and then choose that local file. No proxy or helper is used.`); }
 });
 $('touch').onclick = () => operation(async () => {
@@ -340,7 +345,7 @@ $('flash').onclick = () => operation(async () => {
   if(pkg.architecture==='nrf52')await acknowledgeBoard(pkg);
   if(plan.erasePkg)await acknowledgeBoard(plan.erasePkg);
   const token = pkg.expert ? `WRITE 0x${plan.addresses[0].toString(16)}` : pkg.destructive||plan.erasePkg ? 'WIPE WITHOUT BACKUP' : 'FLASH';
-  const detail = `${pkg.name}\nSHA-256 ${pkg.sha256}\n${plan.mac ? 'Verified chip MAC ' + plan.mac : plan.uf2Info || 'Board identity unknown to this browser. Confirm the selected nRF52 board yourself.'}${plan.erasePkg?'\nERASE FIRST: '+plan.erasePkg.name+'\nSHA-256 '+plan.erasePkg.sha256+'\n'+plan.erasePkg.warnings.join(' '):''}`;
+  const detail = `${pkg.name}\nSHA-256 ${pkg.sha256}\n${plan.mac ? 'Verified chip MAC ' + plan.mac : plan.uf2Info || 'Board identity unknown to this browser. Confirm the selected nRF52 board yourself.'}${selectedBootloader(pkg)?'\nOur OTAFIX '+selectedBootloader(pkg).version+' · '+selectedBootloader(pkg).profile+'\n'+bootloaderReinstallWarning:''}${plan.erasePkg?'\nERASE FIRST: '+plan.erasePkg.name+'\nSHA-256 '+plan.erasePkg.sha256+'\n'+plan.erasePkg.warnings.join(' '):''}`;
   let allowRevisionMismatch=false;
   if(plan.requiresRevisionOverride){if(!await confirm('ESP silicon-revision mismatch',detail+'\n'+(plan.compatibilityWarnings||[]).join('\n'),'The image is not compatible with the verified chip revision, or the constrained revision could not be verified. Force only if you accept that it may not boot. This does not override security, chip-family or flash bounds checks.',plan.revisionOverrideToken||'FORCE CHIP REVISION'))return;allowRevisionMismatch=true;}
   if(plan.chunkedRecovery&&!await confirm('Retry this exact ESP32 write in bounded chunks?',detail,'This retries only the verified same chip/image/addresses, in independent 16 KiB operations with readback. No automatic reconnect, reset or repeated whole-chip erase. At most three user-reselected recovery rounds are allowed.','RETRY IN CHUNKS'))return;

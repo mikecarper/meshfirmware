@@ -1,4 +1,5 @@
 import {gzipSync,gunzipSync,strToU8,strFromU8} from 'fflate';
+import {validateBootloaderSnapshot,applyBootloaderCatalog} from './bootloader-catalog.js';
 
 export function httpsUrl(value, base) {
   const url = new URL(value, base);
@@ -94,7 +95,9 @@ export function validateCatalog(value) {
     return url===item.url?item:{...item,url};
   });
   const linked=repaired?items:value.items,enriched=inheritOfficialUtilities(linked);
-  return repaired||enriched!==linked?{...value,items:enriched,warnings:repaired?[...value.warnings,`Repaired ${repaired} legacy official release URLs missing the repository path.`]:value.warnings}:value;
+  const bootloaderCatalog=value.bootloaderCatalog?validateBootloaderSnapshot({...value.bootloaderCatalog,cached:value.cached===true||value.bootloaderCatalog.cached===true}):null;
+  const recommended=applyBootloaderCatalog(enriched,bootloaderCatalog);
+  return repaired||recommended!==value.items?{...value,...(bootloaderCatalog?{bootloaderCatalog}:{}),items:recommended,warnings:repaired?[...value.warnings,`Repaired ${repaired} legacy official release URLs missing the repository path.`]:value.warnings}:value;
 }
 function encodeCache(value) {
   const bytes=gzipSync(strToU8(JSON.stringify(value)),{level:6});let binary='';
@@ -117,7 +120,7 @@ export async function getCatalog({fetchImpl=fetch,storage}={}) {
     if (!response.ok) throw new Error('Catalog snapshot unavailable.');
     const value=validateCatalog(await response.json());try{storage?.setItem(key,encodeCache(value));}catch{}return value;
   } catch(error) {
-    try {const value=validateCatalog(decodeCache(storage?.getItem(key)));return {...value,cached:true,warnings:[...value.warnings,`Using cached public catalog from ${value.generatedAt}; refresh unavailable.`]};}catch{}
+    try {const value=validateCatalog({...decodeCache(storage?.getItem(key)),cached:true});return {...value,warnings:[...value.warnings,`Using cached public catalog from ${value.generatedAt}; refresh unavailable.`]};}catch{}
     throw new Error(`${error.message} Choose a local firmware file or an HTTPS URL.`);
   }
 }

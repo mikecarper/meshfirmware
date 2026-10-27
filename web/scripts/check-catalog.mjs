@@ -17,7 +17,11 @@ export function checkCatalogRoutes(catalog) {
     if(item.architecture==='nrf52')assert.ok(/\.zip$/i.test(item.name),'nRF52 must offer serial DFU ZIPs, never drive-copy images.');
   }
   assert.ok(artifacts>0,'Empty catalog cannot replace a published catalog.');
-  validateCatalog(catalog);
+  const checked=validateCatalog(catalog);
+  for(let i=0;i<catalog.items.length;i++)if(catalog.items[i].architecture==='nrf52'){
+    assert.deepEqual(catalog.items[i].bootloader||[],checked.items[i].bootloader||[],'Published nRF52 bootloader recommendations must match the verified fork manifest.');
+    assert.deepEqual(catalog.items[i].bootloaderInfo,checked.items[i].bootloaderInfo,'Published nRF52 bootloader hashes and profiles must match the verified fork manifest.');
+  }
   return {artifacts,utilities,officialReleases};
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href){

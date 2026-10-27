@@ -16,3 +16,9 @@ test('publication checks every raw artifact and utility reference, not only a re
   assert.throws(()=>checkCatalogRoutes({...snapshot(item),items:[item,{...item,url:'https://github.com'+route}]}),/owner\/repository/);
   assert.throws(()=>checkCatalogRoutes(snapshot({...item,erase:['https://github.com'+route]})),/owner\/repository/);
 });
+
+test('publication cannot retain old or unverified bootloader recommendations that the browser would disable',()=>{
+  const legacy={...item,bootloader:['https://flasher.meshcore.io/firmware/old-2.2.zip']};
+  assert.deepEqual(validateCatalog(snapshot(legacy)).items[0].bootloader,[]);
+  assert.throws(()=>checkCatalogRoutes(snapshot(legacy)),/verified fork manifest/);
+});

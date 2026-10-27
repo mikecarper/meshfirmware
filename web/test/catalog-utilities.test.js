@@ -35,21 +35,21 @@ test('conflicting official hints are not guessed and unrelated providers cannot 
 
 test('old browser snapshots and offline caches receive the same exact-board fallback without mutation',async()=>{
   const raw=snapshot([official,provider]),before=JSON.stringify(raw),fixed=validateCatalog(raw);
-  assert.deepEqual(fixed.items[1].erase,[erase]);assert.deepEqual(fixed.items[1].bootloader,[boot]);assert.equal(JSON.stringify(raw),before);
+  assert.deepEqual(fixed.items[1].erase,[erase]);assert.deepEqual(fixed.items[1].bootloader,[]);assert.ok(fixed.items[1].bootloaderUnavailable);assert.equal(JSON.stringify(raw),before);
   const cached=await getCatalog({fetchImpl:async()=>{throw Error('offline');},storage:{getItem:()=>JSON.stringify(raw)}});
-  assert.equal(cached.cached,true);assert.deepEqual(cached.items[1].erase,[erase]);assert.deepEqual(cached.items[1].bootloader,[boot]);
+  assert.equal(cached.cached,true);assert.deepEqual(cached.items[1].erase,[erase]);assert.deepEqual(cached.items[1].bootloader,[]);assert.ok(cached.items[1].bootloaderUnavailable);
 });
 
 test('fresh provider firmware can use validated cached official metadata during official outage',async()=>{
   const config={device:[{name:provider.hardware,type:'nrf52',firmware:[{role:'companionFull',version:{v1:{files:[{name:'keymind.zip',url:provider.url,type:'flash'}]}}}]}]};
   const result=await buildCatalog({previous:async()=>snapshot([official]),readJson:async url=>{if(url.includes('/git/trees/'))return{tree:[]};if(url.includes('raw.githubusercontent.com/'))return config;throw Error('official outage');}});
   for(const item of result.items.filter(item=>item.provider!=='MeshCore')){
-    assert.deepEqual(item.erase,[erase]);assert.deepEqual(item.bootloader,[boot]);assert.equal(item.url,provider.url);assert.equal(item.role,'companionFull');
+    assert.deepEqual(item.erase,[erase]);assert.deepEqual(item.bootloader,[]);assert.ok(item.bootloaderUnavailable);assert.equal(item.url,provider.url);assert.equal(item.role,'companionFull');
   }
   assert.equal(result.items.filter(item=>item.provider!=='MeshCore').length,2);
 });
 
 test('fully cached provider firmware also gains the official utility fallback at build time',async()=>{
   const result=await buildCatalog({previous:async()=>snapshot([official,provider]),readJson:async()=>{throw Error('offline');}});
-  const item=result.items.find(item=>item.provider==='Keymind Cascade');assert.deepEqual(item.erase,[erase]);assert.deepEqual(item.bootloader,[boot]);
+  const item=result.items.find(item=>item.provider==='Keymind Cascade');assert.deepEqual(item.erase,[erase]);assert.deepEqual(item.bootloader,[]);assert.ok(item.bootloaderUnavailable);
 });
