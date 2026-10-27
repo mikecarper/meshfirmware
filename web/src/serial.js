@@ -1,11 +1,22 @@
 import { fail, sleep, words, crc16, hash, nrfMetadataHash } from './firmware.js';
 
+// Software USB-CDC applications can require DTR before they will answer. These
+// are reviewed native USB interfaces, not UART bridges whose DTR may drive EN.
+// A shared native ID is sufficient to assert host presence at 115200, never to
+// infer a board or choose a reset mechanism. DFU/default opens remain unchanged.
+const applicationDtrIds=new Set(['303a:0002','303a:1001','2886:0059','2886:8044','2886:8045']);
+function applicationDtr(port,baudRate,application){
+  const info=port?.getInfo?.()||{};
+  if(!application||baudRate!==115200||![info.usbVendorId,info.usbProductId].every(n=>Number.isInteger(n)&&n>=0&&n<=65535))return false;
+  return applicationDtrIds.has([info.usbVendorId,info.usbProductId].map(n=>n.toString(16).padStart(4,'0')).join(':'));
+}
+
 export class SerialLink {
   constructor(port) { this.port = port; this.buffer = []; this.error = null; this.reader = null; this.readTask = null; }
-  async open(baudRate = 115200) {
+  async open(baudRate = 115200,{application=false}={}) {
     this.buffer.length=0; this.error=null;
     await this.port.open({ baudRate, flowControl: 'none', bufferSize: 65536 });
-    try { await this.port.setSignals({ dataTerminalReady: false, requestToSend: false }); }
+    try { await this.port.setSignals({ dataTerminalReady: applicationDtr(this.port,baudRate,application), requestToSend: false }); }
     catch (e) { await this.port.close(); throw e; }
     this.reader = this.port.readable.getReader();
     this.readTask = (async () => { try { while (true) { const { value, done } = await this.reader.read(); if (done) { this.error=new Error('Serial device disconnected.'); break; } if (this.buffer.length + value.length > (1 << 20)) fail('Serial receive limit exceeded.'); for(const byte of value) this.buffer.push(byte); } } catch (e) { this.error = e; } finally { this.reader.releaseLock(); this.reader = null; } })();

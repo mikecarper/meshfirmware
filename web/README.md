@@ -8,28 +8,35 @@ upload your firmware, identity, settings or backups. Public firmware/catalog
 downloads contact their named hosts. GitHub receives ordinary site requests.
 
 This is a **hardware preview**. Automated protocol, safety, simulated serial,
-WebAssembly and simulated IndexedDB persistence tests pass. Physical flashing,
-visual browser QA and real-browser persistence have not yet been verified.
+WebAssembly and simulated IndexedDB persistence tests pass. Browser UI and
+read-only automatic detection were checked against a connected Heltec V4 OLED
+repeater. End-to-end browser flashing and real-browser persistence are not yet verified.
 Start with a recoverable bench radio, not a remote USB-only node.
 
 ## Use
 
-1. Open the page in desktop Chrome/Edge and choose a USB port. Optionally enable
-   **Detect board & auto-select after choosing a port**, or click **Detect board
-   & select** afterward. Running MeshCore's complete model string selects exact
-   matching catalog hardware (including reviewed model aliases), not a firmware
-   image. Unknown, truncated or ambiguous models stay manual. Detection only
-   queries the selected port; it never enumerates or opens other radios. Without
-   the option, choosing a port still sends no application probe.
-2. Select a release, an HTTPS URL or a local BIN/DFU ZIP/UF2/release ZIP. If a
-   host blocks browser fetches, use Download, then choose that local file. A
-   replacement clears the previous image and plan before reading/downloading;
-   a failed replacement cannot leave the old image ready to flash.
+1. Open the page in desktop Chrome/Edge and choose a USB port. **Automatic setup**
+   is on by default: read the running model/role, select matching hardware, keep
+   the detected provider and choose its newest write-only application update.
+   It never chooses a wipe, bootloader, downgrade or ambiguous screen/storage
+   variant. No USB enumeration, reset or flash occurs on page load. Only the
+   selected port is queried after permission. Turn off Automatic setup for manual use.
+2. Check the automatic summary. **Change provider, role or firmware build** and
+   **Connection overrides** retain manual controls. Explicit choices are not
+   silently substituted. **Custom file or download URL** accepts local
+   BIN/DFU ZIP/UF2/release ZIP. If a host blocks browser fetches, use Download,
+   then choose that local file. A replacement clears the previous image and
+   plan before reading/downloading; a failed replacement cannot leave the old
+   image ready to flash.
    Published release-ZIP hashes are checked before indexing; the selected inner
    image is validated separately, never compared to the enclosing ZIP's hash.
-3. Choose the correct connection type and use **Back up & inspect**. Before
-   resetting an application or entering ROM/DFU, the page offers a backup by
-   default. Auto-detection distinguishes a binary companion from CommonCLI.
+3. Use **Prepare update**: download and validate the selected application, then
+   back up before bootloader entry by default. Detection distinguishes a binary
+   companion from CommonCLI. Reviewed native USB application reads assert DTR
+   at 115200 so older V4 firmware answers; UART and DFU line behavior is unchanged.
+   Connection selection handles qualified UART bridges, nRF52 and responding
+   TinyUSB applications. TinyUSB entry is offered after backup; re-select the
+   same radio's ROM port and prepare again without choosing a reset strategy.
    Confirm that the downloaded archive was saved; partial/failed backups need
    separate acknowledgement. A backup-only button is also available.
 4. Review the exact file, operation, target evidence and hash, then type the
@@ -37,6 +44,9 @@ Start with a recoverable bench radio, not a remote USB-only node.
    application settings: select **Already in ROM/DFU** and explicitly accept
    continuing without a backup, or return to the application first.
 5. ESP32 writes require target MD5 readback before the one-time reset action.
+   **Start firmware automatically** is on by default for complete application,
+   merged or verified bridge writes, never expert components or failed writes.
+   It retains the actual session transport instead of re-guessing USB vs UART.
    Re-select the application port to run startup verification automatically.
    The page checks retained node identity/model when applicable, protected
    nRF52 board family, payload version when verified metadata is available,
@@ -46,8 +56,10 @@ Start with a recoverable bench radio, not a remote USB-only node.
 
 CH340/CP210x/FTDI work through the installed OS serial driver. The page cannot
 install drivers or expose device interfaces the browser/OS does not permit.
-TinyUSB application handoff and hardware USB-Serial/JTAG are separate choices;
+TinyUSB application handoff and hardware USB-Serial/JTAG remain distinct;
 the shared `303a:1001` ID is not used to guess their board or reset mechanism.
+Ambiguous IDs, missing models or unknown roles open the manual choices. A missing
+application response never proves ROM mode. Reconnects still require permission.
 Reported firmware models can be wrong if the wrong firmware was installed;
 auto-selection is a convenience, not independent physical-board proof. Review
 the selected hardware. Existing payload, chip and board checks remain in force.

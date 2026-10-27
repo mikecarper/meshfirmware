@@ -336,12 +336,36 @@ export function backupSummary(archive) {
 // Probe only the selected port, without consuming unread messages, resetting,
 // entering text mode, or changing logging. Native CommonCLI and binary API
 // detection share the same public-key evidence; VID/PID alone is not a role.
+export function cleanCliReply(reply,command='') {
+  if(typeof reply!=='string'||reply.length>8192)return '';
+  return reply.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').split(/[\r\n]+/).map(line=>line.trim().replace(/^(?:(?:->|>)\s*)+/,''))
+    .filter(line=>line&&line.toLowerCase()!==command.toLowerCase()).join('\n');
+}
+function reportedCatalogRole(value){
+  const roles=new Map([['repeater','repeater'],['room server','roomServer'],['room-server','roomServer'],['roomserver','roomServer'],['sensor','sensor'],['companionble','companionBle'],['companionusb','companionUsb'],['companionfull','companionFull']]);
+  return roles.get(value.trim().toLowerCase())||null;
+}
 export async function detectMeshCore(link,{timeoutMs=1500}={}) {
   const reply=await link.command('get public.key',Math.min(timeoutMs,450));
   const publicKey=/(?<![a-f0-9])[a-f0-9]{64}(?![a-f0-9])/i.exec(reply)?.[0].toLowerCase();
-  if(publicKey) { const name=(await link.command('get name',350)).replace(/^>\s*/, '').trim(),version=await link.command('ver',350),board=(await link.command('board',350)).replace(/^>\s*/,'').trim();return {role:'common-cli',publicKey,name,version,model:!board||/unknown command|unsupported|error/i.test(board)?null:board}; }
+  if(publicKey) {
+    const name=cleanCliReply(await link.command('get name',350),'get name'),version=cleanCliReply(await link.command('ver',350),'ver'),board=cleanCliReply(await link.command('board',350),'board');
+    let catalogRole=null;
+    try{catalogRole=reportedCatalogRole(cleanCliReply(await link.command('get role',350),'get role'));}catch{/* Optional role hints never replace the independently read public identity. */}
+    return {role:'common-cli',publicKey,name,version,model:!board||board.includes('\n')||/unknown command|unsupported|error/i.test(board)?null:board,catalogRole};
+  }
   if(link.buffer)link.buffer.length=0;
   const core=new MeshCore(link,{timeoutMs}),self=await core.self(),info=await core.info();
   if(self[1]!==1)fail('This binary interface is not a companion. Select the primary CommonCLI port.');
-  return {role:'companion',publicKey:bytesToHex(self.subarray(4,36)),name:text(self.subarray(58)).split('\0')[0],model:text(info.subarray(20,60)).split('\0')[0],version:text(info.subarray(60,80)).split('\0')[0]};
+  const shortVersion=text(info.subarray(60,80)).split('\0')[0];let version=shortVersion;
+  // Protocol 14 exposes read-only role CLI. DEVICE_INFO's version field is only
+  // 20 bytes; use its full response for provider/version selection when present.
+  // Older companions must not receive unsupported CLI commands during probing.
+  if(info[1]>=14){
+    try{
+      const optional=new MeshCore(link,{timeoutMs:Math.min(timeoutMs,700)}),reply=cleanCliReply(await optional.cli('version'),'version');
+      if(/^Companion\s+v?\d+\.\d+\.\d+[^\r\n]*\s+\(protocol\s+\d+,\s*build\s+[^\r\n]+\)$/i.test(reply))version=reply;
+    }catch{/* Core companion identity remains usable without the optional full version. */}
+  }
+  return {role:'companion',publicKey:bytesToHex(self.subarray(4,36)),name:text(self.subarray(58)).split('\0')[0],model:text(info.subarray(20,60)).split('\0')[0],version,shortVersion,protocol:info[1]};
 }

@@ -4,20 +4,23 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import {detectBoard,detectRecoveryProfile} from '../src/board-detection.js';
+import {chooseFirmware} from '../src/automatic.js';
+import {chooseConnection} from '../src/connection-choice.js';
 const html=await readFile(new URL('../index.html',import.meta.url),'utf8');
 const source=(await readFile(new URL('../src/app.js',import.meta.url),'utf8')).replace(/^import .*;\r?$/gm,'');
 const ids=[...html.matchAll(/\bid="([^"]+)"/g)].map(m=>m[1]);
-function workbench({pending=null,recovery=null,espRecovery=null,catalogPromise=null}={}) {
+function workbench({pending=null,recovery=null,espRecovery=null,catalogPromise=null,productionDefaults=false}={}) {
   const calls=[],elements=new Map(),serialEvents={};
   class Option {constructor(text,value){this.text=text;this.value=value;}}
   for(const id of ids)elements.set(id,{value:'',disabled:false,hidden:false,textContent:'',files:[],options:[],checked:false,classList:{toggle(){}},replaceChildren(...options){this.options=options;this.value=options[0]?.value||'';},removeAttribute(){},setAttribute(){},addEventListener(){},showModal(){},scrollHeight:0});
   elements.get('project').value='MeshCore';elements.get('transport-mode').value='no_reset';elements.get('backup-role').value='companion';
+  if(productionDefaults){for(const id of ['auto-detect-board','auto-backup','auto-finish'])elements.get(id).checked=true;elements.get('transport-mode').value='auto';elements.get('backup-role').value='auto';}
   const port={getInfo:()=>({usbVendorId:0x303a,usbProductId:0x1001})};
   const storage=new Map(pending?[['meshfirmware.pendingMigration',JSON.stringify(pending)]]:[]);
   if(recovery)storage.set('meshfirmware.nrfRecovery',JSON.stringify(recovery));
   if(espRecovery)storage.set('meshfirmware.espRecovery',JSON.stringify(espRecovery));
   const context=vm.createContext({document:{getElementById:id=>{assert.ok(elements.has(id),`Missing HTML id ${id}`);return elements.get(id);},querySelectorAll:()=>[...elements.values()]},navigator:{serial:{requestPort:async()=>{calls.push('chooser');return port;},getPorts(){throw new Error('must not enumerate automatically');},addEventListener(type,handler){serialEvents[type]=handler;}}},window:{addEventListener(){}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},Option,URL,Blob,Uint8Array,TextEncoder,TextDecoder,console,setTimeout,clearTimeout,AbortSignal,Date,
-    fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),
+    fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,chooseConnection,assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),
     SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
   });
   vm.runInContext(source,context);
@@ -26,6 +29,43 @@ function workbench({pending=null,recovery=null,espRecovery=null,catalogPromise=n
 test('every UI id exists once and all wired controls have matching HTML',()=>{
   assert.equal(new Set(ids).size,ids.length);
   for(const match of source.matchAll(/\$\('([^']+)'\)/g))assert.ok(ids.includes(match[1]),match[1]);
+});
+
+const v4Item={project:'MeshCore',provider:'MeshCore',hardware:'Heltec v4',architecture:'esp32',role:'repeater',version:'v1.18.0',name:'heltec_v4_repeater-v1.18.0.bin',action:'flash-update',url:'https://example.test/v4.bin'};
+test('production defaults select connected old V4 role, latest update and TinyUSB without downloads or reset',async()=>{
+  assert.match(html,/id="auto-detect-board" checked/);assert.match(html,/id="auto-backup"[^>]*checked/);assert.match(html,/id="auto-finish"[^>]*checked/);assert.match(html,/value="auto" selected/);
+  const ui=workbench({productionDefaults:true});await Promise.resolve();serialMock(ui);ui.context.inventory=[v4Item,{...v4Item,action:'flash-wipe',name:'merged.bin'}];ui.evaluate('state.items=inventory;filterCatalog();');ui.port.getInfo=()=>({usbVendorId:0x303a,usbProductId:0x0002});ui.context.detectMeshCore=async()=>({model:'Heltec V4 OLED',role:'common-cli',catalogRole:'repeater',version:'v1.14.1'});
+  await ui.elements.get('select-port').onclick();assert.equal(ui.elements.get('hardware').value,'Heltec v4');assert.equal(ui.elements.get('provider').value,'MeshCore');assert.equal(ui.elements.get('role').value,'repeater');assert.equal(ui.elements.get('version').value,'v1.18.0');assert.equal(ui.elements.get('artifact').value,'0');assert.equal(ui.evaluate('connectionMode()'),'tinyusb');assert.equal(ui.evaluate('state.pkg'),null);assert.deepEqual(ui.calls,['chooser','open','close']);assert.equal(ui.elements.get('prepare').disabled,false);assert.equal(ui.elements.get('flash').disabled,true);
+});
+
+test('automatic selection invalidates an older merged/custom image and its ready write proof',async()=>{
+  const ui=workbench({productionDefaults:true});await Promise.resolve();ui.context.inventory=[v4Item];ui.evaluate("state.items=inventory;state.device={catalogRole:'repeater',version:'v1.14.1'};state.pkg={name:'old-merged.bin',destructive:true};state.item={name:'old-merged.bin',url:'https://example.test/old.bin'};state.plan={written:true};filterCatalog();");ui.elements.get('hardware').value='Heltec v4';ui.evaluate('applyAutomaticSelections();');assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.match(ui.elements.get('automatic-summary').textContent,/Write-only/);assert.equal(ui.elements.get('artifact').value,'0');
+});
+
+test('unsupported explicit automatic preferences stay refused and do not display stale dropdown values',async()=>{
+  const ui=workbench({productionDefaults:true});await Promise.resolve();ui.context.inventory=[v4Item];ui.evaluate("state.items=inventory;state.device={catalogRole:'repeater'};filterCatalog();state.manualSelections={provider:'Unavailable'};");ui.elements.get('hardware').value='Heltec v4';ui.evaluate('applyAutomaticSelections();');assert.equal(ui.elements.get('provider').value,'');assert.equal(ui.elements.get('artifact').value,'');assert.equal(ui.evaluate('state.manualSelections.provider'),'Unavailable');assert.match(ui.elements.get('automatic-summary').textContent,/No write-only/);
+});
+
+test('Prepare update loads the automatic artifact and requests guarded TinyUSB handoff, never flashes',async()=>{
+  const ui=workbench({productionDefaults:true});await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({architecture:'esp32'});ui.evaluate("state.port=selectedPort;state.device={model:'Heltec V4 OLED',architecture:'esp32'};");ui.port.getInfo=()=>({usbVendorId:0x303a,usbProductId:0x0002});ui.elements.get('artifact').value='0';ui.context.fetchSelectedFirmware=async()=>{ui.calls.push('fetch');ui.evaluate('state.pkg=pkg;');};ui.context.ensureBackup=async()=>ui.calls.push('backup');ui.context.confirm=async(_t,_d,_w,token)=>{ui.calls.push(token);return true;};ui.context.touch1200=async(_port,kind)=>ui.calls.push(kind);
+  await ui.elements.get('prepare').onclick();assert.deepEqual(ui.calls,['fetch','backup','ENTER BOOTLOADER','tinyusb']);assert.equal(ui.evaluate('state.port'),null);assert.equal(ui.elements.get('transport-mode').value,'no_reset');assert.equal(ui.elements.get('already-bootloader').checked,true);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);
+});
+
+test('successful application rereads retain exact-model architecture for automatic connection choice',async()=>{
+  const ui=workbench({productionDefaults:true});await Promise.resolve();serialMock(ui);ui.context.inventory=[v4Item];ui.context.selectedPort=ui.port;ui.evaluate('state.items=inventory;state.port=selectedPort;');ui.port.getInfo=()=>({usbVendorId:0x303a,usbProductId:0x0002});ui.context.detectMeshCore=async()=>({model:'Heltec V4 OLED',role:'common-cli',catalogRole:'repeater'});
+  await ui.evaluate('linkOperation(readApplication)');assert.equal(ui.evaluate('state.device.architecture'),'esp32');assert.equal(ui.evaluate('connectionMode()'),'tinyusb');
+});
+
+test('automatic verified finish retains UART transport even after the handoff flag becomes set',async()=>{
+  const ui=workbench({productionDefaults:true});await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.record=ui.calls;ui.evaluate("state.port=selectedPort;state.handoff=true;state.plan={written:true,transportMode:'default_reset'};state.esp={connectMode:'default_reset',finish:async native=>record.push(native),close:async()=>record.push('close')};");
+  await ui.elements.get('finish').onclick();assert.deepEqual(ui.calls,[false,'close']);assert.equal(ui.evaluate('state.port'),null);
+});
+
+test('auto finish never starts expert components or failed writes; ordinary verified app starts once',async()=>{
+  for(const expert of [false,true])for(const succeeds of [false,true]){
+    const ui=workbench({productionDefaults:true});await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.record=ui.calls;ui.context.pkg=fakePackage({architecture:'esp32',expert});ui.context.succeeds=succeeds;ui.evaluate("state.pkg=pkg;state.port=selectedPort;state.plan={generation:0,port:selectedPort,sha256:pkg.sha256,addresses:[65536],transportMode:'usb_reset'};state.esp={flash:async()=>{record.push('write');if(!succeeds)throw Error('readback failed');},finish:async()=>record.push('finish'),close:async()=>record.push('close')};");ui.context.confirm=async()=>true;ui.context.queueVerification=()=>ui.calls.push('verify-record');
+    await ui.elements.get('flash').onclick();assert.equal(ui.calls.includes('finish'),!expert&&succeeds);assert.equal(ui.calls.filter(x=>x==='finish').length,!expert&&succeeds?1:0);if(!succeeds)assert.match(ui.elements.get('notice').textContent,/readback failed/);
+  }
 });
 test('page initialization never opens, probes, resets or enumerates serial devices',async()=>{
   const ui=workbench();await Promise.resolve();assert.deepEqual(ui.calls,[]);assert.equal(ui.elements.get('flash').disabled,true);assert.equal(ui.elements.get('restore').disabled,true);
