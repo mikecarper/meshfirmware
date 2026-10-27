@@ -18,10 +18,12 @@ jobs:
       fail-fast: false
       matrix:
         shell: [powershell, pwsh]
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Hardware-free startup, DFU progress, and USB safety checks
-        shell: ${{ matrix.shell }}
         run: |
           $engine = (Get-Process -Id $PID).Path
           foreach ($test in @(
