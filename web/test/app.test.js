@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import {detectBoard,detectRecoveryProfile} from '../src/board-detection.js';
-import {chooseFirmware} from '../src/automatic.js';
+import {chooseFirmware,firmwareVersionWarning} from '../src/automatic.js';
 import {chooseConnection} from '../src/connection-choice.js';
 const html=await readFile(new URL('../index.html',import.meta.url),'utf8');
 const source=(await readFile(new URL('../src/app.js',import.meta.url),'utf8')).replace(/^import .*;\r?$/gm,'');
@@ -20,7 +20,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,catalogPromise=n
   if(recovery)storage.set('meshfirmware.nrfRecovery',JSON.stringify(recovery));
   if(espRecovery)storage.set('meshfirmware.espRecovery',JSON.stringify(espRecovery));
   const context=vm.createContext({document:{getElementById:id=>{assert.ok(elements.has(id),`Missing HTML id ${id}`);return elements.get(id);},querySelectorAll:()=>[...elements.values()]},navigator:{serial:{requestPort:async()=>{calls.push('chooser');return port;},getPorts(){throw new Error('must not enumerate automatically');},addEventListener(type,handler){serialEvents[type]=handler;}}},window:{addEventListener(){}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},Option,URL,Blob,Uint8Array,TextEncoder,TextDecoder,console,setTimeout,clearTimeout,AbortSignal,Date,
-    fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,chooseConnection,assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),
+    fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,chooseConnection,assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),
     SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
   });
   vm.runInContext(source,context);
@@ -40,6 +40,175 @@ test('production defaults select connected old V4 role, latest update and TinyUS
   assert.match(html,/id="auto-detect-board" checked/);assert.match(html,/id="auto-backup"[^>]*checked/);assert.match(html,/id="auto-finish"[^>]*checked/);assert.match(html,/value="auto" selected/);
   const ui=workbench({productionDefaults:true});await Promise.resolve();serialMock(ui);ui.context.inventory=[v4Item,{...v4Item,action:'flash-wipe',name:'merged.bin'}];ui.evaluate('state.items=inventory;filterCatalog();');ui.port.getInfo=()=>({usbVendorId:0x303a,usbProductId:0x0002});ui.context.detectMeshCore=async()=>({model:'Heltec V4 OLED',role:'common-cli',catalogRole:'repeater',version:'v1.14.1'});
   await ui.elements.get('select-port').onclick();assert.equal(ui.elements.get('hardware').value,'Heltec v4');assert.equal(ui.elements.get('provider').value,'MeshCore');assert.equal(ui.elements.get('role').value,'repeater');assert.equal(ui.elements.get('version').value,'v1.18.0');assert.equal(ui.elements.get('artifact').value,'0');assert.equal(ui.evaluate('connectionMode()'),'tinyusb');assert.equal(ui.evaluate('state.pkg'),null);assert.deepEqual(ui.calls,['chooser','open','close']);assert.equal(ui.elements.get('prepare').disabled,false);assert.equal(ui.elements.get('flash').disabled,true);
+});
+
+const headlessV4Item=(more={})=>({...v4Item,provider:'Keymind Cascade',version:'v1.18.0.2-halo-keymind-cascade-dev-eab29a12',name:'heltec_v4_repeater-full-usb-wifi-ota-v1.18.0.2-halo-keymind-cascade-dev-eab29a12.bin',releaseNotes:'EXACT TARGET - heltec_v4_repeater. Match exact hardware.\nSETUP - https://mikecarper.github.io/MeshCore/firmware_picker/?hardware=heltec_v4',...more});
+
+test('connecting a reviewed screenless V4 automatically selects exact hardware and matching safe firmware, not USB reset mode',async()=>{
+  for(const model of ['Heltec V4.2 none detected','Heltec V4.3 none detected']){
+    const ui=workbench({productionDefaults:true});await Promise.resolve();serialMock(ui);
+    const matching=headlessV4Item();ui.context.inventory=[matching,
+      headlessV4Item({name:'heltec_v4_tft_repeater-full-logging-ota-v1.18.0.2-halo-keymind-cascade-dev-eab29a12.bin',url:'https://example.test/tft.bin',releaseNotes:'EXACT TARGET - heltec_v4_tft_repeater. Match exact hardware.\nSETUP - https://mikecarper.github.io/MeshCore/firmware_picker/?hardware=heltec_v4_tft'}),
+      headlessV4Item({hardware:'Heltec v4 R8',url:'https://example.test/r8.bin'}),
+      headlessV4Item({action:'flash-wipe',name:'heltec_v4_repeater-v1.19.0-merged.bin',version:'v1.19.0',url:'https://example.test/merged.bin'})];
+    ui.evaluate('state.items=inventory;filterCatalog();');
+    ui.context.detectMeshCore=async()=>{ui.calls.push('detect');return {model,name:'MQTT Observer',role:'common-cli',catalogRole:'repeater',version:'v1.18.0.2-halo-keymind-cascade-dev-observer-eab29a12 (Build: 27-Oct-2026)',publicKey:'a'.repeat(64)};};
+    assert.deepEqual(ui.calls,[]);await ui.elements.get('select-port').onclick();
+    assert.equal(ui.elements.get('hardware').value,'Heltec v4',model);assert.equal(ui.elements.get('provider').value,'Keymind Cascade');assert.equal(ui.elements.get('role').value,'repeater');assert.equal(ui.elements.get('version').value,matching.version);assert.equal(ui.elements.get('artifact').value,'0');
+    assert.equal(ui.evaluate('state.device.architecture'),'esp32');assert.match(ui.elements.get('board-detection').textContent,/Selected Heltec v4/);assert.match(ui.elements.get('automatic-summary').textContent,/Write-only update selected/);
+    assert.deepEqual(ui.calls,['chooser','open','detect','close']);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('flash').disabled,true);
+    assert.equal(ui.evaluate('state.connection.mode'),null);assert.match(ui.elements.get('connection-summary').textContent,/needs a manual choice/); // Shared 303a:1001 is not a reset-protocol proof.
+  }
+});
+
+test('a newer screenless V4 auto-selects the available older catalog build with a downgrade warning',async()=>{
+  const ui=workbench({productionDefaults:true});await Promise.resolve();serialMock(ui);
+  ui.context.inventory=[headlessV4Item({version:'v1.18.0.1-halo-keymind-cascade-dev-03214a16',name:'heltec_v4_repeater-full-usb-wifi-ota-v1.18.0.1-halo-keymind-cascade-dev-03214a16.bin'})];ui.evaluate('state.items=inventory;filterCatalog();');
+  ui.context.detectMeshCore=async()=>({model:'Heltec V4.2 none detected',name:'MQTT Observer',role:'common-cli',catalogRole:'repeater',version:'v1.18.0.2-halo-keymind-cascade-dev-observer-eab29a12 (Build: 27-Oct-2026)'});
+  await ui.elements.get('select-port').onclick();
+  assert.equal(ui.elements.get('hardware').value,'Heltec v4');assert.equal(ui.elements.get('provider').value,'Keymind Cascade');assert.equal(ui.elements.get('role').value,'repeater');assert.equal(ui.elements.get('artifact').value,'0');assert.match(ui.elements.get('automatic-summary').textContent,/downgrade/i);assert.match(ui.elements.get('automatic-summary').textContent,/v1\.18\.0\.2/);assert.match(ui.elements.get('automatic-summary').textContent,/v1\.18\.0\.1/);assert.match(ui.elements.get('board-detection').textContent,/Selected Heltec v4/);
+  assert.deepEqual(ui.calls,['chooser','open','close']);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('flash').disabled,true);
+});
+
+test('a headless V4 connected before the catalog arrives is selected automatically without a second USB query',async()=>{
+  let resolveCatalog;const catalogPromise=new Promise(resolve=>resolveCatalog=resolve),ui=workbench({productionDefaults:true,catalogPromise});serialMock(ui);
+  ui.context.detectMeshCore=async()=>({model:'Heltec V4.3 none detected',role:'common-cli',catalogRole:'repeater',version:'v1.18.0.2-halo-keymind-cascade-dev-observer-eab29a12'});
+  await ui.elements.get('select-port').onclick();assert.equal(ui.elements.get('hardware').value,'');
+  resolveCatalog({items:[headlessV4Item()],warnings:[],generatedAt:new Date().toISOString()});await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(ui.elements.get('hardware').value,'Heltec v4');assert.equal(ui.elements.get('provider').value,'Keymind Cascade');assert.equal(ui.elements.get('role').value,'repeater');assert.equal(ui.elements.get('artifact').value,'0');
+  assert.equal(ui.evaluate('state.device.architecture'),'esp32');assert.equal(ui.evaluate('state.pkg'),null);assert.deepEqual(ui.calls,['chooser','open','close']);
+});
+
+const xiaoRepeaterItem=(more={})=>({...v4Item,provider:'MeshCore',hardware:'Seeed Studio Xiao nRF52 WIO',architecture:'nrf52',version:'v1.18.0.1',name:'Xiao_nrf52_repeater-v1.18.0.1.zip',action:'flash',url:'https://example.test/xiao.zip',...more});
+
+test('manual board changes refresh the right-side summary even with automatic setup off',async()=>{
+  const ui=workbench();await Promise.resolve();ui.context.inventory=[v4Item,xiaoRepeaterItem({version:'v1.20.0'})];
+  ui.evaluate("state.items=inventory;state.device={version:'v1.19.0'};filterCatalog();");
+  ui.elements.get('hardware').value='Heltec v4';ui.elements.get('provider').value='MeshCore';ui.elements.get('artifact').value='0';
+  ui.elements.get('automatic-summary').textContent=`Old Heltec v4 selection ${v4Item.name}. Downgrade warning from the previous board.`;
+  ui.context.pkg=fakePackage({name:v4Item.name,architecture:'esp32'});ui.evaluate('state.pkg=pkg;state.item=inventory[0];state.plan={written:true};');
+  ui.elements.get('hardware').value='Seeed Studio Xiao nRF52 WIO';await ui.elements.get('hardware').onchange();
+  const summary=ui.elements.get('automatic-summary').textContent;
+  assert.equal(ui.elements.get('hardware').value,'Seeed Studio Xiao nRF52 WIO');assert.match(summary,/Seeed Studio Xiao nRF52 WIO/);
+  assert.ok(!summary.includes(v4Item.name));assert.doesNotMatch(summary,/Old Heltec|previous board|Downgrade warning/);
+  assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(ui.calls,[]);
+});
+
+test('manually choosing another artifact replaces the automatic filename and warning summary',async()=>{
+  const ui=workbench({productionDefaults:true});await Promise.resolve();
+  const base=headlessV4Item({version:'v1.18.0.1',name:'heltec_v4_repeater-v1.18.0.1.bin'}),alternate={...base,name:'heltec_v4_tft_repeater-v1.18.0.1.bin',url:'https://example.test/tft.bin',releaseNotes:'SETUP - https://mikecarper.github.io/MeshCore/firmware_picker/?hardware=heltec_v4_tft'};
+  ui.context.inventory=[base,alternate];ui.evaluate("state.items=inventory;state.device={model:'Heltec V4.2 none detected',catalogRole:'repeater',version:'v1.18.0.2-keymind-cascade'};filterCatalog();selectDetectedBoard();");
+  assert.equal(ui.elements.get('artifact').value,'0');assert.ok(ui.elements.get('automatic-summary').textContent.includes(base.name));
+  ui.context.pkg=fakePackage({name:base.name,architecture:'esp32'});ui.evaluate('state.pkg=pkg;state.item=inventory[0];state.plan={written:true};');
+  ui.elements.get('artifact').value='1';await ui.elements.get('artifact').onchange();
+  const summary=ui.elements.get('automatic-summary').textContent;
+  assert.equal(ui.elements.get('artifact').value,'1');assert.ok(summary.includes(alternate.name));assert.ok(!summary.includes(base.name));assert.match(summary,/downgrade/i);
+  assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(ui.calls,[]);
+});
+
+test('a fresh USB choice clears previous automatic firmware state before a failed or unknown board probe',async()=>{
+  for(const probeResult of ['failure','unknown']){
+    const ui=workbench({productionDefaults:true});await Promise.resolve();serialMock(ui);
+    ui.context.inventory=[headlessV4Item(),xiaoRepeaterItem()];ui.evaluate("state.items=inventory;state.device={model:'Heltec V4.2 none detected',catalogRole:'repeater',version:'v1.18.0.2-keymind-cascade'};filterCatalog();selectDetectedBoard();");
+    ui.context.pkg=fakePackage({name:ui.context.inventory[0].name,architecture:'esp32'});ui.context.oldPort=ui.port;
+    ui.evaluate('state.port=oldPort;state.pkg=pkg;state.item=inventory[0];state.plan={written:true};');
+    const newPort={getInfo:()=>({usbVendorId:0x2886,usbProductId:0x8044})};ui.context.navigator.serial.requestPort=async()=>{ui.calls.push('chooser');return newPort;};
+    let beforeProbe;
+    ui.context.detectMeshCore=async()=>{
+      beforeProbe={filters:Object.fromEntries(['provider','hardware','role','version','artifact'].map(id=>[id,ui.elements.get(id).value])),summary:ui.elements.get('automatic-summary').textContent,pkg:ui.evaluate('state.pkg'),plan:ui.evaluate('state.plan')};
+      if(probeResult==='failure')throw Error('Fixture node did not answer');
+      return {model:'Unreviewed new bench board',role:'common-cli'};
+    };
+    await ui.elements.get('select-port').onclick();
+    assert.ok(beforeProbe,probeResult);
+    for(const [id,value]of Object.entries(beforeProbe.filters))assert.equal(value,'',`${probeResult}: stale ${id} before the new probe`);
+    assert.equal(beforeProbe.pkg,null);assert.equal(beforeProbe.plan,null);assert.ok(!beforeProbe.summary.includes(ui.context.inventory[0].name));
+    assert.equal(ui.elements.get('hardware').value,'');assert.equal(ui.elements.get('artifact').value,'');assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);
+    assert.equal(ui.elements.get('prepare').disabled,true);assert.equal(ui.elements.get('flash').disabled,true);assert.ok(!ui.elements.get('automatic-summary').textContent.includes(ui.context.inventory[0].name));
+    assert.deepEqual(ui.calls,['chooser','open','close']);
+  }
+});
+
+test('detecting again on an unknown model cannot retain a previous automatic board match',async()=>{
+  const ui=workbench({productionDefaults:true});await Promise.resolve();serialMock(ui);ui.context.selectedPort=ui.port;ui.context.inventory=[headlessV4Item(),xiaoRepeaterItem()];
+  ui.evaluate("state.items=inventory;state.port=selectedPort;state.device={model:'Heltec V4.2 none detected',catalogRole:'repeater',version:'v1.18.0.2-keymind-cascade'};filterCatalog();selectDetectedBoard();");
+  assert.equal(ui.elements.get('hardware').value,'Heltec v4');
+  ui.context.pkg=fakePackage({name:ui.context.inventory[0].name,architecture:'esp32'});ui.evaluate('state.pkg=pkg;state.item=inventory[0];state.plan={written:true};state.backupApproved={sha256:pkg.sha256,port:selectedPort};');
+  ui.context.detectMeshCore=async()=>({model:'Unreviewed replacement board',role:'common-cli'});
+  await ui.elements.get('probe').onclick();
+  assert.equal(ui.elements.get('hardware').value,'');assert.equal(ui.elements.get('artifact').value,'');assert.equal(ui.evaluate('state.detectedHardware'),null);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.backupApproved'),null);
+  assert.ok(!ui.elements.get('automatic-summary').textContent.includes(ui.context.inventory[0].name));assert.doesNotMatch(ui.elements.get('automatic-summary').textContent,/Downgrade warning/);assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(ui.calls,['open','close']);
+});
+
+test('a deliberately loaded custom file survives a new unknown or failed probe only as an unapproved manual image',async()=>{
+  for(const probeResult of ['failure','unknown']){
+    const ui=workbench({productionDefaults:true});await Promise.resolve();serialMock(ui);ui.context.selectedPort=ui.port;ui.context.inventory=[headlessV4Item(),xiaoRepeaterItem()];
+    ui.evaluate("state.items=inventory;state.port=selectedPort;state.device={model:'Heltec V4.2 none detected',catalogRole:'repeater'};filterCatalog();selectDetectedBoard();");
+    ui.context.pkg=fakePackage({name:'deliberate-custom-v1.18.0.2.zip'});ui.evaluate("state.pkg=pkg;state.item={hardware:'Heltec v4',erase:[],bootloader:[]};state.plan={written:true};state.backupApproved={sha256:pkg.sha256,port:selectedPort};state.backup={filename:'old-radio-backup.json'};");
+    const nextPort={getInfo:()=>({usbVendorId:0x2886,usbProductId:0x8044})};ui.context.navigator.serial.requestPort=async()=>{ui.calls.push('chooser');return nextPort;};
+    ui.context.detectMeshCore=async()=>{if(probeResult==='failure')throw Error('Fixture node did not answer');return {model:'Unreviewed replacement board',role:'common-cli'};};
+    await ui.elements.get('select-port').onclick();
+    assert.equal(ui.evaluate('state.pkg'),ui.context.pkg,probeResult);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.evaluate('state.backup'),null);
+    assert.ok(ui.elements.get('automatic-summary').textContent.includes(ui.context.pkg.name));assert.match(ui.elements.get('automatic-summary').textContent,/manual/i);assert.equal(ui.elements.get('hardware').value,'');assert.equal(ui.elements.get('artifact').value,'');assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(ui.calls,['chooser','open','close']);
+  }
+});
+
+test('a new DFU radio after a known automatic board disconnect clears that old board without guessing physical hardware',async()=>{
+  const ui=workbench({productionDefaults:true});await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.inventory=[headlessV4Item(),xiaoRepeaterItem()];
+  ui.evaluate("state.items=inventory;state.port=selectedPort;state.device={model:'Heltec V4.2 none detected',catalogRole:'repeater'};filterCatalog();selectDetectedBoard();");
+  ui.context.pkg=fakePackage({name:ui.context.inventory[0].name,architecture:'esp32'});ui.evaluate('state.pkg=pkg;state.item=inventory[0];state.plan={written:true};');
+  ui.serialEvents.disconnect({port:ui.port});
+  const nextPort={getInfo:()=>({usbVendorId:0x2886,usbProductId:0x0044})};ui.context.navigator.serial.requestPort=async()=>{ui.calls.push('chooser');return nextPort;};
+  await ui.elements.get('select-port').onclick();
+  for(const id of ['hardware','role','version','artifact'])assert.equal(ui.elements.get(id).value,'',id);
+  assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.device'),null);assert.ok(!ui.elements.get('automatic-summary').textContent.includes(ui.context.inventory[0].name));assert.match(ui.elements.get('notice').textContent,/without sending/);assert.deepEqual(ui.calls,['chooser']);
+});
+
+test('switching connected radios refreshes hardware provider role and artifact for the newly read node',async()=>{
+  const ui=workbench({productionDefaults:true});await Promise.resolve();serialMock(ui);
+  const first=headlessV4Item(),second=xiaoRepeaterItem();ui.context.inventory=[first,second];ui.evaluate('state.items=inventory;filterCatalog();');
+  let device={model:'Heltec V4.2 none detected',role:'common-cli',catalogRole:'repeater',version:'v1.18.0.2-keymind-cascade'};
+  ui.context.detectMeshCore=async()=>device;await ui.elements.get('select-port').onclick();assert.equal(ui.elements.get('hardware').value,'Heltec v4');assert.equal(ui.elements.get('artifact').value,'0');
+  const secondPort={getInfo:()=>({usbVendorId:0x2886,usbProductId:0x8044})};ui.context.navigator.serial.requestPort=async()=>{ui.calls.push('chooser');return secondPort;};
+  device={model:'Seeed Xiao-nrf52',name:'Second radio',role:'common-cli',catalogRole:'repeater',version:'v1.17.0'};
+  await ui.elements.get('select-port').onclick();
+  assert.equal(ui.evaluate('state.port'),secondPort);assert.equal(ui.elements.get('hardware').value,second.hardware);assert.equal(ui.elements.get('provider').value,'MeshCore');assert.equal(ui.elements.get('role').value,'repeater');assert.equal(ui.elements.get('version').value,second.version);assert.equal(ui.elements.get('artifact').value,'1');
+  const summary=ui.elements.get('automatic-summary').textContent;assert.ok(summary.includes(second.name));assert.ok(!summary.includes(first.name));assert.doesNotMatch(summary,/downgrade/i);
+  assert.equal(ui.evaluate('state.device.architecture'),'nrf52');assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(ui.calls,['chooser','open','close','chooser','open','close']);
+});
+
+test('a manual hardware override with automatic setup on immediately refreshes the chosen target',async()=>{
+  const ui=workbench({productionDefaults:true});await Promise.resolve();ui.context.inventory=[v4Item,xiaoRepeaterItem()];
+  ui.evaluate("state.items=inventory;state.device={model:'Heltec V4 OLED',catalogRole:'repeater',version:'v1.17.0'};filterCatalog();selectDetectedBoard();");
+  assert.equal(ui.elements.get('artifact').value,'0');
+  ui.elements.get('hardware').value='Seeed Studio Xiao nRF52 WIO';await ui.elements.get('hardware').onchange();
+  assert.equal(ui.elements.get('hardware').value,'Seeed Studio Xiao nRF52 WIO');assert.equal(ui.elements.get('artifact').value,'1');assert.ok(ui.elements.get('automatic-summary').textContent.includes(ui.context.inventory[1].name));assert.ok(!ui.elements.get('automatic-summary').textContent.includes(v4Item.name));assert.deepEqual(ui.calls,[]);
+});
+
+test('cancelling the first-awaited USB chooser preserves the existing board firmware and write context',async()=>{
+  const ui=workbench({productionDefaults:true});await Promise.resolve();ui.context.pkg=fakePackage({name:v4Item.name,architecture:'esp32'});ui.context.selectedPort=ui.port;ui.context.inventory=[v4Item];
+  ui.evaluate("state.items=inventory;state.port=selectedPort;state.pkg=pkg;state.item=inventory[0];state.device={model:'Heltec V4 OLED'};state.manualSelections={hardware:'Heltec v4'};state.plan={written:true};filterCatalog();");
+  ui.elements.get('hardware').value='Heltec v4';ui.elements.get('artifact').value='0';ui.elements.get('automatic-summary').textContent='Existing chosen V4 firmware';
+  const prior={plan:ui.evaluate('state.plan'),device:ui.evaluate('state.device'),generation:ui.evaluate('state.generation')};
+  ui.context.navigator.serial.requestPort=async()=>{ui.calls.push('chooser');throw Error('Fixture chooser cancelled');};
+  await ui.elements.get('select-port').onclick();
+  assert.equal(ui.evaluate('state.port'),ui.port);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);assert.equal(ui.evaluate('state.plan'),prior.plan);assert.equal(ui.evaluate('state.device'),prior.device);assert.equal(ui.evaluate('state.generation'),prior.generation);
+  assert.equal(ui.elements.get('hardware').value,'Heltec v4');assert.equal(ui.elements.get('artifact').value,'0');assert.equal(ui.elements.get('automatic-summary').textContent,'Existing chosen V4 firmware');assert.equal(ui.evaluate('state.manualSelections.hardware'),'Heltec v4');assert.deepEqual(ui.calls,['chooser']);
+});
+
+test('handoff recovery migration and verification re-selection retain the exact in-progress firmware image',async()=>{
+  for(const mode of ['handoff','recovery','migration','espRecovery','verification']){
+    const ui=workbench({productionDefaults:true});await Promise.resolve();
+    ui.context.pkg=fakePackage({name:'in-progress.bin',architecture:mode==='recovery'?'nrf52':'esp32'});ui.context.selectedPort=ui.port;ui.evaluate('state.pkg=pkg;state.port=selectedPort;');
+    ui.context.confirm=async()=>{ui.calls.push('same-device');return true;};
+    if(mode==='handoff')ui.evaluate('state.handoff=true;');
+    else if(mode==='recovery'){ui.evaluate('state.recovery={sha256:pkg.sha256,name:pkg.name,phase:"reselect-dfu",eraseComplete:true};');ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0044});}
+    else if(mode==='migration')ui.evaluate('state.migration={mac:"aa:bb:cc:dd:ee:ff",sha256:pkg.sha256,phase:"running"};');
+    else if(mode==='espRecovery')ui.evaluate('state.espRecovery={mac:"aa:bb:cc:dd:ee:ff",sha256:pkg.sha256,name:pkg.name};');
+    else {ui.evaluate('state.verification={sha256:pkg.sha256,name:pkg.name,publicKey:null};');ui.context.verifyApplication=async()=>{ui.calls.push('verify-application');assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);};}
+    await ui.elements.get('select-port').onclick();
+    assert.equal(ui.evaluate('state.pkg'),ui.context.pkg,mode);assert.ok(!ui.calls.includes('open'),mode);assert.ok(!ui.calls.includes('rom'),mode);assert.ok(!ui.calls.includes('mock-write'),mode);
+  }
 });
 
 test('automatic selection invalidates an older merged/custom image and its ready write proof',async()=>{
@@ -174,6 +343,36 @@ test('nRF52 mode never opens a mounted-drive picker even for a non-Nordic UF2',a
 });
 const fakePackage=(extra={})=>({name:'final.zip',architecture:'nrf52',kind:'application',sha256:'a'.repeat(64),payloadHash:'b'.repeat(64),payload:new Uint8Array(64),warnings:[],destructive:false,...extra});
 function serialMock(ui){ui.context.SerialLink=class{async open(){ui.calls.push('open');}async close(){ui.calls.push('close');}async command(command){ui.calls.push(command);return '';}};}
+
+test('manual catalog downgrade is warned before loading and stays loadable without a device operation',async()=>{
+  const ui=workbench();await Promise.resolve();ui.context.inventory=[v4Item];ui.context.pkg=fakePackage({name:v4Item.name,architecture:'esp32'});ui.evaluate("state.items=inventory;state.device={version:'v1.19.0'};filterCatalog();");ui.elements.get('artifact').value='0';ui.evaluate('updateDownload();controls();');
+  assert.match(ui.elements.get('catalog-detail').textContent,/downgrade/i);assert.match(ui.elements.get('catalog-detail').textContent,/v1\.19\.0/);assert.match(ui.elements.get('catalog-detail').textContent,/v1\.18\.0/);assert.equal(ui.elements.get('fetch-firmware').disabled,false);
+  ui.context.inspectFirmware=()=>ui.context.pkg;await ui.evaluate("loadFirmware(pkg.name,new Uint8Array(64),inventory[0])");
+  assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);assert.match(ui.elements.get('image-warning').textContent,/downgrade/i);assert.deepEqual(ui.calls,[]);
+  ui.elements.get('artifact').value='';ui.evaluate('updateDownload();');assert.equal(ui.elements.get('catalog-detail').textContent,'');
+});
+
+test('custom application downgrade warnings prefer verified payload version and never inherit another catalog version',async()=>{
+  const ui=workbench();await Promise.resolve();ui.evaluate("state.device={version:'v1.18.0.2'};");
+  ui.context.pkg=fakePackage({name:'custom-v1.17.0.zip',firmwareIdentity:{versionText:'v1.18.0.2'}});ui.context.inspectFirmware=()=>ui.context.pkg;ui.context.checkedZip=()=>[{name:'manifest.json'},{name:'app.bin'},{name:'app.dat'}];
+  await ui.evaluate('loadFirmware(pkg.name,new Uint8Array(64))');assert.doesNotMatch(ui.elements.get('image-warning').textContent,/downgrade/i);
+  ui.context.pkg=fakePackage({name:'renamed.zip',firmwareIdentity:{versionText:'v1.17.0'}});await ui.evaluate('loadFirmware(pkg.name,new Uint8Array(64))');assert.match(ui.elements.get('image-warning').textContent,/downgrade/i);assert.match(ui.elements.get('image-warning').textContent,/v1\.17\.0/);
+  ui.context.pkg=fakePackage({name:'custom_v1.17.0.bin',architecture:'esp32'});await ui.evaluate('loadFirmware(pkg.name,new Uint8Array(64))');assert.match(ui.elements.get('image-warning').textContent,/downgrade/i);
+  ui.elements.get('hardware').value='Heltec v4';ui.context.inventory=[v4Item];ui.evaluate('state.items=inventory;');ui.context.pkg=fakePackage({name:'unversioned.bin',architecture:'esp32'});await ui.evaluate('loadFirmware(pkg.name,new Uint8Array(64))');assert.doesNotMatch(ui.elements.get('image-warning').textContent,/downgrade/i);
+  ui.context.pkg=fakePackage({name:'board_bootloader-v0.11.0.zip',kind:'softdevice_bootloader',destructive:true});await ui.evaluate('loadFirmware(pkg.name,new Uint8Array(64))');assert.doesNotMatch(ui.elements.get('image-warning').textContent,/downgrade/i);assert.deepEqual(ui.calls,[]);
+});
+
+test('reading the connected version refreshes a previously loaded application downgrade warning',async()=>{
+  const ui=workbench();serialMock(ui);ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({name:'older.bin',architecture:'esp32'});ui.context.endfIdentity=()=>({versionText:'v1.17.0'});ui.evaluate('state.port=selectedPort;state.pkg=pkg;refreshFirmwareWarnings();');assert.doesNotMatch(ui.elements.get('image-warning').textContent,/downgrade/i);
+  ui.context.detectMeshCore=async()=>({role:'common-cli',version:'v1.18.0.2'});await ui.evaluate('linkOperation(readApplication)');assert.match(ui.elements.get('image-warning').textContent,/downgrade/i);assert.deepEqual(ui.calls,['open','close']);
+});
+
+test('downgrade can prepare and continue after the ordinary FLASH warning acknowledgement, never automatically',async()=>{
+  const ui=workbench();serialMock(ui);ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({firmwareIdentity:{versionText:'v1.17.0'}});ui.evaluate("state.port=selectedPort;state.pkg=pkg;state.device={version:'v1.18.0.2',model:'Test board'};");ui.elements.get('transport-mode').value='nrf52';ui.elements.get('already-bootloader').checked=true;
+  ui.context.ensureBackup=async()=>ui.calls.push('backup-considered');await ui.elements.get('prepare').onclick();assert.ok(ui.evaluate('state.plan'));assert.deepEqual(ui.calls,['backup-considered']);
+  let warnings=[];ui.context.confirm=async(title,_detail,warning,token)=>{assert.equal(title,'Write this firmware?');assert.equal(token,'FLASH');warnings.push(warning);return false;};ui.context.flashNrf=async()=>ui.calls.push('mock-write');await ui.elements.get('flash').onclick();assert.match(warnings[0],/downgrade/i);assert.match(warnings[0],/v1\.18\.0\.2/);assert.match(warnings[0],/v1\.17\.0/);assert.ok(!ui.calls.includes('mock-write'));
+  ui.context.confirm=async(_title,_detail,warning,token)=>{assert.equal(token,'FLASH');assert.match(warning,/downgrade/i);return true;};await ui.elements.get('flash').onclick();assert.ok(ui.calls.includes('mock-write'));assert.equal(ui.evaluate('state.verification.version'),'v1.17.0');
+});
 test('default backup flow finishes and acknowledges the saved archive before ROM entry',async()=>{
   const ui=workbench();serialMock(ui);ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({name:'app.bin',architecture:'esp32'});ui.evaluate('state.port=selectedPort;state.pkg=pkg;');ui.elements.get('backup-role').value='auto';
   ui.context.choose=async title=>{ui.calls.push(title);return title.startsWith('Back up')?'backup':'saved';};

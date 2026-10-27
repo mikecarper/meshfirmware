@@ -16,6 +16,18 @@ test('old and updated V4 OLED model strings select normal V4 without guessing TF
   for(const deviceModel of ['Heltec V4 OLED','Heltec V4.2 OLED','Heltec V4.3 OLED'])assert.equal(detectBoard({items,deviceModel}).hardware,'Heltec v4');
   for(const deviceModel of ['Heltec V4.3','Heltec V4.3 TFT','Heltec V4.3 OLED R8'])assert.equal(detectBoard({items,deviceModel}).hardware,null);
 });
+
+test('exact headless V4 model strings select the base hardware without a USB or display guess',()=>{
+  const items=[item('Heltec v4'),item('Heltec v4 R8'),item('Heltec v4 + Expansion Kit (Touch)')];
+  for(const deviceModel of ['Heltec V4.2 none detected','Heltec V4.3 none detected','  HELTEC_V4.2_NONE_DETECTED  ']){
+    const result=detectBoard({items,deviceModel,usbInfo:{usbVendorId:0x303a,usbProductId:0x1001}});
+    assert.equal(result.hardware,'Heltec v4');assert.equal(result.source,'application-model');assert.deepEqual(result.candidates,['Heltec v4']);
+  }
+  for(const deviceModel of ['Heltec V4 none detected','Heltec V4.4 none detected','Heltec V4.2 none','Heltec V4.2 none detected R8','Heltec V4.2 off','Heltec V4.2 display initialization failed','Unknown Heltec V4.2 none detected']){
+    assert.equal(detectBoard({items,deviceModel}).hardware,null,deviceModel);
+  }
+  assert.equal(detectBoard({items:[item('Heltec v4 R8')],deviceModel:'Heltec V4.2 none detected'}).hardware,null);
+});
 test('exact manifest hardware ID selects only one corresponding catalog hardware',()=>{
   const items=[item('Seeed Studio SenseCAP T1000-E',{bootloaderInfo:{hardwareId:'t1000e'}}),item('Something else')];
   assert.equal(detectBoard({items,deviceModel:'t1000e'}).hardware,'Seeed Studio SenseCAP T1000-E');

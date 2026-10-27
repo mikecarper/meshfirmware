@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {chooseFirmware} from '../src/automatic.js';
+import {chooseFirmware,firmwareVersionWarning} from '../src/automatic.js';
 const app=(more={})=>({project:'MeshCore',hardware:'Heltec v4',provider:'MeshCore',architecture:'esp32',role:'repeater',version:'v1.18.0',action:'flash-update',name:'heltec_v4_repeater-v1.18.0.bin',url:'https://example.test/heltec_v4_repeater-v1.18.0.bin',...more});
 const choose=(items,more={})=>chooseFirmware({items,hardware:'Heltec v4',device:{catalogRole:'repeater'},...more});
 
@@ -62,6 +62,27 @@ test('exact reviewed V4 OLED models choose the fork OLED application rather than
   assert.equal(choose([oldSetup],{provider:'Keymind Cascade',device:{model:'Heltec V4.3 OLED',catalogRole:'companionFull'}}).artifactIndex,null); // Never guess unsupported older metadata aliases.
 });
 
+test('exact headless V4 revisions choose the reviewed base application for every supported role',()=>{
+  for(const role of ['repeater','roomServer','sensor','companionFull'])for(const model of ['Heltec V4.2 none detected','Heltec V4.3 none detected']){
+    const result=choose([keymindV4(role,true),keymindV4(role)],{device:{model,catalogRole:role,version:'v1.18.0.1-halo-keymind-cascade-dev-03214a16'}});
+    assert.equal(result.artifactIndex,1,`${model} ${role}`);assert.equal(result.selections.provider,'Keymind Cascade');
+  }
+  const logging=[keymindV4('repeater',true),keymindV4()].map(item=>({...item,provider:'Keymind Cascade Logging'}));
+  assert.equal(choose(logging,{provider:'Keymind Cascade Logging',device:{model:'Heltec V4.2 none detected',catalogRole:'repeater'}}).artifactIndex,1);
+});
+
+test('headless convenience preserves exact target checks and warns when its compatible catalog build is older',()=>{
+  const items=[keymindV4(),keymindV4('repeater',true)],device={model:'Heltec V4.2 none detected',catalogRole:'repeater'};
+  assert.equal(choose(items,{provider:'Keymind Cascade',device:{...device,hardwareId:'heltec_v4_tft'}}).artifactIndex,1);
+  assert.equal(choose(items,{provider:'Keymind Cascade',device:{...device,firmwareTarget:'heltec_v4_tft_repeater'}}).artifactIndex,1);
+  for(const model of ['Heltec V4 none detected','Heltec V4.4 none detected','Heltec V4.2 none','Heltec V4.2 none detected R8','Heltec V4.2 off','Heltec V4.2 display initialization failed']){
+    assert.equal(choose(items,{provider:'Keymind Cascade',device:{...device,model}}).artifactIndex,null,model);
+  }
+  const result=choose(items,{device:{...device,version:'v1.18.0.2-halo-keymind-cascade-dev-observer-eab29a12'}});
+  assert.equal(result.selections.hardware,'Heltec v4');assert.equal(result.selections.provider,'Keymind Cascade');assert.equal(result.selections.role,'repeater');
+  assert.equal(result.artifactIndex,0);assert.equal(result.downgrade,true);assert.match(result.warning,/Downgrade warning/);assert.match(result.warning,/v1\.18\.0\.2/);assert.match(result.warning,/v1\.18\.0\.1/);
+});
+
 test('unknown, TFT, truncated or different V4 models do not gain an inferred OLED build hint',()=>{
   for(const model of ['Heltec V4','Heltec V4 TFT','Heltec V4.3 TFT','Heltec V4.3 OLE','Heltec V4.3 OLED extra','Heltec V4 R8 OLED','Heltec V4.4 OLED'])assert.equal(choose([keymindV4(),keymindV4('repeater',true)],{provider:'Keymind Cascade',device:{model,catalogRole:'repeater'}}).artifactIndex,null,model);
   assert.equal(choose([app()],{device:{model:'Heltec V4.3 OLED',catalogRole:'repeater'}}).artifactIndex,0); // Official metadata has no SETUP ID.
@@ -81,10 +102,30 @@ test('explicit target metadata is not bypassed by a conflicting filename or seco
   const conflict=app({releaseNotes:'SETUP - https://mikecarper.github.io/MeshCore/firmware_picker/?hardware=other',bootloaderInfo:{hardwareId:'wanted'}});
   assert.equal(choose([conflict],{device:{catalogRole:'repeater',hardwareId:'wanted'}}).artifactIndex,null);
 });
-test('automatic selection never downgrades numerically; explicit requested versions remain usable',()=>{
-  assert.equal(choose([app()],{device:{catalogRole:'repeater',version:'v1.19.0'}}).artifactIndex,null);
-  assert.equal(choose([app()],{device:{catalogRole:'repeater',version:'v1.19.0'},version:'v1.18.0'}).artifactIndex,0);
-  assert.equal(choose([app({version:'v1.18.0.1-keymind-cascade-dev-new'})],{device:{catalogRole:'repeater',version:'v1.18.0.1-keymind-cascade-dev-old'},provider:'MeshCore'}).artifactIndex,0);
+test('automatic and explicit older versions remain selectable with an advisory warning',()=>{
+  for(const explicit of [false,true]){
+    const result=choose([app()],{device:{catalogRole:'repeater',version:'v1.19.0'},...(explicit?{version:'v1.18.0'}:{})});
+    assert.equal(result.artifactIndex,0);assert.equal(result.selections.version,'v1.18.0');assert.equal(result.downgrade,true);
+    assert.match(result.warning,/v1\.18\.0/);assert.match(result.warning,/v1\.19\.0/);assert.match(result.warning,/backup/);assert.match(result.warning,/confirmation/);
+  }
+  const equalNumeric=choose([app({version:'v1.18.0.1-keymind-cascade-dev-new'})],{device:{catalogRole:'repeater',version:'v1.18.0.1-keymind-cascade-dev-old'},provider:'MeshCore'});
+  assert.equal(equalNumeric.artifactIndex,0);assert.equal(equalNumeric.downgrade,false);assert.equal(equalNumeric.warning,'');
+});
+
+test('newest compatible version is still preferred and downgrade permission never chooses an incompatible utility or role',()=>{
+  const result=choose([app({version:'v1.9.0'}),app({version:'v1.20.0'}),app({version:'v1.10.0'})],{device:{catalogRole:'repeater',version:'v1.19.0'}});
+  assert.equal(result.artifactIndex,1);assert.equal(result.downgrade,false);assert.equal(result.warning,'');
+  const nrf=app({architecture:'nrf52',action:'flash',name:'board_repeater-v1.17.1.zip',version:'v1.17.1'});
+  assert.equal(choose([nrf],{device:{catalogRole:'repeater',version:'v1.18.0.2'}}).downgrade,true);
+  for(const item of [app({role:'sensor'}),app({hardware:'Heltec v4 R8'}),app({action:'flash-wipe',name:'heltec-v4-merged.bin'}),{...nrf,name:'board_bootloader-v1.17.1.zip'}]){
+    const refused=choose([item],{device:{catalogRole:'repeater',version:'v1.19.0'}});
+    assert.equal(refused.artifactIndex,null);assert.equal(refused.warning,'');assert.equal(refused.downgrade,false);
+  }
+});
+
+test('version warning compares numeric components and does not guess commit or build-date order',()=>{
+  for(const [running,selected] of [['v1.18.0.2-preview','v1.18.0.1-release'],['v1.18.0.2','v1.18.0'],['v1.10.0','v1.9.0'],['v2.0','v1.99.99']])assert.match(firmwareVersionWarning(running,selected),/Downgrade warning/);
+  for(const [running,selected] of [['v1.18.0.1-oldhash','v1.18.0.1-newhash'],['v1.18.0 (Build: 27-Oct-2026)','v1.18.0 (Build: 26-Oct-2026)'],['v1.9.0','v1.10.0'],['v1.18','v1.18.0'],['unknown','v1.18.0'],['v1.18.0','unknown'],[null,'v1.18.0'],['v1.18.0',undefined]])assert.equal(firmwareVersionWarning(running,selected),'');
 });
 test('nRF52 serial application ZIP can be suggested, but erased/bootloader/SoftDevice/utilities never are',()=>{
   const nrf=app({architecture:'nrf52',action:'flash',name:'board_repeater-v1.18.0.zip'});

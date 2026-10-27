@@ -18,12 +18,27 @@ Start with a recoverable bench radio, not a remote USB-only node.
 1. Open the page in desktop Chrome/Edge and choose a USB port. **Automatic setup**
    is on by default: read the running model/role, select matching hardware, keep
    the detected provider and choose its newest write-only application update.
-   It never chooses a wipe, bootloader, downgrade or ambiguous screen/storage
+   It never chooses a wipe, bootloader or ambiguous screen/storage
    variant. No USB enumeration, reset or flash occurs on page load. Only the
    selected port is queried after permission. Turn off Automatic setup for manual use.
+   Exact `Heltec V4.2 none detected` and `Heltec V4.3 none detected` models are
+   recognized as the base V4 running without an attached display. R8, unknown
+   revisions and truncated model strings are not guessed. Hardware/provider/role
+   are still selected when the node runs a preview newer than the catalog.
+   Older compatible firmware is allowed: a downgrade warning shows the running
+   and selected versions, including when the newest catalog build is older
+   than the node. Backup, compatibility checks and the normal write confirmation
+   still apply; downgrading does not bypass any safety check.
 2. Check the automatic summary. **Change provider, role or firmware build** and
    **Connection overrides** retain manual controls. Explicit choices are not
-   silently substituted. **Custom file or download URL** accepts local
+   silently substituted. Changing hardware or firmware filters refreshes the
+   summary and available files; changing the USB port clears the previous
+   automatic board choice before reading the new node. A failed or unknown
+   probe cannot leave the old automatic image ready. Changing **Hardware**
+   selects a firmware target, not a different USB device—use **Choose USB port**
+   to switch connected radios. Deliberately loaded custom files remain clearly
+   labelled for manual review, without retaining their old write approval.
+   **Custom file or download URL** accepts local
    BIN/DFU ZIP/UF2/release ZIP. If a host blocks browser fetches, use Download,
    then choose that local file. A replacement clears the previous image and
    plan before reading/downloading; a failed replacement cannot leave the old

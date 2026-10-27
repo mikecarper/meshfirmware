@@ -13,6 +13,12 @@ function olderThanRunning(candidate,running){
   for(let i=0;i<Math.max(a.length,b.length);i++){const delta=(a[i]||0)-(b[i]||0);if(delta)return delta<0;}
   return false;
 }
+// Advisory only: version age must not bypass hardware, partition, security,
+// backup or write-confirmation checks, and unknown versions are not guessed.
+export function firmwareVersionWarning(runningVersion,selectedVersion){
+  if(!olderThanRunning(selectedVersion,runningVersion))return '';
+  return `Downgrade warning: selected firmware ${text(selectedVersion)} is older than the running ${text(runningVersion)}. Older firmware may not understand current settings or partition layouts. Keep a backup and review compatibility before flashing. Downgrading is allowed after the normal checks and confirmation.`;
+}
 function defaultProvider(device){
   const version=text(device?.version);
   if(/\bkeymind[\s_-]+cascade[\s_-]+logging\b/i.test(version))return 'Keymind Cascade Logging';
@@ -48,17 +54,21 @@ function setupHardware(item){
   return targets.size===1?targets:new Set();
 }
 function reviewedModelHardware(device,selections){
-  // HeltecV4Board::getManufacturerName() distinguishes OLED from TFT, and the
-  // reviewed Keymind setup manifests map the OLED repeater/room/sensor and
-  // canonical Full Companion (heltec_v4_2_v4_3_...) to hardware=heltec_v4.
+  // HeltecV4Board::getManufacturerName() reports exact OLED/TFT/headless
+  // status. Reviewed Keymind manifests map base OLED/headless profiles,
+  // including canonical Full Companion (heltec_v4_2_v4_3_...),
+  // to hardware=heltec_v4.
   // This is exact model evidence only, never a friendly-name/filename guess.
   if(selections.hardware!=='Heltec v4'||!['Keymind Cascade','Keymind Cascade Logging'].includes(selections.provider)||!['repeater','roomServer','sensor','companionFull'].includes(selections.role))return '';
-  return /^Heltec V4(?:\.[23])? OLED$/i.test(text(device?.model))?'heltec_v4':'';
+  return /^(?:Heltec V4(?:\.[23])? OLED|Heltec V4\.[23] none detected)$/i.test(text(device?.model))?'heltec_v4':'';
 }
 
 export function chooseFirmware({items=[],device={},hardware='',provider='',role='',version=''}={}){
   const selections={provider:text(provider)||defaultProvider(device),hardware:text(hardware),role:text(role)||inferredRole(device),version:text(version)};
-  const result=(reason,candidates=[],artifactIndex=null)=>({selections,artifactIndex,candidates,reason});
+  const result=(reason,candidates=[],artifactIndex=null)=>{
+    const warning=artifactIndex===null?'':firmwareVersionWarning(device?.version,items[artifactIndex]?.version);
+    return {selections,artifactIndex,candidates,reason,warning,downgrade:!!warning};
+  };
   if(!selections.hardware)return result('Detect or choose exact hardware before selecting an application update.');
   let candidates=items.map((item,index)=>({item,index})).filter(({item})=>isApplicationUpdate(item)&&item.hardware===selections.hardware&&item.provider===selections.provider);
   if(!candidates.length)return result('No write-only application update matches this exact hardware/provider. Choose another provider or an explicit firmware file; no wipe or bootloader was substituted.');
@@ -81,11 +91,10 @@ export function chooseFirmware({items=[],device={},hardware='',provider='',role=
   }
   if(selections.version)candidates=candidates.filter(({item})=>item.version===selections.version);
   else{
-    candidates=candidates.filter(({item})=>!olderThanRunning(item.version,device?.version));
     if(candidates.length)selections.version=distinct(candidates.map(({item})=>item.version)).sort(compareVersions)[0];
     candidates=candidates.filter(({item})=>item.version===selections.version);
   }
-  if(!candidates.length)return result('No matching version is available without an automatic downgrade. An explicit version may be selected manually.');
+  if(!candidates.length)return result('No matching version is available for this exact selection. Choose another version or an explicit firmware file.');
   const equivalents=new Map();
   for(const candidate of candidates){const item=candidate.item,key=JSON.stringify([item.url,item.name,item.architecture,item.action,item.role,item.sha256||null]);if(!equivalents.has(key))equivalents.set(key,candidate);}
   candidates=[...equivalents.values()];

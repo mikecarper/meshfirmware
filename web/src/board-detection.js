@@ -10,6 +10,10 @@ const modelAliases=[
   ['Heltec V4 OLED',['Heltec v4']],
   ['Heltec V4.2 OLED',['Heltec v4']],
   ['Heltec V4.3 OLED',['Heltec v4']],
+  // Exact unified-display status from HeltecV4Board::getManufacturerName().
+  // No attached display is still the base V4, not an unknown board or R8.
+  ['Heltec V4.2 none detected',['Heltec v4']],
+  ['Heltec V4.3 none detected',['Heltec v4']],
   ['Station G3 ESP32',['UnitEng/BQ Voyage Station G3']],
   ['Station G2',['UnitEng Station G2']],
   ['Seeed Tracker T1000-E',['Seeed Studio SenseCAP T1000-E']],
