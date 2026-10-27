@@ -6,6 +6,12 @@ import {flashNrf,hciPacket,parseAck,slipDecode} from '../src/serial.js';
 import {EspSession,assertSecurity,stabilizeS3Jtag} from '../src/esp.js';
 
 const encode=value=>new TextEncoder().encode(value);
+test('bridge begin always receives the immutable final image after other validator work',async()=>{
+  const {s}=session(),pkg=inspectFirmware('app.bin',image()),bridge=pkg.payload;
+  s.recordPlan({sha256:pkg.sha256,payloadHash:pkg.payloadHash,mac:s.mac,addresses:[0x10000],merged:false,needed:true,verified:false,bridge:Array.from(bridge),bridge_sha256:hash(bridge)});
+  let began=false;s.planner={call:async(op,data)=>{assert.equal(op,'begin');assert.deepEqual(data.image,pkg.payload);began=true;}};
+  await s.flash(pkg,()=>{});assert.equal(began,true);
+});
 const bytesFromHex=value=>Uint8Array.from(value.match(/../g),b=>parseInt(b,16));
 function image({chip=9,app=true}={}) {
   const data=new Uint8Array(64),v=new DataView(data.buffer); data[0]=0xe9; data[1]=1; data[12]=chip; v.setUint32(28,16,true); if(app) v.setUint32(32,0xabcd5432,true);

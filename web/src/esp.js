@@ -147,7 +147,7 @@ export class EspSession {
     const bridge=plan.needed && !plan.verified;
     const payload=bridge?Uint8Array.from(plan.bridge):pkg.payload;
     if(plan.addresses.some(address=>!Number.isInteger(address) || address<0 || address%4096 || address+Math.ceil(payload.length/4)*4>this.flashBytes)) fail('Write exceeds verified physical flash bounds.');
-    if(bridge) { if(hash(payload)!==plan.bridge_sha256) fail('Verified bridge bytes changed.'); await this.planner.call('begin',{}); }
+    if(bridge) { if(hash(payload)!==plan.bridge_sha256) fail('Verified bridge bytes changed.'); await this.planner.call('begin',{image:pkg.payload}); }
     // Update fallback slots first, active slot last. Erase only on explicit merged install.
     for (let i = 0; i < plan.addresses.length; i++) {
       await this.assertMac();

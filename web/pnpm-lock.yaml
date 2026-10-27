@@ -24,6 +24,9 @@ importers:
         specifier: 0.29.3
         version: 0.29.3
     devDependencies:
+      fake-indexeddb:
+        specifier: 6.2.6
+        version: 6.2.6
       vite:
         specifier: 8.3.5
         version: 8.3.5
@@ -156,6 +159,10 @@ packages:
 
   esptool-js@0.7.0:
     resolution: {integrity: sha512-9wHuW/s9t4Vs6HKcr3pra3gbRVWwaN0eabMWodWH4KEJHEYZxgmWwZ3s0F4xcWVCZOc/L98bGZ4uWoZvR8KBKA==}
+
+  fake-indexeddb@6.2.6:
+    resolution: {integrity: sha512-ihhmr0KoET51jT8R4YhbUYuLLvr1qqO6INISygtN16i8loR8kAxtAUr4+EKHTSMjL+lggaAn4OC7DRqzrNgnuQ==}
+    engines: {node: '>=18'}
 
   fdir@6.5.0:
     resolution: {integrity: sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg==}
@@ -408,6 +415,8 @@ snapshots:
     dependencies:
       atob-lite: 2.0.0
       pako: 2.2.0
+
+  fake-indexeddb@6.2.6: {}
 
   fdir@6.5.0(picomatch@4.0.7):
     optionalDependencies:
