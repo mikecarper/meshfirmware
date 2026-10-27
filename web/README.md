@@ -43,8 +43,8 @@ the shared `303a:1001` ID is not used to guess their reset mechanism.
 
 | Feature | Browser behavior |
 | --- | --- |
-| MeshCore / Keymind catalog | Rebuilt daily/on deployment; newest versioned Keymind manifest discovery; primary/proxy/validated-cache fallback; board/role/variant context and newest-first versions |
-| ESP32/S2/C3/S3/C6 | Validated application updates and merged installs; chip/security/MAC/capacity checks; factory-only/non-OTA updates and larger OTA metadata partitions supported |
+| MeshCore / Keymind catalog | Rebuilt daily/on deployment; repository-aware release URLs, newest Keymind manifest discovery, primary/proxy/validated-cache fallback, variant context and newest-first versions; every raw publication route checked in CI |
+| ESP32/S2/C3/S3/C6 | Validated application updates and merged installs; chip/security/MAC/capacity and silicon-revision checks; factory-only/non-OTA updates and larger OTA metadata partitions supported |
 | Merged ESP32 installs | Populate missing secondary OTA slots from the exact embedded app, with independent readback; refuse ambiguous source boundaries rather than guessing |
 | ESP components | Checksum-valid bootloader/component image, explicit address, typed acknowledgement; never guess an offset |
 | nRF52 | Serial DFU like `adafruit-nrfutil`: application, bootloader, SoftDevice or combined SD/bootloader ZIP; guided erase/reconnect/final-write; no mounted-drive workflow or generic Nordic secure-DFU substitution |
@@ -61,14 +61,21 @@ are validated from their original JSON text to preserve Python's canonical
 floating-point integrity. Diagnostic firmware versions are never restored.
 Unstructured optional CLI settings are retained for manual comparison.
 
+Revision-constrained ESP images are checked before erasing or writing. A
+mismatch or unavailable required revision needs a separate **FORCE CHIP
+REVISION** acknowledgement; this never bypasses chip-family, security or flash
+bounds checks. Forced transfers still do not prove that the image will boot.
+
 ### nRF52 erase and recovery
 
 Choose **Erase, reconnect, then write selected ZIP**. The final firmware and
 the selected board's erase ZIP are validated before erase. Use the published
 erase choice or its exact local ZIP if browser downloads are blocked. Only
 application erase packages qualify; bootloader/SoftDevice components cannot be
-used as the guided erase step. Official v6/v7 utilities are recognized by their
-payload hashes even after renaming. A name-marked custom eraser requires an
+used as the guided erase step. Official v6/v7 erase utilities and the five
+published QSPI formatters (ThinkNode M1, T-Echo, Wio Tracker L1, XIAO nRF52 and
+Nano G2 Ultra) are recognized by their payload hashes even after renaming or
+repacking. A name-marked custom eraser requires an
 additional **CUSTOM ERASE** acknowledgement, not an automatic trust decision.
 Erase packages require destructive acknowledgement even when
 their DFU manifest calls them an `application`.
@@ -84,6 +91,9 @@ erase, the final ZIP remains loaded, but no final write occurs until you
 reselect its DFU port, inspect again and confirm the write. Recovery state
 records only public filenames/hashes and board hints; if the page reloads,
 select the original exact final ZIP. Do not disconnect power during recovery.
+Successful final bootloader/SoftDevice transfers also release the pending
+recovery state so a subsequent application can be selected. They do not claim
+that an application or the new bootloader has started successfully.
 
 ### Backup compatibility and physical-target checks
 
@@ -100,6 +110,9 @@ connected target USB serial. The Python restore helper requires
 `--target-serial` for a browser capture; moving to a different model also
 requires `--new-hardware`. Hardware, public identity, private-key proof and
 explicit identity-replacement checks remain in force.
+Valid negative TX powers use signed comparisons against the target maximum.
+Legacy browser archives receive contact type, coordinate and path validation
+before any restore write, in addition to checksum and identity checks.
 
 CommonCLI captures remain partial and cannot be automatically restored.
 Missing private identity or unavailable required sections cannot become a
@@ -141,6 +154,7 @@ cd web
 pnpm install --frozen-lockfile --ignore-scripts
 pnpm test
 node scripts/catalog.mjs
+node scripts/check-catalog.mjs
 pnpm build
 node scripts/check-dist.mjs
 pnpm preview

@@ -5,13 +5,30 @@ export function httpsUrl(value, base) {
   if (url.protocol !== 'https:' || url.username || url.password) throw new Error('Firmware URLs must use HTTPS without credentials.');
   return url.href;
 }
+const officialRepository='https://github.com/meshcore-dev/MeshCore';
+// Upstream publishes repository-relative release routes, not origin-relative
+// routes. URL('/releases/...', repository) incorrectly drops owner/repository.
+export function githubReleaseUrl(value,repository=officialRepository) {
+  if(typeof value!=='string')throw new Error('Missing firmware release URL.');
+  const repo=new URL(httpsUrl(repository));
+  if(repo.hostname!=='github.com'||!/^\/[^/]+\/[^/]+\/?$/.test(repo.pathname)||repo.search||repo.hash)throw new Error('Invalid GitHub repository base.');
+  const route=value.trim();
+  return httpsUrl(/^\/?releases\/download\//.test(route)?repo.href.replace(/\/$/,'')+'/'+route.replace(/^\//,''):route,repo.href.replace(/\/$/,'')+'/');
+}
+export function validateFirmwareUrl(value) {
+  if(typeof value!=='string')throw new Error('Missing firmware asset URL.');
+  const url=new URL(httpsUrl(value));
+  if(url.hostname==='github.com' && (/^\/releases(?:\/|$)/.test(url.pathname) || (url.pathname.includes('/releases/download/')&&!/^\/[^/]+\/[^/]+\/releases\/download\/[^/]+\/.+/.test(url.pathname))))throw new Error('GitHub release URL is missing owner/repository, release tag, or asset path.');
+  return url.href;
+}
+function artifactUrl(value,base='https://flasher.meshcore.io') {if(typeof value!=='string')throw new Error('Missing firmware asset URL.');return validateFirmwareUrl(/^\/?releases\/download\//.test(value)?githubReleaseUrl(value):httpsUrl(value,base));}
 export function compareVersions(a,b) {
   const parts=value=>{const match=String(value).match(/(?:^|\bv?)(\d+(?:\.\d+){0,3})(.*)$/i);return match?{numbers:match[1].split('.').map(Number),suffix:match[2]}:null;};
   const x=parts(a),y=parts(b);
   if(x&&y) {for(let i=0;i<Math.max(x.numbers.length,y.numbers.length);i++){const delta=(y.numbers[i]||0)-(x.numbers[i]||0);if(delta)return delta;}if(!x.suffix&&y.suffix)return -1;if(x.suffix&&!y.suffix)return 1;}
   return String(b).localeCompare(String(a),undefined,{numeric:true,sensitivity:'base'});
 }
-function assets(value,config) {return (Array.isArray(value)?value:value?[value]:[]).map(name=>httpsUrl(/^[a-z][a-z0-9+.-]*:|^\//i.test(name)?name:`${config.staticPath||'/firmware'}/${name}`,'https://flasher.meshcore.io'));}
+function assets(value,config) {return (Array.isArray(value)?value:value?[value]:[]).map(name=>artifactUrl(/^[a-z][a-z0-9+.-]*:|^\/|^releases\/download\//i.test(name)?name:`${config.staticPath||'/firmware'}/${name}`));}
 function metadata(config,device,firmware,release={}) {
   const role=config.role?.[firmware.role]||{},bootloader=assets(device.bootloader,config).filter(url=>device.type!=='nrf52'||/\.zip(?:[?#]|$)/i.test(url));
   let notice=config.notice?.[firmware.notice]||firmware.notice||'';
@@ -27,12 +44,12 @@ export function catalogItems(config, releases = [], provider = 'MeshCore') {
       let re; try { re = new RegExp(`^(?:${pattern})$`,'i'); } catch { continue; }
       for (const release of releases.filter(r => r.type === firmware.github.type)) for (const file of release.files || []) {
         if (!re.test(file.name)) continue;
-        items.push({ project: 'MeshCore', provider, hardware: device.name, architecture: device.type, role: firmware.role, version: release.version, action, name: file.name, url: httpsUrl(file.url,'https://github.com/meshcore-dev/MeshCore'),sha256:publishedHash(file),...metadata(config,device,firmware,release) });
+        items.push({ project: 'MeshCore', provider, hardware: device.name, architecture: device.type, role: firmware.role, version: release.version, action, name: file.name, url: validateFirmwareUrl(githubReleaseUrl(file.url)),sha256:publishedHash(file),...metadata(config,device,firmware,release) });
       }
     }
     for (const [version, release] of Object.entries(firmware.version || {})) for (const file of release.files || []) {
       const raw = file.url || (typeof file.name === 'string' && /^https:/.test(file.name) ? file.name : `${config.staticPath || '/firmware'}/${file.name}`);
-      items.push({ project: 'MeshCore', provider, hardware: device.name, architecture: device.type, role: firmware.role, version, action: file.type, name: String(file.name).split('/').pop(), url: httpsUrl(raw,'https://flasher.meshcore.io'),sha256:publishedHash(file),...metadata(config,device,firmware,release),artifactTitle:file.title||'' });
+      items.push({ project: 'MeshCore', provider, hardware: device.name, architecture: device.type, role: firmware.role, version, action: file.type, name: String(file.name).split('/').pop(), url: artifactUrl(raw),sha256:publishedHash(file),...metadata(config,device,firmware,release),artifactTitle:file.title||'' });
     }
   }
   // nRF52 is always the CLI-style serial DFU path, never a UF2 drive action.
@@ -40,8 +57,17 @@ export function catalogItems(config, releases = [], provider = 'MeshCore') {
 }
 export function validateCatalog(value) {
   if(!value||!Array.isArray(value.items)||value.items.length>50000||!Array.isArray(value.warnings)||!Number.isFinite(Date.parse(value.generatedAt)))throw new Error('Invalid catalog snapshot.');
-  for(const item of value.items) {if(item.project!=='MeshCore'||typeof item.name!=='string'||typeof item.hardware!=='string')throw new Error('Invalid catalog entry.');httpsUrl(item.url);for(const url of [...(item.erase||[]),...(item.bootloader||[])])httpsUrl(url);}
-  return value;
+  let repaired=0;
+  const items=value.items.map(item=>{
+    if(item.project!=='MeshCore'||typeof item.name!=='string'||typeof item.hardware!=='string')throw new Error('Invalid catalog entry.');
+    let url=httpsUrl(item.url);const parsed=new URL(url);
+    // Only the historical official-provider bug has a provable destination.
+    // Other provider/origin paths are rejected, never guessed into another repo.
+    if(parsed.hostname==='github.com'&&parsed.pathname.startsWith('/releases/download/')&&item.provider==='MeshCore'){url=githubReleaseUrl(parsed.pathname+parsed.search+parsed.hash);repaired++;}
+    validateFirmwareUrl(url);for(const source of [...(item.erase||[]),...(item.bootloader||[])])validateFirmwareUrl(source);
+    return url===item.url?item:{...item,url};
+  });
+  return repaired?{...value,items,warnings:[...value.warnings,`Repaired ${repaired} legacy official release URLs missing the repository path.`]}:value;
 }
 function encodeCache(value) {
   const bytes=gzipSync(strToU8(JSON.stringify(value)),{level:6});let binary='';

@@ -14,9 +14,16 @@ export const nrfMetadataHash = pkg => hash(new TextEncoder().encode(JSON.stringi
 // repacked erase package must not become an apparently ordinary app update.
 const knownNrfErasePayloads = new Map([
   ['f17500b598ce53d4d4183f6bd20e06e9bf2bd3468d9a22ff3af7f148bb0dfc0c','official SoftDevice v6 erase payload'],
-  ['01f8d553e5ce865312fcfe3ddf1eb06f10ed7ca6bd4f34dd81e58b6f8400be8e','official SoftDevice v7 erase payload']
+  ['01f8d553e5ce865312fcfe3ddf1eb06f10ed7ca6bd4f34dd81e58b6f8400be8e','official SoftDevice v7 erase payload'],
+  // Published by flasher.meshcore.io/firmware/*_QSPIFlash_Format-v1.2.zip.
+  // Bind destructive intent to the BIN, not the ZIP filename or compression.
+  ['bfd6d72de724c4b84395a963c0428c89de245038a44f02241907838e6caf9e09','official QSPI formatter payload (WioTrackerL1 v1.2)'],
+  ['dc6f52a8c7c6734be1cc1d3ce9ee01db657acac1383bbd48f4be017408cb20b9','official QSPI formatter payload (LilyGo_T-Echo v1.2)'],
+  ['400008ca61ead5d5ccd6a22278aef7555e0377e9982a676f17a030642384bd82','official QSPI formatter payload (Xiao_nrf52 v1.2)'],
+  ['5f704a28b9abe49998cad9a63565c855ae27d3af4bc8dd1870a468618025ceb2','official QSPI formatter payload (ThinkNode_M1 v1.2)'],
+  ['c3580dcd94d4f9983a9bf1d5e40ff678b38c6e9074f5e287360f27e992f29174','official QSPI formatter payload (Nano_G2_Ultra v1.2)']
 ]);
-const eraseName = value => /(?:^|[\\/_. -])(?:flash[_. -]*)?(?:erase|wipe)(?:[\\/_. -]|$)/i.test(value || '');
+const eraseName = value => /(?:^|[\\/_. -])(?:flash[_. -]*)?(?:erase|wipe|(?:qspi[_. -]*flash[_. -]*)?format(?:ter)?)(?:[\\/_. -]|$)/i.test(value || '');
 export const nrfEraseIntent = (name,payloadHash,entryNames = []) => knownNrfErasePayloads.get(payloadHash) || ([name,...entryNames].some(eraseName) ? 'erase/wipe package name (conservative destructive classification)' : null);
 export function crc16(data) {
   let crc = 0xffff;

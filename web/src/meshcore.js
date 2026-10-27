@@ -9,6 +9,23 @@ const canonical = value => value === null || typeof value !== 'object' ? JSON.st
 const record = (value, code, lengths, label) => { const b = unhex(value); if (b[0] !== code || !lengths.includes(b.length)) fail(`Invalid ${label} record.`); return b; };
 const integer = (value, min, max, label) => { if (!Number.isInteger(value) || value < min || value > max) fail(`Invalid ${label}.`); return value; };
 const fixedText = (value, size, label) => { if (typeof value !== 'string' || /[\x00\r\n]/.test(value) || encode(value).length > size) fail(`Invalid ${label}.`); const b = new Uint8Array(size); b.set(encode(value)); return b; };
+const signedByte = value => value < 128 ? value : value - 256;
+function wireName(bytes, label) {
+  const end=bytes.indexOf(0), value=bytes.subarray(0,end<0?bytes.length:end);
+  try {return new TextDecoder('utf-8',{fatal:true}).decode(value);}catch{fail(`Invalid UTF-8 ${label}.`);}
+}
+function contactRecord(row) {
+  const b=record(row,3,[148],'contact'),v=new DataView(b.buffer,b.byteOffset,b.byteLength),packed=b[35];
+  // These are the native archive's semantic checks applied to the wire form.
+  // Type/flags are uint8 and timestamps uint32 by construction; do not narrow
+  // them to an undocumented enum or treat bit 31 as a negative timestamp.
+  if(packed!==255&&(packed&63)*((packed>>6)+1)>64)fail('Invalid contact path geometry.');
+  if(Math.abs(v.getInt32(136,true))>90000000||Math.abs(v.getInt32(140,true))>180000000)fail('Invalid contact coordinates.');
+  // A flood path has no active bytes. Firmware may retain stale unused path
+  // and name padding; only the advertised, NUL-terminated name is text.
+  wireName(b.subarray(100,132),'contact advertised name');
+  return b;
+}
 export const loggingState = reply => /\busb\.logging\s+(on|off)\b/i.exec(reply || '')?.[1].toLowerCase() ?? null;
 export function bluetoothName(reply) {
   if (reply && typeof reply === 'object' && typeof reply.name === 'string' && typeof reply.default === 'boolean') { fixedText(reply.name,32,'Bluetooth name'); return {name:reply.name,default:reply.default}; }
@@ -35,8 +52,8 @@ function validateCompanion(p) {
   const pin=new DataView(info.buffer,info.byteOffset,info.byteLength).getUint32(4,true); if (pin !== 0 && (pin<100000 || pin>999999)) fail('Invalid BLE PIN.');
   if (key && (key.length !== 65 || key[0] !== 14 || publicFromPrivate(key.subarray(1)) !== p.publicKey)) fail('Private/public identity verification failed.');
   if (!Array.isArray(p.channels) || p.channels.length !== info[3] || !Array.isArray(p.contacts) || p.contacts.length > info[2]*2 || !p.options || typeof p.options !== 'object' || !p.cli || typeof p.cli !== 'object') fail('Incomplete or invalid backup inventories.');
-  p.channels.forEach((row,index) => { const b = record(row,18,[50],'channel'); if (b[1] !== index) fail('Channel inventory invalid.'); });
-  const keys=new Set(); p.contacts.forEach(row => { const b = record(row,3,[148],'contact'),id=bytesToHex(b.subarray(1,33)); if (keys.has(id) || (b[35]!==255 && (b[35]&63)*((b[35]>>6)+1)>64)) fail('Duplicate contact or invalid contact path.'); keys.add(id); });
+  p.channels.forEach((row,index) => { const b = record(row,18,[50],'channel'); if (b[1] !== index) fail('Channel inventory invalid.');wireName(b.subarray(2,34),'channel name'); });
+  const keys=new Set(); p.contacts.forEach(row => { const b=contactRecord(row),id=bytesToHex(b.subarray(1,33));if(keys.has(id))fail('Duplicate contact.');keys.add(id); });
   for (const [name,code,lengths] of [['autoadd',25,[2,3]],['tuning',23,[9]],['scope',28,[1,48]]]) if (typeof p.options[name] === 'string') record(p.options[name],code,lengths,name);
   if(typeof p.options.autoadd==='string'){const b=unhex(p.options.autoadd);if(b.length===3&&b[2]>64)fail('Invalid auto-add maximum hops.');}
   if (typeof p.options.custom === 'string') customVars(p.options.custom);
@@ -159,7 +176,11 @@ export class MeshCore {
     const live = await this.self(), info = await this.info(), source = unhex(p.info), saved = unhex(p.self);
     if (live[1] !== 1 || (!newHardware && text(info.subarray(20,60)) !== text(source.subarray(20,60)))) fail('Different hardware: explicitly enable migration to a new board.');
     if (info[2] * 2 < p.contacts.length || p.channels.slice(info[3]).some(row => unhex(row)[2] !== 0)) fail('Target cannot hold all populated contacts/channels.');
-    if(saved[2]>live[3]) fail('Saved TX power exceeds this hardware maximum.');
+    // SELF_INFO exposes the raw uint8 wire representation, while the firmware
+    // interprets CMD_SET_RADIO_TX_POWER as int8 (-9..MAX_LORA_TX_POWER).
+    // Preserve that raw byte for the write/readback and native JSON export.
+    const desiredTx=signedByte(saved[2]),maximumTx=signedByte(live[3]);
+    if(desiredTx < -9 || maximumTx < -9 || desiredTx>maximumTx) fail('Saved TX power is outside this hardware range (-9 dBm to its reported maximum).');
     // Capacity includes contacts already present: do not discover a full table
     // only after writing an identity or some channels.
     const existing=await this.contacts(), union=new Set([...existing.map(row=>bytesToHex(row.subarray(1,33))),...p.contacts.map(row=>row.slice(2,66))]);

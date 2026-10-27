@@ -1,5 +1,6 @@
 import { ESPLoader, Transport } from 'esptool-js';
 import { fail, hash, md5hex, partitionTable, activeOta, text, sleep, validateEspImage } from './firmware.js';
+import { assessEspCompatibility } from './esp-compatibility.js';
 
 export async function assertSecurity(loader) {
   if (loader.secureDownloadMode) fail('Secure download mode: this browser does not perform encrypted or secure-boot updates.');
@@ -86,7 +87,8 @@ export class EspSession {
     plan.addresses=Object.freeze([...plan.addresses]); this.plan=plan;
     this.#planProof=this.planProof(plan); this.#written=false; return plan;
   }
-  planProof(plan) { return hash(new TextEncoder().encode(JSON.stringify([plan.sha256,plan.payloadHash,plan.mac,plan.addresses,plan.merged,plan.expert,!!plan.needed,!!plan.verified,plan.bridge_sha256,plan.segments]))); }
+  async recordCompatiblePlan(pkg,plan) { return this.recordPlan({...plan,...await assessEspCompatibility(this.loader,pkg,plan)}); }
+  planProof(plan) { return hash(new TextEncoder().encode(JSON.stringify([plan.sha256,plan.payloadHash,plan.mac,plan.addresses,plan.merged,plan.expert,!!plan.needed,!!plan.verified,plan.bridge_sha256,plan.segments,plan.revisionProof,plan.requiresRevisionOverride,plan.revisionOverrideToken]))); }
   async prepare(pkg, {planner,packageBytes,usbSetBytes,resume,expertOffset} = {}) {
     this.plan=null; this.#planProof=null; this.#written=false;
     if (pkg.architecture !== 'esp32' || pkg.chipId !== this.loader.chip.IMAGE_CHIP_ID || hash(pkg.payload) !== pkg.payloadHash) fail('Firmware chip or immutable payload verification failed.');
@@ -94,7 +96,7 @@ export class EspSession {
     await this.assertMac();
     if(pkg.expert) {
       if(!Number.isInteger(expertOffset) || expertOffset<0 || expertOffset%4096 || expertOffset+Math.ceil(pkg.payload.length/4)*4>this.flashBytes) fail('Expert ESP image requires an explicit 4 KiB-aligned flash offset within physical flash.');
-      return this.recordPlan({sha256:pkg.sha256,payloadHash:pkg.payloadHash,mac:this.mac,addresses:[expertOffset],merged:false,expert:true,parts:[]});
+      return this.recordCompatiblePlan(pkg,{sha256:pkg.sha256,payloadHash:pkg.payloadHash,mac:this.mac,addresses:[expertOffset],merged:false,expert:true,parts:[]});
     }
     const parts = pkg.merged ? partitionTable(pkg.payload.subarray(0x8000,0x9000),this.flashBytes) : partitionTable(await this.loader.readFlash(0x8000,4096),this.flashBytes);
     let addresses;
@@ -117,7 +119,7 @@ export class EspSession {
       }
       if(bootable===undefined || !populated.has(bootable)) fail('Merged install does not contain a valid application in its boot-selected partition.');
       const mirrors=mergedMirrorSegments(pkg,proposed,populated),segments=[{address:0,sourceOffset:0,length:pkg.payload.length,payloadHash:pkg.payloadHash},...mirrors];
-      return this.recordPlan({sha256:pkg.sha256,payloadHash:pkg.payloadHash,mac:this.mac,addresses:segments.map(segment=>segment.address),merged:true,parts,segments,mirroredSlots:mirrors.length});
+      return this.recordCompatiblePlan(pkg,{sha256:pkg.sha256,payloadHash:pkg.payloadHash,mac:this.mac,addresses:segments.map(segment=>segment.address),merged:true,parts,segments,mirroredSlots:mirrors.length});
     } else {
       // The shared expansion helper reviews ESP32/C3/S3 only. Other supported
       // chips may update fitting slots, never run an unreviewed migration.
@@ -129,7 +131,7 @@ export class EspSession {
         appWriteOrder(parts,snapshots.ota);
         const result=await planner.call(resume?'verify':'plan',resume?{...snapshots,image:pkg.payload,sha256:pkg.sha256}:{...snapshots,name:pkg.name,image:pkg.payload,chip:this.loader.chip.CHIP_NAME,flashBytes:this.flashBytes,package:packageBytes,usbSet:usbSetBytes});
         this.planner=planner;
-        return this.recordPlan({...result,sha256:pkg.sha256,payloadHash:pkg.payloadHash,mac:this.mac,addresses:result.app_offsets,merged:false,parts});
+        return this.recordCompatiblePlan(pkg,{...result,sha256:pkg.sha256,payloadHash:pkg.payloadHash,mac:this.mac,addresses:result.app_offsets,merged:false,parts});
       }
       const apps = parts.filter(p => p.type === 0);
       if (apps.some(p => pkg.payload.length > p.size)) fail('Partition expansion is required, but no reviewed browser migration plan exists for this chip/layout. No write was performed.');
@@ -140,7 +142,7 @@ export class EspSession {
       if (ota.length > 1 || ota.some(part=>part.size<8192)) fail('Ambiguous OTA metadata layout.');
       addresses = appWriteOrder(parts,ota.length?await this.loader.readFlash(ota[0].offset,8192):null);
     }
-    return this.recordPlan({ sha256: pkg.sha256, payloadHash: pkg.payloadHash, mac: this.mac, addresses, merged: pkg.merged, parts });
+    return this.recordCompatiblePlan(pkg,{ sha256: pkg.sha256, payloadHash: pkg.payloadHash, mac: this.mac, addresses, merged: pkg.merged, parts });
   }
   async recoverBridge(pkg,{planner}={}) {
     this.plan=null; this.#planProof=null; this.#written=false;
@@ -161,16 +163,19 @@ export class EspSession {
     }
     await this.assertMac();
     this.planner=planner;
-    const plan=this.recordPlan({...result,bridge:Array.from(bridge),sha256:pkg.sha256,payloadHash:pkg.payloadHash,mac:this.mac,addresses,merged:false,parts,written:true,recovered:true});
+    const plan=await this.recordCompatiblePlan(pkg,{...result,bridge:Array.from(bridge),sha256:pkg.sha256,payloadHash:pkg.payloadHash,mac:this.mac,addresses,merged:false,parts,written:true,recovered:true});
     this.#written=true; // Readback proved the bridge write; allow exactly one start.
     return plan;
   }
-  async flash(pkg, progress) {
+  async flash(pkg, progress, {allowRevisionMismatch=false} = {}) {
     this.#written=false;
     const plan = this.plan;
     if (!plan || hash(pkg.payload) !== plan.payloadHash || pkg.sha256 !== plan.sha256) fail('Firmware changed after confirmation.');
     await this.assertMac();
     if(!this.#planProof || this.planProof(plan)!==this.#planProof || plan.mac!==this.mac || !plan.addresses.length) fail('Verified flash plan changed after inspection.');
+    const compatibility=await assessEspCompatibility(this.loader,pkg,plan);
+    if(plan.revisionProof && compatibility.revisionProof!==plan.revisionProof) fail('Silicon revision evidence changed after inspection. Inspect again before authorizing a write.');
+    if(compatibility.requiresRevisionOverride && allowRevisionMismatch!==true) fail('ESP image silicon-revision compatibility is not satisfied. An explicit FORCE CHIP REVISION acknowledgement is required before erase or write.');
     const bridge=plan.needed && !plan.verified;
     const payload=bridge?Uint8Array.from(plan.bridge):pkg.payload;
     const segments=plan.segments||plan.addresses.map(address=>({address,payloadHash:hash(payload),length:payload.length}));

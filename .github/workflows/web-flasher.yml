@@ -56,6 +56,9 @@ jobs:
         working-directory: web
         env:
           GITHUB_TOKEN: ${{ github.token }}
+      - name: Validate all firmware and utility catalog routes
+        run: node scripts/check-catalog.mjs
+        working-directory: web
       - name: Build static browser app
         run: pnpm build
         working-directory: web
