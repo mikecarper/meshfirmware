@@ -26,6 +26,15 @@ const size = bytes => `${(bytes / (1 << 20)).toFixed(2)} MiB`;
 function log(message) { $('log').textContent = ($('log').textContent + '\n' + String(message).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'')).slice(-100000); $('log').scrollTop = $('log').scrollHeight; }
 function notice(message, error = false) { $('notice').textContent = message; $('notice').classList.toggle('error',error); }
 function progress(value, message) { $('progress').value = value; $('progress-label').textContent = message; }
+function revealPanel(id) {
+  const target=$(id);
+  for(let panel=target;panel;panel=panel.parentElement)if(panel===target||panel.tagName==='DETAILS'){panel.hidden=false;panel.open=true;}
+}
+function openLinkedPanel() {
+  const id=window.location?.hash?.slice(1);
+  // Only known tool links are expanded; arbitrary fragments are not selectors.
+  if(['backups','console','capabilities','advanced-options'].includes(id))revealPanel(id);
+}
 function controls() {
   document.querySelectorAll('[data-lock]').forEach(el => { el.disabled = state.busy; });
   $('select-port').disabled ||= !('serial' in navigator);
@@ -42,6 +51,12 @@ function controls() {
   $('load-bootloader').disabled ||= !$('bootloader-source').value;
   $('load-recovery').disabled ||= !state.recoveryCatalog||!$('recovery-profile').value;
   $('retry').disabled ||= !state.port||!state.pkg;
+  // Extras stay collapsed for ordinary updates, but never conceal a required
+  // recovery/migration step or a deliberately selected destructive action.
+  if(state.espRecovery)revealPanel('esp-retry-options');
+  if(state.migration||state.plan?.needed)revealPanel('migration-options');
+  if(state.recovery||(!$('nrf-actions').hidden&&$('flash-action').value==='wipe'))revealPanel('nrf-actions');
+  if(state.verification||state.plan?.written)revealPanel('verification-options');
 }
 async function closeEsp() { const esp=state.esp;state.esp=null;state.plan=null;if(esp)await esp.close(); }
 async function operation(callback) {
@@ -170,7 +185,7 @@ function updateConnectionChoice(){
 }
 function connectionMode(){
   if($('transport-mode').value!=='auto')return $('transport-mode').value;
-  const result=updateConnectionChoice();if(!result.mode){$('connection-options').open=true;fail(result.reason);}return result.mode;
+  const result=updateConnectionChoice();if(!result.mode){revealPanel('connection-options');fail(result.reason);}return result.mode;
 }
 function matchInstalledRecovery(installedIdentity='') {
   state.recoveryDetectionRequested=true;
@@ -240,7 +255,7 @@ async function acknowledgeBoard(pkg) {
 async function erasePackage() {
   const file=$('erase-file').files[0];let name,bytes;
   if(file){if(file.size>(4<<20))fail('Erase ZIP exceeds 4 MiB.');name=file.name;bytes=new Uint8Array(await file.arrayBuffer());}
-  else {const url=$('erase-source').value;if(!url)fail('Select this board’s erase ZIP, or choose its exact local erase ZIP. The final firmware has not been written.');name=new URL(url).pathname.split('/').pop();try{bytes=await boundedFetch(url);}catch{ $('download-firmware').href=httpsUrl(url);fail('Download the exact erase ZIP using Download, choose it under Erase ZIP, then inspect again.');}}
+  else {const url=$('erase-source').value;if(!url)fail('Select this board’s erase ZIP, or choose its exact local erase ZIP. The final firmware has not been written.');name=new URL(url).pathname.split('/').pop();try{bytes=await boundedFetch(url);}catch{ $('download-firmware').href=httpsUrl(url);revealPanel('image-details');revealPanel('nrf-actions');fail('Download the exact erase ZIP using Download, choose it under Erase ZIP, then inspect again.');}}
   const pkg=inspectFirmware(name,bytes);if(pkg.architecture!=='nrf52'||pkg.kind!=='application'||!pkg.erase)fail('Guided erase requires an application erase ZIP, never a bootloader/SoftDevice component. Load component replacements separately.');
   if(!/^official (?:SoftDevice v[67] erase payload|QSPI formatter payload\b)/.test(pkg.eraseEvidence||'')&&!await confirm('Custom erase application',`${pkg.name}\nPayload SHA-256 ${pkg.payloadHash}`,'Only the name marks this as an erase application. It is not one of the known official utilities. This permission does not waive board checks or the separate wipe acknowledgement.','CUSTOM ERASE'))fail('Custom erase cancelled.');return pkg;
 }
@@ -322,6 +337,7 @@ async function loadFirmware(name, bytes, item = null) {
       const candidates=entries.filter(e=>/\.(?:bin|zip|uf2)$/i.test(e.name) && e.length>0 && e.length<(32<<20));
       if (!candidates.length) fail('No firmware images in this release archive.');
       state.archive=bytes;state.archiveContext=item?{hardware:item.hardware,erase:item.erase||[],bootloader:item.bootloader||[]}:null; $('archive-entry').replaceChildren(...candidates.map(e=>new Option(e.name,e.name))); $('archive-picker').hidden=false;
+      revealPanel('custom-firmware');
       notice('Release ZIP indexed without expanding every board. Select the exact image for your board.'); return;
     }
   }
@@ -407,10 +423,10 @@ for (const id of ['expert-offset','migration-package','usb-set','flash-action','
 $('expected-sha').onchange = () => operation(async () => { state.automaticSha=null;state.automaticShaName=null;await closeEsp(); state.generation++; if (state.pkg && $('expected-sha').value.trim() && $('expected-sha').value.trim().toLowerCase() !== state.pkg.sha256) fail('SHA-256 mismatch. Flash plan invalidated.'); });
 $('firmware-file').onchange = () => operation(async () => { const file = $('firmware-file').files[0]; if (!file) return; clearAutomaticSha(file.name);await clearFirmwareSelection();if (file.size > 64 << 20) fail('Firmware exceeds 64 MiB.'); await loadFirmware(file.name,new Uint8Array(await file.arrayBuffer())); });
 $('load-entry').onclick = () => operation(async () => { const entry=$('archive-entry').value,archive=state.archive,item=state.archiveContext;await clearFirmwareSelection();if(!archive || !entry) fail('Select an archive entry.');const expected=$('expected-sha').value.trim().toLowerCase();if(expected&&(!/^[a-f0-9]{64}$/.test(expected)||hash(archive)!==expected))fail('Release ZIP SHA-256 does not match.');const files=checkedZip(archive,{maxEntries:8192,maxExpanded:512<<20,select:name=>name===entry});$('expected-sha').value='';await loadFirmware(entry.split('/').pop(),files[entry],item); });
-$('fetch-custom').onclick = () => operation(async () => { clearAutomaticSha();await clearFirmwareSelection();const url=httpsUrl($('custom-url').value); $('download-firmware').href=url; try { await loadFirmware(new URL(url).pathname.split('/').pop(),await boundedFetch(url)); } catch(error) { throw new Error(`${error.message} If this host blocks browser fetches, download it and select the local file.`); } });
+$('fetch-custom').onclick = () => operation(async () => { clearAutomaticSha();await clearFirmwareSelection();const url=httpsUrl($('custom-url').value); $('download-firmware').href=url; try { await loadFirmware(new URL(url).pathname.split('/').pop(),await boundedFetch(url)); } catch(error) { revealPanel('image-details');revealPanel('custom-firmware');throw new Error(`${error.message} If this host blocks browser fetches, download it and select the local file.`); } });
 $('artifact').onchange = () => operation(async()=>{await clearFirmwareSelection();updateDownload();updateFirmwareSelectionSummary();controls();});
 $('bootloader-source').onchange=controls;
-$('load-bootloader').onclick=()=>operation(async()=>{const url=$('bootloader-source').value,item=bootloaderItem(),info=item?.bootloaderInfo;await clearFirmwareSelection();if(!url||!item)fail('Choose exact hardware or an explicit board firmware artifact and its bootloader ZIP.');if(item.architecture==='nrf52'&&(!info||info.url!==url||!item.bootloader?.includes(url)))fail('No verified stable bootloader from our fork is available for this exact hardware. Select a custom ZIP manually if you intend a recovery.');$('download-firmware').href=httpsUrl(url);try{setAutomaticSha(info?.sha256||'',new URL(url).pathname.split('/').pop());const bytes=await boundedFetch(url);if(info&&bytes.length!==info.size)fail('Published bootloader size does not match the downloaded ZIP.');await loadFirmware(new URL(url).pathname.split('/').pop(),bytes,item);if(info)notice(`Our stable OTAFIX ${info.version} loaded and SHA-256 verified. ${bootloaderReinstallWarning}`);}catch(error){throw new Error(error.message+' If the host blocks fetching, download this exact bootloader ZIP and choose it locally.');}});
+$('load-bootloader').onclick=()=>operation(async()=>{const url=$('bootloader-source').value,item=bootloaderItem(),info=item?.bootloaderInfo;await clearFirmwareSelection();if(!url||!item)fail('Choose exact hardware or an explicit board firmware artifact and its bootloader ZIP.');if(item.architecture==='nrf52'&&(!info||info.url!==url||!item.bootloader?.includes(url)))fail('No verified stable bootloader from our fork is available for this exact hardware. Select a custom ZIP manually if you intend a recovery.');$('download-firmware').href=httpsUrl(url);try{setAutomaticSha(info?.sha256||'',new URL(url).pathname.split('/').pop());const bytes=await boundedFetch(url);if(info&&bytes.length!==info.size)fail('Published bootloader size does not match the downloaded ZIP.');await loadFirmware(new URL(url).pathname.split('/').pop(),bytes,item);if(info)notice(`Our stable OTAFIX ${info.version} loaded and SHA-256 verified. ${bootloaderReinstallWarning}`);}catch(error){revealPanel('image-details');revealPanel('custom-firmware');throw new Error(error.message+' If the host blocks fetching, download this exact bootloader ZIP and choose it locally.');}});
 $('recovery-profile').onchange=()=>{state.recoveryManual=true;$('recovery-detection').textContent=$('recovery-profile').value?`Manual choice R_${$('recovery-profile').value}; confirm it matches the currently installed bootloader, not the physical target board.`:'';controls();};
 $('match-recovery').onclick=()=>operation(async()=>{if(state.migration||state.recovery||state.espRecovery)fail('Finish the pending write or migration before selecting a different recovery profile.');matchInstalledRecovery($('installed-identity').value.trim());});
 $('load-recovery').onclick=()=>operation(async()=>{
@@ -426,7 +442,7 @@ async function fetchSelectedFirmware(){
   await clearFirmwareSelection();
   notice('Downloading firmware into browser memory…');
   try { setAutomaticSha(item.sha256||'',item.name);await loadFirmware(item.name,await boundedFetch(item.url),item); }
-  catch (error) { $('firmware-choices').open=true;throw new Error(`${error.message} If the firmware host blocks browser downloads (CORS), use Download and then choose that local file. No proxy or helper is used.`); }
+  catch (error) { revealPanel('firmware-choices');revealPanel('image-details');revealPanel('custom-firmware');throw new Error(`${error.message} If the firmware host blocks browser downloads (CORS), use Download and then choose that local file. No proxy or helper is used.`); }
 }
 $('fetch-firmware').onclick=()=>operation(fetchSelectedFirmware);
 $('touch').onclick = () => operation(async () => {
@@ -509,9 +525,8 @@ $('prepare').onclick = () => operation(async () => {
       catch(error) {
         if(!error.download) throw error;
         const {url}=error.download;
-        $('download-firmware').href=httpsUrl(url);
         try { await planner.call('download',{url,bytes:await boundedFetch(url)}); }
-        catch { fail('The migration host blocked the browser download. Use the Download link, select the exact migration ZIP / pinned USB set under Partition migration artifacts, and inspect again.'); }
+        catch { $('download-migration').href=httpsUrl(url);$('download-migration').hidden=false;revealPanel('migration-options');fail('The migration host blocked the browser download. Use the Download exact migration artifact link, select the exact migration ZIP / pinned USB set under Partition migration artifacts, and inspect again.'); }
       }
     }
     if(!prepared) fail('Could not resolve all exact migration artifacts.');
@@ -607,6 +622,7 @@ $('backup').onclick = () => operation(async () => {
   await captureBackup();
 });
 $('backup-file').onchange = () => operation(async () => {
+  revealPanel('backups');
   state.restore=null;const file=$('backup-file').files[0];if(!file)return;if(file.size>(8<<20))fail('Backup exceeds 8 MiB.');
   const raw=await file.text();
   notice('Validating backup integrity locally…');
@@ -625,6 +641,13 @@ $('restore').onclick = () => operation(async () => {
 $('send-command').onclick = () => operation(async () => {const command=$('command').value.trim();if(!command||/[\r\n\x00]/.test(command))fail('Enter one command.');invalidateApplicationEvidence();try{await linkOperation(async link=>{const role=$('backup-role').value==='auto'?(await readApplication(link)).role:$('backup-role').value;log(role==='common-cli'?await link.command(command):await new MeshCore(link).cli(command));});}finally{invalidateApplicationEvidence();}});
 $('clear-log').onclick = () => { $('log').textContent = 'Log cleared locally.'; };
 window.addEventListener('beforeunload',event => { if (state.busy) { event.preventDefault(); event.returnValue = ''; } });
+window.addEventListener('hashchange',openLinkedPanel);openLinkedPanel();
+window.addEventListener('click',event=>{
+  // A same-fragment link does not emit hashchange; reopen a tool even if the
+  // user collapsed it after the previous visit.
+  const link=event.target?.closest?.('nav a[href^="#"]'),id=link?.getAttribute('href')?.slice(1);
+  if(['backups','console','capabilities','advanced-options'].includes(id))revealPanel(id);
+});
 if(state.migration) notice('A partition migration is pending in this browser. Keep power connected, select its original firmware and the same device. Application commands are blocked until final verification.');
 if(state.recovery)notice('An nRF52 erase/recovery is pending. Select its original final ZIP and explicitly choose the same radio’s DFU port.');
 if(state.espRecovery)notice('An interrupted ESP32 write is pending. Select its original exact image and the same radio’s waiting ROM port without resetting it.');

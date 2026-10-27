@@ -639,3 +639,101 @@ test('failed recovery download or verification cannot leave a previous firmware 
     await ui.elements.get('load-recovery').onclick();assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('flash').disabled,true);assert.match(ui.elements.get('notice').textContent,invalid?/SHA-256/:/Download recovery bundle/);assert.deepEqual(ui.calls,[]);
   }
 });
+
+// Minimal DOM ancestry for collapsed-panel wiring; no browser is involved.
+function collapsedPanels(ui){
+  const advanced=ui.elements.get('advanced-options');assert.ok(advanced);advanced.tagName='DETAILS';advanced.open=false;advanced.hidden=false;
+  for(const id of ['connection-options','custom-firmware','nrf-actions','migration-options','verification-options','esp-retry-options','image-details']){
+    const panel=ui.elements.get(id);assert.ok(panel,id);panel.tagName='DETAILS';panel.open=false;panel.hidden=false;panel.parentElement=advanced;
+  }
+  for(const id of ['backups','console','capabilities']){const panel=ui.elements.get(id);panel.tagName='DETAILS';panel.open=false;panel.hidden=false;}
+  ui.elements.get('archive-picker').tagName='DIV';ui.elements.get('archive-picker').parentElement=ui.elements.get('custom-firmware');
+  return advanced;
+}
+
+test('revealing a required nested input opens every details ancestor without a hardware operation',async()=>{
+  const ui=workbench();await Promise.resolve();const advanced=collapsedPanels(ui),custom=ui.elements.get('custom-firmware'),archive=ui.elements.get('archive-picker');
+  advanced.hidden=true;archive.hidden=true;ui.evaluate("revealPanel('archive-picker');");
+  assert.equal(archive.hidden,false);assert.equal(custom.open,true);assert.equal(advanced.open,true);assert.equal(advanced.hidden,false);assert.equal(ui.elements.get('connection-options').open,false);assert.deepEqual(ui.calls,[]);
+});
+
+test('pending recovery and verification controls reveal themselves but never reset, retry or write automatically',async()=>{
+  for(const [state,panel]of [['migration','migration-options'],['needed','migration-options'],['espRecovery','esp-retry-options'],['recovery','nrf-actions'],['verification','verification-options'],['written','verification-options']]){
+    const ui=workbench();await Promise.resolve();const advanced=collapsedPanels(ui);ui.elements.get(panel).hidden=true;
+    ui.context.pendingPanelState=state;ui.evaluate("if(['written','needed'].includes(pendingPanelState))state.plan={[pendingPanelState]:true};else state[pendingPanelState]={};controls();");
+    assert.equal(ui.elements.get(panel).open,true,state);assert.equal(ui.elements.get(panel).hidden,false,state);assert.equal(advanced.open,true,state);assert.deepEqual(ui.calls,[],state);
+  }
+});
+
+test('tool navigation opens known collapsed sections and ignores unrelated fragments without USB activity',async()=>{
+  const ui=workbench();await Promise.resolve();
+  for(const id of ['backups','console','capabilities','advanced-options']){
+    collapsedPanels(ui);ui.context.window.location={hash:'#'+id};ui.evaluate('openLinkedPanel();');assert.equal(ui.elements.get(id).open,true,id);
+  }
+  collapsedPanels(ui);ui.context.window.location={hash:'#confirm-submit'};ui.evaluate('openLinkedPanel();');
+  assert.equal(ui.elements.get('advanced-options').open,false);assert.equal(ui.elements.get('backups').open,false);assert.equal(ui.elements.get('confirm-submit').open,undefined);assert.deepEqual(ui.calls,[]);
+});
+
+test('normal default controls keep extras closed and only an explicit visible nRF52 wipe expands its actions',async()=>{
+  const ui=workbench();await Promise.resolve();const advanced=collapsedPanels(ui);ui.elements.get('nrf-actions').hidden=true;
+  ui.evaluate('controls();');assert.equal(advanced.open,false);assert.equal(ui.elements.get('nrf-actions').open,false);
+  ui.context.pkg=fakePackage();ui.evaluate('state.pkg=pkg;');ui.elements.get('nrf-actions').hidden=false;ui.elements.get('flash-action').value='wipe';ui.evaluate('controls();');
+  assert.equal(ui.elements.get('nrf-actions').open,true);assert.equal(advanced.open,true);assert.deepEqual(ui.calls,[]);
+});
+
+test('an unresolved automatic connection reveals its override and parent without sending control lines',async()=>{
+  const ui=workbench();await Promise.resolve();const advanced=collapsedPanels(ui);ui.elements.get('transport-mode').value='auto';
+  ui.context.chooseConnection=()=>({mode:null,reason:'Fixture connection needs manual selection.'});
+  assert.throws(()=>ui.evaluate('connectionMode();'),/needs manual selection/);assert.equal(ui.elements.get('connection-options').open,true);assert.equal(advanced.open,true);assert.deepEqual(ui.calls,[]);
+});
+
+test('release archives reveal the exact-image chooser while expert components reveal their required top-level offset',async()=>{
+  const ui=workbench();await Promise.resolve();const advanced=collapsedPanels(ui);
+  ui.context.checkedZip=()=>[{name:'board.bin',length:64},{name:'README.txt',length:12}];
+  await ui.evaluate("loadFirmware('release.zip',new Uint8Array(64));");
+  assert.equal(ui.elements.get('archive-picker').hidden,false);assert.equal(ui.elements.get('custom-firmware').open,true);assert.equal(advanced.open,true);assert.equal(ui.evaluate('state.pkg'),null);
+  advanced.open=false;ui.context.pkg=fakePackage({name:'bootloader.bin',architecture:'esp32',expert:true,destructive:true});ui.context.inspectFirmware=()=>ui.context.pkg;
+  await ui.evaluate('loadFirmware(pkg.name,new Uint8Array(64));');assert.equal(ui.elements.get('expert-fields').hidden,false);assert.equal(advanced.open,false);assert.deepEqual(ui.calls,[]);
+});
+
+test('blocked migration downloads expose the offline ZIP inputs and exact download link',async()=>{
+  const ui=workbench();await Promise.resolve();const advanced=collapsedPanels(ui),url='https://example.test/exact-migration.zip';
+  ui.context.pkg=fakePackage({name:'app.bin',architecture:'esp32'});ui.context.selectedPort=ui.port;ui.evaluate('state.pkg=pkg;state.port=selectedPort;');
+  ui.context.ensureBackup=async()=>{};ui.context.boundedFetch=async()=>{throw Error('Fixture CORS block');};
+  ui.context.EspSession=class{async connect(){ui.calls.push('mock-connect');return{mac:'aa:bb:cc:dd:ee:ff',chip:'ESP32',flashBytes:4<<20};}async prepare(){throw Object.assign(Error('Needs migration artifact'),{download:{url}});}async close(){ui.calls.push('mock-close');}};
+  await ui.elements.get('prepare').onclick();
+  assert.equal(ui.elements.get('migration-options').open,true);assert.equal(advanced.open,true);assert.equal(ui.elements.get('download-migration').hidden,false);assert.equal(ui.elements.get('download-migration').href,url);
+  assert.match(ui.elements.get('notice').textContent,/migration host blocked/);assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls,['mock-connect','mock-close']);
+});
+
+test('importing a validated backup reveals restore controls without restoring or opening USB',async()=>{
+  const ui=workbench();await Promise.resolve();collapsedPanels(ui);
+  const archive={schema:'org.meshfirmware.web-backup/v1',payload:{role:'companion',publicKey:'a'.repeat(64),channels:[],contacts:[]}};
+  ui.elements.get('backup-file').files=[{name:'backup.json',size:2,text:async()=>'{}'}];ui.context.parseBackup=async()=>archive;ui.context.verifyBackup=value=>value.payload;
+  await ui.elements.get('backup-file').onchange();assert.equal(ui.elements.get('backups').open,true);assert.equal(ui.evaluate('state.restore'),archive);assert.equal(ui.elements.get('restore').disabled,true);assert.deepEqual(ui.calls,[]);
+});
+
+test('a blocked custom URL download reveals its exact download link and local-file alternative',async()=>{
+  const ui=workbench();await Promise.resolve();const advanced=collapsedPanels(ui),url='https://example.test/custom.bin';
+  ui.elements.get('custom-url').value=url;ui.context.pkg=fakePackage();ui.evaluate('state.pkg=pkg;state.plan={written:true};');
+  ui.context.boundedFetch=async()=>{throw Error('Fixture CORS block');};await ui.elements.get('fetch-custom').onclick();
+  assert.equal(ui.elements.get('image-details').open,true);assert.equal(ui.elements.get('custom-firmware').open,true);assert.equal(advanced.open,true);assert.equal(ui.elements.get('download-firmware').href,url);
+  assert.match(ui.elements.get('notice').textContent,/Fixture CORS block/);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(ui.calls,[]);
+});
+
+test('a blocked exact-board bootloader download reveals its link and local-file alternative without retaining write proof',async()=>{
+  const ui=workbench();await Promise.resolve();const advanced=collapsedPanels(ui),url='https://example.test/board_bootloader.zip';
+  ui.context.item={architecture:'nrf52',hardware:'Exact board',bootloader:[url],bootloaderInfo:{url,sha256:'b'.repeat(64),size:64,profile:'exact-board',version:'2.4.12'}};
+  ui.elements.get('hardware').value='Exact board';ui.elements.get('bootloader-source').value=url;ui.evaluate("state.items=[item];state.pkg={name:'previous.zip'};state.plan={written:true};");
+  ui.context.boundedFetch=async()=>{throw Error('Fixture bootloader CORS block');};await ui.elements.get('load-bootloader').onclick();
+  assert.equal(ui.elements.get('image-details').open,true);assert.equal(ui.elements.get('custom-firmware').open,true);assert.equal(advanced.open,true);assert.equal(ui.elements.get('download-firmware').href,url);
+  assert.match(ui.elements.get('notice').textContent,/download this exact bootloader ZIP/);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(ui.calls,[]);
+});
+
+test('a blocked erase ZIP download reveals its exact link and local erase input while retaining the final image',async()=>{
+  const ui=workbench();await Promise.resolve();const advanced=collapsedPanels(ui),url='https://example.test/exact-erase.zip';
+  ui.elements.get('nrf-actions').hidden=true;ui.elements.get('erase-source').value=url;ui.context.pkg=fakePackage({name:'intended-final.zip'});ui.evaluate('state.pkg=pkg;state.plan=null;');
+  ui.context.boundedFetch=async()=>{throw Error('Fixture erase CORS block');};await assert.rejects(ui.evaluate('erasePackage();'),/Download the exact erase ZIP/);
+  assert.equal(ui.elements.get('image-details').open,true);assert.equal(ui.elements.get('nrf-actions').open,true);assert.equal(ui.elements.get('nrf-actions').hidden,false);assert.equal(advanced.open,true);assert.equal(ui.elements.get('download-firmware').href,url);
+  assert.equal(ui.elements.get('custom-firmware').open,false);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls,[]);
+});

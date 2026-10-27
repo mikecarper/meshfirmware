@@ -15,6 +15,14 @@ Start with a recoverable bench radio, not a remote USB-only node.
 
 ## Use
 
+The USB button, firmware/hardware/role/version/build selectors, and Prepare/Flash
+actions are at the top. Buttons and user actions are left-aligned, including
+advanced tools, backup/restore, console commands and confirmation dialogs.
+Advanced options, backup/restore, the console and help
+start collapsed. Required recovery, migration, connection or archive controls
+open automatically when needed; warnings, progress and final confirmations stay
+visible. The top navigation opens the corresponding tools without touching USB.
+
 1. Open the page in desktop Chrome/Edge and choose a USB port. **Automatic setup**
    is on by default: read the running model/role, select matching hardware,
    default to Keymind Cascade and choose its newest write-only application update.
@@ -31,8 +39,9 @@ Start with a recoverable bench radio, not a remote USB-only node.
    and selected versions, including when the newest catalog build is older
    than the node. Backup, compatibility checks and the normal write confirmation
    still apply; downgrading does not bypass any safety check.
-2. Check the automatic summary. **Change provider, role or firmware build** and
-   **Connection overrides** retain manual controls. Explicit choices are not
+2. Check the automatic summary and the visible **Firmware selection** inputs.
+   **Advanced options & troubleshooting → Connection & automatic setup** retains
+   connection overrides. Explicit choices are not
    silently substituted. Choose **Keymind Cascade** or **MeshCore (stock)**;
    the old separate Logging provider is folded into Keymind Cascade because
    current releases use the same binaries, with runtime logging where supported.
