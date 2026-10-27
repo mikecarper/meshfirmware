@@ -29,5 +29,5 @@ if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).hr
   const catalog=JSON.parse(await readFile(new URL('../public/catalog.json',import.meta.url),'utf8'));
   const {artifacts,utilities,officialReleases}=checkCatalogRoutes(catalog);
   console.log(`Catalog routes verified: ${artifacts} artifacts, ${officialReleases} complete GitHub release routes, ${utilities} utility references; no repository-less GitHub release URLs.`);
-  if(catalog.recoveryCatalog)console.log(`Recovery catalog verified: ${catalog.recoveryCatalog.profiles.length} explicit installed-bootloader profiles, OTAFIX ${catalog.recoveryCatalog.version}; no automatic profile selection.`);
+  if(catalog.recoveryCatalog)console.log(`Recovery catalog verified: ${catalog.recoveryCatalog.profiles.length} installed-bootloader profiles, OTAFIX ${catalog.recoveryCatalog.version}; metadata only, no recovery binaries.`);
 }

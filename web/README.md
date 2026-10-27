@@ -14,7 +14,13 @@ Start with a recoverable bench radio, not a remote USB-only node.
 
 ## Use
 
-1. Open the page in desktop Chrome/Edge and choose a USB port.
+1. Open the page in desktop Chrome/Edge and choose a USB port. Optionally enable
+   **Detect board & auto-select after choosing a port**, or click **Detect board
+   & select** afterward. Running MeshCore's complete model string selects exact
+   matching catalog hardware (including reviewed model aliases), not a firmware
+   image. Unknown, truncated or ambiguous models stay manual. Detection only
+   queries the selected port; it never enumerates or opens other radios. Without
+   the option, choosing a port still sends no application probe.
 2. Select a release, an HTTPS URL or a local BIN/DFU ZIP/UF2/release ZIP. If a
    host blocks browser fetches, use Download, then choose that local file. A
    replacement clears the previous image and plan before reading/downloading;
@@ -41,7 +47,10 @@ Start with a recoverable bench radio, not a remote USB-only node.
 CH340/CP210x/FTDI work through the installed OS serial driver. The page cannot
 install drivers or expose device interfaces the browser/OS does not permit.
 TinyUSB application handoff and hardware USB-Serial/JTAG are separate choices;
-the shared `303a:1001` ID is not used to guess their reset mechanism.
+the shared `303a:1001` ID is not used to guess their board or reset mechanism.
+Reported firmware models can be wrong if the wrong firmware was installed;
+auto-selection is a convenience, not independent physical-board proof. Review
+the selected hardware. Existing payload, chip and board checks remain in force.
 
 ## Features and boundaries
 
@@ -79,8 +88,11 @@ Bootloader recommendations use the latest stable release of our
 `mikecarper/Adafruit_nRF52_Bootloader_OTAFIX` fork, refreshed with the catalog
 on deployment and daily. Its checksum-verified release manifest supplies exact
 MeshCore hardware mappings and serial DFU ZIPs; the page checks the selected
-ZIP's published size and SHA-256 before loading. It does not guess profiles
-from USB IDs or similar board names. Missing, ambiguous or unqualified profiles
+ZIP's published size and SHA-256 before loading. Selecting exact hardware can
+populate its single normal bootloader ZIP without choosing an application
+artifact. Conflicting storage/board profiles still require an explicit artifact.
+Normal physical-board bootloaders are never inferred from DFU USB IDs or similar
+board names. Missing, ambiguous or unqualified profiles
 have no automatic recommendation. If the latest-release check fails, only a
 validated last-known fork snapshot may be retained, with a catalog warning;
 old upstream bootloader links are not silently substituted.
@@ -88,10 +100,17 @@ old upstream bootloader links are not silently substituted.
 These combined SoftDevice/bootloader ZIPs require the exact compatible
 application to be reinstalled afterward. Application-owned data is not
 guaranteed; back up before DFU. Normal recommendations never select temporary
-`R_` recovery builds. The separate **Temporary R_ recovery bridge** picker has
-no default selection: choose the exact **currently installed bootloader
-profile**, not the physical target board. Advertised names and USB IDs can be
-shared, so neither is used to choose a profile automatically.
+`R_` recovery builds. The separate **Temporary R_ recovery bridge** picker starts
+blank. Optional detection can select a unique reviewed DFU USB hint for the
+**currently installed bootloader profile**, never the physical target board.
+USB mappings are scoped to the reviewed release and full profile inventory;
+shared IDs, unknown releases or unreviewed profiles require manual selection.
+Web Serial cannot read USB product names or query a model through Legacy DFU.
+If known, enter the exact installed name/profile under **Match installed
+bootloader** (for example `GAT562BOOT` or `gat562`). Shared names like `XIAO_DFU`
+remain ambiguous unless other reviewed evidence disambiguates them. Contradictory
+evidence never chooses a profile. These are selection hints, not proof of the
+installed version or physical board, and never load or flash a ZIP automatically.
 
 The latest release's recovery bundle and each inner serial DFU ZIP are checked
 against their hashes and inventory before use. If browser downloads are blocked,
