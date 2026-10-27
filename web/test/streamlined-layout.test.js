@@ -103,3 +103,32 @@ test('action buttons are not pushed right by auto margins or stretched to fill t
     assert.match(rule.flex,/^0(?:\s|$)/,`${selector} must not grow across empty space, including on mobile`);
   }
 });
+
+test('one visible Update or Erase/new-install switch precedes the build list and defaults to Update',()=>{
+  const group=get('install-mode-switch'),update=get('install-mode-update'),install=get('install-mode-install'),hint=get('install-mode-hint'),workflow=nodes.find(node=>hasClass(node,'workflow'));
+  assert.equal(group.tag,'fieldset');assert.ok(group.children.some(node=>node.tag==='legend'),'Mode switch requires an accessible group label');assert.ok(inside(group,workflow));assert.ok(group.start<get('artifact').start);
+  for(const radio of [update,install]){assert.equal(radio.tag,'input');assert.equal(radio.attrs.type,'radio');assert.equal(radio.attrs.name,'install-mode');assert.ok(inside(radio,group));assert.equal(closedAncestors(radio).length,0);}
+  assert.equal(update.attrs.value,'update');assert.equal(install.attrs.value,'install');assert.ok(has(update,'checked'));assert.ok(!has(install,'checked'));
+  assert.ok(inside(hint,workflow));assert.equal(closedAncestors(hint).length,0);assert.equal(hint.attrs['aria-live'],'polite');
+  assert.equal(get('flash-action').tag,'input');assert.equal(get('flash-action').attrs.type,'hidden','The legacy nRF action is a mirror, not a second conflicting user choice');
+});
+
+test('three primary actions have large stable step numbers and accessible action labels',()=>{
+  for(const [id,number]of [['select-port','1'],['prepare','2'],['flash','3']]){
+    const button=get(id),badge=button.children.find(node=>hasClass(node,'action-number')),label=button.children.find(node=>hasClass(node,'action-label'));
+    assert.ok(hasClass(button,'step-button'),id);assert.ok(badge,`#${id} needs a persistent number badge`);assert.ok(label,`#${id} needs a separate editable label`);
+    assert.equal(badge.attrs['aria-hidden'],'true');assert.equal(/^<[^>]+>([^<]*)</.exec(html.slice(badge.start))?.[1].trim(),number,id);
+    assert.match(button.attrs['aria-label']||'',new RegExp(`Step ${number}\\b`),`#${id} must announce its step`);
+  }
+  assert.ok(inside(get('prepare-label'),get('prepare')));assert.match(html.slice(get('prepare-label').start).split('</span>')[0],/Backup\s*(?:&amp;|&)\s*prepare/i);
+  assert.ok(!nodes.filter(node=>node.tag==='button'&&!['select-port','prepare','flash'].includes(node.attrs.id)).some(node=>hasClass(node,'step-button')),'Optional tools must not suggest extra mandatory workflow steps');
+});
+
+test('next-step instructions stay visible and numbered actions remain legible on phones',()=>{
+  const guidance=get('step-guidance');assert.equal(guidance.attrs.role,'status');assert.equal(guidance.attrs['aria-live'],'polite');assert.equal(closedAncestors(guidance).length,0);
+  const numberSize=[...declarationsFor('.action-number'),...declarationsFor('.step-button .action-number')].find(rule=>rule['font-size'])?.['font-size'];assert.ok(numberSize&&parseFloat(numberSize)>=28,'Step numbers must be visually prominent');
+  const buttonHeight=declarationsFor('.step-button').find(rule=>rule['min-height'])?.['min-height'];assert.ok(buttonHeight&&parseFloat(buttonHeight)>=62,'Numbered main actions need a readable touch target');
+  const phoneCss=css.slice(css.indexOf('@media (max-width: 600px)'));assert.match(phoneCss,/\.step-button[^{}]*\{[^}]*width:\s*100%/,'Phone actions must have room for number and backup text');
+  const labelRules=[...declarationsFor('.action-label'),...declarationsFor('.step-button .action-label')];
+  assert.ok(labelRules.some(rule=>rule['min-width']==='0'),'Long labels need room to shrink and wrap');assert.ok(!labelRules.some(rule=>rule['white-space']==='nowrap'||rule.overflow==='hidden'),'Step instructions must not be clipped or forced onto one line');
+});

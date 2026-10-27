@@ -6,6 +6,28 @@ const RECOVERY_FORMAT='meshfirmware-esp-write-recovery-v1';
 const RECOVERY_CHUNK=16384;
 const MAX_RECOVERY_ATTEMPTS=3;
 const interruptedTransport=error=>/NetworkError|NotFoundError|TimeoutError|InvalidStateError/.test(error?.name||'')||/disconnect|device (?:lost|removed)|port.*closed|closed.*port|timed? ?out|timeout|serial.*(?:exception|stopped|error)|no more data|stream.*(?:closed|stopped)|packet.*(?:stopped|header)|lost connection/i.test(error?.message||'');
+async function detectWithSingleReset(loader,mode) {
+  const original=loader.resetConstructors;
+  if(!original||typeof original!=='object')fail('The ESP loader does not expose guarded reset constructors. No automatic ROM entry is permitted.');
+  let consumed=mode==='no_reset';
+  const guarded={...original};
+  for(const key of ['classicReset','usbJTAGSerialReset','customReset','hardReset']){
+    const factory=original[key];
+    if(typeof factory!=='function')continue;
+    guarded[key]=(...args)=>{
+      const strategy=Reflect.apply(factory,original,args);
+      if(!strategy||typeof strategy.reset!=='function')fail('Invalid ESP reset strategy. No automatic ROM entry is permitted.');
+      return {reset:async(...resetArgs)=>{
+        if(consumed)fail('Automatic ROM entry already used its one reset. No reset retry was sent.');
+        consumed=true; // Delivery may be uncertain even when the first await rejects.
+        return Reflect.apply(strategy.reset,strategy,resetArgs);
+      }};
+    };
+  }
+  loader.resetConstructors=guarded;
+  try {await loader.detectChip(mode,1);}
+  finally {loader.resetConstructors=original;}
+}
 function writeProgram(pkg,plan,flashBytes) {
   const bridge=!!(plan.needed&&!plan.verified),payload=bridge?Uint8Array.from(plan.bridge):pkg.payload;
   const segments=(plan.segments||plan.addresses.map(address=>({address,sourceOffset:0,length:payload.length,payloadHash:hash(payload)}))).map(part=>({address:part.address,sourceOffset:part.sourceOffset||0,length:part.length,payloadHash:part.payloadHash}));
@@ -87,11 +109,15 @@ export class EspSession {
     this.loader = new ESPLoader({ transport: this.transport, baudrate: 115200, romBaudrate: 115200, terminal: { clean() {}, writeLine: log, write: log } });
     this.port = port; this.mac = null; this.flashBytes = 0; this.plan = null; this.connectMode=null;
   }
-  async connect(mode) {
+  async connect(mode,{singleReset=false}={}) {
     if (!['no_reset','usb_reset','default_reset'].includes(mode)) fail('Choose a qualified ESP32 bootloader/reset mode.');
+    if(typeof singleReset!=='boolean')fail('The single-reset option must be a boolean.');
     this.mac=null; this.flashBytes=0; this.plan=null; this.#planProof=null; this.#written=false; this.#writeRecovery=null; this.connectMode=null;
     // Never infer TinyUSB versus hardware JTAG from shared VID/PID 303a:1001.
-    await this.loader.detectChip(mode);
+    // attempts=1 alone is insufficient: chip-identification fallback can open
+    // and reset again. Share one consumed budget across every reset factory.
+    if(singleReset)await detectWithSingleReset(this.loader,mode);
+    else await this.loader.detectChip(mode);
     if (![0,2,5,9,13].includes(this.loader.chip.IMAGE_CHIP_ID)) fail('This browser build does not support the detected ESP chip family.');
     await assertSecurity(this.loader); // Before RAM stub upload/register changes.
     this.mac = (await this.loader.chip.readMac(this.loader)).toLowerCase();

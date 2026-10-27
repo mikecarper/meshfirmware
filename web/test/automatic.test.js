@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {chooseFirmware,firmwareVersionWarning} from '../src/automatic.js';
+import {chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode} from '../src/automatic.js';
 const app=(more={})=>({project:'MeshCore',hardware:'Heltec v4',provider:'MeshCore',architecture:'esp32',role:'repeater',version:'v1.18.0',action:'flash-update',name:'heltec_v4_repeater-v1.18.0.bin',url:'https://example.test/heltec_v4_repeater-v1.18.0.bin',...more});
 const choose=(items,more={})=>chooseFirmware({items,hardware:'Heltec v4',provider:'MeshCore',device:{catalogRole:'repeater'},...more});
 
@@ -166,4 +166,101 @@ test('missing exact hardware and unsupported architectures do not select firmwar
   assert.equal(choose([app()],{hardware:''}).artifactIndex,null);
   assert.equal(choose([app({architecture:'noflash',action:'download'})]).artifactIndex,null);
   assert.equal(choose([null,{project:'Meshtastic'},app({role:'bootloader'})]).artifactIndex,null);
+});
+
+const mergedInstall=(more={})=>app({action:'flash-wipe',name:'heltec_v4_repeater-v1.18.0-merged.bin',url:'https://example.test/heltec_v4_repeater-v1.18.0-merged.bin',...more});
+test('install-mode matching separates application updates from explicit merged installs',()=>{
+  const update=app(),merged=mergedInstall();
+  assert.equal(matchesInstallMode(update),true);assert.equal(matchesInstallMode(merged),false);
+  assert.equal(matchesInstallMode(update,'update'),true);assert.equal(matchesInstallMode(merged,'update'),false);
+  assert.equal(matchesInstallMode(update,'install'),false);assert.equal(matchesInstallMode(merged,'install'),true);
+  for(const mode of ['update','install'])for(const item of [
+    null,{project:'Meshtastic'},mergedInstall({role:'bootloader'}),mergedInstall({name:'bootloader-merged.bin'}),
+    mergedInstall({name:'FLASH_ERASE-merged.bin'}),mergedInstall({name:'softdevice-merged.bin'}),mergedInstall({name:'R_board-merged.bin'}),
+    mergedInstall({name:'QSPIFlash_Format-merged.bin'}),mergedInstall({architecture:'uf2'})
+  ])assert.equal(matchesInstallMode(item,mode),false,`${mode}: ${item?.name}`);
+  for(const item of [mergedInstall({name:'application.bin'}),mergedInstall({name:'board-merged-component.bin'}),mergedInstall({action:'flash-update'}),mergedInstall({action:'download'})])assert.equal(matchesInstallMode(item,'install'),false,item.name);
+});
+
+test('only explicit install mode selects a merged image and neither mode falls back to the other',()=>{
+  const update=app(),merged=mergedInstall();
+  for(const mode of [undefined,'update'])assert.equal(choose([merged,update],mode===undefined?{}:{installMode:mode}).artifactIndex,1);
+  const result=choose([update,merged],{installMode:'install'});
+  assert.equal(result.artifactIndex,1);assert.match(result.reason,/erase\/new install/);assert.match(result.reason,/nothing has been loaded or written/);
+  assert.equal(result.downgrade,false);assert.equal(result.warning,'');
+  assert.equal(choose([update],{installMode:'install'}).artifactIndex,null);
+  assert.equal(choose([merged]).artifactIndex,null);
+  for(const mode of ['',null,'erase','wipe','unknown']){
+    assert.equal(matchesInstallMode(merged,mode),false);assert.equal(matchesInstallMode(update,mode),false);
+    const refused=choose([update,merged],{installMode:mode});assert.equal(refused.artifactIndex,null);assert.match(refused.reason,/unsupported install mode/);
+  }
+});
+
+test('explicit installs retain exact role hardware version and newest-build selection',()=>{
+  const current=mergedInstall(),newer=mergedInstall({version:'v1.19.0',name:'heltec_v4_repeater-v1.19.0-merged.bin',url:'https://example.test/new-merged.bin'}),otherBoard=mergedInstall({hardware:'Heltec v4 R8',version:'v9.0.0'}),sensor=mergedInstall({role:'sensor',version:'v8.0.0'});
+  const items=[current,newer,otherBoard,sensor,app({version:'v10.0.0'})];
+  assert.equal(choose(items,{installMode:'install'}).artifactIndex,1);
+  assert.equal(choose(items,{installMode:'install',version:current.version}).artifactIndex,0);
+  assert.equal(choose(items,{installMode:'install',role:'sensor'}).artifactIndex,3);
+  for(const overrides of [{provider:'Unknown'},{role:'roomServer'},{version:'v0.1.0'},{hardware:''}])assert.equal(choose(items,{installMode:'install',...overrides}).artifactIndex,null);
+  assert.equal(choose([current,mergedInstall({role:'roomServer'})],{installMode:'install',device:{role:'common-cli'}}).artifactIndex,null);
+});
+
+test('erase/new install retains reviewed V4 target and display distinctions plus downgrade warnings',()=>{
+  const convert=item=>({...item,action:'flash-wipe',name:item.name.replace(/\.bin$/,'-merged.bin'),url:item.url.replace(/\.bin$/,'-merged.bin')}),items=[convert(keymindV4('repeater',true)),convert(keymindV4())];
+  const device={model:'Heltec V4.2 none detected',catalogRole:'repeater',version:'v1.18.0.2-keymind-cascade'};
+  const result=choose(items,{provider:'Keymind Cascade',device,installMode:'install'});
+  assert.equal(result.artifactIndex,1);assert.equal(result.downgrade,true);assert.match(result.warning,/v1\.18\.0\.2/);assert.match(result.warning,/v1\.18\.0\.1/);
+  assert.equal(choose(items,{provider:'Keymind Cascade',device:{...device,firmwareTarget:'heltec_v4_tft_repeater'},installMode:'install'}).artifactIndex,0);
+  assert.equal(choose(items,{provider:'Keymind Cascade',device:{...device,hardwareId:'heltec_v4_tft'},installMode:'install'}).artifactIndex,0);
+  for(const hints of [{firmwareTarget:'unknown_target'},{hardwareId:'unknown_board'},{model:'Heltec V4.4 none detected'}])assert.equal(choose(items,{provider:'Keymind Cascade',device:{...device,...hints},installMode:'install'}).artifactIndex,null);
+});
+
+test('same-download install entries with different safety or profile metadata remain manual',()=>{
+  const item=mergedInstall();
+  for(const difference of [{notice:'Requires different recovery'},{subtitle:'Alternate storage profile'},{sha256:'a'.repeat(64)},{url:'https://elsewhere.test/merged.bin'}]){
+    const result=choose([item,{...item,...difference}],{installMode:'install'});
+    assert.equal(result.artifactIndex,null);assert.match(result.reason,/Multiple exact-board builds/);assert.deepEqual(result.candidates,[0,1]);
+  }
+  assert.equal(choose([item,{...item}],{installMode:'install'}).artifactIndex,0);
+});
+
+test('nRF52 uses the same ordinary application DFU ZIP for either mode without choosing an erase or bootloader ZIP',()=>{
+  const nrf=app({architecture:'nrf52',action:'flash',name:'board_repeater-v1.18.0.zip'});
+  for(const mode of ['update','install']){
+    assert.equal(matchesInstallMode(nrf,mode),true);assert.equal(choose([nrf],{installMode:mode}).artifactIndex,0);
+    for(const name of ['board_bootloader-v1.18.0.zip','softdevice.zip','FLASH_ERASE.zip','R_board_bootloader.zip','QSPIFlash_Format.zip','board-merged.zip']){
+      assert.equal(matchesInstallMode({...nrf,name},mode),false);assert.equal(choose([{...nrf,name}],{installMode:mode}).artifactIndex,null);
+    }
+    for(const action of ['flash-update','flash-wipe','erase','download'])assert.equal(matchesInstallMode({...nrf,action},mode),false);
+  }
+});
+
+test('catalog retains qualified embedded-bootloader application bundles without auto-suggesting them',()=>{
+  const embedded=app({architecture:'nrf52',action:'flash',name:'board_repeater-with-bootloader-2.4.12-full-ota-v1.18.0.zip'});
+  for(const mode of ['update','install']){
+    assert.equal(matchesCatalogInstallMode(embedded,mode),true);
+    assert.equal(matchesInstallMode(embedded,mode),false);assert.equal(choose([embedded],{installMode:mode}).artifactIndex,null);
+    for(const name of ['board_bootloader-v2.4.12.zip','board_repeater-with-bootloader-latest-full-v1.18.0.zip','board_repeater-with-bootloader-2.4.12-FLASH_ERASE.zip','board_repeater-with-bootloader-2.4.12-with-bootloader-2.4.12-full-v1.18.0.zip'])assert.equal(matchesCatalogInstallMode({...embedded,name},mode),false,name);
+    for(const difference of [{role:'bootloader'},{architecture:'esp32'},{action:'download'},{project:'Meshtastic'}])assert.equal(matchesCatalogInstallMode({...embedded,...difference},mode),false);
+  }
+});
+
+test('manual legacy catalog entries remain in Update only and are never automatic suggestions',()=>{
+  const entries=[
+    app({architecture:'noflash',action:'download',name:'board_companion-v1.18.0.bin'}),
+    app({architecture:'noflash',action:'download',name:'board_companion-v1.18.0.uf2'}),
+    app({architecture:'noflash',action:'download',name:'board_repeater-v1.18.0.zip'}),
+    app({architecture:'esp32',action:'flash',name:'board_repeater-v1.18.0.zip'}),
+    app({architecture:'esp32',action:'download',name:'board_repeater-v1.18.0.uf2'})
+  ];
+  for(const entry of entries){
+    assert.equal(matchesCatalogInstallMode(entry),true);assert.equal(matchesCatalogInstallMode(entry,'update'),true);
+    assert.equal(matchesCatalogInstallMode(entry,'install'),false);assert.equal(matchesInstallMode(entry),false);
+    assert.equal(choose([entry]).artifactIndex,null);assert.equal(choose([entry],{installMode:'install'}).artifactIndex,null);
+    for(const difference of [{role:'bootloader'},{name:'board_bootloader-v1.18.0.uf2'},{name:'FLASH_ERASE.zip'},{name:'board-merged.zip'},{name:'R_board.zip'},{project:'Meshtastic'},{version:''},{url:''}])assert.equal(matchesCatalogInstallMode({...entry,...difference}),false);
+  }
+  assert.equal(matchesCatalogInstallMode(app({architecture:'noflash',action:'download',name:'board.hex'})),false);
+  assert.equal(matchesCatalogInstallMode(app({architecture:'noflash',action:'flash',name:'board.uf2'})),false);
+  for(const mode of [null,'','unknown'])for(const item of [entries[0],mergedInstall()])assert.equal(matchesCatalogInstallMode(item,mode),false);
 });

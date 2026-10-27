@@ -18,6 +18,20 @@ Start with a recoverable bench radio, not a remote USB-only node.
 The USB button, firmware/hardware/role/version/build selectors, and Prepare/Flash
 actions are at the top. Buttons and user actions are left-aligned, including
 advanced tools, backup/restore, console commands and confirmation dialogs.
+Large button numbers mark the main actions: **1 Choose USB port**, **2 Backup &
+prepare**, **3 Review & flash**. The next-step hint follows the current stage.
+If an ordinary bootloader handoff reconnects USB, repeat 1 then 2 for the same
+radio. Supported partition expansion instead uses one scoped confirmation for
+the bridge and final firmware and continues automatically; only a newly
+ungranted USB interface may still require step 1. The numbers never imply that
+a backup or application startup was verified.
+The **Installation** switch defaults to **Update** and filters the build list.
+**Erase & new install** selects merged ESP32 installations, or validates a
+separate erase ZIP before an nRF52 application install. It warns about identity
+and settings loss; selecting the mode never resets, downloads or flashes a node.
+Changing mode discards the previous prepared image, write plan and backup approval.
+Pending recovery/migration/verification keeps its original image and locks the
+switch. Erase mode is not saved as a preference for the next page visit.
 Advanced options, backup/restore, the console and help
 start collapsed. Required recovery, migration, connection or archive controls
 open automatically when needed; warnings, progress and final confirmations stay
@@ -28,8 +42,9 @@ visible. The top navigation opens the corresponding tools without touching USB.
    default to Keymind Cascade and choose its newest write-only application update.
    MeshCore (stock) remains an explicit provider choice; an unavailable Keymind
    build never silently falls back to stock. Saved manual provider choices still work.
-   It never chooses a wipe, bootloader or ambiguous screen/storage
-   variant. No USB enumeration, reset or flash occurs on page load. Only the
+   Default Update mode never chooses a wipe or bootloader. Explicit erase mode
+   still checks exact board/role/profile compatibility; ambiguous screen/storage
+   variants are not guessed. No USB enumeration, reset or flash occurs on page load. Only the
    selected port is queried after permission. Turn off Automatic setup for manual use.
    Exact `Heltec V4.2 none detected` and `Heltec V4.3 none detected` models are
    recognized as the base V4 running without an attached display. R8, unknown
@@ -60,7 +75,7 @@ visible. The top navigation opens the corresponding tools without touching USB.
    image ready to flash.
    Published release-ZIP hashes are checked before indexing; the selected inner
    image is validated separately, never compared to the enclosing ZIP's hash.
-3. Use **Prepare update**: download and validate the selected application, then
+3. Use **Backup & prepare update** (or **Backup & prepare install**): download and validate the selected application, then
    back up before bootloader entry by default. Detection distinguishes a binary
    companion from CommonCLI. Reviewed native USB application reads assert DTR
    at 115200 so older V4 firmware answers; UART and DFU line behavior is unchanged.
@@ -263,11 +278,35 @@ physical chip MAC and final firmware SHA-256. The public plan and bridge are
 persisted in this browser's IndexedDB **before** bridge writes. Raw NVS/OTA
 snapshots and private backups are memory-only, not stored in that cache.
 
-Keep power, this browser profile and its storage available. The bridge must
-finish before the final write. Native USB bridges return to ROM automatically;
-select that port with **already in ROM / no reset**. Classic ESP32 USB-UART
-bridges must report the exact chip-bound settled status before another reset.
-Then the validator checks the new table, restoration flags and OTA state.
+For a fresh supported update, **Review & flash** asks once with **EXPAND AND
+FLASH**. This memory-only approval covers the exact chip MAC, bridge, expanded
+table, final firmware hashes, required restarts and read-only startup checks.
+It automatically writes/verifies the bridge, waits for expansion, verifies the
+new table/restoration flags/OTA state, then writes/verifies/restarts the original
+final firmware. It applies even if the optional automatic-finish box is off.
+Backup save/skip decisions still happen before entering ROM.
+
+Keep power, this tab, browser profile and its storage available. Native USB
+bridges return to ROM automatically, always inspected without another reset.
+The exact already-selected port resumes on its reconnect event; the page never
+scans for or substitutes another radio. If a new USB interface needs browser
+permission, choose the same radio with **1 Choose USB port**; no repeated
+Prepare/Flash/Reset presses or redundant handoff confirmations are needed.
+Classic USB-UART bridges first report the exact MAC-bound settled status,
+then automatically re-enter ROM once for final verification and writing.
+ESP32-C3/S3 bridges can return to ROM themselves behind a persistent USB serial
+adapter; the page waits on that same granted port for up to 180 seconds using
+no-reset ROM checks. A newly selected port never inherits automatic reset
+permission from the original UART port.
+
+**Stop automatic continuation** stops future stages at a safe boundary; it does
+not interrupt an active write. Any failed proof or transport error revokes the
+approval without automatically retrying a write/reset. Pending recovery markers
+remain. Reloading never restores write authorization; interrupted/resumed
+migrations and compatibility overrides use the existing manual checks. After
+the final restart, read-only application readiness is retried for up to 120 seconds. Public identity
+must match when captured; without it, startup is reported with explicitly
+limited identity verification, not proof of the physical application device.
 
 If the page closed before starting a verified bridge, choose its original
 firmware and ROM port without resetting, then use **Recover verified bridge

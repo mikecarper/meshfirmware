@@ -75,6 +75,10 @@ json.dumps({'image': list(_image), 'table': list(suite_module.table(suite_module
   await assert.rejects(service.call('verify', { ...binding, ...data, table: expanded, mac: '00:11:22:33:44:55', sha256: hash(data.image) }), /Different device MAC/);
   const verified = await service.call('verify', { ...binding, ...data, table: expanded, sha256: hash(data.image) });
   assert.equal(verified.verified, true); assert.deepEqual(verified.app_offsets, [0x650000, 0x10000]);
+  assert.equal(verified.completed_bridge_sha256,plan.bridge_sha256);
+  assert.equal(verified.completed_source_table_sha256,hash(data.table));
+  assert.equal(verified.completed_target_table_sha256,hash(expanded));
+  assert.deepEqual(verified.completed_bridge_segments,plan.bridge_offsets.map(address=>({address,sourceOffset:0,length:plan.bridge_bytes,payloadHash:plan.bridge_sha256})));
   for (const directory of py.FS.readdir('/work/cache/AABBCCDDEEFF').filter(x => /^[a-f0-9]{64}$/.test(x))) {
     assert.deepEqual(py.FS.readdir('/work/cache/AABBCCDDEEFF/' + directory).sort(), ['.', '..', 'plan.json', 'target-partitions.bin', 'usb-bridge.bin'].sort());
   }

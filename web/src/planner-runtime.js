@@ -181,7 +181,7 @@ json.dumps({'summary': _backup_result, 'payload': _backup_archive['payload'], **
           py.globals.set('plan_path', currentPlan.plan_file); result = JSON.parse(py.runPython(`json.dumps(m.verify_plan(Path(plan_path), Path('/work/table.bin'), Path('/work/nvs.bin'), Path('/work/ota.bin')))`));
           // Public provenance lets an interrupted bridge descriptor be
           // superseded only by completion of that exact cached bridge/geometry.
-          result={...result,completed_bridge_sha256:currentPlan.bridge_sha256,completed_source_table_sha256:currentPlan.source_table_sha256,completed_bridge_segments:currentPlan.bridge_offsets.map(address=>({address,sourceOffset:0,length:currentPlan.bridge_bytes,payloadHash:currentPlan.bridge_sha256}))};
+          result={...result,completed_bridge_sha256:currentPlan.bridge_sha256,completed_source_table_sha256:currentPlan.source_table_sha256,completed_target_table_sha256:currentPlan.target_table_sha256,completed_bridge_segments:currentPlan.bridge_offsets.map(address=>({address,sourceOffset:0,length:currentPlan.bridge_bytes,payloadHash:currentPlan.bridge_sha256}))};
         }
         // The started marker must be durable before authorizing any bridge write.
         if (persistent) await sync(py, false);
