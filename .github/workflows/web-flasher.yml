@@ -40,6 +40,11 @@ jobs:
       - name: Unit and protocol tests
         run: pnpm test
         working-directory: web
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - name: Install pinned native compatibility-test dependencies
+        run: python3 -m pip install --disable-pip-version-check meshcore==2.3.9.1 meshcore-cli==1.6.3 PyNaCl==1.6.2
       - name: Native archive and migration compatibility
         run: |
           python3 -m unittest discover -s tests -p test_meshcore_backup.py
