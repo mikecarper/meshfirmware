@@ -38,7 +38,22 @@ function metadata(config,device,firmware,release={}) {
   return {title:firmware.title||role.title||firmware.role,subtitle:firmware.subTitle||firmware.subtitle||role.subTitle||role.subtitle||'',notice:notice.replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim(),bootloader,erase:assets(device.erase,config),releaseNotes:release.notes||release.description||'',maker:device.maker||'',hardwareVersion:device.version||device.hardwareVersion||''};
 }
 const publishedHash=file=>{const value=file.sha256||String(file.digest||'').replace(/^sha256:/,'');return /^[a-f0-9]{64}$/i.test(value||'')?value.toLowerCase():undefined;};
+// The historical Logging provider URL remains valid for external clients, but
+// current Full images expose logging at runtime rather than as a separate fork.
+export const catalogProvider=value=>value==='Keymind Cascade Logging'?'Keymind Cascade':value;
+const ordered=value=>Array.isArray(value)?value.map(ordered):value&&typeof value==='object'?Object.fromEntries(Object.keys(value).sort().map(key=>[key,ordered(value[key])])):value;
+export const catalogItemKey=item=>JSON.stringify(ordered({...item,provider:catalogProvider(item.provider)}));
+export function combineProviderItems(items) {
+  const seen=new Set();
+  return items.flatMap(source=>{
+    const provider=catalogProvider(source.provider),item=provider===source.provider?source:{...source,provider};
+    // Compare all metadata, not just the download URL: distinct historical
+    // profiles, exact-target restrictions and utility hints must survive.
+    const key=catalogItemKey(item);if(seen.has(key))return [];seen.add(key);return [item];
+  });
+}
 export function catalogItems(config, releases = [], provider = 'MeshCore') {
+  provider=catalogProvider(provider);
   const items = [];
   for (const device of config.device || []) for (const firmware of device.firmware || []) {
     if (firmware.github?.files) for (const [action, pattern] of Object.entries(firmware.github.files)) {
@@ -95,9 +110,9 @@ export function validateCatalog(value) {
     validateFirmwareUrl(url);for(const source of [...(item.erase||[]),...(item.bootloader||[])])validateFirmwareUrl(source);
     return url===item.url?item:{...item,url};
   });
-  const linked=repaired?items:value.items,enriched=inheritOfficialUtilities(linked);
+  const linked=combineProviderItems(repaired?items:value.items),enriched=inheritOfficialUtilities(linked);
   const bootloaderCatalog=value.bootloaderCatalog?validateBootloaderSnapshot({...value.bootloaderCatalog,cached:value.cached===true||value.bootloaderCatalog.cached===true}):null;
-  const recommended=applyBootloaderCatalog(enriched,bootloaderCatalog);
+  const recommended=combineProviderItems(applyBootloaderCatalog(enriched,bootloaderCatalog));
   let recoveryCatalog=null;const warnings=repaired?[...value.warnings,`Repaired ${repaired} legacy official release URLs missing the repository path.`]:[...value.warnings];
   if(value.recoveryCatalog)try{recoveryCatalog=validateRecoveryCatalog({...value.recoveryCatalog,cached:value.cached===true||value.recoveryCatalog.cached===true});}catch{warnings.push('Recovery catalog could not be verified; recovery recommendations are disabled. Normal bootloader and application firmware remain available.');}
   return {...value,...(bootloaderCatalog?{bootloaderCatalog}:{}),recoveryCatalog,items:recommended,warnings};

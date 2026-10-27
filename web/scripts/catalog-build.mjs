@@ -1,4 +1,4 @@
-import {catalogItems,compareVersions,validateCatalog,inheritOfficialUtilities} from '../src/catalog.js';
+import {catalogItems,catalogProvider,combineProviderItems,compareVersions,validateCatalog,inheritOfficialUtilities} from '../src/catalog.js';
 import {BOOTLOADER_LATEST_URL,bootloaderManifestAsset,validateBootloaderSnapshot,applyBootloaderCatalog} from '../src/bootloader-catalog.js';
 import {recoveryBundleAsset,createRecoveryCatalog,validateRecoveryCatalog} from '../src/bootloader-recovery.js';
 
@@ -18,7 +18,7 @@ export async function buildCatalog({readJson,readBytes,previous=async()=>null,no
     for(const url of urls)try{const value=await readJson(url);if(!validate(value))throw new Error('invalid metadata');if(failures.length)warnings.push(`${label}: primary source unavailable; using fallback.`);return value;}catch(error){failures.push(error.message);}
     throw new Error(`${label}: ${failures.join('; ')}`);
   }
-  async function reuse(provider,error) {warnings.push(`${provider}: ${error.message}`);const old=(await prior())?.items.filter(item=>item.provider===provider)||[];if(old.length){items.push(...old);warnings.push(`${provider}: retained last known public entries.`);}}
+  async function reuse(provider,error) {warnings.push(`${provider}: ${error.message}`);const old=(await prior())?.items.filter(item=>catalogProvider(item.provider)===catalogProvider(provider))||[];if(old.length){items.push(...old);warnings.push(`${provider}: retained last known public entries.`);}}
   await Promise.all([
     (async()=>{try{const [config,releases]=await Promise.all([
       source(['https://flasher.meshcore.io/config.json','https://apps.meshamerica.com/proxy/flasher/config.json'],v=>Array.isArray(v?.device)&&v.device.length>0,'MeshCore config'),
@@ -48,5 +48,8 @@ export async function buildCatalog({readJson,readBytes,previous=async()=>null,no
     }})()
   ]);
   if(!items.length)throw new Error('No fresh or validated cached MeshCore catalog entries are available. Existing deployed site was not replaced.');
-  const seen=new Set();return {generatedAt:now(),bootloaderCatalog,recoveryCatalog,items:applyBootloaderCatalog(inheritOfficialUtilities(items.filter(item=>{const key=JSON.stringify([item.provider,item.hardware,item.role,item.version,item.action,item.url]);if(seen.has(key))return false;seen.add(key);return true;})),bootloaderCatalog).sort((a,b)=>a.provider.localeCompare(b.provider)||a.hardware.localeCompare(b.hardware)||a.role.localeCompare(b.role)||compareVersions(a.version,b.version)||a.name.localeCompare(b.name)),warnings};
+  // Fresh and cached copies can become identical only after current utility
+  // and verified bootloader metadata replace their previous recommendations.
+  const enriched=applyBootloaderCatalog(inheritOfficialUtilities(combineProviderItems(items)),bootloaderCatalog);
+  return {generatedAt:now(),bootloaderCatalog,recoveryCatalog,items:combineProviderItems(enriched).sort((a,b)=>a.provider.localeCompare(b.provider)||a.hardware.localeCompare(b.hardware)||a.role.localeCompare(b.role)||compareVersions(a.version,b.version)||a.name.localeCompare(b.name)),warnings};
 }

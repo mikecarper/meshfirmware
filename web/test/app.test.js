@@ -6,6 +6,7 @@ import vm from 'node:vm';
 import {detectBoard,detectRecoveryProfile} from '../src/board-detection.js';
 import {chooseFirmware,firmwareVersionWarning} from '../src/automatic.js';
 import {chooseConnection} from '../src/connection-choice.js';
+import {catalogProvider} from '../src/catalog.js';
 const html=await readFile(new URL('../index.html',import.meta.url),'utf8');
 const source=(await readFile(new URL('../src/app.js',import.meta.url),'utf8')).replace(/^import .*;\r?$/gm,'');
 const ids=[...html.matchAll(/\bid="([^"]+)"/g)].map(m=>m[1]);
@@ -20,7 +21,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,catalogPromise=n
   if(recovery)storage.set('meshfirmware.nrfRecovery',JSON.stringify(recovery));
   if(espRecovery)storage.set('meshfirmware.espRecovery',JSON.stringify(espRecovery));
   const context=vm.createContext({document:{getElementById:id=>{assert.ok(elements.has(id),`Missing HTML id ${id}`);return elements.get(id);},querySelectorAll:()=>[...elements.values()]},navigator:{serial:{requestPort:async()=>{calls.push('chooser');return port;},getPorts(){throw new Error('must not enumerate automatically');},addEventListener(type,handler){serialEvents[type]=handler;}}},window:{addEventListener(){}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},Option,URL,Blob,Uint8Array,TextEncoder,TextDecoder,console,setTimeout,clearTimeout,AbortSignal,Date,
-    fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,chooseConnection,assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),
+    fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,chooseConnection,assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),
     SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
   });
   vm.runInContext(source,context);
@@ -36,10 +37,40 @@ test('reconnect guidance warns about VM USB capture without promising a timed re
 });
 
 const v4Item={project:'MeshCore',provider:'MeshCore',hardware:'Heltec v4',architecture:'esp32',role:'repeater',version:'v1.18.0',name:'heltec_v4_repeater-v1.18.0.bin',action:'flash-update',url:'https://example.test/v4.bin'};
+test('provider picker shows Keymind Cascade and stock and restores a saved historical Logging choice',async()=>{
+  let resolveCatalog;const catalogPromise=new Promise(resolve=>resolveCatalog=resolve),ui=workbench({catalogPromise});
+  ui.context.localStorage.setItem('meshfirmware.selections',JSON.stringify({provider:'Keymind Cascade Logging',hardware:v4Item.hardware,role:v4Item.role,version:v4Item.version}));
+  resolveCatalog({items:[v4Item,{...v4Item,provider:'Keymind Cascade'}],warnings:[],generatedAt:'2026-10-27T00:00:00Z'});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(ui.elements.get('provider').options.map(option=>[option.text,option.value]),[['All providers',''],['Keymind Cascade','Keymind Cascade'],['MeshCore (stock)','MeshCore']]);
+  assert.equal(ui.elements.get('provider').value,'Keymind Cascade');assert.equal(ui.elements.get('hardware').value,v4Item.hardware);assert.equal(ui.elements.get('role').value,v4Item.role);assert.equal(ui.elements.get('version').value,v4Item.version);
+  assert.equal(JSON.parse(ui.context.localStorage.getItem('meshfirmware.selections')).provider,'Keymind Cascade');assert.deepEqual(ui.calls,[]);
+});
+test('page defaults to Keymind while a saved explicit stock choice remains available',async()=>{
+  for(const saved of [null,{provider:'MeshCore'},'invalid']){
+    let resolveCatalog;const catalogPromise=new Promise(resolve=>resolveCatalog=resolve),ui=workbench({catalogPromise});
+    if(saved!==null)ui.context.localStorage.setItem('meshfirmware.selections',JSON.stringify(saved));
+    resolveCatalog({items:[v4Item,{...v4Item,provider:'Keymind Cascade'}],warnings:[],generatedAt:'2026-10-27T00:00:00Z'});await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(ui.elements.get('provider').value,saved?.provider||'Keymind Cascade');assert.deepEqual(ui.calls,[]);
+  }
+});
+test('a saved or pre-connect explicit stock provider survives connection without keeping the previous board or version',async()=>{
+  for(const saved of [false,true]){
+    let resolveCatalog;const catalogPromise=new Promise(resolve=>resolveCatalog=resolve),ui=workbench({productionDefaults:true,catalogPromise});serialMock(ui);
+    if(saved)ui.context.localStorage.setItem('meshfirmware.selections',JSON.stringify({provider:'MeshCore'}));
+    resolveCatalog({items:[v4Item,headlessV4Item()],warnings:[],generatedAt:'2026-10-27T00:00:00Z'});await new Promise(resolve=>setImmediate(resolve));
+    if(!saved){ui.elements.get('provider').value='MeshCore';await ui.elements.get('provider').onchange();}
+    ui.evaluate("state.manualSelections.hardware='Previous board';state.manualSelections.version='v0.1.0';");
+    ui.context.detectMeshCore=async()=>({model:'Heltec V4 OLED',catalogRole:'repeater',version:'v1.14.1'});await ui.elements.get('select-port').onclick();
+    assert.equal(ui.elements.get('provider').value,'MeshCore');assert.equal(ui.elements.get('hardware').value,v4Item.hardware);assert.equal(ui.elements.get('version').value,v4Item.version);assert.equal(ui.elements.get('artifact').value,'0');
+    assert.equal(ui.evaluate('state.manualSelections.hardware'),undefined);assert.equal(ui.evaluate('state.manualSelections.version'),undefined);assert.deepEqual(ui.calls,['chooser','open','close']);
+  }
+});
+
 test('production defaults select connected old V4 role, latest update and TinyUSB without downloads or reset',async()=>{
   assert.match(html,/id="auto-detect-board" checked/);assert.match(html,/id="auto-backup"[^>]*checked/);assert.match(html,/id="auto-finish"[^>]*checked/);assert.match(html,/value="auto" selected/);
-  const ui=workbench({productionDefaults:true});await Promise.resolve();serialMock(ui);ui.context.inventory=[v4Item,{...v4Item,action:'flash-wipe',name:'merged.bin'}];ui.evaluate('state.items=inventory;filterCatalog();');ui.port.getInfo=()=>({usbVendorId:0x303a,usbProductId:0x0002});ui.context.detectMeshCore=async()=>({model:'Heltec V4 OLED',role:'common-cli',catalogRole:'repeater',version:'v1.14.1'});
-  await ui.elements.get('select-port').onclick();assert.equal(ui.elements.get('hardware').value,'Heltec v4');assert.equal(ui.elements.get('provider').value,'MeshCore');assert.equal(ui.elements.get('role').value,'repeater');assert.equal(ui.elements.get('version').value,'v1.18.0');assert.equal(ui.elements.get('artifact').value,'0');assert.equal(ui.evaluate('connectionMode()'),'tinyusb');assert.equal(ui.evaluate('state.pkg'),null);assert.deepEqual(ui.calls,['chooser','open','close']);assert.equal(ui.elements.get('prepare').disabled,false);assert.equal(ui.elements.get('flash').disabled,true);
+  const ui=workbench({productionDefaults:true});await Promise.resolve();serialMock(ui);ui.context.inventory=[headlessV4Item({version:'v1.18.0'}),{...v4Item,action:'flash-wipe',name:'merged.bin'},v4Item];ui.evaluate('state.items=inventory;filterCatalog();');ui.port.getInfo=()=>({usbVendorId:0x303a,usbProductId:0x0002});ui.context.detectMeshCore=async()=>({model:'Heltec V4 OLED',role:'common-cli',catalogRole:'repeater',version:'v1.14.1'});
+  await ui.elements.get('select-port').onclick();assert.equal(ui.elements.get('hardware').value,'Heltec v4');assert.equal(ui.elements.get('provider').value,'Keymind Cascade');assert.equal(ui.elements.get('role').value,'repeater');assert.equal(ui.elements.get('version').value,'v1.18.0');assert.equal(ui.elements.get('artifact').value,'0');assert.equal(ui.evaluate('connectionMode()'),'tinyusb');assert.equal(ui.evaluate('state.pkg'),null);assert.deepEqual(ui.calls,['chooser','open','close']);assert.equal(ui.elements.get('prepare').disabled,false);assert.equal(ui.elements.get('flash').disabled,true);
 });
 
 const headlessV4Item=(more={})=>({...v4Item,provider:'Keymind Cascade',version:'v1.18.0.2-halo-keymind-cascade-dev-eab29a12',name:'heltec_v4_repeater-full-usb-wifi-ota-v1.18.0.2-halo-keymind-cascade-dev-eab29a12.bin',releaseNotes:'EXACT TARGET - heltec_v4_repeater. Match exact hardware.\nSETUP - https://mikecarper.github.io/MeshCore/firmware_picker/?hardware=heltec_v4',...more});
@@ -80,6 +111,13 @@ test('a headless V4 connected before the catalog arrives is selected automatical
 });
 
 const xiaoRepeaterItem=(more={})=>({...v4Item,provider:'MeshCore',hardware:'Seeed Studio Xiao nRF52 WIO',architecture:'nrf52',version:'v1.18.0.1',name:'Xiao_nrf52_repeater-v1.18.0.1.zip',action:'flash',url:'https://example.test/xiao.zip',...more});
+test('a detected board without a Keymind build stays selected without falling back to stock; stock can be chosen explicitly',async()=>{
+  const ui=workbench({productionDefaults:true});await Promise.resolve();ui.context.inventory=[headlessV4Item(),xiaoRepeaterItem()];
+  ui.evaluate("state.items=inventory;state.device={model:'Seeed Xiao-nrf52',catalogRole:'repeater',version:'v1.17.0'};filterCatalog();selectDetectedBoard();");
+  assert.equal(ui.elements.get('hardware').value,'Seeed Studio Xiao nRF52 WIO');assert.equal(ui.elements.get('provider').value,'Keymind Cascade');assert.equal(ui.elements.get('artifact').value,'');assert.match(ui.elements.get('automatic-summary').textContent,/No write-only application update/);assert.equal(ui.elements.get('prepare').disabled,true);
+  ui.elements.get('provider').value='MeshCore';await ui.elements.get('provider').onchange();
+  assert.equal(ui.elements.get('provider').value,'MeshCore');assert.equal(ui.elements.get('hardware').value,'Seeed Studio Xiao nRF52 WIO');assert.equal(ui.elements.get('artifact').value,'1');assert.deepEqual(ui.calls,[]);
+});
 
 test('manual board changes refresh the right-side summary even with automatic setup off',async()=>{
   const ui=workbench();await Promise.resolve();ui.context.inventory=[v4Item,xiaoRepeaterItem({version:'v1.20.0'})];
@@ -166,20 +204,20 @@ test('a new DFU radio after a known automatic board disconnect clears that old b
 
 test('switching connected radios refreshes hardware provider role and artifact for the newly read node',async()=>{
   const ui=workbench({productionDefaults:true});await Promise.resolve();serialMock(ui);
-  const first=headlessV4Item(),second=xiaoRepeaterItem();ui.context.inventory=[first,second];ui.evaluate('state.items=inventory;filterCatalog();');
+  const first=headlessV4Item(),second=xiaoRepeaterItem({provider:'Keymind Cascade'});ui.context.inventory=[first,second];ui.evaluate('state.items=inventory;filterCatalog();');
   let device={model:'Heltec V4.2 none detected',role:'common-cli',catalogRole:'repeater',version:'v1.18.0.2-keymind-cascade'};
   ui.context.detectMeshCore=async()=>device;await ui.elements.get('select-port').onclick();assert.equal(ui.elements.get('hardware').value,'Heltec v4');assert.equal(ui.elements.get('artifact').value,'0');
   const secondPort={getInfo:()=>({usbVendorId:0x2886,usbProductId:0x8044})};ui.context.navigator.serial.requestPort=async()=>{ui.calls.push('chooser');return secondPort;};
   device={model:'Seeed Xiao-nrf52',name:'Second radio',role:'common-cli',catalogRole:'repeater',version:'v1.17.0'};
   await ui.elements.get('select-port').onclick();
-  assert.equal(ui.evaluate('state.port'),secondPort);assert.equal(ui.elements.get('hardware').value,second.hardware);assert.equal(ui.elements.get('provider').value,'MeshCore');assert.equal(ui.elements.get('role').value,'repeater');assert.equal(ui.elements.get('version').value,second.version);assert.equal(ui.elements.get('artifact').value,'1');
+  assert.equal(ui.evaluate('state.port'),secondPort);assert.equal(ui.elements.get('hardware').value,second.hardware);assert.equal(ui.elements.get('provider').value,'Keymind Cascade');assert.equal(ui.elements.get('role').value,'repeater');assert.equal(ui.elements.get('version').value,second.version);assert.equal(ui.elements.get('artifact').value,'1');
   const summary=ui.elements.get('automatic-summary').textContent;assert.ok(summary.includes(second.name));assert.ok(!summary.includes(first.name));assert.doesNotMatch(summary,/downgrade/i);
   assert.equal(ui.evaluate('state.device.architecture'),'nrf52');assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(ui.calls,['chooser','open','close','chooser','open','close']);
 });
 
 test('a manual hardware override with automatic setup on immediately refreshes the chosen target',async()=>{
   const ui=workbench({productionDefaults:true});await Promise.resolve();ui.context.inventory=[v4Item,xiaoRepeaterItem()];
-  ui.evaluate("state.items=inventory;state.device={model:'Heltec V4 OLED',catalogRole:'repeater',version:'v1.17.0'};filterCatalog();selectDetectedBoard();");
+  ui.evaluate("state.items=inventory;state.manualSelections={provider:'MeshCore'};state.device={model:'Heltec V4 OLED',catalogRole:'repeater',version:'v1.17.0'};filterCatalog();selectDetectedBoard();");
   assert.equal(ui.elements.get('artifact').value,'0');
   ui.elements.get('hardware').value='Seeed Studio Xiao nRF52 WIO';await ui.elements.get('hardware').onchange();
   assert.equal(ui.elements.get('hardware').value,'Seeed Studio Xiao nRF52 WIO');assert.equal(ui.elements.get('artifact').value,'1');assert.ok(ui.elements.get('automatic-summary').textContent.includes(ui.context.inventory[1].name));assert.ok(!ui.elements.get('automatic-summary').textContent.includes(v4Item.name));assert.deepEqual(ui.calls,[]);
@@ -212,7 +250,7 @@ test('handoff recovery migration and verification re-selection retain the exact 
 });
 
 test('automatic selection invalidates an older merged/custom image and its ready write proof',async()=>{
-  const ui=workbench({productionDefaults:true});await Promise.resolve();ui.context.inventory=[v4Item];ui.evaluate("state.items=inventory;state.device={catalogRole:'repeater',version:'v1.14.1'};state.pkg={name:'old-merged.bin',destructive:true};state.item={name:'old-merged.bin',url:'https://example.test/old.bin'};state.plan={written:true};filterCatalog();");ui.elements.get('hardware').value='Heltec v4';ui.evaluate('applyAutomaticSelections();');assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.match(ui.elements.get('automatic-summary').textContent,/Write-only/);assert.equal(ui.elements.get('artifact').value,'0');
+  const ui=workbench({productionDefaults:true});await Promise.resolve();ui.context.inventory=[{...v4Item,provider:'Keymind Cascade'}];ui.evaluate("state.items=inventory;state.device={catalogRole:'repeater',version:'v1.14.1'};state.pkg={name:'old-merged.bin',destructive:true};state.item={name:'old-merged.bin',url:'https://example.test/old.bin'};state.plan={written:true};filterCatalog();");ui.elements.get('hardware').value='Heltec v4';ui.evaluate('applyAutomaticSelections();');assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.match(ui.elements.get('automatic-summary').textContent,/Write-only/);assert.equal(ui.elements.get('artifact').value,'0');
 });
 
 test('unsupported explicit automatic preferences stay refused and do not display stale dropdown values',async()=>{

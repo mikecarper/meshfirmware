@@ -16,8 +16,10 @@ Start with a recoverable bench radio, not a remote USB-only node.
 ## Use
 
 1. Open the page in desktop Chrome/Edge and choose a USB port. **Automatic setup**
-   is on by default: read the running model/role, select matching hardware, keep
-   the detected provider and choose its newest write-only application update.
+   is on by default: read the running model/role, select matching hardware,
+   default to Keymind Cascade and choose its newest write-only application update.
+   MeshCore (stock) remains an explicit provider choice; an unavailable Keymind
+   build never silently falls back to stock. Saved manual provider choices still work.
    It never chooses a wipe, bootloader or ambiguous screen/storage
    variant. No USB enumeration, reset or flash occurs on page load. Only the
    selected port is queried after permission. Turn off Automatic setup for manual use.
@@ -31,7 +33,11 @@ Start with a recoverable bench radio, not a remote USB-only node.
    still apply; downgrading does not bypass any safety check.
 2. Check the automatic summary. **Change provider, role or firmware build** and
    **Connection overrides** retain manual controls. Explicit choices are not
-   silently substituted. Changing hardware or firmware filters refreshes the
+   silently substituted. Choose **Keymind Cascade** or **MeshCore (stock)**;
+   the old separate Logging provider is folded into Keymind Cascade because
+   current releases use the same binaries, with runtime logging where supported.
+   Duplicate files are removed, distinct historical builds remain available,
+   and saved Logging-provider selections still work. Changing hardware or firmware filters refreshes the
    summary and available files; changing the USB port clears the previous
    automatic board choice before reading the new node. A failed or unknown
    probe cannot leave the old automatic image ready. Changing **Hardware**

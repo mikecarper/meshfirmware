@@ -2,7 +2,7 @@ import './style.css';
 import { inspectFirmware, checkedZip, hash, fail, text } from './firmware.js';
 import { SerialLink, flashNrf, touch1200 } from './serial.js';
 import { EspSession, validateEspWriteRecovery } from './esp.js';
-import { getCatalog, httpsUrl, compareVersions } from './catalog.js';
+import { getCatalog, catalogProvider, httpsUrl, compareVersions } from './catalog.js';
 import { MeshCore, backupCommonCli, verifyBackup, parseBackup, enterCompanionBinary, detectMeshCore, backupSummary } from './meshcore.js';
 import { exportNativeBackup } from './backup-native.js';
 import { assessBoard, rakFamily, endfIdentity } from './board-safety.js';
@@ -159,6 +159,8 @@ function resetAutomaticBoardSelection(message) {
   clearAutomaticSha();
   for(const id of ['provider','hardware','role','version'])$(id).value='';
   filterCatalog();
+  const provider=state.manualSelections.provider;
+  if(provider&&[...$('provider').options].some(o=>o.value===provider)){$('provider').value=provider;filterCatalog('provider');}
   $('automatic-summary').textContent=message+(manualFile?` Manual file ${manualFile} remains loaded; review it explicitly against this radio.`:'');
 }
 function updateConnectionChoice(){
@@ -330,7 +332,14 @@ async function loadFirmware(name, bytes, item = null) {
   $('expert-fields').hidden = !pkg.expert;
   progress(0,'Image validated locally. Inspect the device before confirmation.'); notice('Firmware loaded. No device data has been written.');
 }
-function options(id, values, placeholder) { const select = $(id), prior = select.value; select.replaceChildren(new Option(placeholder,''),...Array.from(new Set(values)).filter(Boolean).sort(id==='version'?compareVersions:undefined).map(v => new Option(v,v))); if ([...select.options].some(o => o.value === prior)) select.value = prior; }
+function options(id, values, placeholder) {
+  const select = $(id), prior = select.value;
+  // A detected physical target remains visible even when the chosen provider
+  // has no build for it. In that case no firmware artifact is selected.
+  if(id==='hardware'&&state.detectedHardware)values=[...values,state.detectedHardware];
+  select.replaceChildren(new Option(placeholder,''),...Array.from(new Set(values)).filter(Boolean).sort(id==='version'?compareVersions:undefined).map(v => new Option(id==='provider'&&v==='MeshCore'?'MeshCore (stock)':v,v)));
+  if ([...select.options].some(o => o.value === prior)) select.value = prior;
+}
 function filterCatalog(changed = 'project') {
   let items = state.items.filter(i => i.project === $('project').value);
   for (const id of ['provider','hardware','role','version']) { if (['project','provider','hardware','role','version'].indexOf(id) > ['project','provider','hardware','role','version'].indexOf(changed)) options(id,items.map(i => i[id]),`All ${id === 'hardware' ? 'boards' : id + 's'}`); if ($(id).value) items = items.filter(i => i[id] === $(id).value); }
@@ -372,7 +381,8 @@ $('select-port').onclick = () => operation(async () => {
   const manualDfuSelection=dfuIds.has(portId(port))&&!state.device&&!state.detectedHardware&&!state.boardDetected;
   await closeEsp();state.backupApproved=null;
   if(!continuation){
-    state.device=null;state.detectedHardware=null;state.manualSelections={};state.backup=null;$('backup-summary').textContent='';
+    const provider=state.manualSelections.provider;
+    state.device=null;state.detectedHardware=null;state.manualSelections=provider?{provider}:{};state.backup=null;$('backup-summary').textContent='';
     if($('auto-detect-board').checked&&!manualDfuSelection)resetAutomaticBoardSelection('Reading the selected USB device. Previous automatic firmware choices were cleared; no image is ready to flash.');
     else updateFirmwareSelectionSummary({reason:'New USB port selected. Review the manual firmware target against this radio.'});
   }
@@ -622,5 +632,13 @@ if ('serial' in navigator) {
   $('browser-status').textContent = 'Web Serial available';
   navigator.serial.addEventListener('disconnect',event => { if (event.target === state.port || event.port === state.port) { state.port=null;state.generation++; state.plan = null;state.boardDetected=false;state.recoveryManual=false;state.recoveryDetectionRequested=false;$('recovery-profile').value='';$('installed-identity').value='';$('recovery-detection').textContent='';$('board-detection').textContent='Selected port disconnected; detect again after selecting the same radio.';if(!state.handoff&&!state.recovery&&!state.migration){state.device=null;state.backupApproved=null;} $('port-status').textContent = 'Disconnected'; log('Selected USB port disconnected. No different port will be substituted.'); controls(); } });
 } else { $('browser-status').textContent = 'Web Serial unavailable'; notice('Use a browser with Web Serial support (typically desktop Chrome or Edge). Catalog browsing and local file inspection still work.',true); }
-getCatalog().then(catalog => { state.items = catalog.items;state.recoveryCatalog=catalog.recoveryCatalog||null;updateRecoveryChoices(); $('catalog-status').textContent = `${state.items.length.toLocaleString()} artifacts · snapshot ${new Date(catalog.generatedAt).toLocaleString()} · ${catalog.warnings.length} provider warnings${catalog.cached?' · cached':''}`;let saved={};try{saved=JSON.parse(localStorage.getItem('meshfirmware.selections')||'{}');}catch{}filterCatalog();for(const id of ['provider','hardware','role','version']){if([...$(id).options].some(o=>o.value===saved[id])){$(id).value=saved[id];filterCatalog(id);}}if(state.boardDetected&&state.device)selectDetectedBoard();else if(state.recoveryDetectionRequested&&!state.recoveryManual&&!state.migration&&!state.recovery&&!state.espRecovery&&(state.port||$('installed-identity').value.trim()))matchInstalledRecovery($('installed-identity').value.trim()); }).catch(error => { $('artifact').replaceChildren(new Option('Catalog unavailable · choose local firmware','')); $('catalog-status').textContent = error.message; controls(); });
+getCatalog().then(catalog => {
+  state.items=catalog.items;state.recoveryCatalog=catalog.recoveryCatalog||null;updateRecoveryChoices();
+  $('catalog-status').textContent=`${state.items.length.toLocaleString()} artifacts · snapshot ${new Date(catalog.generatedAt).toLocaleString()} · ${catalog.warnings.length} provider warnings${catalog.cached?' · cached':''}`;
+  let saved={};try{const value=JSON.parse(localStorage.getItem('meshfirmware.selections')||'{}');if(value&&typeof value==='object'&&!Array.isArray(value))saved=value;}catch{}
+  saved.provider=catalogProvider(saved.provider)||'Keymind Cascade';
+  filterCatalog();for(const id of ['provider','hardware','role','version'])if([...$(id).options].some(o=>o.value===saved[id])){$(id).value=saved[id];if(id==='provider')state.manualSelections.provider=saved[id];filterCatalog(id);}
+  if(state.boardDetected&&state.device)selectDetectedBoard();
+  else if(state.recoveryDetectionRequested&&!state.recoveryManual&&!state.migration&&!state.recovery&&!state.espRecovery&&(state.port||$('installed-identity').value.trim()))matchInstalledRecovery($('installed-identity').value.trim());
+}).catch(error=>{$('artifact').replaceChildren(new Option('Catalog unavailable · choose local firmware',''));$('catalog-status').textContent=error.message;controls();});
 controls();

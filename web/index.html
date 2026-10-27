@@ -33,7 +33,7 @@
         <details><summary>Full Companion text mode</summary><div class="inline-actions"><button id="binary-mode" class="secondary" data-lock>MeshCore text → binary</button></div><p class="hint">Use only for a running Full Companion in text mode. Binary handoff may turn USB logging off. nRF52 flashing uses its serial DFU port, not a mounted drive.</p></details>
       </section>
       <section class="card firmware-card"><div class="card-title"><span class="step">02</span><div><h2>Your firmware</h2><p>Official releases, Keymind, or your own build.</p></div></div>
-        <p id="automatic-summary" class="notice" aria-live="polite">Choose a USB port. The page will keep the detected role/provider and select the latest compatible write-only update where unambiguous.</p>
+        <p id="automatic-summary" class="notice" aria-live="polite">Choose a USB port. The page will keep the detected role and default to the latest compatible Keymind Cascade update where unambiguous. MeshCore (stock) is available as a manual provider choice.</p>
         <input type="hidden" id="project" value="MeshCore"><details id="firmware-choices"><summary>Change provider, role or firmware build</summary><label for="provider">Provider</label><select id="provider" data-lock><option value="">All providers</option></select>
         <label for="hardware">Hardware</label><select id="hardware" data-lock><option value="">All boards</option></select>
         <div class="two-fields"><div><label for="role">Role</label><select id="role" data-lock><option value="">All roles</option></select></div><div><label for="version">Version</label><select id="version" data-lock><option value="">All versions</option></select></div></div>

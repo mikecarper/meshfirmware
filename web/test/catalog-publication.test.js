@@ -23,6 +23,14 @@ test('publication cannot retain old or unverified bootloader recommendations tha
   assert.throws(()=>checkCatalogRoutes(snapshot(legacy)),/verified fork manifest/);
 });
 
+test('publication handles duplicate provider aliases without skipping later bootloader or raw-URL checks',()=>{
+  const keymind={...item,provider:'Keymind Cascade'},duplicate={...keymind,provider:'Keymind Cascade Logging'},next={...keymind,hardware:'Second board',name:'second.zip',url:item.url.replace('board.zip','second.zip')};
+  const raw={...snapshot(item),items:[keymind,duplicate,next]},before=structuredClone(raw);
+  assert.deepEqual(checkCatalogRoutes(raw),{artifacts:3,utilities:3,officialReleases:3});assert.deepEqual(raw,before);
+  assert.throws(()=>checkCatalogRoutes({...raw,items:[keymind,duplicate,{...next,bootloader:['https://example.test/unverified-boot.zip']}]}),/verified fork manifest/);
+  assert.throws(()=>checkCatalogRoutes({...raw,items:[keymind,duplicate,{...next,url:'https://github.com'+route}]}),/owner\/repository/);
+});
+
 test('invalid optional recovery metadata cannot be published and cannot poison otherwise valid application entries',()=>{
   const raw={...snapshot(item),recoveryCatalog:{schemaVersion:1}},checked=validateCatalog(raw);
   assert.equal(checked.items[0].url,item.url);assert.equal(checked.recoveryCatalog,null);assert.ok(checked.warnings.some(w=>w.includes('Recovery catalog could not be verified')));

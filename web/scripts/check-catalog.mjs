@@ -4,7 +4,8 @@ import { readFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { validateCatalog, validateFirmwareUrl } from '../src/catalog.js';
+import { combineProviderItems, inheritOfficialUtilities, validateCatalog, validateFirmwareUrl } from '../src/catalog.js';
+import { applyBootloaderCatalog } from '../src/bootloader-catalog.js';
 export function checkCatalogRoutes(catalog) {
   assert.ok(Array.isArray(catalog?.items),'Invalid raw catalog item inventory.');
   let artifacts=0,utilities=0,officialReleases=0;
@@ -19,9 +20,13 @@ export function checkCatalogRoutes(catalog) {
   assert.ok(artifacts>0,'Empty catalog cannot replace a published catalog.');
   const checked=validateCatalog(catalog);
   if(catalog.recoveryCatalog)assert.deepEqual(catalog.recoveryCatalog,checked.recoveryCatalog,'Published recovery metadata must match its verified stable-release bundle.');
-  for(let i=0;i<catalog.items.length;i++)if(catalog.items[i].architecture==='nrf52'){
-    assert.deepEqual(catalog.items[i].bootloader||[],checked.items[i].bootloader||[],'Published nRF52 bootloader recommendations must match the verified fork manifest.');
-    assert.deepEqual(catalog.items[i].bootloaderInfo,checked.items[i].bootloaderInfo,'Published nRF52 bootloader hashes and profiles must match the verified fork manifest.');
+  // Compare every distinct raw entry with its own expected recommendations,
+  // before final browser deduplication can change inventory indexes.
+  const inventory=combineProviderItems(catalog.items);
+  const expected=applyBootloaderCatalog(inheritOfficialUtilities(inventory),checked.bootloaderCatalog);
+  for(let i=0;i<inventory.length;i++)if(inventory[i].architecture==='nrf52'){
+    assert.deepEqual(inventory[i].bootloader||[],expected[i].bootloader||[],'Published nRF52 bootloader recommendations must match the verified fork manifest.');
+    assert.deepEqual(inventory[i].bootloaderInfo,expected[i].bootloaderInfo,'Published nRF52 bootloader hashes and profiles must match the verified fork manifest.');
   }
   return {artifacts,utilities,officialReleases};
 }

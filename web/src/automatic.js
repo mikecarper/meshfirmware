@@ -1,6 +1,6 @@
 // Selection suggestions only. This module never fetches firmware, opens USB,
 // resets a device, or authorizes a write. Byte/chip/partition checks still run.
-import {compareVersions} from './catalog.js';
+import {catalogProvider,catalogItemKey,compareVersions} from './catalog.js';
 
 const applicationRoles=new Set(['companionFull','companionBle','companionUsb','repeater','roomServer','sensor','kissRadio','gui','guiSD']);
 const companionRoles=new Set(['companionFull','companionBle','companionUsb']);
@@ -18,11 +18,6 @@ function olderThanRunning(candidate,running){
 export function firmwareVersionWarning(runningVersion,selectedVersion){
   if(!olderThanRunning(selectedVersion,runningVersion))return '';
   return `Downgrade warning: selected firmware ${text(selectedVersion)} is older than the running ${text(runningVersion)}. Older firmware may not understand current settings or partition layouts. Keep a backup and review compatibility before flashing. Downgrading is allowed after the normal checks and confirmation.`;
-}
-function defaultProvider(device){
-  const version=text(device?.version);
-  if(/\bkeymind[\s_-]+cascade[\s_-]+logging\b/i.test(version))return 'Keymind Cascade Logging';
-  return /\bkeymind[\s_-]+cascade\b/i.test(version)?'Keymind Cascade':'MeshCore';
 }
 function inferredRole(device){
   if(applicationRoles.has(device?.catalogRole))return device.catalogRole;
@@ -59,18 +54,18 @@ function reviewedModelHardware(device,selections){
   // including canonical Full Companion (heltec_v4_2_v4_3_...),
   // to hardware=heltec_v4.
   // This is exact model evidence only, never a friendly-name/filename guess.
-  if(selections.hardware!=='Heltec v4'||!['Keymind Cascade','Keymind Cascade Logging'].includes(selections.provider)||!['repeater','roomServer','sensor','companionFull'].includes(selections.role))return '';
+  if(selections.hardware!=='Heltec v4'||selections.provider!=='Keymind Cascade'||!['repeater','roomServer','sensor','companionFull'].includes(selections.role))return '';
   return /^(?:Heltec V4(?:\.[23])? OLED|Heltec V4\.[23] none detected)$/i.test(text(device?.model))?'heltec_v4':'';
 }
 
 export function chooseFirmware({items=[],device={},hardware='',provider='',role='',version=''}={}){
-  const selections={provider:text(provider)||defaultProvider(device),hardware:text(hardware),role:text(role)||inferredRole(device),version:text(version)};
+  const selections={provider:catalogProvider(text(provider))||'Keymind Cascade',hardware:text(hardware),role:text(role)||inferredRole(device),version:text(version)};
   const result=(reason,candidates=[],artifactIndex=null)=>{
     const warning=artifactIndex===null?'':firmwareVersionWarning(device?.version,items[artifactIndex]?.version);
     return {selections,artifactIndex,candidates,reason,warning,downgrade:!!warning};
   };
   if(!selections.hardware)return result('Detect or choose exact hardware before selecting an application update.');
-  let candidates=items.map((item,index)=>({item,index})).filter(({item})=>isApplicationUpdate(item)&&item.hardware===selections.hardware&&item.provider===selections.provider);
+  let candidates=items.map((item,index)=>({item,index})).filter(({item})=>isApplicationUpdate(item)&&item.hardware===selections.hardware&&catalogProvider(item.provider)===selections.provider);
   if(!candidates.length)return result('No write-only application update matches this exact hardware/provider. Choose another provider or an explicit firmware file; no wipe or bootloader was substituted.');
   if(!selections.role){
     const allowed=device?.role==='companion'?companionRoles:device?.role==='common-cli'?commonRoles:null;
@@ -96,7 +91,7 @@ export function chooseFirmware({items=[],device={},hardware='',provider='',role=
   }
   if(!candidates.length)return result('No matching version is available for this exact selection. Choose another version or an explicit firmware file.');
   const equivalents=new Map();
-  for(const candidate of candidates){const item=candidate.item,key=JSON.stringify([item.url,item.name,item.architecture,item.action,item.role,item.sha256||null]);if(!equivalents.has(key))equivalents.set(key,candidate);}
+  for(const candidate of candidates){const key=catalogItemKey(candidate.item);if(!equivalents.has(key))equivalents.set(key,candidate);}
   candidates=[...equivalents.values()];
   if(candidates.length!==1)return result('Multiple exact-board builds remain (for example a different display, storage or Full profile). Choose the exact artifact or supply its exact running build target; no first-match guess was made.',candidates.map(({index})=>index));
   return result('Newest matching write-only application selected. Firmware bytes, chip identity and partition compatibility still require inspection; nothing has been loaded or written.',[candidates[0].index],candidates[0].index);

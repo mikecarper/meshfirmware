@@ -46,7 +46,7 @@ test('fresh provider firmware can use validated cached official metadata during 
   for(const item of result.items.filter(item=>item.provider!=='MeshCore')){
     assert.deepEqual(item.erase,[erase]);assert.deepEqual(item.bootloader,[]);assert.ok(item.bootloaderUnavailable);assert.equal(item.url,provider.url);assert.equal(item.role,'companionFull');
   }
-  assert.equal(result.items.filter(item=>item.provider!=='MeshCore').length,2);
+  assert.equal(result.items.filter(item=>item.provider!=='MeshCore').length,1);
 });
 
 test('fully cached provider firmware also gains the official utility fallback at build time',async()=>{
