@@ -8,6 +8,8 @@ const unique=values=>[...new Set(values)].sort();
 // are catalog hardware display names, NOT a fuzzy name-search vocabulary.
 const modelAliases=[
   ['Heltec V4 OLED',['Heltec v4']],
+  ['Heltec V4.2 OLED',['Heltec v4']],
+  ['Heltec V4.3 OLED',['Heltec v4']],
   ['Station G3 ESP32',['UnitEng/BQ Voyage Station G3']],
   ['Station G2',['UnitEng Station G2']],
   ['Seeed Tracker T1000-E',['Seeed Studio SenseCAP T1000-E']],

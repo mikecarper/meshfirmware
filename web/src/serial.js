@@ -78,13 +78,31 @@ export async function flashNrf(link, pkg, onProgress, {delay = sleep, now = Date
   await delay(eraseWait + Math.ceil(pages * 204.8)); onProgress(1,'DFU transfer completed. Application / installed bootloader remains unverified.');
 }
 
+// Arduino TinyUSB's native-CDC reboot state machine is 2 -> 3 -> 1 -> 0
+// (DTR is bit 0, RTS bit 1). Windows usbser.sys needs DTR re-applied after
+// each combined signal update to flush the control request reliably. Keep
+// 115200 throughout: a 1200-baud SET_LINE_CODING can leave older S3 USB
+// endpoints stalled. This requests handoff only; the caller must explicitly
+// select the same radio's ROM port and independently verify its chip identity.
+export async function enterTinyUsbBootloader(port,{delay=sleep}={}) {
+  try {
+    await port.open({baudRate:115200,flowControl:'none'});
+    for(const [dataTerminalReady,requestToSend] of [[false,false],[false,true],[true,true],[true,false],[false,false]]) {
+      await port.setSignals({dataTerminalReady,requestToSend});
+      await port.setSignals({dataTerminalReady});
+      await delay(100);
+    }
+  } finally { await port.close().catch(() => {}); }
+}
+
 // User gesture only. A re-enumerated port is never silently substituted.
+// Keep the public entry point for callers, but only nRF52 uses a baud touch.
 export async function touch1200(port, kind) {
+  if(!['nrf52','tinyusb'].includes(kind))fail('Choose an explicit nRF52 or TinyUSB bootloader handoff.');
+  if(kind==='tinyusb')return enterTinyUsbBootloader(port);
   try {
     await port.open({ baudRate: 1200 });
-    if (kind === 'nrf52') {
-      await port.setSignals({ dataTerminalReady: true, requestToSend: false }); await sleep(100);
-      await port.setSignals({ dataTerminalReady: false, requestToSend: false });
-    } else await sleep(100);
+    await port.setSignals({ dataTerminalReady: true, requestToSend: false }); await sleep(100);
+    await port.setSignals({ dataTerminalReady: false, requestToSend: false });
   } finally { await port.close().catch(() => {}); }
 }

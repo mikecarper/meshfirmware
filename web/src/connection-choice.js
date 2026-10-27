@@ -27,11 +27,11 @@ export function chooseConnection({usbInfo={},device=null,usbDescription='',alrea
   const tiny=/\bTinyUSB\b/i.test(description),jtag=/\b(?:USB[ -]JTAG[/ -](?:serial|debug)|USB\s+Serial[/ -]JTAG)\b/i.test(description);
   if(tiny&&jtag)return result(null,false,'conflict','Conflicting TinyUSB and USB-Serial/JTAG descriptor evidence; choose the connection method manually.');
   if(id.startsWith('303a:')&&jtag)return result('usb_reset',false,'usb-descriptor','The selected port descriptor identifies hardware USB-Serial/JTAG; use its qualified reset after backup.');
-  if((id.startsWith('303a:')||id==='2886:0059')&&tiny)return result('tinyusb',false,'usb-descriptor','The selected port descriptor identifies TinyUSB; offer its guarded 1200-baud handoff after backup.');
+  if((id.startsWith('303a:')||id==='2886:0059')&&tiny)return result('tinyusb',false,'usb-descriptor','The selected port descriptor identifies TinyUSB; offer its guarded control-line handoff at 115200 after backup.');
   // 303a:0002 can also be an ESP32-S2 ROM endpoint. Require a successful
   // application-model reply before classifying it as software USB CDC.
   // Hardware USB-Serial/JTAG has its fixed 303a:1001 identity instead.
-  if(architecture==='esp32'&&device?.model&&(id==='303a:0002'||id==='2886:0059'))return result('tinyusb',false,'application-usb',`The running ESP32 application answered on USB ${id}; use its software-CDC 1200-baud handoff after backup.`);
+  if(architecture==='esp32'&&device?.model&&(id==='303a:0002'||id==='2886:0059'))return result('tinyusb',false,'application-usb',`The running ESP32 application answered on USB ${id}; use its software-CDC control-line handoff at 115200 after backup.`);
   if(id==='303a:1001')return result(null,false,'shared-usb','USB 303a:1001 is shared by TinyUSB applications and hardware USB-Serial/JTAG. Web Serial cannot distinguish them from this ID or board model alone; choose manually unless an exact port descriptor is available.');
   return result(null,false,'unknown','No qualified automatic bootloader connection method was found. A missing application reply never proves ROM mode; choose the method manually.');
 }

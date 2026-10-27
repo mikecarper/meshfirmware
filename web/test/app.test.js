@@ -31,6 +31,10 @@ test('every UI id exists once and all wired controls have matching HTML',()=>{
   for(const match of source.matchAll(/\$\('([^']+)'\)/g))assert.ok(ids.includes(match[1]),match[1]);
 });
 
+test('reconnect guidance warns about VM USB capture without promising a timed return or an administrator CLI',()=>{
+  assert.match(html,/pause VMs configured for USB auto-capture/);assert.match(html,/do not assume it will be returned after 30 seconds/);assert.match(html,/No administrator CLI command is part of the browser workflow/);assert.match(html,/Never interrupt an active partition-migration bridge/);
+});
+
 const v4Item={project:'MeshCore',provider:'MeshCore',hardware:'Heltec v4',architecture:'esp32',role:'repeater',version:'v1.18.0',name:'heltec_v4_repeater-v1.18.0.bin',action:'flash-update',url:'https://example.test/v4.bin'};
 test('production defaults select connected old V4 role, latest update and TinyUSB without downloads or reset',async()=>{
   assert.match(html,/id="auto-detect-board" checked/);assert.match(html,/id="auto-backup"[^>]*checked/);assert.match(html,/id="auto-finish"[^>]*checked/);assert.match(html,/value="auto" selected/);

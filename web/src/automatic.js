@@ -47,6 +47,14 @@ function setupHardware(item){
   }
   return targets.size===1?targets:new Set();
 }
+function reviewedModelHardware(device,selections){
+  // HeltecV4Board::getManufacturerName() distinguishes OLED from TFT, and the
+  // reviewed Keymind setup manifests map the OLED repeater/room/sensor and
+  // canonical Full Companion (heltec_v4_2_v4_3_...) to hardware=heltec_v4.
+  // This is exact model evidence only, never a friendly-name/filename guess.
+  if(selections.hardware!=='Heltec v4'||!['Keymind Cascade','Keymind Cascade Logging'].includes(selections.provider)||!['repeater','roomServer','sensor','companionFull'].includes(selections.role))return '';
+  return /^Heltec V4(?:\.[23])? OLED$/i.test(text(device?.model))?'heltec_v4':'';
+}
 
 export function chooseFirmware({items=[],device={},hardware='',provider='',role='',version=''}={}){
   const selections={provider:text(provider)||defaultProvider(device),hardware:text(hardware),role:text(role)||inferredRole(device),version:text(version)};
@@ -62,7 +70,7 @@ export function chooseFirmware({items=[],device={},hardware='',provider='',role=
   }
   candidates=candidates.filter(({item})=>item.role===selections.role);
   if(!candidates.length)return result('No write-only application update matches the selected role. An unsupported explicit role is never replaced automatically.');
-  const exactTarget=text(device?.firmwareTarget||device?.exactTarget),hardwareId=text(device?.hardwareId);
+  const exactTarget=text(device?.firmwareTarget||device?.exactTarget),hardwareId=text(device?.hardwareId)||(!exactTarget?reviewedModelHardware(device,selections):'');
   if(exactTarget||hardwareId){
     candidates=candidates.filter(({item})=>{
       const setup=setupHardware(item),declared=item.bootloaderInfo?.hardwareId;

@@ -366,7 +366,7 @@ $('touch').onclick = () => operation(async () => {
   await ensureBackup();
   if (!await confirm('Enter USB bootloader?','This resets the selected application USB interface. A new port may appear.','Bluetooth may disconnect. Select the same physical device again after the touch.','ENTER BOOTLOADER')) return;
   await closeEsp();state.handoff=true; try { await touch1200(state.port,mode); } catch (error) { log(`The touch was interrupted (${error.message}). Delivery is uncertain; no second touch was sent.`); }
-  state.handoff=true;state.port = null; state.generation++; $('port-status').textContent = 'Select bootloader port'; $('device-name').textContent = 'USB handoff requested'; notice('Choose USB port again for the same device. Set ESP32 to already in ROM, or select the nRF52 DFU port.');
+  state.handoff=true;state.port = null; state.generation++; $('port-status').textContent = 'Select bootloader port'; $('device-name').textContent = 'USB handoff requested'; notice('Choose USB port again for the same device. Set ESP32 to already in ROM, or select the nRF52 DFU port. If a VM captures the reconnect, pause its USB auto-capture before retrying.');
   if (mode === 'tinyusb') $('transport-mode').value = 'no_reset';
 });
 $('probe').onclick = () => operation(detectSelectedBoard);
@@ -408,7 +408,7 @@ $('prepare').onclick = () => operation(async () => {
     await ensureBackup();
     if(!await confirm('Enter the detected USB bootloader?',state.device?.model||'Selected TinyUSB application','Backup was considered first. This resets only the selected radio, without flashing it. Then choose that SAME radio’s ROM port to continue.','ENTER BOOTLOADER'))return;
     state.handoff=true;try{await touch1200(state.port,'tinyusb');}catch(error){log(`Bootloader entry was interrupted (${error.message}); no second touch was sent.`);}
-    state.port=null;state.generation++;$('transport-mode').value='no_reset';$('already-bootloader').checked=true;$('port-status').textContent='Choose same ROM radio';notice('Bootloader entry requested. Choose the same radio’s ROM port; its connection strategy is already set. Then Prepare update verifies chip and partitions.');return;
+    state.port=null;state.generation++;$('transport-mode').value='no_reset';$('already-bootloader').checked=true;$('port-status').textContent='Choose same ROM radio';notice('Bootloader entry requested, not yet verified. Choose the same radio’s ROM port; its connection strategy is already set. Then Prepare update verifies chip and partitions. If the device disappears, pause VMs with USB auto-capture before retrying; do not assume a 30-second return.');return;
   }
   if(state.migration && !state.migration.uart && mode!=='no_reset') fail('Pending USB migration: use already in ROM / no reset. A reset could interrupt the bridge.');
   if(state.espRecovery&&mode!=='no_reset')fail('ESP32 write recovery must use the waiting ROM port without resetting it.');

@@ -35,7 +35,9 @@ Start with a recoverable bench radio, not a remote USB-only node.
    companion from CommonCLI. Reviewed native USB application reads assert DTR
    at 115200 so older V4 firmware answers; UART and DFU line behavior is unchanged.
    Connection selection handles qualified UART bridges, nRF52 and responding
-   TinyUSB applications. TinyUSB entry is offered after backup; re-select the
+   TinyUSB applications. TinyUSB entry uses the Arduino control-line sequence
+   at 115200, including the Windows DTR-refresh workaround, not a 1200-baud open.
+   nRF52 retains its 1200-baud touch. TinyUSB entry is offered after backup; re-select the
    same radio's ROM port and prepare again without choosing a reset strategy.
    Confirm that the downloaded archive was saved; partial/failed backups need
    separate acknowledgement. A backup-only button is also available.
@@ -63,6 +65,26 @@ application response never proves ROM mode. Reconnects still require permission.
 Reported firmware models can be wrong if the wrong firmware was installed;
 auto-selection is a convenience, not independent physical-board proof. Review
 the selected hardware. Existing payload, chip and board checks remain in force.
+
+### If USB disappears during bootloader entry
+
+Pause virtual machines configured for automatic USB capture, or disable the
+radio's VM auto-attach rule **before flashing**. The ROM/DFU interface can appear
+as a different USB device and be claimed by a guest. Do not assume the VM will
+return it after 30 seconds; return it to the host and explicitly select the same
+radio. The page cannot reclaim a VM-owned USB device or restart a Windows driver.
+Never pause/reset a radio in an active partition-migration bridge just because
+USB temporarily disappears; follow its verified completion/recovery workflow.
+
+Older Arduino TinyUSB firmware also has a reported Windows direct-root-port
+handoff issue. A USB hub or another socket routed through an internal hub may
+help ([Espressif issue](https://github.com/espressif/arduino-esp32/issues/10204)).
+On the tested V4, changing from a direct root port to a USB 2.0 socket with an
+internal hub, then using the Windows-safe control-line sequence, produced a
+verified ROM MAC without an administrator command. VM capture may also have
+affected earlier attempts; port routing alone is not proven to be the sole cause.
+The browser requires a fresh selected ROM session and chip identity before
+writing; no blind retry or 1200-baud fallback follows an uncertain handoff.
 
 ## Features and boundaries
 
