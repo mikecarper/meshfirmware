@@ -14,7 +14,7 @@
   </aside>
   <main>
     <header class="page-header" id="flasher">
-      <div class="page-heading"><h1>Flash firmware</h1><p id="step-guidance" role="status" aria-live="polite">Step 1: Choose your radio’s USB port. Then check the firmware before step 2.</p></div>
+      <div class="page-heading"><h1>Flash firmware</h1><p id="step-guidance" role="status" aria-live="polite">Step 1: Choose your radio’s USB port. Then choose Update or Erase &amp; new install in step 2.</p></div>
       <div class="connect-controls"><button id="select-port" class="primary step-button" aria-label="Step 1: Choose USB port" data-lock><span class="action-number" aria-hidden="true">1</span><span class="action-label">Choose USB port</span><span class="action-icon" aria-hidden="true">↗</span></button><span id="browser-status" class="tag">Checking Web Serial…</span></div>
     </header>
     <div id="notice" class="notice" role="status" aria-live="polite">Choose a USB port to detect your board. Nothing is flashed automatically.</div>
@@ -23,19 +23,19 @@
       <div class="device-display"><svg viewBox="0 0 64 64" aria-hidden="true"><rect x="18" y="9" width="28" height="46" rx="5"/><path d="M26 9V4m12 5V4M26 55v5m12-5v5M18 22H9m9 12H9m37-12h9M46 34h9"/><rect x="25" y="23" width="14" height="14" rx="2"/></svg><div><strong id="device-name">No USB port selected</strong><small id="device-meta">Use a data-capable USB cable. Board and role are detected after connecting.</small></div><span class="tag" id="port-status">Not connected</span></div>
       <input type="hidden" id="project" value="MeshCore">
       <details id="firmware-choices" class="primary-inputs" open>
-        <summary>Check your firmware before step 2</summary>
+        <summary>Check your firmware and installation mode</summary>
         <div class="firmware-fields">
           <div><label for="provider">Firmware</label><select id="provider" data-lock><option value="">All providers</option></select></div>
           <div><label for="hardware">Hardware</label><select id="hardware" data-lock><option value="">All boards</option></select></div>
           <div><label for="role">Role</label><select id="role" data-lock><option value="">All roles</option></select></div>
           <div><label for="version">Version</label><select id="version" data-lock><option value="">All versions</option></select></div>
         </div>
-        <fieldset id="install-mode-switch" class="mode-switch"><legend>Installation</legend><div class="mode-options"><label><input type="radio" id="install-mode-update" name="install-mode" value="update" checked data-lock> Update</label><label><input type="radio" id="install-mode-install" name="install-mode" value="install" data-lock> Erase &amp; new install</label></div></fieldset>
+        <fieldset id="install-mode-switch" class="mode-switch" aria-describedby="install-mode-hint"><legend><span class="sr-only">Step 2: </span>Installation</legend><div class="mode-step"><span class="action-number" aria-hidden="true">2</span><div class="mode-options"><label><input type="radio" id="install-mode-update" name="install-mode" value="update" checked data-lock> Update</label><label><input type="radio" id="install-mode-install" name="install-mode" value="install" data-lock> Erase &amp; new install</label></div></div></fieldset>
         <div class="artifact-field"><label for="artifact">Firmware build</label><select id="artifact" data-lock><option value="">Loading public catalog…</option></select></div>
       </details>
       <p id="install-mode-hint" class="hint" role="status" aria-live="polite">Update writes the application without a whole-chip erase. Required partition migration is checked separately.</p>
       <div id="expert-fields" hidden><label for="expert-offset">Expert component write offset · required</label><input id="expert-offset" placeholder="For example 0x1000 — use your board's documented offset" spellcheck="false" data-lock><p class="hint">Bootloader/component writes can make USB recovery unavailable. This is not an application update. No offset or compatibility is inferred from the filename; confirmation includes the exact address.</p></div>
-      <div class="review-actions"><button id="prepare" class="secondary step-button" aria-label="Step 2: Backup and prepare update" data-lock><span class="action-number" aria-hidden="true">2</span><span id="prepare-label" class="action-label">Backup &amp; prepare update</span></button><button id="flash" class="primary step-button" aria-label="Step 3: Review and flash firmware" disabled data-lock><span class="action-number" aria-hidden="true">3</span><span class="action-label">Review &amp; flash</span><span class="action-icon" aria-hidden="true">→</span></button><p>Step 2 offers a backup; skipping needs your acknowledgement.<br>Step 3 asks once for supported expansion + final firmware, then completes both automatically. A new USB interface may still need step 1.</p></div>
+      <div class="review-actions"><button id="prepare" class="primary step-button" aria-label="Step 3: Backup and prepare update" data-lock><span class="action-number" aria-hidden="true">3</span><span id="prepare-label" class="action-label">Backup &amp; prepare update</span></button><button id="flash" class="primary step-button" aria-label="Step 4: Review and flash firmware" disabled data-lock><span class="action-number" aria-hidden="true">4</span><span class="action-label">Review &amp; flash</span><span class="action-icon" aria-hidden="true">→</span></button><p>Step 3 offers a backup; skipping needs your acknowledgement.<br>Step 4 asks once for supported expansion + final firmware, then completes both automatically. A new USB interface may still need step 1.</p></div>
       <button id="stop-migration-auto" class="secondary" hidden>Stop automatic continuation</button>
       <p id="automatic-summary" class="selection-summary" aria-live="polite">Keymind Cascade is selected by default. Connecting selects matching hardware and the newest compatible update when unambiguous.</p>
       <p id="catalog-detail" class="hint"></p>
@@ -77,7 +77,15 @@
     </details>
 
     <details class="card disclosure" id="backups"><summary>Backup &amp; restore</summary><div class="disclosure-body backup-options"><p class="hint">Export settings without flashing, or restore to the same board or deliberately move to another.</p>
-      <details><summary>Backup interface override · normally automatic</summary><label for="backup-role">MeshCore USB interface</label><select id="backup-role" data-lock><option value="auto">Auto-detect companion / CommonCLI</option><option value="companion">Binary companion · identity, channels, contacts + settings</option><option value="common-cli">Repeater / room CommonCLI · partial text capture</option></select></details><div class="inline-actions"><button id="backup" class="secondary" data-lock>Create &amp; download backup</button><label class="button secondary" for="backup-file">Choose backup to restore<input type="file" id="backup-file" accept=".json" data-lock></label></div><p id="backup-summary" class="hint">Backups contain private identity and channel secrets. They are not full flash images and cannot be captured in ROM/DFU mode. New exports use the native script JSON format; old browser JSON and existing script JSON are accepted.</p><div class="inline-checks"><label><input type="checkbox" id="new-hardware" data-lock> Moving to different hardware</label><label><input type="checkbox" id="replace-identity" data-lock> Explicitly replace the target identity</label></div><button id="restore" class="secondary" disabled data-lock>Review &amp; restore backup</button>
+      <details><summary>Backup interface override · normally automatic</summary><label for="backup-role">MeshCore USB interface</label><select id="backup-role" data-lock><option value="auto">Auto-detect companion / CommonCLI</option><option value="companion">Binary companion · identity, channels, contacts + settings</option><option value="common-cli">Repeater / room CommonCLI · partial text capture</option></select></details><div class="inline-actions"><button id="backup" class="secondary" data-lock>Create &amp; download backup</button><label class="button secondary" for="backup-file">Choose backup to restore<input type="file" id="backup-file" accept=".json" data-lock></label></div><p id="backup-summary" class="hint">Backups contain private identity and channel secrets. They are not full flash images and cannot be captured in ROM/DFU mode. New exports use the native script JSON format; old browser JSON and existing script JSON are accepted.</p>
+      <div id="backup-json-view" class="backup-json-view" hidden>
+        <label for="backup-json">Captured backup JSON · copy and save privately</label>
+        <p id="backup-json-warning" class="hint">May contain private identity and channel secrets. This copy stays in page memory only; it is not uploaded or saved in browser storage. Copy it only to a trusted private location.</p>
+        <textarea id="backup-json" class="backup-json" rows="10" readonly spellcheck="false" autocomplete="off" aria-describedby="backup-json-warning"></textarea>
+        <div class="inline-actions"><button id="copy-backup-json" class="secondary" type="button">Copy JSON</button><button id="clear-backup-json" class="secondary" type="button">Clear text</button></div>
+        <p id="backup-json-status" class="hint" role="status" aria-live="polite"></p>
+      </div>
+      <div class="inline-checks"><label><input type="checkbox" id="new-hardware" data-lock> Moving to different hardware</label><label><input type="checkbox" id="replace-identity" data-lock> Explicitly replace the target identity</label></div><button id="restore" class="secondary" disabled data-lock>Review &amp; restore backup</button>
     </div></details>
     <details class="card disclosure" id="console"><summary>Serial console &amp; operation log</summary><div class="disclosure-body"><div class="card-title"><p>USB commands and operation output. Not stored or uploaded.</p><button id="clear-log" class="text-link">Clear</button></div><pre id="log" aria-label="Serial and operation log">Mesh Firmware workbench ready.
 No hardware operations have been performed.</pre><div class="console-input"><label class="sr-only" for="command">Serial command</label><input id="command" placeholder="version" data-lock><button id="send-command" class="secondary" data-lock>Send command</button></div></div></details>
@@ -85,7 +93,15 @@ No hardware operations have been performed.</pre><div class="console-input"><lab
     <footer><span>Hardware preview · Use a recoverable bench radio.</span><a href="https://github.com/mikecarper/meshfirmware" target="_blank" rel="noopener noreferrer">Source &amp; documentation ↗</a></footer>
   </main>
   <dialog id="confirm-dialog"><form method="dialog"><div class="eyebrow">EXPLICIT AUTHORIZATION</div><h2 id="confirm-title">Confirm operation</h2><p id="confirm-detail"></p><p id="confirm-warning" class="notice"></p><label for="confirm-token">Type <strong id="token-label"></strong> to continue</label><input id="confirm-token" autocomplete="off" spellcheck="false"><div class="inline-actions"><button value="cancel" class="secondary">Cancel</button><button id="confirm-submit" value="confirm" class="danger" disabled>Confirm operation</button></div></form></dialog>
-  <dialog id="question-dialog"><form method="dialog"><h2 id="question-title"></h2><p id="question-detail"></p><div id="question-actions" class="inline-actions"></div></form></dialog>
+  <dialog id="question-dialog"><form method="dialog"><h2 id="question-title"></h2><p id="question-detail"></p>
+    <div id="question-backup-json-view" class="backup-json-view" hidden>
+      <label for="question-backup-json">Captured backup JSON · copy before continuing</label>
+      <p id="question-backup-json-warning" class="hint">May contain private identity and channel secrets. This copy stays in page memory only; it is not uploaded or saved in browser storage. Copy it only to a trusted private location.</p>
+      <textarea id="question-backup-json" class="backup-json" rows="10" readonly spellcheck="false" autocomplete="off" aria-describedby="question-backup-json-warning"></textarea>
+      <div class="inline-actions"><button id="copy-question-backup-json" class="secondary" type="button">Copy JSON</button><button id="clear-question-backup-json" class="secondary" type="button">Clear text</button></div>
+      <p id="question-backup-json-status" class="hint" role="status" aria-live="polite"></p>
+    </div>
+    <div id="question-actions" class="inline-actions"></div></form></dialog>
   <script type="module" src="/src/app.js"></script>
 </body>
 </html>

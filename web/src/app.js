@@ -18,6 +18,7 @@ const $ = id => document.getElementById(id);
 const state = { installMode:'update', port: null, pkg: null, esp: null, plan: null, generation: 0, busy: false, items: [], restore: null, directory: null, archive:null, archiveContext:null, automaticSha:null, automaticShaName:null, recoveryCatalog:null,loadedRecovery:null,planner:null, migration:null, downloaded:new Set(),item:null,device:null,manualSelections:{},detectedHardware:null,connection:null,boardDetected:false,recoveryManual:false,recoveryDetectionRequested:false,backupApproved:null,backup:null,recovery:null,espRecovery:null,verification:null,handoff:false };
 // This write authorization is deliberately never saved in browser storage.
 state.migrationApproval=null;state.approvalPort=null;state.approvalResetPort=null;state.approvalResumeRequested=null;
+state.backupTextGeneration=0;
 try { const pending=JSON.parse(localStorage.getItem('meshfirmware.pendingMigration') || 'null'); if(pending && /^[a-f0-9:]{17}$/i.test(pending.mac) && /^[a-f0-9]{64}$/.test(pending.sha256)) state.migration=pending; } catch { /* The worker still fails closed on any actual NVS migration state. */ }
 for(const [key,field] of [['meshfirmware.nrfRecovery','recovery'],['meshfirmware.verifyApplication','verification']])try{const saved=JSON.parse(localStorage.getItem(key)||'null');if(saved&&/^[a-f0-9]{64}$/.test(saved.sha256))state[field]=field==='recovery'?{...saved,phase:'reselect-dfu',eraseComplete:saved.eraseComplete===true}:saved;}catch{}
 try{const saved=JSON.parse(localStorage.getItem('meshfirmware.espRecovery')||'null');if(saved)state.espRecovery=validateEspWriteRecovery(saved);}catch{/* Invalid retry state never authorizes a write. */}
@@ -55,7 +56,7 @@ function syncInstallMode(){
   $('flash-action').value=state.installMode==='install'?'wipe':'update';
   const modeLabel=state.installMode==='install'?'install':'update';
   $('prepare-label').textContent=`Backup & prepare ${modeLabel}`;
-  $('prepare').setAttribute('aria-label',`Step 2: Backup and prepare ${modeLabel}`);
+  $('prepare').setAttribute('aria-label',`Step 3: Backup and prepare ${modeLabel}`);
   const locked=installModeLocked();for(const id of ['install-mode-update','install-mode-install'])$(id).disabled=state.busy||locked;
   const component=state.pkg&&(state.pkg.expert||(state.pkg.architecture==='nrf52'&&(state.pkg.kind!=='application'||state.pkg.erase)));
   $('install-mode-hint').textContent=locked?'Finish the pending USB handoff, recovery, migration or verification before changing the installation mode. The original image and recovery checks are retained.':component?'Advanced component/recovery file loaded. Its own board, offset and destructive-write checks still apply; this switch filters application builds.':state.installMode==='install'?'Erase & new install deletes node identity and settings. ESP32 uses a merged image; nRF52 validates an erase ZIP first, then writes the application after you reselect the same radio.':'Update writes the application without a whole-chip erase. Required partition migration is checked separately.';
@@ -93,11 +94,11 @@ function updateStepGuidance(){
   else if(state.busy)message='Follow the current prompt. Keep the radio connected and power stable.';
   else if(state.verification)message=state.port?'Follow the verification controls to restart verified firmware, then use step 1 for its application port and startup check.':'Step 1 again: choose the same radio’s application port to check that the new firmware started.';
   else if(state.plan?.written)message='Transfer finished; startup is not yet verified. Follow the verification controls before starting another update.';
-  else if(state.recovery?.phase==='reselect-dfu'||(state.handoff&&!state.port))message='Step 1 again: choose the same radio’s requested USB port. Then repeat step 2 before step 3.';
-  else if(!state.port)message='Step 1: Choose your radio’s USB port. Then check the firmware before step 2.';
-  else if(state.plan)message='Step 3: Review & flash. Check the warning and confirm the exact operation; nothing is written before confirmation.';
-  else if(!state.pkg&&!$('artifact').value)message='Check the firmware, installation mode and build below, then use step 2: Backup & prepare.';
-  else message='Step 2: Backup & prepare. Follow the backup prompts and USB-port instructions; flash is a separate step.';
+  else if(state.recovery?.phase==='reselect-dfu'||(state.handoff&&!state.port))message='Step 1 again: choose the same radio’s requested USB port. Then repeat step 3: Backup & prepare before step 4: Flash.';
+  else if(!state.port)message='Step 1: Choose your radio’s USB port. Then step 2: choose Update or Erase & new install and check the firmware.';
+  else if(state.plan)message='Step 4: Review & flash. Check the warning and confirm the exact operation; nothing is written before confirmation.';
+  else if(!state.pkg&&!$('artifact').value)message='Step 2: Choose Update or Erase & new install and check the firmware build. Then step 3: Backup & prepare.';
+  else message='Step 3: Backup & prepare. Follow the backup prompts and USB-port instructions; step 4 flashes only after confirmation.';
   $('step-guidance').textContent=message;
 }
 function controls() {
@@ -170,14 +171,16 @@ function confirm(title, detail, warning, token) {
   return new Promise(resolve => dialog.addEventListener('close',() => resolve(dialog.returnValue === 'confirm' && $('confirm-token').value === token),{once:true}));
 }
 function download(name, bytes, type = 'application/octet-stream') { const url = URL.createObjectURL(new Blob([bytes],{type})); const a = document.createElement('a'); a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url),30000); }
-function choose(title,detail,buttons) {
+function choose(title,detail,buttons,{backupJson=null}={}) {
   $('question-title').textContent=title;$('question-detail').textContent=detail;
+  state.backupTextGeneration++;
+  $('question-backup-json-view').hidden=!backupJson;$('question-backup-json').value=backupJson||'';$('question-backup-json-status').textContent='';
   const form=$('question-actions');form.replaceChildren(...buttons.map(([value,label])=>{const button=document.createElement('button');button.value=value;button.textContent=label;button.className=value==='backup'?'primary':'secondary';return button;}));
-  const dialog=$('question-dialog');dialog.returnValue='cancel';dialog.showModal();return new Promise(resolve=>dialog.addEventListener('close',()=>resolve(dialog.returnValue),{once:true}));
+  const dialog=$('question-dialog');dialog.returnValue='cancel';dialog.showModal();return new Promise(resolve=>dialog.addEventListener('close',()=>{state.backupTextGeneration++;$('question-backup-json').value='';$('question-backup-json-view').hidden=true;resolve(dialog.returnValue);},{once:true}));
 }
 function persistFlow(field,key) { if(state[field])localStorage.setItem(key,JSON.stringify(state[field]));else localStorage.removeItem(key); }
 function persistEspRecovery(){try{persistFlow('espRecovery','meshfirmware.espRecovery');}catch{log(state.espRecovery?'ESP retry state could not be saved in browser storage. It remains in memory only; keep this page open until recovery finishes.':'The old ESP retry record could not be removed from browser storage and may reappear after reload. Keep this page open and review any stale retry record before another operation.');}}
-function invalidateApplicationEvidence(){state.backupApproved=null;state.backup=null;state.device=null;state.boardDetected=false;state.handoff=false;}
+function invalidateApplicationEvidence(){clearBackupJson();state.backupApproved=null;state.backup=null;state.device=null;state.boardDetected=false;state.handoff=false;}
 function clearVerification(){state.verification=null;persistFlow('verification','meshfirmware.verifyApplication');}
 const summaryText=s=>`${s.complete?'Complete exposed-API snapshot':'Partial backup'}; ${s.privateIdentity?'private identity included':'private identity unavailable'}. ${(s.reasons||[]).join(' ')}`;
 async function readApplication(link) {
@@ -293,18 +296,39 @@ async function detectSelectedBoard() {
   if(state.port!==port||state.generation!==generation){state.device=null;fail('Selected port changed or disconnected during detection. Re-select and detect again.');}
   state.boardDetected=true;selectDetectedBoard();notice('Running MeshCore model read and matching catalog hardware selected when unambiguous. No reset, settings change or firmware write was sent.');
 }
+function clearBackupJson(){
+  state.backupTextGeneration++;
+  for(const prefix of ['backup','question-backup']){$(`${prefix}-json`).value='';$(`${prefix}-json-view`).hidden=true;$(`${prefix}-json-status`).textContent='';}
+  if(state.backup)delete state.backup.json;
+}
+async function copyBackupJson(prefix){
+  const field=$(`${prefix}-json`),status=$(`${prefix}-json-status`),value=field.value,generation=state.backupTextGeneration;
+  if(!value){status.textContent='No backup JSON is available to copy.';return;}
+  if(!navigator.clipboard?.writeText){field.focus?.();field.select?.();status.textContent='Clipboard access is unavailable. Select the JSON and copy it manually.';return;}
+  try{await navigator.clipboard.writeText(value);if(generation===state.backupTextGeneration&&field.value===value)status.textContent='Backup JSON copied. Save it privately; your clipboard now contains node secrets.';}
+  catch{if(generation!==state.backupTextGeneration||field.value!==value)return;field.focus?.();field.select?.();status.textContent='Clipboard permission was not granted. Select the JSON and copy it manually.';}
+}
+for(const prefix of ['backup','question-backup']){
+  $(`copy-${prefix}-json`).onclick=()=>copyBackupJson(prefix);
+  $(`clear-${prefix}-json`).onclick=()=>{clearBackupJson();notice('Backup JSON boxes cleared. Existing downloaded files and your clipboard were not changed.');};
+}
 async function captureBackup() {
+  clearBackupJson();state.backup=null;state.backupApproved=null;
+  const port=state.port,generation=state.generation;
   const archive=await linkOperation(async link=>{
     const device=$('backup-role').value==='auto'?await readApplication(link):null;
     if(!device && !state.device) { try {await readApplication(link);}catch{/* Explicit interface choice is still attempted and independently validates identity. */} }
     return (device?.role||$('backup-role').value)==='common-cli'?backupCommonCli(link,progress):new MeshCore(link).backup(progress);
   });
-  const info=state.port.getInfo(),native=await exportNativeBackup(archive,{usbIdentity:{vendor_id:info.usbVendorId??null,product_id:info.usbProductId??null},deviceHint:state.device?.model||$('hardware').value,sealNative:args=>(state.planner ||=new BrowserPlanner()).call('sealBackup',args)});
+  const info=port.getInfo(),native=await exportNativeBackup(archive,{usbIdentity:{vendor_id:info.usbVendorId??null,product_id:info.usbProductId??null},deviceHint:state.device?.model||$('hardware').value,sealNative:args=>(state.planner ||=new BrowserPlanner()).call('sealBackup',args)});
+  if(state.port!==port||state.generation!==generation)fail('Selected port changed during backup. No saved-backup approval was retained; select and back up the intended radio again.');
   const summary=backupSummary(archive),completeness=native.payload?.completeness;if(completeness){summary.complete=completeness.status==='api-snapshot-complete';summary.reasons=[...new Set([...summary.reasons,...(completeness.missing_required||[]).map(n=>'Missing '+n),...(completeness.optional_errors||[]).map(n=>'Query failed: '+n)])];}
   const filename=`mc.config_backup.web.${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
-  download(filename,JSON.stringify(native,null,2),'application/json');state.backup={archive,summary,filename,port:state.port};
-  $('backup-summary').textContent=`Downloaded ${filename}. ${summaryText(summary)} Logical backup only; not wipe-safe. Confirm the download was saved.`;
-  notice('Native-compatible archive validated locally; download requested. No backup or secret was uploaded.');return state.backup;
+  const json=JSON.stringify(native,null,2);state.backup={archive,summary,filename,port,json};
+  $('backup-json').value=json;$('backup-json-view').hidden=false;revealPanel('backups');
+  download(filename,json,'application/json');
+  $('backup-summary').textContent=`Download requested: ${filename}. ${summaryText(summary)} The same validated JSON is shown below for copying. Logical backup only; not wipe-safe. Save the download or copied JSON privately.`;
+  notice('Native-compatible archive validated locally; JSON is available to copy and download. No backup or secret was uploaded.');return state.backup;
 }
 async function ensureBackup() {
   if(state.migration||state.recovery||state.espRecovery||(state.backupApproved?.sha256===state.pkg?.sha256&&state.backupApproved?.port===state.port))return;
@@ -317,7 +341,7 @@ async function ensureBackup() {
     if(answer==='cancel')fail('Cancelled before reset or flash.');
     if(answer==='backup') {
       let result;try{result=await captureBackup();}catch(error){if(!await confirm('Backup did not complete',error.message,'No reset or write has occurred. Continue only if you accept having no complete backup.','CONTINUE WITHOUT BACKUP'))throw error;}
-      if(result){const saved=await choose('Confirm your backup download',`${result.filename}. ${summaryText(result.summary)} The browser cannot confirm the file reached disk.`,[['cancel','Cancel'],['saved','I saved the archive']]);if(saved!=='saved')fail('Backup save was not acknowledged.');
+      if(result){const saved=await choose('Confirm your backup download',`${result.filename}. ${summaryText(result.summary)} Save the download or copy the JSON below into a private file. The browser cannot confirm it reached disk.`,[['cancel','Cancel'],['saved','I saved the backup']],{backupJson:result.json});if(saved!=='saved')fail('Backup save was not acknowledged.');
         if(result.summary.complete===false&&!await confirm('Continue with a partial backup?',summaryText(result.summary),'A partial logical archive cannot authorize a wipe.','CONTINUE WITH PARTIAL BACKUP'))fail('Partial-backup continuation cancelled.');}
     } else if(answer!=='skip')fail('Cancelled before reset or flash.');
     if(!state.device)try{await linkOperation(readApplication);}catch(error){log(`Application identity unavailable: ${error.message}`);}
@@ -473,11 +497,22 @@ function bootloaderItem(){
 function updateDownload() { const item = $('artifact').value?state.items[Number($('artifact').value)]:null,board=bootloaderItem(),info=board?.bootloaderInfo,urls=board?.architecture==='nrf52'?(info?[info.url]:[]):board?.bootloader||[];$('bootloader-source').replaceChildren(...urls.map(url=>new Option(`${info?(info.cached?'Last verified ':'')+'OTAFIX '+info.version+' · ':''}${new URL(url).pathname.split('/').pop()}`,url)));$('bootloader-detail').textContent=info?`${info.cached?'Latest release could not be checked; using our last verified stable':'Our stable'} OTAFIX ${info.version} · ${info.profile}. SHA-256 is checked before loading. ${bootloaderReinstallWarning}`:item?.bootloaderUnavailable||'Select exact hardware or a firmware artifact for its board-specific bootloader recommendation; conflicting profiles require an explicit artifact.';if (item) { $('download-firmware').href = item.url; $('download-firmware').removeAttribute('aria-disabled');$('catalog-detail').textContent=[firmwareDowngradeWarning(null,item),item.subtitle,item.notice,item.releaseNotes,item.bootloaderUnavailable].filter(Boolean).join('\n'); } else { $('download-firmware').removeAttribute('href'); $('download-firmware').setAttribute('aria-disabled','true');$('catalog-detail').textContent=''; } }
 async function boundedFetch(url) {
   const response = await fetch(httpsUrl(url),{signal:AbortSignal.timeout(120000),credentials:'omit'});
-  if (!response.ok || Number(response.headers.get('Content-Length')) > (64 << 20)) fail('Firmware download failed or exceeds 64 MiB.');
+  if(!response.ok)throw Object.assign(new Error(`Download host returned HTTP ${response.status}.`),{downloadKind:'http'});
+  if(Number(response.headers.get('Content-Length'))>(64<<20))throw Object.assign(new Error('Firmware download exceeds 64 MiB.'),{downloadKind:'size'});
+  if(!response.body?.getReader)throw Object.assign(new Error('Download has no readable response body.'),{downloadKind:'body'});
   const reader = response.body.getReader(), chunks = []; let total = 0;
-  try { while (true) { const {value,done} = await reader.read(); if (done) break; total += value.length; if (total > (64 << 20)) fail('Firmware download exceeds 64 MiB.'); chunks.push(value); } }
+  try { while (true) { const {value,done} = await reader.read(); if (done) break; total += value.length; if (total > (64 << 20)) throw Object.assign(new Error('Firmware download exceeds 64 MiB.'),{downloadKind:'size'}); chunks.push(value); } }
   finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
   const result = new Uint8Array(total); let offset = 0; for (const c of chunks) { result.set(c,offset); offset += c.length; } return result;
+}
+async function downloadFirmwareBytes(url,name){
+  const source=httpsUrl(url);
+  try{return await boundedFetch(source);}
+  catch(error){
+    $('download-firmware').href=source;revealPanel('firmware-choices');revealPanel('image-details');revealPanel('custom-firmware');
+    const reason=error.downloadKind?'':' Browser or network restrictions, including CORS, can block access; this page cannot determine which from a failed fetch.';
+    throw new Error(`Could not download ${name} from ${new URL(source).hostname}. ${error.message}${reason} Open Download firmware, then choose that exact local file. No reset or write was sent.`);
+  }
 }
 
 $('select-port').onclick = () => operation(async () => {
@@ -489,7 +524,7 @@ $('select-port').onclick = () => operation(async () => {
   await closeEsp();state.backupApproved=null;
   if(!continuation){
     const provider=state.manualSelections.provider;
-    state.device=null;state.detectedHardware=null;state.manualSelections=provider?{provider}:{};state.backup=null;$('backup-summary').textContent='';
+    clearBackupJson();state.device=null;state.detectedHardware=null;state.manualSelections=provider?{provider}:{};state.backup=null;$('backup-summary').textContent='';
     if($('auto-detect-board').checked&&!manualDfuSelection)resetAutomaticBoardSelection('Reading the selected USB device. Previous automatic firmware choices were cleared; no image is ready to flash.');
     else updateFirmwareSelectionSummary({reason:'New USB port selected. Review the manual firmware target against this radio.'});
   }
@@ -515,7 +550,7 @@ for (const id of ['expert-offset','migration-package','usb-set','erase-source','
 $('expected-sha').onchange = () => operation(async () => { state.automaticSha=null;state.automaticShaName=null;await closeEsp(); state.generation++; if (state.pkg && $('expected-sha').value.trim() && $('expected-sha').value.trim().toLowerCase() !== state.pkg.sha256) fail('SHA-256 mismatch. Flash plan invalidated.'); });
 $('firmware-file').onchange = () => operation(async () => { const file = $('firmware-file').files[0]; if (!file) return; clearAutomaticSha(file.name);await clearFirmwareSelection();if (file.size > 64 << 20) fail('Firmware exceeds 64 MiB.'); await loadFirmware(file.name,new Uint8Array(await file.arrayBuffer())); });
 $('load-entry').onclick = () => operation(async () => { const entry=$('archive-entry').value,archive=state.archive,item=state.archiveContext;await clearFirmwareSelection();if(!archive || !entry) fail('Select an archive entry.');const expected=$('expected-sha').value.trim().toLowerCase();if(expected&&(!/^[a-f0-9]{64}$/.test(expected)||hash(archive)!==expected))fail('Release ZIP SHA-256 does not match.');const files=checkedZip(archive,{maxEntries:8192,maxExpanded:512<<20,select:name=>name===entry});$('expected-sha').value='';await loadFirmware(entry.split('/').pop(),files[entry],item); });
-$('fetch-custom').onclick = () => operation(async () => { clearAutomaticSha();await clearFirmwareSelection();const url=httpsUrl($('custom-url').value); $('download-firmware').href=url; try { await loadFirmware(new URL(url).pathname.split('/').pop(),await boundedFetch(url)); } catch(error) { revealPanel('image-details');revealPanel('custom-firmware');throw new Error(`${error.message} If this host blocks browser fetches, download it and select the local file.`); } });
+$('fetch-custom').onclick = () => operation(async () => { clearAutomaticSha();await clearFirmwareSelection();const url=httpsUrl($('custom-url').value),name=new URL(url).pathname.split('/').pop();$('download-firmware').href=url;const bytes=await downloadFirmwareBytes(url,name);await loadFirmware(name,bytes); });
 $('artifact').onchange = () => operation(async()=>{await clearFirmwareSelection();updateDownload();updateFirmwareSelectionSummary();controls();});
 $('bootloader-source').onchange=controls;
 $('load-bootloader').onclick=()=>operation(async()=>{const url=$('bootloader-source').value,item=bootloaderItem(),info=item?.bootloaderInfo;await clearFirmwareSelection();if(!url||!item)fail('Choose exact hardware or an explicit board firmware artifact and its bootloader ZIP.');if(item.architecture==='nrf52'&&(!info||info.url!==url||!item.bootloader?.includes(url)))fail('No verified stable bootloader from our fork is available for this exact hardware. Select a custom ZIP manually if you intend a recovery.');$('download-firmware').href=httpsUrl(url);try{setAutomaticSha(info?.sha256||'',new URL(url).pathname.split('/').pop());const bytes=await boundedFetch(url);if(info&&bytes.length!==info.size)fail('Published bootloader size does not match the downloaded ZIP.');await loadFirmware(new URL(url).pathname.split('/').pop(),bytes,item);if(info)notice(`Our stable OTAFIX ${info.version} loaded and SHA-256 verified. ${bootloaderReinstallWarning}`);}catch(error){revealPanel('image-details');revealPanel('custom-firmware');throw new Error(error.message+' If the host blocks fetching, download this exact bootloader ZIP and choose it locally.');}});
@@ -534,8 +569,10 @@ async function fetchSelectedFirmware(){
   const item = $('artifact').value?state.items[Number($('artifact').value)]:null; if (!item) fail('Choose an artifact.');
   await clearFirmwareSelection();
   notice('Downloading firmware into browser memory…');
-  try { setAutomaticSha(item.sha256||'',item.name);await loadFirmware(item.name,await boundedFetch(item.url),item); }
-  catch (error) { revealPanel('firmware-choices');revealPanel('image-details');revealPanel('custom-firmware');throw new Error(`${error.message} If the firmware host blocks browser downloads (CORS), use Download and then choose that local file. No proxy or helper is used.`); }
+  setAutomaticSha(item.sha256||'',item.name);
+  const bytes=await downloadFirmwareBytes(item.url,item.name);
+  // Validation errors are not network/CORS errors. Keep their exact cause.
+  await loadFirmware(item.name,bytes,item);
 }
 $('fetch-firmware').onclick=()=>operation(fetchSelectedFirmware);
 $('touch').onclick = () => operation(async () => {

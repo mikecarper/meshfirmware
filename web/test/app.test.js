@@ -423,6 +423,137 @@ test('default backup flow finishes and acknowledges the saved archive before ROM
   await ui.elements.get('prepare').onclick();
   assert.ok(ui.calls.indexOf('backup')<ui.calls.indexOf('enter-rom'));assert.ok(ui.calls.indexOf('Confirm your backup download')<ui.calls.indexOf('enter-rom'));assert.equal(ui.evaluate('state.plan.sha256'),ui.context.pkg.sha256);
 });
+
+async function backupJsonWorkbench(){
+  const ui=workbench();await Promise.resolve();serialMock(ui);collapsedPanels(ui);
+  const sentinel='PRIVATE_BACKUP_SENTINEL',native={schema:'org.meshfirmware.backup/v1',payload:{private_key:sentinel,bluetooth_name:'<script>not executable</script>',channels:[{name:'Private channel',key:'fixture-channel-key'}]}},downloads=[],stored=[];
+  ui.context.selectedPort=ui.port;ui.evaluate("state.port=selectedPort;state.device={role:'companion',model:'Test board'};");
+  ui.context.MeshCore=class{async backup(){ui.calls.push('capture-backup');return {payload:{role:'companion'}};}};
+  ui.context.exportNativeBackup=async()=>native;ui.context.download=(name,json,type)=>downloads.push({name,json,type});
+  const setItem=ui.context.localStorage.setItem;ui.context.localStorage.setItem=(key,value)=>{stored.push([key,value]);setItem(key,value);};
+  return {...ui,native,sentinel,downloads,stored};
+}
+
+test('validated backup JSON is byte-identical to its download, kept as safe text and never automatically copied or persisted',async()=>{
+  const ui=await backupJsonWorkbench();let clipboardWrites=0;ui.context.navigator.clipboard={writeText:async()=>{clipboardWrites++;}};
+  await ui.elements.get('backup').onclick();
+  const json=JSON.stringify(ui.native,null,2);
+  assert.equal(ui.downloads.length,1);assert.equal(ui.downloads[0].json,json);assert.equal(ui.downloads[0].type,'application/json');assert.equal(ui.evaluate('state.backup.json'),json);
+  assert.equal(ui.elements.get('backup-json').value,json);assert.equal(ui.elements.get('backup-json-view').hidden,false);assert.equal(ui.elements.get('backups').open,true);
+  assert.equal(ui.elements.get('question-backup-json').value,'');assert.equal(ui.elements.get('question-backup-json-view').hidden,true);assert.equal(clipboardWrites,0);
+  assert.ok(ui.elements.get('backup-json').value.includes('<script>not executable</script>'));assert.equal(ui.elements.get('backup-json').innerHTML,undefined);
+  assert.ok(ui.stored.every(([_key,value])=>!String(value).includes(ui.sentinel)));assert.ok(!ui.elements.get('log').textContent.includes(ui.sentinel));assert.ok(!ui.elements.get('notice').textContent.includes(ui.sentinel));
+  assert.deepEqual(ui.calls,['open','capture-backup','close']);assert.equal(ui.evaluate('state.backupApproved'),null);
+});
+
+test('copy JSON needs its explicit button and does not grant flash or saved-backup approval; clear removes both boxes only',async()=>{
+  const ui=await backupJsonWorkbench(),clipboard=[];ui.context.navigator.clipboard={writeText:async value=>clipboard.push(value)};
+  await ui.elements.get('backup').onclick();const json=ui.downloads[0].json,before=ui.calls.length;
+  ui.elements.get('question-backup-json').value=json;ui.elements.get('question-backup-json-view').hidden=false;
+  await ui.elements.get('copy-backup-json').onclick();await ui.elements.get('copy-question-backup-json').onclick();
+  assert.deepEqual(clipboard,[json,json]);assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls.slice(before),[]);
+  for(const prefix of ['backup','question-backup']){assert.match(ui.elements.get(prefix+'-json-status').textContent,/copied|privately|secrets/i);assert.ok(!ui.elements.get(prefix+'-json-status').textContent.includes(ui.sentinel));}
+  ui.elements.get('clear-question-backup-json').onclick();
+  for(const prefix of ['backup','question-backup']){assert.equal(ui.elements.get(prefix+'-json').value,'');assert.equal(ui.elements.get(prefix+'-json-view').hidden,true);assert.equal(ui.elements.get(prefix+'-json-status').textContent,'');}
+  assert.equal(ui.evaluate('state.backup.json'),undefined);assert.equal(ui.downloads.length,1);assert.equal(ui.downloads[0].json,json);assert.deepEqual(clipboard,[json,json]);assert.deepEqual(ui.calls.slice(before),[]);
+  assert.match(ui.elements.get('notice').textContent,/downloaded files and your clipboard were not changed/i);
+});
+
+test('missing or denied clipboard access keeps selectable JSON and falls back to manual copying without device commands',async()=>{
+  for(const clipboard of ['missing','denied']){
+    const ui=await backupJsonWorkbench();await ui.elements.get('backup').onclick();const json=ui.downloads[0].json,before=ui.calls.length;let focused=0,selected=0;
+    ui.elements.get('backup-json').focus=()=>focused++;ui.elements.get('backup-json').select=()=>selected++;
+    if(clipboard==='denied')ui.context.navigator.clipboard={writeText:async()=>{throw Error('Permission denied');}};
+    await ui.elements.get('copy-backup-json').onclick();
+    assert.equal(focused,1,clipboard);assert.equal(selected,1,clipboard);assert.equal(ui.elements.get('backup-json').value,json);assert.equal(ui.elements.get('backup-json-view').hidden,false);
+    assert.match(ui.elements.get('backup-json-status').textContent,/copy it manually/i,clipboard);assert.equal(ui.evaluate('state.backupApproved'),null);assert.deepEqual(ui.calls.slice(before),[],clipboard);
+  }
+});
+
+test('clearing JSON revokes pending copy UI updates but preserves an existing saved-backup approval',async()=>{
+  for(const result of ['resolve','reject'])for(const prefix of ['backup','question-backup']){
+    const ui=await backupJsonWorkbench();assert.equal(ui.evaluate('state.backupTextGeneration'),0);await ui.elements.get('backup').onclick();const json=ui.downloads[0].json;
+    ui.elements.get(prefix+'-json').value=json;ui.elements.get(prefix+'-json-view').hidden=false;let complete,focused=0,selected=0;
+    ui.context.navigator.clipboard={writeText:()=>new Promise((resolve,reject)=>{complete=result==='resolve'?resolve:()=>reject(Error('Late clipboard denial'));})};
+    ui.elements.get(prefix+'-json').focus=()=>focused++;ui.elements.get(prefix+'-json').select=()=>selected++;
+    ui.context.savedApproval={sha256:'a'.repeat(64),port:ui.port};ui.evaluate('state.backupApproved=savedApproval;');const generation=ui.evaluate('state.backupTextGeneration');
+    const pending=ui.elements.get('copy-'+prefix+'-json').onclick();ui.elements.get('clear-backup-json').onclick();
+    assert.ok(ui.evaluate('state.backupTextGeneration')>generation);assert.equal(ui.evaluate('state.backupApproved'),ui.context.savedApproval);
+    complete();await pending;
+    for(const name of ['backup','question-backup']){assert.equal(ui.elements.get(name+'-json').value,'');assert.equal(ui.elements.get(name+'-json-status').textContent,'');assert.equal(ui.elements.get(name+'-json-view').hidden,true);}
+    assert.equal(focused,0,result+' '+prefix);assert.equal(selected,0,result+' '+prefix);assert.equal(ui.evaluate('state.backupApproved'),ui.context.savedApproval);assert.equal(ui.downloads.length,1);
+  }
+});
+
+test('a new identical backup has a new text generation so a late copy cannot label or select the replacement',async()=>{
+  for(const result of ['resolve','reject']){
+    const ui=await backupJsonWorkbench();await ui.elements.get('backup').onclick();const json=ui.downloads[0].json;let complete,focused=0,selected=0;
+    ui.context.navigator.clipboard={writeText:()=>new Promise((resolve,reject)=>{complete=result==='resolve'?resolve:()=>reject(Error('Late clipboard denial'));})};
+    ui.elements.get('backup-json').focus=()=>focused++;ui.elements.get('backup-json').select=()=>selected++;
+    const generation=ui.evaluate('state.backupTextGeneration'),pending=ui.elements.get('copy-backup-json').onclick();
+    await ui.elements.get('backup').onclick();assert.equal(ui.elements.get('backup-json').value,json);assert.ok(ui.evaluate('state.backupTextGeneration')>generation);
+    complete();await pending;
+    assert.equal(ui.elements.get('backup-json').value,json);assert.equal(ui.elements.get('backup-json-status').textContent,'');assert.equal(focused,0,result);assert.equal(selected,0,result);assert.equal(ui.downloads.length,2);
+  }
+});
+
+test('closing and reopening a same-JSON save dialog invalidates an older pending clipboard result',async()=>{
+  for(const result of ['resolve','reject']){
+    const ui=await backupJsonWorkbench();await ui.elements.get('backup').onclick();ui.context.json=ui.downloads[0].json;let close,complete,focused=0,selected=0;
+    ui.context.document.createElement=()=>({});ui.elements.get('question-dialog').addEventListener=(_event,handler)=>{close=handler;};
+    ui.context.navigator.clipboard={writeText:()=>new Promise((resolve,reject)=>{complete=result==='resolve'?resolve:()=>reject(Error('Late clipboard denial'));})};
+    ui.elements.get('question-backup-json').focus=()=>focused++;ui.elements.get('question-backup-json').select=()=>selected++;
+    const initial=ui.evaluate('state.backupTextGeneration'),oldDialog=ui.evaluate("choose('Save backup','Save privately',[['cancel','Cancel']],{backupJson:json});");
+    assert.ok(ui.evaluate('state.backupTextGeneration')>initial);const opened=ui.evaluate('state.backupTextGeneration'),copy=ui.elements.get('copy-question-backup-json').onclick();
+    close();await oldDialog;assert.ok(ui.evaluate('state.backupTextGeneration')>opened);
+    const replacement=ui.evaluate("choose('Save replacement backup','Save privately',[['cancel','Cancel']],{backupJson:json});");
+    complete();await copy;
+    assert.equal(ui.elements.get('question-backup-json').value,ui.context.json);assert.equal(ui.elements.get('question-backup-json-status').textContent,'');assert.equal(focused,0,result);assert.equal(selected,0,result);
+    close();await replacement;
+  }
+});
+
+test('the save-acknowledgement dialog alone receives backup JSON and clears its copy when closed',async()=>{
+  const ui=await backupJsonWorkbench();await ui.elements.get('backup').onclick();const json=ui.downloads[0].json;let close;
+  ui.context.document.createElement=()=>({});ui.elements.get('question-dialog').addEventListener=(event,handler)=>{assert.equal(event,'close');close=handler;};ui.context.json=json;
+  const pending=ui.evaluate("choose('Confirm your backup download','Save privately',[['saved','I saved the backup']],{backupJson:json});");
+  assert.equal(ui.elements.get('question-backup-json').value,json);assert.equal(ui.elements.get('question-backup-json-view').hidden,false);assert.equal(ui.elements.get('backup-json').value,json);
+  ui.elements.get('question-dialog').returnValue='saved';close();assert.equal(await pending,'saved');
+  assert.equal(ui.elements.get('question-backup-json').value,'');assert.equal(ui.elements.get('question-backup-json-view').hidden,true);assert.equal(ui.elements.get('backup-json').value,json);
+  const other=ui.evaluate("choose('Unrelated question','No secrets here',[['cancel','Cancel']]);");
+  assert.equal(ui.elements.get('question-backup-json').value,'');assert.equal(ui.elements.get('question-backup-json-view').hidden,true);close();await other;
+  assert.ok(!ui.elements.get('question-detail').textContent.includes(ui.sentinel));assert.ok(!ui.elements.get('log').textContent.includes(ui.sentinel));
+});
+
+test('copying a captured backup cannot replace the separate save acknowledgement before ROM entry',async()=>{
+  const ui=await backupJsonWorkbench();ui.context.pkg=fakePackage({architecture:'esp32'});ui.evaluate('state.pkg=pkg;');ui.elements.get('auto-backup').checked=true;
+  let copied='';ui.context.navigator.clipboard={writeText:async value=>{copied=value;}};
+  ui.context.choose=async(title,_detail,_buttons,options)=>{assert.equal(title,'Confirm your backup download');assert.equal(options.backupJson,ui.downloads[0].json);ui.elements.get('question-backup-json').value=options.backupJson;await ui.elements.get('copy-question-backup-json').onclick();return 'cancel';};
+  await assert.rejects(ui.evaluate('ensureBackup();'),/Backup save was not acknowledged/);
+  assert.equal(copied,ui.downloads[0].json);assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls,['open','capture-backup','close']);
+});
+
+test('failed captures and changed ports during export cannot display stale JSON or grant saved-backup approval',async()=>{
+  for(const failure of ['capture','seal','port']){
+    const ui=await backupJsonWorkbench();await ui.elements.get('backup').onclick();const old=ui.downloads[0].json;ui.elements.get('question-backup-json').value=old;ui.elements.get('question-backup-json-view').hidden=false;
+    ui.context.savedApproval={sha256:'a'.repeat(64),port:ui.port};ui.evaluate('state.backupApproved=savedApproval;');
+    if(failure==='capture')ui.context.MeshCore=class{async backup(){assert.equal(ui.evaluate('state.backupApproved'),null);throw Error('Backup query failed');}};
+    else ui.context.exportNativeBackup=async()=>{if(failure==='seal')throw Error('Native backup validation failed');ui.serialEvents.disconnect({port:ui.port});return ui.native;};
+    await ui.elements.get('backup').onclick();
+    for(const prefix of ['backup','question-backup']){assert.equal(ui.elements.get(prefix+'-json').value,'',failure);assert.equal(ui.elements.get(prefix+'-json-view').hidden,true,failure);}
+    assert.equal(ui.evaluate('state.backup'),null,failure);assert.equal(ui.evaluate('state.backupApproved'),null,failure);assert.equal(ui.downloads.length,1,failure);assert.ok(!ui.elements.get('log').textContent.includes(ui.sentinel),failure);
+  }
+});
+
+test('selecting another radio or invalidating application evidence clears visible backup secrets',async()=>{
+  for(const action of ['new-radio','application-change']){
+    const ui=await backupJsonWorkbench();await ui.elements.get('backup').onclick();ui.elements.get('question-backup-json').value=ui.downloads[0].json;ui.elements.get('question-backup-json-view').hidden=false;
+    if(action==='new-radio'){ui.context.navigator.serial.requestPort=async()=>({getInfo:ui.port.getInfo});await ui.elements.get('select-port').onclick();}
+    else ui.evaluate('invalidateApplicationEvidence();');
+    for(const prefix of ['backup','question-backup']){assert.equal(ui.elements.get(prefix+'-json').value,'',action);assert.equal(ui.elements.get(prefix+'-json-view').hidden,true,action);}
+    assert.equal(ui.evaluate('state.backup'),null,action);assert.equal(ui.evaluate('state.backupApproved'),null,action);assert.equal(ui.downloads.length,1,action);
+  }
+});
 test('cancelling the backup offer prevents all reset and ROM operations',async()=>{
   const ui=workbench();ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({architecture:'esp32'});ui.evaluate('state.port=selectedPort;state.pkg=pkg;');ui.context.choose=async()=> 'cancel';
   await ui.elements.get('prepare').onclick();assert.deepEqual(ui.calls,[]);assert.match(ui.elements.get('notice').textContent,/Cancelled before reset/);
@@ -723,6 +854,50 @@ test('a blocked custom URL download reveals its exact download link and local-fi
   assert.match(ui.elements.get('notice').textContent,/Fixture CORS block/);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(ui.calls,[]);
 });
 
+test('firmware validation failures after a successful download are not misreported as CORS or network failures',async()=>{
+  for(const action of ['fetch-firmware','fetch-custom']){
+    const ui=workbench();await Promise.resolve();collapsedPanels(ui);
+    ui.context.item={...v4Item,url:'https://firmware.example.test/exact-board.bin',name:'exact-board.bin'};
+    ui.evaluate("state.items=[item];state.pkg={name:'old.bin'};state.plan={written:true};");
+    ui.elements.get('artifact').value='0';ui.elements.get('custom-url').value=ui.context.item.url;
+    ui.context.boundedFetch=async()=>new Uint8Array(64);
+    ui.context.inspectFirmware=()=>{throw Error('Firmware checksum rejected after download');};
+    await ui.elements.get(action).onclick();
+    const message=ui.elements.get('notice').textContent;
+    assert.match(message,/Firmware checksum rejected after download/,action);
+    assert.doesNotMatch(message,/CORS|network restrictions|could not download|host blocks|choose.*local file/i,action);
+    assert.equal(ui.evaluate('state.pkg'),null,action);assert.equal(ui.evaluate('state.plan'),null,action);assert.equal(ui.elements.get('flash').disabled,true,action);assert.deepEqual(ui.calls,[],action);
+  }
+});
+
+test('a failed catalog download names its host and exposes the exact local-file fallback without claiming CORS is proven',async()=>{
+  const ui=workbench();await Promise.resolve();const advanced=collapsedPanels(ui),url='https://firmware.example.test/exact-board.bin';
+  ui.context.item={...v4Item,url,name:'exact-board.bin'};ui.evaluate("state.items=[item];state.pkg={name:'old.bin'};state.plan={written:true};");ui.elements.get('artifact').value='0';
+  ui.context.boundedFetch=async()=>{throw Error('Failed to fetch');};
+  await ui.elements.get('fetch-firmware').onclick();
+  const message=ui.elements.get('notice').textContent;
+  assert.match(message,/Could not download exact-board\.bin from firmware\.example\.test/i);
+  assert.match(message,/including CORS|CORS.{0,25}(?:can|may)|(?:can|may).{0,25}CORS/i);
+  assert.doesNotMatch(message,/CORS (?:caused|blocked)|blocked (?:by|because of) CORS/i);
+  assert.equal(ui.elements.get('download-firmware').href,url);assert.equal(ui.elements.get('image-details').open,true);assert.equal(ui.elements.get('custom-firmware').open,true);assert.equal(advanced.open,true);
+  assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(ui.calls,[]);
+});
+
+test('known HTTP, size and response-body failures preserve their cause without suggesting CORS',async()=>{
+  for(const failure of ['http','declared-size','stream-size','body']){
+    const ui=workbench();await Promise.resolve();collapsedPanels(ui);let cancelled=0,released=0;
+    ui.context.item={...v4Item,name:'exact-board.bin',url:'https://firmware.example.test/exact-board.bin'};ui.evaluate('state.items=[item];');ui.elements.get('artifact').value='0';
+    const reader={read:async()=>({value:{length:(64<<20)+1},done:false}),cancel:async()=>{cancelled++;},releaseLock(){released++;}};
+    ui.context.fetch=async()=>({ok:failure!=='http',status:404,headers:{get:()=>failure==='declared-size'?String((64<<20)+1):null},body:failure==='body'?null:{getReader:()=>reader}});
+    await ui.elements.get('fetch-firmware').onclick();
+    const message=ui.elements.get('notice').textContent;
+    assert.match(message,failure==='http'?/HTTP 404/:failure==='body'?/no readable response body/:/exceeds 64 MiB/,failure);
+    assert.doesNotMatch(message,/CORS|network restrictions/i,failure);assert.match(message,/firmware\.example\.test/,failure);
+    assert.equal(cancelled,failure==='stream-size'?1:0,failure);assert.equal(released,failure==='stream-size'?1:0,failure);
+    assert.equal(ui.evaluate('state.pkg'),null,failure);assert.equal(ui.evaluate('state.plan'),null,failure);assert.deepEqual(ui.calls,[],failure);
+  }
+});
+
 test('a blocked exact-board bootloader download reveals its link and local-file alternative without retaining write proof',async()=>{
   const ui=workbench();await Promise.resolve();const advanced=collapsedPanels(ui),url='https://example.test/board_bootloader.zip';
   ui.context.item={architecture:'nrf52',hardware:'Exact board',bootloader:[url],bootloaderInfo:{url,sha256:'b'.repeat(64),size:64,profile:'exact-board',version:'2.4.12'}};
@@ -860,7 +1035,7 @@ test('numbered backup/prepare labels survive control refreshes and install-mode 
   ui.evaluate('controls();');assert.match(ui.elements.get('prepare-label').textContent,/Backup\s*&\s*prepare update/i);
   await ui.evaluate("setInstallMode('install');");assert.match(ui.elements.get('prepare-label').textContent,/Backup\s*&\s*prepare install/i);
   await ui.evaluate("setInstallMode('update');");assert.match(ui.elements.get('prepare-label').textContent,/Backup\s*&\s*prepare update/i);
-  assert.ok(ariaWrites.some(([name,value])=>name==='aria-label'&&/Step 2: Backup and prepare install/i.test(value)));assert.ok(ariaWrites.some(([name,value])=>name==='aria-label'&&/Step 2: Backup and prepare update/i.test(value)));
+  assert.ok(ariaWrites.some(([name,value])=>name==='aria-label'&&/Step 3: Backup and prepare install/i.test(value)));assert.ok(ariaWrites.some(([name,value])=>name==='aria-label'&&/Step 3: Backup and prepare update/i.test(value)));
   assert.deepEqual(ui.calls,[]);
 });
 
@@ -868,10 +1043,10 @@ test('step guidance describes the next action from UI state without authorizing 
   const cases=[
     {state:'',patterns:[/step\s*1/i]},
     {state:'state.port=selectedPort;',patterns:[/firmware|build/i,/step\s*2/i]},
-    {state:'state.port=selectedPort;state.pkg=pkg;',patterns:[/step\s*2/i,/backup|prepare/i]},
-    {state:'state.port=selectedPort;state.pkg=pkg;state.plan={prepared:true};',patterns:[/step\s*3/i,/review|flash/i]},
-    {state:'state.handoff=true;',patterns:[/step\s*1/i,/step\s*2/i,/same/i]},
-    {state:"state.recovery={sha256:pkg.sha256,phase:'reselect-dfu',eraseComplete:true};",patterns:[/step\s*1/i,/step\s*2/i,/same/i]},
+    {state:'state.port=selectedPort;state.pkg=pkg;',patterns:[/step\s*3/i,/backup|prepare/i]},
+    {state:'state.port=selectedPort;state.pkg=pkg;state.plan={prepared:true};',patterns:[/step\s*4/i,/review|flash/i]},
+    {state:'state.handoff=true;',patterns:[/step\s*1/i,/step\s*3/i,/same/i]},
+    {state:"state.recovery={sha256:pkg.sha256,phase:'reselect-dfu',eraseComplete:true};",patterns:[/step\s*1/i,/step\s*3/i,/same/i]},
     {state:'state.port=selectedPort;state.pkg=pkg;state.verification={sha256:pkg.sha256};',patterns:[/verif|startup|application/i]},
     {state:'state.port=selectedPort;state.pkg=pkg;state.plan={written:true};',patterns:[/verif|start|reset/i]},
     {state:'state.busy=true;',patterns:[/connect|running|working|progress/i]}
@@ -881,6 +1056,22 @@ test('step guidance describes the next action from UI state without authorizing 
     const message=ui.elements.get('step-guidance').textContent;for(const pattern of fixture.patterns)assert.match(message,pattern,fixture.state||'initial');
     assert.doesNotMatch(message,/(?:backup|backed\s+up).{0,25}(?:complete|saved|successful)/i,'A numbered label is not proof a backup was saved');assert.deepEqual(ui.calls,[]);
   }
+});
+
+test('four-step guidance keeps mode selection at 2, backup at 3 and final confirmation at 4',async()=>{
+  const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage();
+  ui.evaluate('state.port=selectedPort;controls();');
+  assert.match(ui.elements.get('step-guidance').textContent,/step\s*2/i);
+  assert.match(ui.elements.get('step-guidance').textContent,/update|install|installation/i);
+  for(const mode of ['update','install']){
+    ui.context.mode=mode;ui.evaluate('state.installMode=mode;state.pkg=pkg;state.plan=null;controls();');
+    const backup=ui.elements.get('step-guidance').textContent;
+    assert.match(backup,/step\s*3/i);assert.match(backup,/backup|prepare/i);assert.doesNotMatch(backup,/step\s*2\s*:\s*backup/i);
+    ui.evaluate('state.plan={prepared:true};controls();');
+    const flash=ui.elements.get('step-guidance').textContent;
+    assert.match(flash,/step\s*4/i);assert.match(flash,/review|flash/i);assert.match(flash,/confirm/i);
+  }
+  assert.deepEqual(ui.calls,[]);
 });
 
 // Real immutable byte/table proofs, with all USB and timers supplied by mocks.

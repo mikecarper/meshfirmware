@@ -18,9 +18,12 @@ Start with a recoverable bench radio, not a remote USB-only node.
 The USB button, firmware/hardware/role/version/build selectors, and Prepare/Flash
 actions are at the top. Buttons and user actions are left-aligned, including
 advanced tools, backup/restore, console commands and confirmation dialogs.
-Large button numbers mark the main actions: **1 Choose USB port**, **2 Backup &
-prepare**, **3 Review & flash**. The next-step hint follows the current stage.
-If an ordinary bootloader handoff reconnects USB, repeat 1 then 2 for the same
+Large numbers mark the main actions: **1 Choose USB port**, **2 Update or Erase &
+new install**, **3 Backup & prepare**, **4 Review & flash**. Backup & prepare is
+a dark primary button, matching USB selection and Flash. The installation
+choices share one numbered, accessible radio group—not another action button.
+The next-step hint follows the current stage.
+If an ordinary bootloader handoff reconnects USB, repeat 1 then 3 for the same
 radio. Supported partition expansion instead uses one scoped confirmation for
 the bridge and final firmware and continues automatically; only a newly
 ungranted USB interface may still require step 1. The numbers never imply that
@@ -75,6 +78,16 @@ visible. The top navigation opens the corresponding tools without touching USB.
    image ready to flash.
    Published release-ZIP hashes are checked before indexing; the selected inner
    image is validated separately, never compared to the enclosing ZIP's hash.
+
+   A GitHub Release asset can exist and download normally, yet fail the page's
+   automatic fetch because the redirect or final asset host does not grant
+   cross-origin access (CORS). Browser JavaScript cannot bypass that permission;
+   `no-cors` would return unreadable bytes that cannot be verified or flashed.
+   Use **Download firmware** and select that exact local file; published hashes
+   and image validation still apply. A same-origin, digest-verified public
+   firmware mirror or owned download service would be needed to remove this
+   limitation. The page distinguishes failed downloads from image-validation
+   errors and does not label checksum, HTTP or size errors as CORS failures.
 3. Use **Backup & prepare update** (or **Backup & prepare install**): download and validate the selected application, then
    back up before bootloader entry by default. Detection distinguishes a binary
    companion from CommonCLI. Reviewed native USB application reads assert DTR
@@ -85,7 +98,9 @@ visible. The top navigation opens the corresponding tools without touching USB.
    nRF52 retains its 1200-baud touch. TinyUSB entry is offered after backup; re-select the
    same radio's ROM port and prepare again without choosing a reset strategy.
    Confirm that the downloaded archive was saved; partial/failed backups need
-   separate acknowledgement. A backup-only button is also available.
+   separate acknowledgement. The save prompt also shows the validated backup
+   JSON in a read-only text box with Copy JSON and Clear text controls; a copy
+   remains available under Backup & restore. A backup-only button is also available.
 4. Review the exact file, operation, target evidence and hash, then type the
    confirmation token. An already-running ROM/DFU interface cannot export
    application settings: select **Already in ROM/DFU** and explicitly accept
@@ -265,6 +280,13 @@ Missing private identity or unavailable required sections cannot become a
 complete restore merely because the archive checksum is valid. Files are
 downloaded through the browser: the page cannot prove the download reached
 disk or set the file permissions, so keep the archive in a private location.
+After a validated capture, its exact JSON can also be copied from a read-only
+text box in the save-confirmation prompt or under **Backup & restore**. These
+copies remain in page memory only, not browser storage, and may contain private
+identity and channel secrets. Use **Clear text** to remove the displayed copies;
+the prompt's copy is cleared when it closes. Copying is not proof that a private
+file was saved, and clearing the text does not recall anything already copied
+to the system clipboard or delete a downloaded backup.
 
 ### Settings-preserving partition expansion
 

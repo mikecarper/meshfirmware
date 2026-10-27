@@ -77,7 +77,7 @@ button, .button { display: inline-flex; justify-content: flex-start; align-items
 .primary:hover:not(:disabled) { background: #274358; }
 .primary .action-icon { color: #68ded2; }
 .step-button { gap: 12px; min-height: 62px; }
-.step-button .action-number { display: grid; place-items: center; flex: 0 0 40px; height: 40px; border-radius: 8px; background: #ffffff18; color: #c2f5e9; font-size: 28px; line-height: 1; font-weight: 800; }
+.step-button .action-number, .mode-step > .action-number { display: grid; place-items: center; flex: 0 0 40px; height: 40px; border-radius: 8px; background: #ffffff18; color: #c2f5e9; font-size: 28px; line-height: 1; font-weight: 800; }
 .step-button .action-label { min-width: 0; line-height: 1.4; }
 .secondary.step-button .action-number { background: #edf6f3; color: var(--teal); }
 .step-button:disabled { opacity: .65; }
@@ -96,6 +96,8 @@ input[type=checkbox] { accent-color: var(--teal); vertical-align: middle; }
 .artifact-field label { margin-top: 8px; }
 .mode-switch { border: 0; padding: 0; margin: 8px 0 0; min-width: 0; }
 .mode-switch legend { padding: 0; margin-bottom: 6px; font-size: 11px; font-weight: 650; color: #526576; }
+.mode-step { display: flex; justify-content: flex-start; align-items: center; gap: 12px; min-height: 42px; }
+.mode-step > .action-number { background: var(--navy); }
 .mode-options { display: flex; justify-content: flex-start; flex-wrap: wrap; gap: 8px; }
 .mode-options label { display: inline-flex; align-items: center; gap: 8px; margin: 0; padding: 10px 13px; min-height: 42px; border: 1px solid #d5dfe5; border-radius: 7px; font-size: 12px; cursor: pointer; }
 .mode-options input { width: 14px; height: 14px; margin: 0; accent-color: var(--teal); }
@@ -147,6 +149,9 @@ input[type=file] { display: block; font-size: 11px; max-width: 100%; margin-top:
 .optional { font-weight: 400; color: #8795a3; margin-left: 6px; }
 .digest { display: block; font-size: 10px; color: #64778a; overflow-wrap: anywhere; line-height: 1.7; margin-top: 7px; }
 .backup-options { max-width: 820px; }
+.backup-json-view { margin-top: 14px; padding-top: 1px; }
+.backup-json-view > .hint { margin: 6px 0 10px; }
+.backup-json { display: block; width: 100%; max-width: 100%; min-width: 0; min-height: 180px; padding: 11px 12px; border: 1px solid #d5dfe5; border-radius: 7px; background: #f7fafb; color: #2d4256; font-family: Consolas, ui-monospace, monospace; font-size: 11px; line-height: 1.55; white-space: pre; overflow: auto; resize: vertical; }
 .inline-checks { display: flex; flex-wrap: wrap; gap: 16px; margin: 5px 0 18px; }
 .inline-checks label { display: flex; align-items: center; gap: 7px; font-weight: 400; }
 .button { border-radius: 7px; margin: 0; }

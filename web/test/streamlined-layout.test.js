@@ -90,7 +90,7 @@ test('USB and flash actions precede non-action badges and explanatory copy',()=>
 });
 
 test('main and optional action groups keep left alignment at every breakpoint',()=>{
-  for(const selector of ['.sidebar','.connect-controls','.review-actions','.inline-actions','.console-input','footer'])assertProperty(selector,'justify-content','flex-start');
+  for(const selector of ['.sidebar','.connect-controls','.mode-step','.review-actions','.inline-actions','.console-input','footer'])assertProperty(selector,'justify-content','flex-start');
   assertProperty('.page-header','align-items','flex-start');assertProperty('.page-header','flex-direction','column');
   for(const selector of ['button','.button']){assertProperty(selector,'justify-content','flex-start');assertProperty(selector,'text-align','left');}
 });
@@ -113,15 +113,27 @@ test('one visible Update or Erase/new-install switch precedes the build list and
   assert.equal(get('flash-action').tag,'input');assert.equal(get('flash-action').attrs.type,'hidden','The legacy nRF action is a mirror, not a second conflicting user choice');
 });
 
-test('three primary actions have large stable step numbers and accessible action labels',()=>{
-  for(const [id,number]of [['select-port','1'],['prepare','2'],['flash','3']]){
+test('USB, backup and flash buttons are dark primary actions with stable step numbers 1, 3 and 4',()=>{
+  for(const [id,number]of [['select-port','1'],['prepare','3'],['flash','4']]){
     const button=get(id),badge=button.children.find(node=>hasClass(node,'action-number')),label=button.children.find(node=>hasClass(node,'action-label'));
-    assert.ok(hasClass(button,'step-button'),id);assert.ok(badge,`#${id} needs a persistent number badge`);assert.ok(label,`#${id} needs a separate editable label`);
+    assert.ok(hasClass(button,'primary'),`#${id} must use the dark primary style`);assert.ok(!hasClass(button,'secondary'),`#${id} cannot use the light secondary style`);assert.ok(hasClass(button,'step-button'),id);assert.ok(badge,`#${id} needs a persistent number badge`);assert.ok(label,`#${id} needs a separate editable label`);
     assert.equal(badge.attrs['aria-hidden'],'true');assert.equal(/^<[^>]+>([^<]*)</.exec(html.slice(badge.start))?.[1].trim(),number,id);
     assert.match(button.attrs['aria-label']||'',new RegExp(`Step ${number}\\b`),`#${id} must announce its step`);
   }
   assert.ok(inside(get('prepare-label'),get('prepare')));assert.match(html.slice(get('prepare-label').start).split('</span>')[0],/Backup\s*(?:&amp;|&)\s*prepare/i);
   assert.ok(!nodes.filter(node=>node.tag==='button'&&!['select-port','prepare','flash'].includes(node.attrs.id)).some(node=>hasClass(node,'step-button')),'Optional tools must not suggest extra mandatory workflow steps');
+});
+
+test('step 2 numbers the installation choices once without creating a fake action or hiding their group label',()=>{
+  const group=get('install-mode-switch'),legend=group.children.find(node=>node.tag==='legend'),row=group.children.find(node=>hasClass(node,'mode-step'));
+  assert.equal(group.attrs['aria-describedby'],'install-mode-hint');assert.ok(legend);assert.ok(row);assert.equal(row.tag,'div');
+  assert.match(html.slice(legend.start).split('</legend>')[0],/Step 2:\s*<\/span>Installation/);
+  const badge=row.children.find(node=>hasClass(node,'action-number'));assert.ok(badge);assert.equal(badge.attrs['aria-hidden'],'true');
+  assert.ok(!has(row,'role')&&!has(row,'tabindex'),'The shared step badge is not another input or button');
+  for(const id of ['install-mode-update','install-mode-install'])assert.ok(inside(get(id),row));
+  const numbers=nodes.filter(node=>hasClass(node,'action-number')).map(node=>/^<[^>]+>([^<]*)</.exec(html.slice(node.start))?.[1].trim());
+  assert.deepEqual(numbers,['1','2','3','4'],'Four steps must appear once, in workflow order');
+  const backgrounds=declarationsFor('.mode-step > .action-number').filter(rule=>Object.hasOwn(rule,'background'));assert.equal(backgrounds.at(-1)?.background,'var(--navy)','The installation badge must finish with the dark primary color');
 });
 
 test('next-step instructions stay visible and numbered actions remain legible on phones',()=>{
@@ -131,4 +143,27 @@ test('next-step instructions stay visible and numbered actions remain legible on
   const phoneCss=css.slice(css.indexOf('@media (max-width: 600px)'));assert.match(phoneCss,/\.step-button[^{}]*\{[^}]*width:\s*100%/,'Phone actions must have room for number and backup text');
   const labelRules=[...declarationsFor('.action-label'),...declarationsFor('.step-button .action-label')];
   assert.ok(labelRules.some(rule=>rule['min-width']==='0'),'Long labels need room to shrink and wrap');assert.ok(!labelRules.some(rule=>rule['white-space']==='nowrap'||rule.overflow==='hidden'),'Step instructions must not be clipped or forced onto one line');
+});
+
+test('captured backup JSON has hidden-by-default read-only private text views in tools and the save prompt',()=>{
+  for(const prefix of ['', 'question-']){
+    const view=get(prefix+'backup-json-view'),field=get(prefix+'backup-json'),warning=get(prefix+'backup-json-warning'),status=get(prefix+'backup-json-status');
+    assert.ok(has(view,'hidden'),'No backup text is revealed on page load');assert.ok(inside(field,view));assert.equal(field.tag,'textarea');assert.ok(hasClass(field,'backup-json'));
+    assert.ok(has(field,'readonly'));assert.equal(field.attrs.rows,'10');assert.equal(field.attrs.spellcheck,'false');assert.equal(field.attrs.autocomplete,'off');assert.equal(field.attrs['aria-describedby'],warning.attrs.id);
+    assert.ok(nodes.some(node=>node.tag==='label'&&node.attrs.for===field.attrs.id&&inside(node,view)),'A visible label must identify each text box');
+    assert.match(html.slice(warning.start).split('</p>')[0],/private identity and channel secrets/);assert.match(html.slice(warning.start).split('</p>')[0],/page memory only/);
+    assert.equal(status.attrs.role,'status');assert.equal(status.attrs['aria-live'],'polite');assert.ok(inside(status,view));
+    assert.equal(html.slice(field.start).split('>')[1].split('</textarea')[0],'','Static HTML cannot contain any captured data');
+  }
+  assert.ok(inside(get('backup-json-view'),get('backups')));assert.ok(get('backup-json-view').start>get('backup-summary').start);
+  assert.ok(inside(get('question-backup-json-view'),get('question-dialog')));assert.ok(get('question-backup-json-view').start<get('question-actions').start);
+});
+
+test('backup JSON copy and clear remain usable during the save prompt without submitting it',()=>{
+  for(const [prefix,ids]of [['',['copy-backup-json','clear-backup-json']],['question-',['copy-question-backup-json','clear-question-backup-json']]])for(const id of ids){
+    const button=get(id);assert.equal(button.tag,'button');assert.equal(button.attrs.type,'button');assert.ok(inside(button,get(prefix+'backup-json-view')));
+    assert.ok(!has(button,'data-lock'),'Copy and clear are local text actions, not busy-locked USB operations');assert.ok(!has(button,'disabled'));
+  }
+  const rules=declarationsFor('.backup-json');assert.ok(rules.some(rule=>rule.width==='100%'&&rule['max-width']==='100%'&&rule['min-width']==='0'),'Text boxes must fit their container on phones and dialogs');
+  assert.ok(rules.some(rule=>rule.resize==='vertical'&&/monospace/.test(rule['font-family']||'')),'JSON should be legible and vertically resizable');
 });
