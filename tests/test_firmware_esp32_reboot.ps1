@@ -7,7 +7,8 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile(
     $firmwarePath, [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw "firmware.cmd parse failed: $parseErrors" }
 foreach ($name in @(
-    'Complete-Esp32FlashSession', 'Get-EspUsbBootloaderStrategy', 'Get-Esp32RomBeforeMode',
+    'Complete-Esp32FlashSession', 'New-Esp32ApplicationVerificationTimer',
+    'Get-EspUsbBootloaderStrategy', 'Get-Esp32RomBeforeMode',
     'Get-Esp32RomSessionStamp', 'Assert-Esp32FinishCapability', 'Get-Esp32WriteAfterMode',
     'Get-EspRomMac', 'Set-Esp32VerifiedChipMac', 'Assert-Esp32RomChipIdentity',
     'Test-UsbComPortIdentityMatch', 'Get-UsbIdentityInterfaceNumber', 'Install-SimpleMergedEspImage'
@@ -33,6 +34,12 @@ function Expect-Failure {
     }
     if (-not $failed) { throw "Expected failure matching '$Pattern'." }
 }
+
+$realTimer = New-Esp32ApplicationVerificationTimer
+Assert-True ($realTimer -is [System.Diagnostics.Stopwatch] -and $realTimer.IsRunning) `
+    'Production first-boot verification does not use a running monotonic timer.'
+$realTimer.Stop()
+
 function New-Identity {
     param([string]$Description = 'Espressif USB JTAG/serial debug unit', [string]$Serial = 'CC8DA2E96F34')
     return [pscustomobject]@{
@@ -61,6 +68,13 @@ function Reset-Fixture {
     $script:missingAfterReset = $false
     $script:swapDuringMac = $false
     $script:writeFails = $false
+    $script:verificationTimeMs = 0
+    $script:runtimeProbeCount = 0
+    $script:runtimeReadyAtMs = 0
+    $script:runtimeUsbReadyAtMs = 0
+    $script:swapDuringRuntimeReply = $false
+    $script:sleepCount = 0
+    $script:hostMessages = @()
     $script:ESPTOOL_NO_RESET = 'no-reset'
     $script:ESPTOOL_HARD_RESET = 'hard-reset'
     $script:ESPTOOL_WATCHDOG_RESET = 'watchdog-reset'
@@ -73,6 +87,9 @@ function Reset-Fixture {
 function Resolve-EspUsbComPort {
     param($PreferredComPort, $UsbIdentity, $TimeoutMs, $Purpose)
     if ($script:missingAfterReset -and $script:state -eq 'runtime') { throw 'Selected USB device missing.' }
+    if ($script:state -eq 'runtime' -and $script:verificationTimeMs -lt $script:runtimeUsbReadyAtMs) {
+        throw 'Selected USB device is re-enumerating.'
+    }
     if (-not (Test-UsbComPortIdentityMatch -Expected $UsbIdentity -Actual $script:actual)) {
         throw 'Selected USB identity changed.'
     }
@@ -85,7 +102,13 @@ function Get-UsbComPortIdentity {
 }
 function Get-EspRuntimeStorageLayout {
     param($ComPort)
-    if ($script:state -eq 'runtime' -and $script:runtimeAnswers -and $ComPort -eq $script:port) {
+    $script:runtimeProbeCount++
+    $script:verificationTimeMs += 3000
+    Assert-True (Test-UsbComPortIdentityMatch -Expected $script:expected -Actual $script:actual) `
+        'A runtime query was sent to a different physical radio.'
+    if ($script:state -eq 'runtime' -and $script:runtimeAnswers -and $ComPort -eq $script:port -and
+        $script:verificationTimeMs -ge $script:runtimeReadyAtMs) {
+        if ($script:swapDuringRuntimeReply) { $script:actual = New-Identity -Serial '441BF669CF98' }
         return 'int:esp32=16384K ext:none; app0*@0x10000+6400K,app1@0x650000+6400K'
     }
     return ''
@@ -116,7 +139,23 @@ function run_cmd {
     }
     return 0
 }
-function Start-Sleep { param($Milliseconds) }
+function New-Esp32ApplicationVerificationTimer {
+    # Model a new monotonic stopwatch per call; no real waits or device access.
+    $timer = [pscustomobject]@{ StartedAtMs = $script:verificationTimeMs }
+    $timer | Add-Member -MemberType ScriptProperty -Name ElapsedMilliseconds -Value {
+        $script:verificationTimeMs - $this.StartedAtMs
+    }
+    return $timer
+}
+function Start-Sleep {
+    param($Milliseconds)
+    $script:sleepCount++
+    $script:verificationTimeMs += $Milliseconds
+}
+function Write-Host {
+    param($Object)
+    $script:hostMessages += [string]$Object
+}
 function Bind-RomSession {
     $null = Assert-Esp32RomChipIdentity -ComPort $script:port -UsbIdentity $script:expected `
         -EspToolCommand 'esptool'
@@ -137,9 +176,77 @@ $script:state = 'runtime'
 $script:port = 'COM12'
 $port = Complete-Esp32FlashSession -ComPort 'COM11' -UsbIdentity $script:expected
 Assert-True ($port -eq 'COM12' -and $script:commands.Count -eq 0) 'Running app was probed/reset.'
+Assert-True ($script:runtimeProbeCount -eq 1 -and $script:sleepCount -eq 0) `
+    'A ready application waited through the first-boot budget instead of returning immediately.'
+Assert-True (@($script:hostMessages | Where-Object { $_ -like 'Waiting for*' }).Count -eq 0) `
+    'A ready application printed a slow-boot warning.'
+
+# A healthy first boot may not serve the CLI until storage/identity work is
+# done, well beyond the previous eight short probes. Keep waiting, never reset.
+Reset-Fixture
+Bind-RomSession
+$script:runtimeReadyAtMs = 80000
+$port = Complete-Esp32FlashSession -ComPort 'COM11' -UsbIdentity $script:expected
+Assert-True ($port -eq 'COM12' -and $script:runtimeProbeCount -gt 8 -and
+    $script:verificationTimeMs -ge 80000 -and $script:verificationTimeMs -lt 120000) `
+    'Slow first boot was not verified within the longer startup allowance.'
+Assert-True ($script:commands.Count -eq 2 -and -not $script:expected.Esp32RomSessionActive) `
+    'Slow application startup triggered an additional ROM query or reset.'
+$waitingMessages = @($script:hostMessages | Where-Object { $_ -like 'Waiting for*' })
+Assert-True ($waitingMessages.Count -gt 0 -and $waitingMessages.Count -le 6) `
+    'Slow-boot waiting notices were missing or printed on every retry.'
+
+# A selected radio may temporarily disappear, then return under a new COM
+# number before its slow first boot completes. Only that identity is queried.
+Reset-Fixture
+Bind-RomSession
+$script:runtimeUsbReadyAtMs = 20000
+$script:runtimeReadyAtMs = 60000
+$port = Complete-Esp32FlashSession -ComPort 'COM11' -UsbIdentity $script:expected
+Assert-True ($port -eq 'COM12' -and $script:verificationTimeMs -ge 60000 -and
+    $script:commands.Count -eq 2) 'Delayed same-device USB return was rejected or reset again.'
+
+# A reply racing a device swap cannot count as application boot proof.
+Reset-Fixture
+$script:state = 'runtime'
+$script:port = 'COM12'
+$script:swapDuringRuntimeReply = $true
+Expect-Failure { Complete-Esp32FlashSession -ComPort 'COM11' -UsbIdentity $script:expected } `
+    'Application boot is unverified'
+Assert-True ($script:commands.Count -eq 0 -and $script:runtimeProbeCount -eq 1) `
+    'USB identity was not rechecked after reading an application reply.'
+
 Reset-Fixture
 Expect-Failure { Complete-Esp32FlashSession -ComPort 'COM11' -UsbIdentity $script:expected } 'Application boot is unverified'
 Assert-True ($script:commands.Count -eq 0) 'Identical JTAG descriptors or absent CLI triggered blind SLIP.'
+Assert-True ($script:verificationTimeMs -ge 120000 -and $script:verificationTimeMs -le 123000) `
+    'Default application verification did not honor its bounded two-minute budget.'
+
+Reset-Fixture
+Expect-Failure { Complete-Esp32FlashSession -ComPort 'COM11' -UsbIdentity $script:expected `
+    -ApplicationVerificationTimeoutSec 1 } 'within 1 seconds'
+Assert-True ($script:runtimeProbeCount -eq 1 -and $script:commands.Count -eq 0) `
+    'An explicit short verification budget caused a reset or unbounded retry loop.'
+Reset-Fixture
+Expect-Failure { Complete-Esp32FlashSession -ComPort 'COM11' -UsbIdentity $script:expected `
+    -ApplicationVerificationTimeoutSec 0 } 'range|greater than or equal'
+Assert-True ($script:runtimeProbeCount -eq 0 -and $script:commands.Count -eq 0) `
+    'An invalid verification timeout reached a device operation.'
+
+# Skip/bridge paths must never consume the normal application wait, and must
+# not claim that a descriptor match proves startup.
+Reset-Fixture
+Bind-RomSession
+$port = Complete-Esp32FlashSession -ComPort 'COM11' -UsbIdentity $script:expected -SkipApplicationVerification
+Assert-True ($port -eq 'COM12' -and $script:runtimeProbeCount -eq 0 -and
+    $script:verificationTimeMs -eq 0 -and $script:commands.Count -eq 2) `
+    'Skip verification entered the startup wait or repeated the final reset.'
+Reset-Fixture
+Bind-RomSession
+$null = Complete-Esp32FlashSession -ComPort 'COM11' -UsbIdentity $script:expected `
+    -SkipApplicationVerification -PartitionBridgeBoot
+Assert-True ($script:runtimeProbeCount -eq 0 -and $script:verificationTimeMs -eq 0 -and
+    $script:commands.Count -eq 2) 'Partition bridge used the ordinary application startup loop.'
 
 Reset-Fixture
 Bind-RomSession
@@ -245,4 +352,4 @@ $script:writeFails = $true
 Expect-Failure { Install-SimpleMergedEspImage -ImagePath $firmwarePath -ComPort 'COM11' -UsbIdentity $script:expected } 'image write failure'
 Assert-True (-not $script:expected.Esp32RomSessionActive -and @($script:commands | Where-Object { $_ -match 'watchdog-reset' }).Count -eq 0) 'Failed image write retained trust or issued final reset.'
 
-Write-Host 'PASS ESP32 masked watchdog finish, ROM/MAC gates, UART legacy reset, and no blind bootloader retries'
+Microsoft.PowerShell.Utility\Write-Host 'PASS ESP32 bounded slow-first-boot verification, masked watchdog finish, ROM/MAC gates, UART legacy reset, and no blind bootloader retries'

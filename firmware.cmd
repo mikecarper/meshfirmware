@@ -5087,12 +5087,19 @@ function Get-EspRuntimeStorageLayout {
 	}
 }
 
+function New-Esp32ApplicationVerificationTimer {
+	# A monotonic clock keeps a system-time correction from shortening or
+	# extending the first-boot wait, and lets hardware-free tests advance time.
+	return [System.Diagnostics.Stopwatch]::StartNew()
+}
+
 function Complete-Esp32FlashSession {
 	param(
 		[Parameter(Mandatory)][string]$ComPort,
 		[Parameter(Mandatory)][psobject]$UsbIdentity,
 		[switch]$SkipApplicationVerification,
-		[switch]$PartitionBridgeBoot
+		[switch]$PartitionBridgeBoot,
+		[ValidateRange(1, 600)][int]$ApplicationVerificationTimeoutSec = 120
 	)
 
 	$lastPort = $ComPort
@@ -5161,7 +5168,13 @@ function Complete-Esp32FlashSession {
 		return $lastPort
 	}
 
-	for ($attempt = 0; $attempt -lt 8; $attempt++) {
+	# First boot after an erase can initialize storage and generate/persist
+	# identity before serving the CLI. A fixed retry count can expire while
+	# a healthy application is still starting. Wait without resetting it.
+	$verificationTimer = New-Esp32ApplicationVerificationTimer
+	$verificationTimeoutMs = [long]$ApplicationVerificationTimeoutSec * 1000
+	$nextWaitingNoticeMs = 10000
+	while ($verificationTimer.ElapsedMilliseconds -lt $verificationTimeoutMs) {
 		try {
 			$lastPort = Resolve-EspUsbComPort -PreferredComPort $lastPort `
 				-UsbIdentity $UsbIdentity -TimeoutMs 2000 `
@@ -5173,6 +5186,13 @@ function Complete-Esp32FlashSession {
 			}
 			$layout = Get-EspRuntimeStorageLayout -ComPort $lastPort
 			if ($layout) {
+				# A longer wait must not let a re-enumeration or COM-port swap
+				# turn another device's response into success for this radio.
+				$replyIdentity = Get-UsbComPortIdentity -ComPort $lastPort
+				if ($null -eq $replyIdentity -or
+					-not (Test-UsbComPortIdentityMatch -Expected $UsbIdentity -Actual $replyIdentity)) {
+					throw 'The selected ESP32 USB identity changed while reading its application reply.'
+				}
 				Write-Host "ESP32 application returned on $lastPort`: $layout"
 				return $lastPort
 			}
@@ -5181,9 +5201,16 @@ function Complete-Esp32FlashSession {
 			# Native USB can disappear briefly between ROM and application modes.
 		}
 
-		Start-Sleep -Milliseconds 500
+		$elapsedMs = $verificationTimer.ElapsedMilliseconds
+		if ($elapsedMs -ge $verificationTimeoutMs) { break }
+		if ($elapsedMs -ge $nextWaitingNoticeMs) {
+			Write-Host ("Waiting for the selected ESP32 application ({0}/{1} seconds). First boot can take longer; no reset or reflash will be sent." -f
+				[int]($elapsedMs / 1000), $ApplicationVerificationTimeoutSec)
+			$nextWaitingNoticeMs = $elapsedMs + 15000
+		}
+		Start-Sleep -Milliseconds ([int][Math]::Min(500, $verificationTimeoutMs - $elapsedMs))
 	}
-	throw "ESP32 firmware was written, but its application did not answer on the selected USB device after reset. Application boot is unverified; no bootloader retry was sent. Check its boot log before reporting this flash as successful."
+	throw "ESP32 firmware was written, but its application did not answer on the selected USB device within $ApplicationVerificationTimeoutSec seconds after reset. Application boot is unverified; no bootloader retry was sent. Check its boot log before reporting this flash as successful."
 }
 
 function Resolve-PartitionExpansionTool {
@@ -7540,13 +7567,17 @@ function Invoke-NrfutilSerialDfu {
 	Write-Host "$($nrfutilCommand.DisplayBase) $($dfuArgs -join ' ')"
 	$totalSteps = Get-NrfutilUploadSteps -PackageFile $PackageFile
 	$progressId = 44
-	$progressStatus = "Opening DFU transport on $dfuComPort"
-	$hashCount = 0
+	# Nested stream callbacks share this object. Assigning scalar variables in
+	# their child scopes would reset the count/cache for every received char.
+	$nrfProgress = [pscustomobject]@{
+		Status = "Opening DFU transport on $dfuComPort"
+		HashCount = 0
+		LastInlineText = ''
+		LastInlineWidth = 0
+		InlineVisible = $false
+	}
 	$outputBuffer = New-Object System.Text.StringBuilder
 	$lineBuffer = New-Object System.Text.StringBuilder
-	$lastInlineProgressText = ""
-	$lastInlineProgressWidth = 0
-	$inlineProgressVisible = $false
 
 	function ConvertTo-ProcessArgumentString {
 		param([string[]]$Values)
@@ -7572,22 +7603,22 @@ function Invoke-NrfutilSerialDfu {
 		param([string]$Text)
 
 		if ([string]::IsNullOrWhiteSpace($Text)) { return }
-		if ($Text -eq $lastInlineProgressText) { return }
+		if ($Text -eq $nrfProgress.LastInlineText) { return }
 
-		$padding = if ($lastInlineProgressWidth -gt $Text.Length) { ' ' * ($lastInlineProgressWidth - $Text.Length) } else { '' }
+		$padding = if ($nrfProgress.LastInlineWidth -gt $Text.Length) { ' ' * ($nrfProgress.LastInlineWidth - $Text.Length) } else { '' }
 		Write-Host -NoNewline ("`r{0}{1}" -f $Text, $padding)
-		$lastInlineProgressText = $Text
-		$lastInlineProgressWidth = $Text.Length
-		$inlineProgressVisible = $true
+		$nrfProgress.LastInlineText = $Text
+		$nrfProgress.LastInlineWidth = $Text.Length
+		$nrfProgress.InlineVisible = $true
 	}
 
 	function Clear-NrfutilInlineProgress {
-		if (-not $inlineProgressVisible) { return }
+		if (-not $nrfProgress.InlineVisible) { return }
 
-		Write-Host -NoNewline ("`r" + (' ' * $lastInlineProgressWidth) + "`r")
-		$lastInlineProgressText = ""
-		$lastInlineProgressWidth = 0
-		$inlineProgressVisible = $false
+		Write-Host -NoNewline ("`r" + (' ' * $nrfProgress.LastInlineWidth) + "`r")
+		$nrfProgress.LastInlineText = ''
+		$nrfProgress.LastInlineWidth = 0
+		$nrfProgress.InlineVisible = $false
 	}
 
 	function Flush-NrfutilLine {
@@ -7599,27 +7630,27 @@ function Invoke-NrfutilSerialDfu {
 		if ($trimmed -match '^[#\s]+$') { return }
 
 		if ($trimmed -match '^Upgrading target on ') {
-			Set-Variable -Name progressStatus -Scope 1 -Value $trimmed
+			$nrfProgress.Status = $trimmed
 			if ($totalSteps -gt 0) {
-				Write-Progress -Id $progressId -Activity $progressActivity -Status $progressStatus -PercentComplete 0
+				Write-Progress -Id $progressId -Activity $progressActivity -Status $nrfProgress.Status -PercentComplete 0
 				Update-NrfutilInlineProgress ("{0}: 0% (0/{1})" -f $progressActivity, $totalSteps)
 			}
 			else {
-				Write-Progress -Id $progressId -Activity $progressActivity -Status $progressStatus
-				Update-NrfutilInlineProgress ("{0}: {1}" -f $progressActivity, $progressStatus)
+				Write-Progress -Id $progressId -Activity $progressActivity -Status $nrfProgress.Status
+				Update-NrfutilInlineProgress ("{0}: {1}" -f $progressActivity, $nrfProgress.Status)
 			}
 			return
 		}
 
 		if ($trimmed -match '^Activating new firmware') {
-			Set-Variable -Name progressStatus -Scope 1 -Value $trimmed
+			$nrfProgress.Status = $trimmed
 			if ($totalSteps -gt 0) {
-				Write-Progress -Id $progressId -Activity $progressActivity -Status $progressStatus -PercentComplete 99
-				Update-NrfutilInlineProgress ("{0}: 99% ({1}/{2})" -f $progressActivity, [Math]::Min($hashCount, $totalSteps), $totalSteps)
+				Write-Progress -Id $progressId -Activity $progressActivity -Status $nrfProgress.Status -PercentComplete 99
+				Update-NrfutilInlineProgress ("{0}: 99% ({1}/{2})" -f $progressActivity, [Math]::Min($nrfProgress.HashCount, $totalSteps), $totalSteps)
 			}
 			else {
-				Write-Progress -Id $progressId -Activity $progressActivity -Status $progressStatus
-				Update-NrfutilInlineProgress ("{0}: {1}" -f $progressActivity, $progressStatus)
+				Write-Progress -Id $progressId -Activity $progressActivity -Status $nrfProgress.Status
+				Update-NrfutilInlineProgress ("{0}: {1}" -f $progressActivity, $nrfProgress.Status)
 			}
 			Clear-NrfutilInlineProgress
 			Write-Host $trimmed
@@ -7627,14 +7658,14 @@ function Invoke-NrfutilSerialDfu {
 		}
 
 		if ($trimmed -match '^Device programmed\.') {
-			Set-Variable -Name progressStatus -Scope 1 -Value $trimmed
+			$nrfProgress.Status = $trimmed
 			if ($totalSteps -gt 0) {
-				Write-Progress -Id $progressId -Activity $progressActivity -Status $progressStatus -PercentComplete 100
+				Write-Progress -Id $progressId -Activity $progressActivity -Status $nrfProgress.Status -PercentComplete 100
 				Update-NrfutilInlineProgress ("{0}: 100% ({1}/{2})" -f $progressActivity, $totalSteps, $totalSteps)
 			}
 			else {
-				Write-Progress -Id $progressId -Activity $progressActivity -Status $progressStatus
-				Update-NrfutilInlineProgress ("{0}: {1}" -f $progressActivity, $progressStatus)
+				Write-Progress -Id $progressId -Activity $progressActivity -Status $nrfProgress.Status
+				Update-NrfutilInlineProgress ("{0}: {1}" -f $progressActivity, $nrfProgress.Status)
 			}
 			Clear-NrfutilInlineProgress
 			Write-Host $trimmed
@@ -7654,11 +7685,11 @@ function Invoke-NrfutilSerialDfu {
 		foreach ($ch in $Chunk.ToCharArray()) {
 			switch ($ch) {
 				"#" {
-					$hashCount++
+					$nrfProgress.HashCount++
 					if ($totalSteps -gt 0) {
-						$pct = [Math]::Min(99, [int](($hashCount * 100) / [Math]::Max(1, $totalSteps)))
-						Write-Progress -Id $progressId -Activity $progressActivity -Status "$progressStatus ($hashCount/$totalSteps)" -PercentComplete $pct
-						Update-NrfutilInlineProgress ("{0}: {1}% ({2}/{3})" -f $progressActivity, $pct, $hashCount, $totalSteps)
+						$pct = [Math]::Min(99, [int](($nrfProgress.HashCount * 100) / [Math]::Max(1, $totalSteps)))
+						Write-Progress -Id $progressId -Activity $progressActivity -Status "$($nrfProgress.Status) ($($nrfProgress.HashCount)/$totalSteps)" -PercentComplete $pct
+						Update-NrfutilInlineProgress ("{0}: {1}% ({2}/{3})" -f $progressActivity, $pct, $nrfProgress.HashCount, $totalSteps)
 					}
 				}
 				"`r" { }
@@ -7692,7 +7723,7 @@ function Invoke-NrfutilSerialDfu {
 	$proc = New-Object System.Diagnostics.Process
 	$proc.StartInfo = $psi
 
-	Write-Progress -Id $progressId -Activity $progressActivity -Status $progressStatus -PercentComplete 0
+	Write-Progress -Id $progressId -Activity $progressActivity -Status $nrfProgress.Status -PercentComplete 0
 	$null = $proc.Start()
 	try {
 		while (-not $proc.HasExited -or $proc.StandardOutput.Peek() -ge 0 -or $proc.StandardError.Peek() -ge 0) {

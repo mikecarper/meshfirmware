@@ -1,0 +1,35 @@
+name: Windows flasher regression tests
+
+on:
+  push:
+    branches: [main]
+    paths: ['firmware.cmd', 'tests/test_firmware_*.ps1', '.github/workflows/windows-flasher.yml']
+  pull_request:
+    paths: ['firmware.cmd', 'tests/test_firmware_*.ps1', '.github/workflows/windows-flasher.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regressions:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Hardware-free startup, DFU progress, and USB safety checks
+        shell: ${{ matrix.shell }}
+        run: |
+          $engine = (Get-Process -Id $PID).Path
+          foreach ($test in @(
+            'tests/test_firmware_esp32_reboot.ps1',
+            'tests/test_firmware_nrfutil_progress.ps1',
+            'tests/test_firmware_esp32_bootloader.ps1',
+            'tests/test_firmware_usb_identity.ps1'
+          )) {
+            & $engine -NoProfile -File $test
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
