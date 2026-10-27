@@ -18,6 +18,7 @@ export function checkCatalogRoutes(catalog) {
   }
   assert.ok(artifacts>0,'Empty catalog cannot replace a published catalog.');
   const checked=validateCatalog(catalog);
+  if(catalog.recoveryCatalog)assert.deepEqual(catalog.recoveryCatalog,checked.recoveryCatalog,'Published recovery metadata must match its verified stable-release bundle.');
   for(let i=0;i<catalog.items.length;i++)if(catalog.items[i].architecture==='nrf52'){
     assert.deepEqual(catalog.items[i].bootloader||[],checked.items[i].bootloader||[],'Published nRF52 bootloader recommendations must match the verified fork manifest.');
     assert.deepEqual(catalog.items[i].bootloaderInfo,checked.items[i].bootloaderInfo,'Published nRF52 bootloader hashes and profiles must match the verified fork manifest.');
@@ -28,4 +29,5 @@ if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).hr
   const catalog=JSON.parse(await readFile(new URL('../public/catalog.json',import.meta.url),'utf8'));
   const {artifacts,utilities,officialReleases}=checkCatalogRoutes(catalog);
   console.log(`Catalog routes verified: ${artifacts} artifacts, ${officialReleases} complete GitHub release routes, ${utilities} utility references; no repository-less GitHub release URLs.`);
+  if(catalog.recoveryCatalog)console.log(`Recovery catalog verified: ${catalog.recoveryCatalog.profiles.length} explicit installed-bootloader profiles, OTAFIX ${catalog.recoveryCatalog.version}; no automatic profile selection.`);
 }

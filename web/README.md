@@ -88,8 +88,26 @@ old upstream bootloader links are not silently substituted.
 These combined SoftDevice/bootloader ZIPs require the exact compatible
 application to be reinstalled afterward. Application-owned data is not
 guaranteed; back up before DFU. Normal recommendations never select temporary
-`R_` recovery builds. Recovery remains a separate manual/custom-file workflow,
-and all existing payload/connected-board checks and overrides remain in force.
+`R_` recovery builds. The separate **Temporary R_ recovery bridge** picker has
+no default selection: choose the exact **currently installed bootloader
+profile**, not the physical target board. Advertised names and USB IDs can be
+shared, so neither is used to choose a profile automatically.
+
+The latest release's recovery bundle and each inner serial DFU ZIP are checked
+against their hashes and inventory before use. If browser downloads are blocked,
+use **Download recovery bundle**, choose that exact local bundle, and load the
+selected profile again. The normal picker remains independent if recovery
+metadata is unavailable; verified cached recovery metadata is labelled as such.
+No recovery binaries are hosted on Pages or saved in the public catalog.
+
+Every recognized recovery write requires **RECOVERY &lt;profile&gt;**, followed by
+the existing independent board override and destructive-write acknowledgements
+when applicable. After transfer, select the same radio's new DFU port and install
+the normal bootloader for the actual physical board, then its compatible
+application. For a RAK4631 showing `GAT562BOOT`, the first bridge is `gat562`,
+not RAK4631. Recovery relaxes on-device board/version guards; do not leave it
+installed. Transfer completion is not activation or installed-identity proof.
+Existing payload/connected-board checks remain in force.
 
 Choose **Erase, reconnect, then write selected ZIP**. The final firmware and
 the selected board's erase ZIP are validated before erase. Use the published

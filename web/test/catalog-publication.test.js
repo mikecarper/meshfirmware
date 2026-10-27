@@ -22,3 +22,9 @@ test('publication cannot retain old or unverified bootloader recommendations tha
   assert.deepEqual(validateCatalog(snapshot(legacy)).items[0].bootloader,[]);
   assert.throws(()=>checkCatalogRoutes(snapshot(legacy)),/verified fork manifest/);
 });
+
+test('invalid optional recovery metadata cannot be published and cannot poison otherwise valid application entries',()=>{
+  const raw={...snapshot(item),recoveryCatalog:{schemaVersion:1}},checked=validateCatalog(raw);
+  assert.equal(checked.items[0].url,item.url);assert.equal(checked.recoveryCatalog,null);assert.ok(checked.warnings.some(w=>w.includes('Recovery catalog could not be verified')));
+  assert.throws(()=>checkCatalogRoutes(raw),/verified stable-release bundle/);
+});

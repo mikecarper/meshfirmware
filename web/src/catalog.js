@@ -1,5 +1,6 @@
 import {gzipSync,gunzipSync,strToU8,strFromU8} from 'fflate';
 import {validateBootloaderSnapshot,applyBootloaderCatalog} from './bootloader-catalog.js';
+import {validateRecoveryCatalog} from './bootloader-recovery.js';
 
 export function httpsUrl(value, base) {
   const url = new URL(value, base);
@@ -97,7 +98,9 @@ export function validateCatalog(value) {
   const linked=repaired?items:value.items,enriched=inheritOfficialUtilities(linked);
   const bootloaderCatalog=value.bootloaderCatalog?validateBootloaderSnapshot({...value.bootloaderCatalog,cached:value.cached===true||value.bootloaderCatalog.cached===true}):null;
   const recommended=applyBootloaderCatalog(enriched,bootloaderCatalog);
-  return repaired||recommended!==value.items?{...value,...(bootloaderCatalog?{bootloaderCatalog}:{}),items:recommended,warnings:repaired?[...value.warnings,`Repaired ${repaired} legacy official release URLs missing the repository path.`]:value.warnings}:value;
+  let recoveryCatalog=null;const warnings=repaired?[...value.warnings,`Repaired ${repaired} legacy official release URLs missing the repository path.`]:[...value.warnings];
+  if(value.recoveryCatalog)try{recoveryCatalog=validateRecoveryCatalog({...value.recoveryCatalog,cached:value.cached===true||value.recoveryCatalog.cached===true});}catch{warnings.push('Recovery catalog could not be verified; recovery recommendations are disabled. Normal bootloader and application firmware remain available.');}
+  return {...value,...(bootloaderCatalog?{bootloaderCatalog}:{}),recoveryCatalog,items:recommended,warnings};
 }
 function encodeCache(value) {
   const bytes=gzipSync(strToU8(JSON.stringify(value)),{level:6});let binary='';
