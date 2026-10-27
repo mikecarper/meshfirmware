@@ -27,3 +27,14 @@ __pycache__/
 /config_backup.*.yaml*
 /mt.config_backup.*.yaml*
 /mc.config_backup.*.json
+
+# Browser flasher dependencies and generated public output
+/web/node_modules/
+/web/dist/
+/web/public/python/
+/web/public/validators/
+/web/public/catalog.json
+/web/public/licenses/
+/web/public/THIRD_PARTY_NOTICES.txt
+/web/test-results/
+/web/playwright-report/

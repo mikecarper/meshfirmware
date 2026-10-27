@@ -1,0 +1,35 @@
+Meshfirmware browser workbench
+Source: https://github.com/mikecarper/meshfirmware/tree/main/web
+Repository license: LGPL-2.1 (see repository LICENSE).
+
+Runtime dependencies are pinned in package.json / pnpm-lock.yaml:
+  esptool-js 0.7.0 — Espressif Systems — Apache-2.0
+    https://github.com/espressif/esptool-js
+  @noble/curves 1.9.7 and @noble/hashes 2.4.0 — Paul Miller — MIT
+    https://github.com/paulmillr/noble-curves
+    https://github.com/paulmillr/noble-hashes
+  fflate 0.8.3 — Arjun Barrett — MIT
+    https://github.com/101arrowz/fflate
+  Pyodide 0.29.3 — Pyodide contributors — MPL-2.0
+    https://github.com/pyodide/pyodide/tree/0.29.3
+    Bundled CPython and standard library: Python Software Foundation license.
+
+The browser's legacy nRF52 DFU implementation follows Adafruit's published
+SLIP/HCI serial DFU protocol and the implementation in MeshCore Open:
+  https://github.com/adafruit/Adafruit_nRF52_nrfutil
+  https://github.com/mikecarper/meshcore-open
+  MeshCore Open: Copyright (c) 2025 zjs81, MIT.
+Cross-checked with the official MeshCore browser flasher (MIT):
+  https://github.com/meshcore-dev/flasher.meshcore.io
+  Copyright (c) 2025 Rastislav Vysoky.
+The ESP32-S3 watchdog reset sequence follows the public Espressif esptool
+target register definitions; esptool is licensed GPL-2.0-or-later.
+
+The exact repository Python validators are distributed unmodified and run
+locally in WebAssembly. No device credentials, backups, or local-helper
+process are included in the static site.
+
+Complete runtime license texts and package attribution are generated into
+the licenses/ directory at build time. Source and build instructions are
+available at the repository link above; no modifications to third-party
+runtime packages are made by this application.

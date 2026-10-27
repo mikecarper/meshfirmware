@@ -1,0 +1,22 @@
+{
+  "name": "meshfirmware-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "node scripts/prepare.mjs && node scripts/licenses.mjs && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@noble/curves": "1.9.7",
+    "@noble/hashes": "2.4.0",
+    "esptool-js": "0.7.0",
+    "fflate": "0.8.3",
+    "pyodide": "0.29.3"
+  },
+  "devDependencies": { "vite": "8.3.5" },
+  "engines": { "node": ">=22.12" },
+  "packageManager": "pnpm@11.25.0"
+}

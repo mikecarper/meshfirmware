@@ -3,6 +3,10 @@
 Select, download, and flash [MeshCore](https://github.com/meshcore-dev/MeshCore)
 or [Meshtastic](https://github.com/meshtastic/firmware) firmware over USB.
 
+[Open the browser USB flasher](https://mikecarper.github.io/meshfirmware/)
+(hardware preview; desktop Chrome/Edge, no local helper).
+See [browser features and limits](web/README.md).
+
 ## Windows
 
 1. [Download firmware.cmd](https://github.com/mikecarper/meshfirmware/blob/main/firmware.cmd?raw=true).
