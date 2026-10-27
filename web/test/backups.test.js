@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sealBackup,verifyBackup,parseBackup,MeshCore,publicFromPrivate,bluetoothName,loggingState,enterCompanionBinary,backupCommonCli } from '../src/meshcore.js';
+import { sealBackup,verifyBackup,parseBackup,MeshCore,publicFromPrivate,bluetoothName,loggingState,enterCompanionBinary,backupCommonCli,backupSummary,detectMeshCore } from '../src/meshcore.js';
+import { nativePayloadFromWeb,exportNativeBackup } from '../src/backup-native.js';
 import { words } from '../src/firmware.js';
 const enc=s=>new TextEncoder().encode(s),hex=b=>Buffer.from(b).toString('hex');
 function payload() {
@@ -64,4 +65,50 @@ test('CommonCLI backup uses repeater verbs and proves identity stability without
   const p=payload(),commands=[],link={async command(command){commands.push(command);if(command==='get public.key')return `> ${p.publicKey}`;if(command==='get prv.key')return `> ${p.privateKey.slice(2)}`;return '> value';}};
   const archive=await backupCommonCli(link);assert.equal(verifyBackup(archive).publicKey,p.publicKey);assert(commands.includes('ver'));assert(commands.includes('region'));assert(!commands.includes('version'));assert.equal(commands.filter(c=>c==='get public.key').length,2);assert(!commands.some(c=>c.startsWith('set ')||c==='reboot'));assert.equal(archive.payload.safeForWipe,false);
   link.command=async command=>command==='get public.key'?'> '+'11'.repeat(32):command==='get prv.key'?'> '+p.privateKey.slice(2):'> value';await assert.rejects(()=>backupCommonCli(link),/identity mismatch/);
+});
+
+test('unreadable logging state fails before any restore mutation',async()=>{
+  for(const mode of ['throw','unknown']) { const p=payload(),core=new MeshCore({});let writes=0;core.self=async()=>Buffer.from(p.self,'hex');core.info=async()=>Buffer.from(p.info,'hex');core.contacts=async()=>[];core.request=async()=>{writes++;};core.cli=async()=>{if(mode==='throw')throw new Error('logging timeout');return 'unknown command';};await assert.rejects(()=>core.restore(sealBackup(p)),/logging|USB logging/i);assert.equal(writes,0); }
+});
+test('identity replacement authorization is checked before even changing USB logging',async()=>{
+  const p=payload(),core=new MeshCore({});let writes=0,cliWrites=0;const live=Buffer.from(p.self,'hex');live[4]^=1;
+  core.self=async()=>live;core.info=async()=>Buffer.from(p.info,'hex');core.contacts=async()=>[];core.request=async()=>{writes++;};core.cli=async c=>{if(c.startsWith('set '))cliWrites++;return '> usb.logging on';};
+  await assert.rejects(()=>core.restore(sealBackup(p)),/Explicit replacement/);assert.equal(writes,0);assert.equal(cliWrites,0);
+});
+
+test('restore refuses success when TX acknowledgement did not change actual readback',async()=>{
+  const p=payload(),core=new MeshCore({}),actual=Buffer.from(p.self,'hex');actual[2]=5;let requested;
+  core.self=async()=>actual;core.info=async()=>Buffer.from(p.info,'hex');core.contacts=async()=>[];
+  core.cli=async c=>c==='get usb.logging'?'> usb.logging off':'> bluetooth off';
+  core.request=async c=>{if(c[0]===12)requested=c[1];return c[0]===31?Buffer.from(p.channels[0],'hex'):Uint8Array.of(0);};
+  await assert.rejects(()=>core.restore(sealBackup(p)),/TX power readback/);assert.equal(requested,20);assert.equal(actual[2],5);
+});
+test('logging must remain readable at final restore verification',async()=>{
+  const p=payload(),core=new MeshCore({});let loggingReads=0;
+  core.self=async()=>Buffer.from(p.self,'hex');core.info=async()=>Buffer.from(p.info,'hex');core.contacts=async()=>[];core.request=async c=>c[0]===31?Buffer.from(p.channels[0],'hex'):Uint8Array.of(0);
+  core.cli=async c=>c==='get usb.logging'?(++loggingReads>=3?'unknown command':'> usb.logging off'):'> bluetooth off';
+  await assert.rejects(()=>core.restore(sealBackup(p)),/USB logging status could not be verified after restore/);assert.equal(loggingReads,3);
+});
+
+test('backup captures battery/storage and RX power-save configuration and reports missing identity clearly',async()=>{
+  const p=payload(),core=new MeshCore({}),commands=[];core.self=async()=>Buffer.from(p.self,'hex');core.info=async()=>Buffer.from(p.info,'hex');core.contacts=async()=>[];
+  core.cli=async c=>{commands.push(c);return c==='get bluetooth.name'?'> MeshCore-test (default from node name)':'unsupported';};
+  core.request=async c=>{if(c[0]===23)throw new Error('Identity export disabled');if(c[0]===31)return Buffer.from(p.channels[0],'hex');if(c[0]===59)return Uint8Array.of(25,1);if(c[0]===43)return Uint8Array.from([23,...words(1,2)]);if(c[0]===40)return Uint8Array.of(21);if(c[0]===64)return Uint8Array.of(28);if(c[0]===20)return Uint8Array.from([12,0xa0,0x0f,...words(3,256)]);throw new Error('unexpected');};
+  const archive=await core.backup(),summary=backupSummary(archive);assert.deepEqual(archive.payload.batteryAndStorage,{level:4000,used_kb:3,total_kb:256});assert(commands.includes('get radio.rxps.config'));assert.equal(summary.privateIdentity,false);assert.equal(summary.complete,false);assert(summary.reasons.some(r=>/Private identity/.test(r)));
+});
+
+test('read-only automatic role detection recognizes CommonCLI and framed companion without resets/settings',async()=>{
+  const p=payload(),commands=[],common={command:async c=>{commands.push(c);return c==='get public.key'?`> ${p.publicKey}`:c==='get name'?'> Test repeater':'MeshCore Repeater test';}};
+  assert.equal((await detectMeshCore(common)).role,'common-cli');assert(!commands.some(c=>c.startsWith('set ')||c==='reboot'));
+  const queue=[],binary={buffer:[],command:async()=>'',write:async bytes=>{const response=Buffer.from(bytes[3]===1?p.self:p.info,'hex');queue.push(Uint8Array.from([0x3e,response.length,0,...response]));},read:async()=>queue.shift()||new Uint8Array()};
+  const detected=await detectMeshCore(binary);assert.equal(detected.role,'companion');assert.equal(detected.publicKey,p.publicKey);assert.equal(detected.model,'test-model');
+});
+
+test('native format conversion records honest browser evidence, structured data and completeness',async()=>{
+  const p=payload(),info=Buffer.from(p.info,'hex');info.set(enc('test-build'),8);info.set(enc('v1.0'),60);p.info=hex(info);p.options={autoadd:'190103',tuning:'17'+hex(words(2,3000)),scope:'1c',custom:'15'+hex(enc('gps:1'))};p.batteryAndStorage={level:4000,used_kb:3,total_kb:256};
+  const input=sealBackup(p),result=nativePayloadFromWeb(input,{usbIdentity:{usbVendorId:0x2886,usbProductId:0x8044},deviceHint:'XIAO'});
+  assert.equal(result.source.physical_usb_identity.attestation,'browser-port-permission');assert.equal(result.source.physical_usb_identity.serial,null);assert.equal(result.source.physical_usb_identity.location,null);assert.equal(result.source.physical_usb_identity.vendor_id,0x2886);
+  assert.equal(result.sections.self_info.data.tx_power,20);assert.equal(result.sections.identity_private_key.data.private_key,p.privateKey.slice(2));assert.equal(result.sections.autoadd.data.max_hops,3);assert.equal(result.sections.device_info.data.ver,'v1.0');assert.equal(result.completeness.safe_for_wipe,false);assert.equal(result.completeness.status,'api-snapshot-complete');
+  await assert.rejects(()=>exportNativeBackup(input,{usbIdentity:{usbVendorId:0x2886,usbProductId:0x8044}}),/exact Python serializer/);assert.throws(()=>nativePayloadFromWeb(input,{usbIdentity:{}}),/VID\/PID/);
+  let args;await exportNativeBackup(input,{usbIdentity:{usbVendorId:0x2886,usbProductId:0x8044},sealNative:async a=>{args=a;return {archive:{schema:'org.meshfirmware.meshcore-backup/v1'},summary:{public_key:p.publicKey}};}});assert.equal(args.privateHex,p.privateKey.slice(2));
 });

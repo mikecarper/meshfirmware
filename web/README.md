@@ -7,23 +7,32 @@ not launch `firmware.cmd`, contact a localhost service, install Python, or
 upload your firmware, identity, settings or backups. Public firmware/catalog
 downloads contact their named hosts. GitHub receives ordinary site requests.
 
-This is a **hardware preview**. Automated protocol, safety, simulated serial
-and WebAssembly tests pass. Physical flashing, visual browser QA and actual
-IndexedDB persistence have not yet been verified. Start with a recoverable
-bench radio, not a remote USB-only node.
+This is a **hardware preview**. Automated protocol, safety, simulated serial,
+WebAssembly and simulated IndexedDB persistence tests pass. Physical flashing,
+visual browser QA and real-browser persistence have not yet been verified.
+Start with a recoverable bench radio, not a remote USB-only node.
 
 ## Use
 
 1. Open the page in desktop Chrome/Edge and choose a USB port.
-2. Read the running MeshCore node and download a backup
-   while application firmware is running. ROM/DFU cannot export its settings.
-3. Select a release, an HTTPS URL or a local BIN/DFU ZIP/UF2/release ZIP. If a
+2. Select a release, an HTTPS URL or a local BIN/DFU ZIP/UF2/release ZIP. If a
    host blocks browser fetches, use Download, then choose that local file.
-4. Choose the correct connection type, inspect the device, review the exact
-   operation and hash, and type the confirmation token to flash.
+3. Choose the correct connection type and use **Back up & inspect**. Before
+   resetting an application or entering ROM/DFU, the page offers a backup by
+   default. Auto-detection distinguishes a binary companion from CommonCLI.
+   Confirm that the downloaded archive was saved; partial/failed backups need
+   separate acknowledgement. A backup-only button is also available.
+4. Review the exact file, operation, target evidence and hash, then type the
+   confirmation token. An already-running ROM/DFU interface cannot export
+   application settings: select **Already in ROM/DFU** and explicitly accept
+   continuing without a backup, or return to the application first.
 5. ESP32 writes require target MD5 readback before the one-time reset action.
-   Re-select the application port and read the node to check startup. DFU/UF2
-   transfer completion alone does not prove which application started.
+   Re-select the application port to run startup verification automatically.
+   The page checks retained node identity/model when applicable, protected
+   nRF52 board family, payload version when verified metadata is available,
+   and an ESP32 `get storage.layout` response. **Verify running application**
+   retries that check. Transfer completion alone is not startup verification;
+   bootloader/SoftDevice-only transfers do not claim application success.
 
 CH340/CP210x/FTDI work through the installed OS serial driver. The page cannot
 install drivers or expose device interfaces the browser/OS does not permit.
@@ -34,13 +43,14 @@ the shared `303a:1001` ID is not used to guess their reset mechanism.
 
 | Feature | Browser behavior |
 | --- | --- |
-| MeshCore / Keymind catalog | Public snapshot rebuilt daily and on deployment; exact board/role filters |
-| ESP32/S2/C3/S3/C6 | Validated application updates and merged installs; chip/security/MAC/capacity checks |
+| MeshCore / Keymind catalog | Rebuilt daily/on deployment; newest versioned Keymind manifest discovery; primary/proxy/validated-cache fallback; board/role/variant context and newest-first versions |
+| ESP32/S2/C3/S3/C6 | Validated application updates and merged installs; chip/security/MAC/capacity checks; factory-only/non-OTA updates and larger OTA metadata partitions supported |
+| Merged ESP32 installs | Populate missing secondary OTA slots from the exact embedded app, with independent readback; refuse ambiguous source boundaries rather than guessing |
 | ESP components | Checksum-valid bootloader/component image, explicit address, typed acknowledgement; never guess an offset |
-| nRF52 | Serial DFU like `adafruit-nrfutil`: application, bootloader, SoftDevice or combined SD/bootloader ZIP; no mounted-drive workflow or generic Nordic secure-DFU substitution |
+| nRF52 | Serial DFU like `adafruit-nrfutil`: application, bootloader, SoftDevice or combined SD/bootloader ZIP; guided erase/reconnect/final-write; no mounted-drive workflow or generic Nordic secure-DFU substitution |
 | Other UF2 boards | Validated blocks; explicitly chosen bootloader directory and identity recheck; nRF52 UF2 is refused in favor of serial DFU ZIP |
-| MeshCore companion backup | Private identity when exposed, channels, contacts, settings and optional snapshots; integrity checked locally |
-| MeshCore companion restore | Browser JSON and existing script companion JSON; exact Python archive validator in WASM; model/capacity/key checks and deliberate cross-hardware identity replacement |
+| MeshCore companion backup | Private identity when exposed, channels, contacts, settings, battery/storage and optional CLI snapshots; completeness and unavailable sections shown separately from integrity |
+| MeshCore companion restore | New native-format exports, existing script JSON and legacy browser JSON; exact Python serialization/validation in WASM; model/capacity/key checks, TX/logging readback, deliberate cross-hardware identity replacement |
 | Full Companion text mode | Explicit binary handoff; turning USB logging off requires acknowledgement |
 | CommonCLI repeater/room | Partial read-only snapshot, no automatic restore |
 | OS/tool management | Not a browser operation: no pip/driver installs, Raspberry Pi USB-speed changes or shell execution |
@@ -50,6 +60,52 @@ messages, files, logs and firmware may be absent. Imported MeshCore archives
 are validated from their original JSON text to preserve Python's canonical
 floating-point integrity. Diagnostic firmware versions are never restored.
 Unstructured optional CLI settings are retained for manual comparison.
+
+### nRF52 erase and recovery
+
+Choose **Erase, reconnect, then write selected ZIP**. The final firmware and
+the selected board's erase ZIP are validated before erase. Use the published
+erase choice or its exact local ZIP if browser downloads are blocked. Only
+application erase packages qualify; bootloader/SoftDevice components cannot be
+used as the guided erase step. Official v6/v7 utilities are recognized by their
+payload hashes even after renaming. A name-marked custom eraser requires an
+additional **CUSTOM ERASE** acknowledgement, not an automatic trust decision.
+Erase packages require destructive acknowledgement even when
+their DFU manifest calls them an `application`.
+
+Protected RAK checks examine embedded payload identity and retained pre-DFU
+board evidence, not just filenames. Unknown or conflicting evidence requires
+a directional, one-write override. That override is separate from the wipe
+acknowledgement; neither is a permanent bypass.
+
+After each reset/handoff, explicitly choose the **same physical radio** and
+confirm it. The browser cannot compare physical USB serial numbers. After
+erase, the final ZIP remains loaded, but no final write occurs until you
+reselect its DFU port, inspect again and confirm the write. Recovery state
+records only public filenames/hashes and board hints; if the page reloads,
+select the original exact final ZIP. Do not disconnect power during recovery.
+
+### Backup compatibility and physical-target checks
+
+New browser downloads use `org.meshfirmware.meshcore-backup/v1`, the native
+script archive format. The exact Python serializer seals the archive inside
+WebAssembly; the exact validator verifies it before download. Existing script
+archives and older browser-format archives still import into this page.
+
+Web Serial exposes VID/PID and port permission, **not** USB serial/location.
+The archive explicitly records `browser-port-permission` attestation and null
+physical-identity fields; it never invents a physical serial. Updated
+`restore.cmd` can use these companion archives, but prompts for the exact
+connected target USB serial. The Python restore helper requires
+`--target-serial` for a browser capture; moving to a different model also
+requires `--new-hardware`. Hardware, public identity, private-key proof and
+explicit identity-replacement checks remain in force.
+
+CommonCLI captures remain partial and cannot be automatically restored.
+Missing private identity or unavailable required sections cannot become a
+complete restore merely because the archive checksum is valid. Files are
+downloaded through the browser: the page cannot prove the download reached
+disk or set the file permissions, so keep the archive in a private location.
 
 ### Settings-preserving partition expansion
 
@@ -94,6 +150,8 @@ Only `web/dist` is published. The build copies an explicit runtime/validator
 allowlist; an artifact check refuses backup names, credentials, source maps,
 symlinks or unexpected root files. The workflow never publishes the repository
 root. Runtime dependencies are pinned; third-party licenses ship with the app.
+The catalog and its compressed last-known cache contain public release metadata
+only. Browser storage is not a substitute for a downloaded private backup.
 
 References: [official MeshCore flasher](https://github.com/meshcore-dev/flasher.meshcore.io),
 [Espressif esptool-js](https://github.com/espressif/esptool-js),

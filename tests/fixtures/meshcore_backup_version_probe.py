@@ -33,7 +33,7 @@ if mode == "ambiguous":
 summary = {
     "ok": mode != "not-ok",
     "schema": "wrong/schema" if mode == "schema" else "org.meshfirmware.meshcore-backup/v1",
-    "tool_version": "0.0.0" if mode == "version" else "0.2.3",
+    "tool_version": "0.0.0" if mode == "version" else "0.2.4",
 }
 print(json.dumps(summary), flush=True)
 if mode == "stderr":

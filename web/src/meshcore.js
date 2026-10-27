@@ -44,6 +44,7 @@ function validateCompanion(p) {
   for (const [command,value] of Object.entries(p.cli)) if (typeof value !== 'string' && value !== null && !(command==='get bluetooth.name' && typeof value==='object')) fail('Invalid CLI snapshot.'); else if(typeof value==='string' && value.length>8192) fail('Oversize CLI snapshot.');
   if (p.cli['get bluetooth.name']) bluetoothName(p.cli['get bluetooth.name']);
   if (p.cli['get radio.cad'] && /\bradio\.cad\s+(?:on|off),/i.test(p.cli['get radio.cad'])) cadStatus(p.cli['get radio.cad']);
+  if(p.batteryAndStorage && !p.batteryAndStorage.unavailable){const b=p.batteryAndStorage;if(!Number.isInteger(b.level)||b.level<0||b.level>65535||('used_kb'in b&&(!Number.isInteger(b.used_kb)||!Number.isInteger(b.total_kb)||b.used_kb<0||b.used_kb>b.total_kb||b.total_kb>0xffffffff)))fail('Invalid battery/storage diagnostic.');}
   return p;
 }
 export function publicFromPrivate(key) {
@@ -57,7 +58,7 @@ export function sealBackup(payload) {
   return { ...archive, sha256: hash(encode(canonical(archive))) };
 }
 export function verifyBackup(archive) {
-  if (archive?.schema !== 'org.meshfirmware.web-backup/v1') fail('Choose a Mesh Firmware web backup. Existing Python archives are not yet imported by this browser build.');
+  if (archive?.schema !== 'org.meshfirmware.web-backup/v1') fail('Import native archives through parseBackup so their exact Python integrity is checked.');
   const {sha256,...covered} = archive;
   if (hash(encode(canonical(covered))) !== sha256) fail('Backup SHA-256 mismatch.');
   const p = archive.payload;
@@ -82,7 +83,8 @@ export async function parseBackup(raw, { validatePython } = {}) {
 }
 
 function convertPythonBackup(payload) {
-  if(payload?.source?.node?.role!=='companion') fail('CommonCLI backups are partial and cannot be automatically restored.');
+  if(payload?.source?.capture_api==='meshcore-cli-common-cli') return sealBackup({role:'common-cli',publicKey:payload.source.node.public_key,safeForWipe:false,replies:payload.sections.settings.data||{},excluded:['CommonCLI captures are partial','No automatic restore'],nativeCompleteness:payload.completeness});
+  if(payload?.source?.node?.role!=='companion') fail('Only companion or partial CommonCLI archives are supported.');
   const sections=payload.sections;
   for(const name of ['self_info','identity_private_key','device_info','channels','contacts']) if(sections?.[name]?.state!=='complete') fail(`Required backup section incomplete: ${name}.`);
   const s=sections.self_info.data,d=sections.device_info.data, self=new Uint8Array(58+encode(s.name).length), v=new DataView(self.buffer),info=new Uint8Array(82),iv=new DataView(info.buffer);
@@ -96,12 +98,13 @@ function convertPythonBackup(payload) {
   value=optional('tuning');if(value)p.options.tuning=bytesToHex(Uint8Array.from([23,...words(value.rx_delay,value.airtime_factor)]));
   value=optional('custom_vars');if(value)p.options.custom=bytesToHex(Uint8Array.from([21,...encode(Object.entries(value).map(([k,v])=>`${k}:${v}`).join(','))]));
   value=optional('default_flood_scope');if(value) { const b=new Uint8Array(value.scope_name?48:1);b[0]=28;if(b.length>1){b.set(fixedText(value.scope_name,31,'scope name'),1);b.set(unhex(value.scope_key),32);}p.options.scope=bytesToHex(b); }
-  for(const [name,command] of [['bluetooth_name','get bluetooth.name'],['usb_logging','get usb.logging'],['radio_cad','get radio.cad']]) { value=optional(name);if(value)p.cli[command]=name==='bluetooth_name' && 'name' in value?value:value.text; }
+  for(const [name,command] of [['bluetooth_name','get bluetooth.name'],['usb_logging','get usb.logging'],['radio_cad','get radio.cad'],['radio_rxps','get radio.rxps.config'],['radio_rxgain','get radio.rxgain'],['radio_fem_rxgain','get radio.fem.rxgain'],['radio_fem_txgain','get radio.fem.txgain'],['display_rotation','get display.rotation'],['power_saving','get powersaving'],['storage_layout','get storage.layout']]) { value=optional(name);if(value)p.cli[command]=name==='bluetooth_name' && 'name' in value?value:value.text; }
+  value=optional('battery_and_storage');if(value)p.batteryAndStorage=value;
   const result=sealBackup(p);verifyBackup(result);return result;
 }
 
 export class MeshCore {
-  constructor(link) { this.link = link; this.bytes = []; this.busy = false; }
+  constructor(link, {timeoutMs=7000}={}) { this.link = link; this.bytes = []; this.busy = false; this.timeoutMs=timeoutMs; }
   async frame(ms = 6000) {
     const until = Date.now() + ms;
     while (Date.now() < until) {
@@ -119,7 +122,7 @@ export class MeshCore {
   async send(command) { if (command.length > 8192) fail('Command limit exceeded.'); await this.link.write(Uint8Array.from([0x3c,command.length & 255,command.length >> 8,...command])); }
   async request(command, code) {
     if (this.busy) fail('Another MeshCore command is active.'); this.busy = true;
-    try { await this.send(command); const until = Date.now() + 7000; while (Date.now() < until) { const frame = await this.frame(Math.max(1,until - Date.now())); if ([1,15].includes(frame[0])) fail(`MeshCore rejected command ${command[0]} (${frame[1] ?? 'disabled'}).`); if (frame[0] === code) return frame; } fail('MeshCore command timed out.'); }
+    try { await this.send(command); const until = Date.now() + this.timeoutMs; while (Date.now() < until) { const frame = await this.frame(Math.max(1,until - Date.now())); if ([1,15].includes(frame[0])) fail(`MeshCore rejected command ${command[0]} (${frame[1] ?? 'disabled'}).`); if (frame[0] === code) return frame; } fail('MeshCore command timed out.'); }
     finally { this.busy = false; }
   }
   async self() { const result = await this.request([1,3,32,32,32,32,32,32,...encode('meshfirmware-web')],5); if (result.length < 58) fail('Truncated SELF_INFO.'); return result; }
@@ -143,7 +146,8 @@ export class MeshCore {
     for (const [name,command,response] of [['autoadd',59,25],['tuning',43,23],['custom',40,21],['scope',64,28]]) {
       try { p.options[name] = bytesToHex(await this.request([command],response)); } catch (error) { p.options[name] = { unavailable: error.message }; }
     }
-    for (const command of ['version','get bluetooth.name','get usb.logging','get bluetooth','get radio.cad','get radio.rxgain','get radio.fem.rxgain','get radio.fem.txgain','get display.rotation','get powersaving','get radio2','get radio2.cross','get storage.layout']) {
+    try { const battery=await this.request([20],12); if(![3,11].includes(battery.length))fail('Invalid battery/storage response.');const view=new DataView(battery.buffer,battery.byteOffset,battery.byteLength);p.batteryAndStorage={level:view.getUint16(1,true)};if(battery.length===11){p.batteryAndStorage.used_kb=view.getUint32(3,true);p.batteryAndStorage.total_kb=view.getUint32(7,true);if(p.batteryAndStorage.used_kb>p.batteryAndStorage.total_kb)fail('Storage counters are internally inconsistent.');}}catch(error){p.batteryAndStorage={unavailable:error.message};}
+    for (const command of ['version','get bluetooth.name','get usb.logging','get bluetooth','get radio.cad','get radio.rxgain','get radio.fem.rxgain','get radio.fem.txgain','get display.rotation','get powersaving','get radio.rxps.config','get radio2','get radio2.cross','get storage.layout']) {
       try { p.cli[command] = await this.cli(command); } catch { p.cli[command] = null; }
     }
     if (bytesToHex((await this.self()).subarray(4,36)) !== publicKey) fail('Identity changed during backup.');
@@ -162,13 +166,16 @@ export class MeshCore {
     if(union.size>info[2]*2) fail('Existing plus restored contacts exceed target capacity. Nothing was written.');
     const vars=typeof p.options.custom==='string'?customVars(p.options.custom):new Map();
     if(vars.size) { const target=customVars(bytesToHex(await this.request([40],21)));if([...vars.keys()].some(key=>!target.has(key))) fail('This hardware does not expose all saved custom variables. Nothing was written.'); }
+    const sameIdentity=bytesToHex(live.subarray(4,36))===p.publicKey;
+    if(!sameIdentity&&(!replaceIdentity||!p.privateKey))fail('Identity differs. Explicit replacement and a verified private-key backup are required. Nothing was written.');
     // Default is off when an older archive has no USB-logging preference.
     // Do not enable logging merely because a Full Companion was in text mode.
     const desiredLogging=loggingState(p.cli['get usb.logging']) || 'off';
-    const priorLogging=loggingState(await this.cli('get usb.logging').catch(()=>''));
+    const priorLogging=loggingState(await this.cli('get usb.logging'));
+    if(priorLogging===null)fail('USB logging status could not be verified. No restore settings were written.');
     if(priorLogging==='on') { const reply=await this.cli('set usb.logging off');if(!/OK - USB logging off \(saved\)/i.test(reply)||/reboot required/i.test(reply))fail('Cannot safely disable USB logging for restore.'); }
-    if (bytesToHex(live.subarray(4,36)) !== p.publicKey) {
-      if (!replaceIdentity || !p.privateKey) fail('Identity differs. Explicit replacement and a verified private-key backup are required.');
+    if(loggingState(await this.cli('get usb.logging'))!=='off')fail('USB logging did not verify off before restore.');
+    if (!sameIdentity) {
       await this.request([24,...unhex(p.privateKey).subarray(1)],0);
       if (bytesToHex((await this.self()).subarray(4,36)) !== p.publicKey) fail('Restored identity did not verify.');
     }
@@ -206,10 +213,12 @@ export class MeshCore {
       if(cadStatus(await this.cli('get radio.cad')).join('|')!==desired.join('|'))fail('Radio CAD readback failed.');
     }
     const verified = await this.self();
+    if (verified[2]!==saved[2]) fail('TX power readback failed.');
     if (bytesToHex(verified.subarray(4,58)) !== bytesToHex(saved.subarray(4,58)) || text(verified.subarray(58)) !== text(saved.subarray(58))) fail('Companion settings readback failed.');
     // Preserve off by default; cycle BLE only if it was enabled on this target.
-    if (/\bbluetooth\s+on\b/i.test(await this.cli('get bluetooth').catch(()=>''))) { try { if(!/OK - Bluetooth off/i.test(await this.cli('set bluetooth off')))fail('Bluetooth off was not confirmed.'); } finally { if(!/OK - Bluetooth on/i.test(await this.cli('set bluetooth on')))fail('Bluetooth could not be re-enabled.'); } }
-    if(priorLogging!==null) { const current=loggingState(await this.cli('get usb.logging'));if(current!==desiredLogging) { if(!new RegExp(`OK - USB logging ${desiredLogging} \\(saved\\)`,'i').test(await this.cli(`set usb.logging ${desiredLogging}`)))fail('USB logging preference rejected.'); }if(loggingState(await this.cli('get usb.logging'))!==desiredLogging)fail('USB logging readback failed.'); }
+    const bleState=/\bbluetooth\s+(on|off)\b/i.exec(await this.cli('get bluetooth'))?.[1].toLowerCase();if(!bleState)fail('Bluetooth state could not be verified.');
+    if (bleState==='on') { try { if(!/OK - Bluetooth off/i.test(await this.cli('set bluetooth off')))fail('Bluetooth off was not confirmed.'); } finally { if(!/OK - Bluetooth on/i.test(await this.cli('set bluetooth on')))fail('Bluetooth could not be re-enabled.'); }if(!/\bbluetooth\s+on\b/i.test(await this.cli('get bluetooth')))fail('Bluetooth did not verify on after resync.'); }
+    const current=loggingState(await this.cli('get usb.logging'));if(current===null)fail('USB logging status could not be verified after restore.');if(current!==desiredLogging) { if(!new RegExp(`OK - USB logging ${desiredLogging} \\(saved\\)`,'i').test(await this.cli(`set usb.logging ${desiredLogging}`)))fail('USB logging preference rejected.'); }if(loggingState(await this.cli('get usb.logging'))!==desiredLogging)fail('USB logging readback failed.');
     progress(1,'Restored identity, channels, contacts, core settings, custom variables, scope and supported structured options. Other CLI snapshots remain for manual comparison.');
   }
 }
@@ -241,4 +250,28 @@ export async function backupCommonCli(link, progress = () => {}) {
   if(privateHex&&publicFromPrivate(unhex(privateHex))!==key)fail('CommonCLI private/public identity mismatch.');
   progress(1,'CommonCLI partial backup captured; no automatic restore or wipe-safe claim.');
   return sealBackup({role:'common-cli',publicKey:key,safeForWipe:false,replies,excluded:['Private identity may not be exposed','Not an atomic/bulk export','No automatic restore']});
+}
+
+export function backupSummary(archive) {
+  const p=verifyBackup(archive),missing=[];
+  if(p.role==='common-cli')return {role:p.role,complete:false,privateIdentity:!!/(?<![a-f0-9])[a-f0-9]{128}(?![a-f0-9])/i.exec(p.replies?.['get prv.key']||''),reasons:['CommonCLI has no versioned bulk export and cannot be automatically restored.'],safeForWipe:false};
+  const info=unhex(p.info);if([[8,20],[20,60],[60,80]].some(([from,to])=>!text(info.subarray(from,to)).split('\0')[0]))missing.push('DEVICE_INFO has incomplete build/model/version diagnostics.');
+  if(!p.privateKey)missing.push('Private identity was not captured; moving the node identity cannot be completed.');
+  for(const name of ['autoadd','tuning','custom','scope'])if(typeof p.options[name]!=='string')missing.push(`${name} settings unavailable.`);
+  for(const [command,value] of Object.entries(p.cli))if(value===null||typeof value==='string'&&/^\s*(?:->\s*)?error/i.test(value))missing.push(`${command} unavailable.`);
+  if(!p.batteryAndStorage || p.batteryAndStorage.unavailable)missing.push('Battery/storage diagnostics unavailable.');
+  return {role:p.role,complete:!missing.length,privateIdentity:!!p.privateKey,reasons:missing,safeForWipe:false};
+}
+
+// Probe only the selected port, without consuming unread messages, resetting,
+// entering text mode, or changing logging. Native CommonCLI and binary API
+// detection share the same public-key evidence; VID/PID alone is not a role.
+export async function detectMeshCore(link,{timeoutMs=1500}={}) {
+  const reply=await link.command('get public.key',Math.min(timeoutMs,450));
+  const publicKey=/(?<![a-f0-9])[a-f0-9]{64}(?![a-f0-9])/i.exec(reply)?.[0].toLowerCase();
+  if(publicKey) { const name=(await link.command('get name',350)).replace(/^>\s*/, '').trim(),version=await link.command('ver',350),board=(await link.command('board',350)).replace(/^>\s*/,'').trim();return {role:'common-cli',publicKey,name,version,model:!board||/unknown command|unsupported|error/i.test(board)?null:board}; }
+  if(link.buffer)link.buffer.length=0;
+  const core=new MeshCore(link,{timeoutMs}),self=await core.self(),info=await core.info();
+  if(self[1]!==1)fail('This binary interface is not a companion. Select the primary CommonCLI port.');
+  return {role:'companion',publicKey:bytesToHex(self.subarray(4,36)),name:text(self.subarray(58)).split('\0')[0],model:text(info.subarray(20,60)).split('\0')[0],version:text(info.subarray(60,80)).split('\0')[0]};
 }

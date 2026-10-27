@@ -23,12 +23,12 @@ export function createPlannerService({ loadRuntime, readValidator, persistent = 
         const { loadPyodide } = await import(/* @vite-ignore */ indexURL + 'pyodide.mjs');
         py = await loadPyodide({ indexURL });
       }
-      const manifestResponse = readValidator ? await readValidator('integrity.json') : await fetch(new URL('../validators/integrity.json', import.meta.url)).then(response => { if (!response.ok) throw new Error('Cannot load validator integrity manifest.'); return response.text(); });
+      const manifestResponse = readValidator ? await readValidator('integrity.json') : await fetch(new URL('../validators/integrity.json', import.meta.url),{cache:'no-store'}).then(response => { if (!response.ok) throw new Error('Cannot load validator integrity manifest.'); return response.text(); });
       const manifest = JSON.parse(manifestResponse);
       if (Object.keys(manifest).sort().join(',') !== [...MODULES].sort().join(',')) throw new Error('Shared validator module list is invalid.');
       py.FS.mkdirTree('/validators'); py.FS.mkdirTree('/work/cache');
       for (const name of MODULES) {
-        const bytes = readValidator ? await readValidator(name) : new Uint8Array(await fetch(new URL('../validators/' + name, import.meta.url)).then(response => { if (!response.ok) throw new Error('Cannot load shared validator.'); return response.arrayBuffer(); }));
+        const bytes = readValidator ? await readValidator(name) : new Uint8Array(await fetch(new URL('../validators/' + name, import.meta.url),{cache:'no-store'}).then(response => { if (!response.ok) throw new Error('Cannot load shared validator.'); return response.arrayBuffer(); }));
         if (!/^[a-f0-9]{64}$/.test(manifest[name]) || hash(bytes) !== manifest[name]) throw new Error('Shared validator hash mismatch.');
         py.FS.writeFile('/validators/' + name, bytes);
       }
@@ -82,17 +82,18 @@ export function createPlannerService({ loadRuntime, readValidator, persistent = 
           fetched.set(url.href, data.bytes); return true;
         }
         const py = await initialize();
-        if (op === 'validateBackup') {
-          if (typeof data.text !== 'string' || new TextEncoder().encode(data.text).length > (16 << 20)) throw new Error('Backup JSON exceeds 16 MiB.');
+        if (op === 'validateBackup' || op === 'sealBackup') {
+          const archiveText=op==='sealBackup'?JSON.stringify(data.payload):data.text;
+          if (typeof archiveText !== 'string' || new TextEncoder().encode(archiveText).length > (16 << 20)) throw new Error('Backup JSON exceeds 16 MiB.');
           let privateHex = '', expectedPub = '';
           if (data.privateHex != null) {
             if (typeof data.privateHex !== 'string' || !/^[a-f0-9]{128}$/i.test(data.privateHex) || typeof data.expectedPub !== 'string' || !/^[a-f0-9]{64}$/i.test(data.expectedPub)) throw new Error('Invalid backup identity.');
             privateHex = data.privateHex.toLowerCase(); expectedPub = publicFromPrivate(hexToBytes(privateHex));
             if (expectedPub !== data.expectedPub.toLowerCase()) throw new Error('Backup private/public identity mismatch.');
           }
-          py.globals.set('_archive_text', data.text); py.globals.set('_private_hex', privateHex); py.globals.set('_expected_pub', expectedPub);
+          py.globals.set('_archive_text', archiveText); py.globals.set('_private_hex', privateHex); py.globals.set('_expected_pub', expectedPub);py.globals.set('_seal_archive',op==='sealBackup');
           const result = JSON.parse(await py.runPythonAsync(`
-_backup_archive = json.loads(_archive_text)
+_backup_archive = backup_validator.make_archive(json.loads(_archive_text)) if _seal_archive else json.loads(_archive_text)
 _original_derive = backup_validator._derive_meshcore_public_key
 def _verified_browser_derive(value):
     if not _private_hex or value.lower() != _private_hex:
@@ -103,7 +104,7 @@ try:
     _backup_result = backup_validator.validate_archive_data(_backup_archive)
 finally:
     backup_validator._derive_meshcore_public_key = _original_derive
-json.dumps({'summary': _backup_result, 'payload': _backup_archive['payload']})
+json.dumps({'summary': _backup_result, 'payload': _backup_archive['payload'], **({'archive': _backup_archive} if _seal_archive else {})})
 `));
           erase(py); return result;
         }
@@ -140,7 +141,9 @@ json.dumps({'summary': _backup_result, 'payload': _backup_archive['payload']})
         if (op === 'plan') { currentPlan = null; erase(py); }
         if (op === 'plan' || op === 'verify') {
           if (typeof data.mac !== 'string' || !MAC.test(data.mac)) throw new Error('Invalid verified physical device MAC.');
-          put(py, 'image.bin', data.image); put(py, 'table.bin', data.table, 4096); put(py, 'nvs.bin', data.nvs, 1 << 20); put(py, 'ota.bin', data.ota, 8192);
+          put(py, 'image.bin', data.image); put(py, 'table.bin', data.table, 4096);
+          if(op==='verify' || data.nvs!=null) put(py,'nvs.bin',data.nvs,1<<20);else {try{py.FS.unlink('/work/nvs.bin');}catch{}}
+          if(op==='verify' || data.ota!=null) put(py,'ota.bin',data.ota,8192);else {try{py.FS.unlink('/work/ota.bin');}catch{}}
         }
         if (op === 'plan') {
           if (!Number.isInteger(data.flashBytes) || data.flashBytes < (256 << 10) || data.flashBytes > (128 << 20) || !/^ESP32(?:-[A-Z0-9]+)?$/.test(data.chip)) throw new Error('Invalid physical flash identification.');
@@ -152,9 +155,9 @@ json.dumps({'summary': _backup_result, 'payload': _backup_archive['payload']})
           if (!filename || filename === '.' || filename === '..') throw new Error('Invalid firmware filename.');
           put(py, filename, data.image);
           if (filename !== 'image.bin') py.FS.unlink('/work/image.bin');
-          const args = { image: '/work/' + filename, mac: data.mac, flash: data.flashBytes, chip: data.chip, package: data.package ? '/work/package.zip' : null, usbSet: data.usbSet ? '/work/usb-set.zip' : null };
+          const args = { image: '/work/' + filename, mac: data.mac, flash: data.flashBytes, chip: data.chip, package: data.package ? '/work/package.zip' : null, usbSet: data.usbSet ? '/work/usb-set.zip' : null,nvs:data.nvs!=null?'/work/nvs.bin':null,ota:data.ota!=null?'/work/ota.bin':null };
           py.globals.set('args_json', JSON.stringify(args));
-          await py.runPythonAsync(`a = json.loads(args_json)\nPath('/work/flash.txt').write_text('Chip is ' + a['chip'] + '\\nDetected flash size: ' + str(a['flash'] // (1024*1024)) + 'MB\\n')\np = m.make_plan(Path(a['image']), Path('/work/table.bin'), Path('/work/flash.txt'), Path('/work/cache') / a['mac'].replace(':','').upper(), Path(a['package']) if a['package'] else None, Path('/work/ota.bin'), a['mac'], Path('/work/nvs.bin'), Path(a['usbSet']) if a['usbSet'] else None)\n`);
+          await py.runPythonAsync(`a = json.loads(args_json)\nPath('/work/flash.txt').write_text('Chip is ' + a['chip'] + '\\nDetected flash size: ' + str(a['flash'] // (1024*1024)) + 'MB\\n')\np = m.make_plan(Path(a['image']), Path('/work/table.bin'), Path('/work/flash.txt'), Path('/work/cache') / a['mac'].replace(':','').upper(), Path(a['package']) if a['package'] else None, Path(a['ota']) if a['ota'] else None, a['mac'], Path(a['nvs']) if a['nvs'] else None, Path(a['usbSet']) if a['usbSet'] else None)\n`);
           result = JSON.parse(py.runPython('json.dumps(p)')); currentPlan = result;
           if (result.needed) result = { ...result, bridge: Array.from(py.FS.readFile(result.bridge_file)), targetTable: Array.from(py.FS.readFile(result.target_table_file)) };
         } else if (op === 'begin') {

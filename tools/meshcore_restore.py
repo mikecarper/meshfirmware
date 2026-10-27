@@ -32,7 +32,8 @@ def load_backup(path):
     if any(sections[name]["state"] != "complete" for name in required):
         raise RestoreError("Backup lacks a complete identity, channels, or contacts section")
     serial = payload["source"]["physical_usb_identity"].get("serial")
-    if not serial:
+    browser_capture = payload["source"]["physical_usb_identity"].get("attestation") == "browser-port-permission"
+    if not serial and not browser_capture:
         raise RestoreError("Backup has no USB serial for physical-device matching")
     return payload, verified, serial
 
@@ -401,7 +402,9 @@ async def run(args):
     path = Path(args.input).expanduser().resolve()
     backup, verified, serial = load_backup(path)
     selected_serial = args.target_serial or serial
-    if selected_serial.lower() != serial.lower() and not args.new_hardware:
+    if not selected_serial:
+        raise RestoreError("Browser backups do not expose a USB serial. Select the exact connected target with --target-serial; target public identity and hardware checks remain required")
+    if serial and selected_serial.lower() != serial.lower() and not args.new_hardware:
         raise RestoreError("A different USB serial requires --new-hardware")
     port = matching_port(selected_serial)
     print(f"Verified archive SHA-256: {verified['sha256']}")

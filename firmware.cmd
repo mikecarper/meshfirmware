@@ -57,8 +57,8 @@ $KEYMIND_RAW_BASE_URL = "https://raw.githubusercontent.com/mikecarper/MeshCore/k
 $KEYMIND_CASCADE_FALLBACK_URL = "$KEYMIND_RAW_BASE_URL/mesh-america/keymind-cascade-v1.16.0-provider.json"
 $KEYMIND_CASCADE_LOGGING_FALLBACK_URL = "$KEYMIND_RAW_BASE_URL/mesh-america/keymind-cascade-logging-v1.16.0-provider.json"
 $MESHCORE_BACKUP_TOOL_URL = "https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_backup.py"
-$MESHCORE_BACKUP_TOOL_VERSION = '0.2.3'
-$MESHCORE_BACKUP_TOOL_SHA256 = 'b4a957e05ea3c00be7f46ddb6269874e4167c8f5bf42976487425696af2140cd'
+$MESHCORE_BACKUP_TOOL_VERSION = '0.2.4'
+$MESHCORE_BACKUP_TOOL_SHA256 = '5183f5a250eb44380abb15801295a180dfe4d807b7705c54254a2d947db616f7'
 $MESHCORE_PARTITION_TOOL_URL = 'https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_partition_expansion.py'
 $MESHCORE_PARTITION_TOOL_SHA256 = 'fd1cc2c2198d31878587a2a7aa48f7ec49055b29af3cb5f2a9630ec2d8787df8'
 

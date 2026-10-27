@@ -2,14 +2,17 @@ import './style.css';
 import { inspectFirmware, checkedZip, hash, fail, text } from './firmware.js';
 import { SerialLink, flashNrf, touch1200 } from './serial.js';
 import { EspSession } from './esp.js';
-import { getCatalog, httpsUrl } from './catalog.js';
-import { MeshCore, backupCommonCli, verifyBackup, parseBackup, enterCompanionBinary } from './meshcore.js';
+import { getCatalog, httpsUrl, compareVersions } from './catalog.js';
+import { MeshCore, backupCommonCli, verifyBackup, parseBackup, enterCompanionBinary, detectMeshCore, backupSummary } from './meshcore.js';
+import { exportNativeBackup } from './backup-native.js';
+import { assessBoard, rakFamily, endfIdentity } from './board-safety.js';
 import { BrowserPlanner } from './planner.js';
 import { waitForMigration } from './migration.js';
 
 const $ = id => document.getElementById(id);
-const state = { port: null, pkg: null, esp: null, plan: null, generation: 0, busy: false, items: [], restore: null, directory: null, archive:null, planner:null, migration:null, downloaded:new Set() };
+const state = { port: null, pkg: null, esp: null, plan: null, generation: 0, busy: false, items: [], restore: null, directory: null, archive:null, planner:null, migration:null, downloaded:new Set(),item:null,device:null,backupApproved:null,backup:null,recovery:null,verification:null,handoff:false };
 try { const pending=JSON.parse(localStorage.getItem('meshfirmware.pendingMigration') || 'null'); if(pending && /^[a-f0-9:]{17}$/i.test(pending.mac) && /^[a-f0-9]{64}$/.test(pending.sha256)) state.migration=pending; } catch { /* The worker still fails closed on any actual NVS migration state. */ }
+for(const [key,field] of [['meshfirmware.nrfRecovery','recovery'],['meshfirmware.verifyApplication','verification']])try{const saved=JSON.parse(localStorage.getItem(key)||'null');if(saved&&/^[a-f0-9]{64}$/.test(saved.sha256))state[field]=field==='recovery'?{...saved,phase:'reselect-dfu',eraseComplete:saved.eraseComplete===true}:saved;}catch{}
 // Exact bootloader IDs shared with the native classifier. Never match a broad
 // vendor/product range: nearby application IDs must still be probed normally.
 const dfuIds = new Set(['2886:0044','2886:0045','2886:0057','2886:1667','239a:0029','239a:002a','239a:0071','239a:00b3','239a:00da']);
@@ -22,13 +25,16 @@ function controls() {
   document.querySelectorAll('[data-lock]').forEach(el => { el.disabled = state.busy; });
   $('select-port').disabled ||= !('serial' in navigator);
   $('prepare').disabled ||= !state.pkg || (!state.port && state.pkg.architecture !== 'uf2');
-  $('flash').disabled ||= !state.plan;
+  $('flash').disabled ||= !state.plan || state.recovery?.phase==='reselect-dfu';
   $('finish').disabled ||= !state.esp || !state.plan?.written;
   $('wait-migration').disabled ||= !state.port || !state.migration?.uart || state.migration?.settled;
   $('recover-bridge').disabled ||= !state.port || !state.pkg || !state.migration;
   $('restore').disabled ||= !state.restore || !state.port || state.restore.schema !== 'org.meshfirmware.web-backup/v1' || state.restore.payload.role !== 'companion';
-  for (const id of ['touch','probe','backup','send-command','binary-mode']) $(id).disabled ||= !state.port;
+  for (const id of ['touch','probe','backup','send-command','binary-mode','verify-app']) $(id).disabled ||= !state.port;
+  $('verify-app').disabled ||= !state.verification;
   $('fetch-firmware').disabled ||= !$('artifact').value;
+  $('load-bootloader').disabled ||= !$('bootloader-source').value;
+  $('retry').disabled ||= !state.port||!state.pkg;
 }
 async function closeEsp() { if (state.esp) { await state.esp.close(); state.esp = null; } state.plan = null; }
 async function operation(callback) {
@@ -39,8 +45,9 @@ async function operation(callback) {
 }
 async function linkOperation(callback) {
   if(state.migration) fail('A partition migration is pending. Application commands and backups are blocked until its final firmware write is verified.');
+  if(state.recovery) fail('Finish the pending nRF52 recovery before opening application commands.');
   if (!state.port) fail('Choose a USB port first.');
-  if (dfuIds.has(portId(state.port))) fail('This port is in DFU. Logical backups and application commands cannot run in a bootloader.');
+  if (dfuIds.has(portId(state.port)) || $('already-bootloader').checked) fail('Backup/application commands cannot run in DFU/ROM. Select the application port and clear Already in bootloader.');
   await closeEsp(); const link = new SerialLink(state.port);
   try { await link.open(); return await callback(link); } finally { await link.close(); }
 }
@@ -51,8 +58,88 @@ function confirm(title, detail, warning, token) {
   return new Promise(resolve => dialog.addEventListener('close',() => resolve(dialog.returnValue === 'confirm' && $('confirm-token').value === token),{once:true}));
 }
 function download(name, bytes, type = 'application/octet-stream') { const url = URL.createObjectURL(new Blob([bytes],{type})); const a = document.createElement('a'); a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url),30000); }
-async function loadFirmware(name, bytes) {
+function choose(title,detail,buttons) {
+  $('question-title').textContent=title;$('question-detail').textContent=detail;
+  const form=$('question-actions');form.replaceChildren(...buttons.map(([value,label])=>{const button=document.createElement('button');button.value=value;button.textContent=label;button.className=value==='backup'?'primary':'secondary';return button;}));
+  const dialog=$('question-dialog');dialog.returnValue='cancel';dialog.showModal();return new Promise(resolve=>dialog.addEventListener('close',()=>resolve(dialog.returnValue),{once:true}));
+}
+function persistFlow(field,key) { if(state[field])localStorage.setItem(key,JSON.stringify(state[field]));else localStorage.removeItem(key); }
+const summaryText=s=>`${s.complete?'Complete exposed-API snapshot':'Partial backup'}; ${s.privateIdentity?'private identity included':'private identity unavailable'}. ${(s.reasons||[]).join(' ')}`;
+async function readApplication(link) {
+  const device=await detectMeshCore(link);state.device=device;
+  $('device-name').textContent=device.name||device.model||'MeshCore';$('device-meta').textContent=`${device.model||device.role} · ${device.version||'version not reported'} · identity ${(device.publicKey||'').slice(0,12)}`;
+  return device;
+}
+async function captureBackup() {
+  const archive=await linkOperation(async link=>{
+    const device=$('backup-role').value==='auto'?await readApplication(link):null;
+    if(!device && !state.device) { try {await readApplication(link);}catch{/* Explicit interface choice is still attempted and independently validates identity. */} }
+    return (device?.role||$('backup-role').value)==='common-cli'?backupCommonCli(link,progress):new MeshCore(link).backup(progress);
+  });
+  const info=state.port.getInfo(),native=await exportNativeBackup(archive,{usbIdentity:{vendor_id:info.usbVendorId??null,product_id:info.usbProductId??null},deviceHint:state.device?.model||$('hardware').value,sealNative:args=>(state.planner ||=new BrowserPlanner()).call('sealBackup',args)});
+  const summary=backupSummary(archive),completeness=native.payload?.completeness;if(completeness){summary.complete=completeness.status==='api-snapshot-complete';summary.reasons=[...new Set([...summary.reasons,...(completeness.missing_required||[]).map(n=>'Missing '+n),...(completeness.optional_errors||[]).map(n=>'Query failed: '+n)])];}
+  const filename=`mc.config_backup.web.${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
+  download(filename,JSON.stringify(native,null,2),'application/json');state.backup={archive,summary,filename,port:state.port};
+  $('backup-summary').textContent=`Downloaded ${filename}. ${summaryText(summary)} Logical backup only; not wipe-safe. Confirm the download was saved.`;
+  notice('Native-compatible archive validated locally; download requested. No backup or secret was uploaded.');return state.backup;
+}
+async function ensureBackup() {
+  if(state.migration||state.recovery||(state.backupApproved?.sha256===state.pkg?.sha256&&state.backupApproved?.port===state.port))return;
+  const bootloader=dfuIds.has(portId(state.port))||$('already-bootloader').checked;
+  if(bootloader) {
+    const answer=await choose('Backup cannot be done in ROM/DFU','The application is not running on this interface. Return to application firmware for a logical backup, or explicitly continue without one.',[['cancel','Cancel'],['skip','Continue without backup']]);
+    if(answer!=='skip')fail('Cancelled before bootloader commands.');
+  } else {
+    const answer=await choose('Back up before entering the bootloader?','Recommended: export and validate the running MeshCore node before any reset, ROM entry or flash. Logical backups contain secrets and are not whole-flash images.',[['backup','Back up first'],['skip','Continue without backup'],['cancel','Cancel']]);
+    if(answer==='cancel')fail('Cancelled before reset or flash.');
+    if(answer==='backup') {
+      let result;try{result=await captureBackup();}catch(error){if(!await confirm('Backup did not complete',error.message,'No reset or write has occurred. Continue only if you accept having no complete backup.','CONTINUE WITHOUT BACKUP'))throw error;}
+      if(result){const saved=await choose('Confirm your backup download',`${result.filename}. ${summaryText(result.summary)} The browser cannot confirm the file reached disk.`,[['cancel','Cancel'],['saved','I saved the archive']]);if(saved!=='saved')fail('Backup save was not acknowledged.');
+        if(result.summary.complete===false&&!await confirm('Continue with a partial backup?',summaryText(result.summary),'A partial logical archive cannot authorize a wipe.','CONTINUE WITH PARTIAL BACKUP'))fail('Partial-backup continuation cancelled.');}
+    } else if(answer!=='skip')fail('Cancelled before reset or flash.');
+    if(!state.device)try{await linkOperation(readApplication);}catch(error){log(`Application identity unavailable: ${error.message}`);}
+  }
+  state.backupApproved={sha256:state.pkg?.sha256||'touch',port:state.port,publicKey:state.device?.publicKey||null};
+}
+function selectedHardware(){return state.item?.hardware||$('hardware').value||state.recovery?.hardware||'';}
+function boardAssessment(pkg){return assessBoard(pkg,{selectedHardware:selectedHardware(),deviceModel:state.device?.model||state.recovery?.deviceModel||''});}
+async function acknowledgeBoard(pkg) {
+  const check=boardAssessment(pkg);
+  if(check.requiresOverride&&!await confirm('nRF52 board safety override',`Payload ${check.firmwareFamily}; connected ${check.deviceFamily}. ${check.reason}`,'A wrong board image or bootloader may need SWD recovery. This token authorizes only this write and this selected interface.',check.token))fail('Board override cancelled before writing.');
+  return check;
+}
+async function erasePackage() {
+  const file=$('erase-file').files[0];let name,bytes;
+  if(file){if(file.size>(4<<20))fail('Erase ZIP exceeds 4 MiB.');name=file.name;bytes=new Uint8Array(await file.arrayBuffer());}
+  else {const url=$('erase-source').value;if(!url)fail('Select this board’s erase ZIP, or choose its exact local erase ZIP. The final firmware has not been written.');name=new URL(url).pathname.split('/').pop();try{bytes=await boundedFetch(url);}catch{ $('download-firmware').href=httpsUrl(url);fail('Download the exact erase ZIP using Download, choose it under Erase ZIP, then inspect again.');}}
+  const pkg=inspectFirmware(name,bytes);if(pkg.architecture!=='nrf52'||pkg.kind!=='application'||!pkg.erase)fail('Guided erase requires an application erase ZIP, never a bootloader/SoftDevice component. Load component replacements separately.');
+  if(!/^official SoftDevice v[67] erase payload$/.test(pkg.eraseEvidence||'')&&!await confirm('Custom erase application',`${pkg.name}\nPayload SHA-256 ${pkg.payloadHash}`,'Only the name marks this as an erase application. It is not one of the known official utilities. This permission does not waive board checks or the separate wipe acknowledgement.','CUSTOM ERASE'))fail('Custom erase cancelled.');return pkg;
+}
+function verificationRecord(pkg) {
+  let identity=pkg.architecture==='nrf52'?pkg.firmwareIdentity:endfIdentity(pkg.payload);
+  if(!identity&&pkg.merged){for(const part of state.esp?.plan?.parts||[]){if(part.type!==0||part.offset>=pkg.payload.length)continue;let end=Math.min(part.offset+part.size,pkg.payload.length);while(end>part.offset&&pkg.payload[end-1]===255)end--;identity=endfIdentity(pkg.payload.subarray(part.offset,end));if(identity)break;}}
+  const family=pkg.architecture==='nrf52'?boardAssessment(pkg).payloadFamily:'unknown',model=state.device?.model||state.recovery?.deviceModel||null,roleText=state.item?.role||pkg.name,role=/companion/i.test(roleText)?'companion':/repeater|room|sensor/i.test(roleText)?'common-cli':state.device?.role||null;
+  return {sha256:pkg.sha256,name:pkg.name,architecture:pkg.architecture,publicKey:!pkg.destructive&&!state.recovery?state.device?.publicKey||null:null,model:['rak4631','rak3401'].includes(family)&&rakFamily(model)!==family?null:model,family,role,version:identity?.versionText||null};
+}
+function queueVerification(pkg){state.verification=verificationRecord(pkg);persistFlow('verification','meshfirmware.verifyApplication');}
+async function verifyApplication() {
+  const expected=state.verification;if(!expected)fail('No flashed application is awaiting verification.');
+  if(state.migration||state.recovery||dfuIds.has(portId(state.port)))fail('Choose the running application interface, not ROM/DFU.');
+  await closeEsp();const link=new SerialLink(state.port);let device,version,layout;
+  try {await link.open();device=await readApplication(link);if(expected.role&&expected.role!==device.role)fail('Running MeshCore interface does not match the selected firmware role.');if(expected.publicKey&&device.publicKey!==expected.publicKey)fail('Running application public identity differs from the pre-flash node. Startup verification failed.');
+    if(expected.model&&device.model&&expected.model.toLowerCase()!==device.model.toLowerCase())fail('Running application model differs from the pre-flash device.');
+    if(['rak4631','rak3401'].includes(expected.family)&&rakFamily(device.model)!==expected.family)fail('Running protected board family does not match the flashed payload.');
+    const mc=device.role==='companion'?new MeshCore(link):null;
+    version=mc?await mc.cli('version'):await link.command('ver',700);
+    if(expected.version){const actual=/\bv?(\d+\.\d+\.\d+(?:\.\d+)?)/i.exec(version)?.[1],normalize=s=>s.replace(/^v/,'').replace(/(?:\.0)+$/,'');if(!actual||normalize(actual)!==normalize(expected.version))fail('Running firmware version does not match the verified payload.');}
+    if(expected.architecture==='esp32'){layout=mc?await mc.cli('get storage.layout'):await link.command('get storage.layout',700);if(!/\bint:esp32-\d+K\b/i.test(layout))fail('Application answered, but storage-layout verification is unavailable or invalid. Flash transfer is verified; application verification remains incomplete.');}
+  }finally{await link.close();}
+  state.verification=null;state.handoff=false;state.backupApproved=null;persistFlow('verification','meshfirmware.verifyApplication');$('already-bootloader').checked=false;
+  notice(`Application startup verified: ${device.name||device.model||device.role}. ${layout?'Storage layout answered. ':''}Physical USB serial is not exposed by Web Serial; the port was explicitly reselected.`);log(version);
+}
+async function loadFirmware(name, bytes, item = null) {
   await closeEsp(); state.pkg = null; state.generation++;
+  if(!item)item=state.items.find(i=>i.hardware===$('hardware').value&&i.name===name)||state.items.find(i=>i.hardware===$('hardware').value)||null;
   $('image-name').textContent = 'No image loaded'; $('image-kind').textContent = '—'; $('image-size').textContent = '—'; $('image-sha').textContent = ''; $('expert-fields').hidden = true;
   if (/\.zip$/i.test(name)) {
     const entries = checkedZip(bytes,{maxEntries:8192,maxExpanded:512<<20,directoryOnly:true});
@@ -65,18 +152,22 @@ async function loadFirmware(name, bytes) {
   }
   const pkg = inspectFirmware(name,bytes), expected = $('expected-sha').value.trim().toLowerCase();
   if (expected && (!/^[a-f0-9]{64}$/.test(expected) || expected !== pkg.sha256)) fail('Published SHA-256 does not match the selected bytes.');
-  state.pkg = pkg; $('image-name').textContent = pkg.name; $('image-kind').textContent = pkg.kind; $('image-size').textContent = size(bytes.length); $('image-sha').textContent = pkg.sha256; $('image-warning').textContent = pkg.warnings.join(' ');
+  state.pkg = pkg;state.item=item;state.backupApproved=null; $('image-name').textContent = pkg.name; $('image-kind').textContent = pkg.kind; $('image-size').textContent = size(bytes.length); $('image-sha').textContent = pkg.sha256; $('image-warning').textContent = pkg.warnings.join(' ');
+  $('nrf-actions').hidden=pkg.architecture!=='nrf52';$('erase-source').replaceChildren(...(item?.erase||state.recovery?.eraseUrls||[]).map(url=>new Option(new URL(url).pathname.split('/').pop(),url)));
+  if(pkg.architecture==='nrf52')$('transport-mode').value='nrf52';
   $('expert-fields').hidden = !pkg.expert;
   progress(0,'Image validated locally. Inspect the device before confirmation.'); notice('Firmware loaded. No device data has been written.');
 }
-function options(id, values, placeholder) { const select = $(id), prior = select.value; select.replaceChildren(new Option(placeholder,''),...Array.from(new Set(values)).filter(Boolean).sort().map(v => new Option(v,v))); if ([...select.options].some(o => o.value === prior)) select.value = prior; }
+function options(id, values, placeholder) { const select = $(id), prior = select.value; select.replaceChildren(new Option(placeholder,''),...Array.from(new Set(values)).filter(Boolean).sort(id==='version'?compareVersions:undefined).map(v => new Option(v,v))); if ([...select.options].some(o => o.value === prior)) select.value = prior; }
 function filterCatalog(changed = 'project') {
   let items = state.items.filter(i => i.project === $('project').value);
   for (const id of ['provider','hardware','role','version']) { if (['project','provider','hardware','role','version'].indexOf(id) > ['project','provider','hardware','role','version'].indexOf(changed)) options(id,items.map(i => i[id]),`All ${id === 'hardware' ? 'boards' : id + 's'}`); if ($(id).value) items = items.filter(i => i[id] === $(id).value); }
-  $('artifact').replaceChildren(new Option(`${items.length} artifacts · choose a file`,''),...items.slice(0,3000).map(item => new Option(`${item.name} · ${item.action}`,String(state.items.indexOf(item)))));
+  items.sort((a,b)=>compareVersions(a.version,b.version));
+  $('artifact').replaceChildren(new Option(`${items.length} artifacts · choose a file`,''),...items.map(item => new Option(`${[item.title,item.subtitle].filter(Boolean).join(' / ')} · ${item.name} · ${item.action}`,String(state.items.indexOf(item)))));
+  try{localStorage.setItem('meshfirmware.selections',JSON.stringify(Object.fromEntries(['provider','hardware','role','version'].map(id=>[id,$(id).value]))));}catch{}
   updateDownload(); controls();
 }
-function updateDownload() { const item = state.items[Number($('artifact').value)]; if ($('artifact').value && item) { $('download-firmware').href = item.url; $('download-firmware').removeAttribute('aria-disabled'); } else { $('download-firmware').removeAttribute('href'); $('download-firmware').setAttribute('aria-disabled','true'); } }
+function updateDownload() { const item = $('artifact').value?state.items[Number($('artifact').value)]:null;$('bootloader-source').replaceChildren(...(item?.bootloader||[]).map(url=>new Option(new URL(url).pathname.split('/').pop(),url)));if (item) { $('download-firmware').href = item.url; $('download-firmware').removeAttribute('aria-disabled');$('catalog-detail').textContent=[item.subtitle,item.notice,item.releaseNotes].filter(Boolean).join('\n'); } else { $('download-firmware').removeAttribute('href'); $('download-firmware').setAttribute('aria-disabled','true');$('catalog-detail').textContent=''; } }
 async function boundedFetch(url) {
   const response = await fetch(httpsUrl(url),{signal:AbortSignal.timeout(120000),credentials:'omit'});
   if (!response.ok || Number(response.headers.get('Content-Length')) > (64 << 20)) fail('Firmware download failed or exceeds 64 MiB.');
@@ -88,23 +179,30 @@ async function boundedFetch(url) {
 
 $('select-port').onclick = () => operation(async () => {
   const port = await navigator.serial.requestPort(); // Must remain the first awaited browser operation after the click.
-  await closeEsp(); state.port = port; state.generation++;
+  const previousApproval=state.backupApproved;await closeEsp();state.backupApproved=null;if(!state.handoff&&!state.recovery)state.device=null;state.port = port; state.generation++;
   $('device-name').textContent = `Selected USB ${portId(port)}`; $('device-meta').textContent = 'Port permission granted. Firmware and board identity are not yet verified.'; $('port-status').textContent = dfuIds.has(portId(port)) ? 'DFU port' : 'Port selected';
   if (dfuIds.has(portId(port))) $('transport-mode').value = 'nrf52';
+  $('already-bootloader').checked=dfuIds.has(portId(port));
+  if(state.recovery){if(!await confirm('Re-select the erased radio',state.recovery.name,'Confirm this selected serial DFU interface is the SAME physical radio. Every recovery port change needs a new acknowledgement.','SAME DEVICE')){state.port=null;fail('Recovery port confirmation cancelled.');}state.recovery.phase='final';persistFlow('recovery','meshfirmware.nrfRecovery');$('transport-mode').value='nrf52';notice(state.recovery.eraseComplete?'Original final firmware retained. Inspect this DFU port, then review the final write.':'Erase completion is uncertain. Inspect to retry the validated erase step before the final image; it will not be silently skipped.');return;}
+  if(state.handoff&&!state.recovery&&!await confirm('Confirm bootloader handoff',state.device?.model||'Previously selected application','Web Serial does not expose the USB serial number. Confirm this is the same physical radio before reusing its pre-reset board evidence.','SAME DEVICE')){state.port=null;fail('Bootloader handoff confirmation cancelled.');}
+  if(state.handoff&&previousApproval)state.backupApproved={...previousApproval,port};
+  if(state.verification){state.backupApproved=null;if(!state.verification.publicKey&&!await confirm('Confirm application interface',state.verification.name,'The previous write may have replaced the node identity. Confirm this is the same physical device; Web Serial cannot read its USB serial.','SAME DEVICE')){state.port=null;fail('Application verification port confirmation cancelled.');}$('already-bootloader').checked=false;notice('Application port selected. Verifying running firmware without resetting it…');await verifyApplication();return;}
   notice('Port selected. No reset, flash or application probe was sent.');
 });
 $('transport-mode').onchange = () => operation(async () => { await closeEsp(); state.generation++; });
-for (const id of ['expert-offset','migration-package','usb-set']) $(id).onchange = () => operation(async()=>{await closeEsp();state.generation++;});
+for (const id of ['expert-offset','migration-package','usb-set','flash-action','erase-source','erase-file']) $(id).onchange = () => operation(async()=>{await closeEsp();state.generation++;});
 $('expected-sha').onchange = () => operation(async () => { await closeEsp(); state.generation++; if (state.pkg && $('expected-sha').value.trim() && $('expected-sha').value.trim().toLowerCase() !== state.pkg.sha256) fail('SHA-256 mismatch. Flash plan invalidated.'); });
 $('firmware-file').onchange = () => operation(async () => { const file = $('firmware-file').files[0]; if (!file) return; if (file.size > 64 << 20) fail('Firmware exceeds 64 MiB.'); await loadFirmware(file.name,new Uint8Array(await file.arrayBuffer())); });
 $('load-entry').onclick = () => operation(async () => { const entry=$('archive-entry').value; if(!state.archive || !entry) fail('Select an archive entry.'); const files=checkedZip(state.archive,{maxEntries:8192,maxExpanded:512<<20,select:name=>name===entry}); await loadFirmware(entry.split('/').pop(),files[entry]); });
 $('fetch-custom').onclick = () => operation(async () => { const url=httpsUrl($('custom-url').value); $('download-firmware').href=url; try { await loadFirmware(new URL(url).pathname.split('/').pop(),await boundedFetch(url)); } catch(error) { throw new Error(`${error.message} If this host blocks browser fetches, download it and select the local file.`); } });
 $('artifact').onchange = () => { updateDownload(); controls(); };
+$('bootloader-source').onchange=controls;
+$('load-bootloader').onclick=()=>operation(async()=>{const url=$('bootloader-source').value;if(!url||!$('artifact').value)fail('Choose an explicit board firmware artifact and its bootloader ZIP.');$('download-firmware').href=httpsUrl(url);try{$('expected-sha').value='';await loadFirmware(new URL(url).pathname.split('/').pop(),await boundedFetch(url),state.items[Number($('artifact').value)]);}catch(error){throw new Error(error.message+' If the host blocks fetching, download this exact bootloader ZIP and choose it locally.');}});
 for (const id of ['project','provider','hardware','role','version']) $(id).onchange = () => filterCatalog(id);
 $('fetch-firmware').onclick = () => operation(async () => {
-  const item = state.items[Number($('artifact').value)]; if (!item) fail('Choose an artifact.');
+  const item = $('artifact').value?state.items[Number($('artifact').value)]:null; if (!item) fail('Choose an artifact.');
   notice('Downloading firmware into browser memory…');
-  try { await loadFirmware(item.name,await boundedFetch(item.url)); }
+  try { $('expected-sha').value=item.sha256||'';await loadFirmware(item.name,await boundedFetch(item.url),item); }
   catch (error) { throw new Error(`${error.message} If the firmware host blocks browser downloads (CORS), use Download and then choose that local file. No proxy or helper is used.`); }
 });
 $('touch').onclick = () => operation(async () => {
@@ -112,18 +210,18 @@ $('touch').onclick = () => operation(async () => {
   const mode = $('transport-mode').value;
   if (!['tinyusb','nrf52'].includes(mode)) fail('Use this only for TinyUSB applications or nRF52 runtime. Other modes enter ROM during inspection.');
   if (dfuIds.has(portId(state.port))) fail('Already a known DFU port; no 1200-baud touch is needed.');
+  await ensureBackup();
   if (!await confirm('Enter USB bootloader?','This resets the selected application USB interface. A new port may appear.','Bluetooth may disconnect. Select the same physical device again after the touch.','ENTER BOOTLOADER')) return;
-  await closeEsp(); try { await touch1200(state.port,mode); } catch (error) { log(`The touch was interrupted (${error.message}). Delivery is uncertain; no second touch was sent.`); }
-  state.port = null; state.generation++; $('port-status').textContent = 'Select bootloader port'; $('device-name').textContent = 'USB handoff requested'; notice('Choose USB port again for the same device. Set ESP32 to already in ROM, or select the nRF52 DFU port.');
+  await closeEsp();state.handoff=true; try { await touch1200(state.port,mode); } catch (error) { log(`The touch was interrupted (${error.message}). Delivery is uncertain; no second touch was sent.`); }
+  state.handoff=true;state.port = null; state.generation++; $('port-status').textContent = 'Select bootloader port'; $('device-name').textContent = 'USB handoff requested'; notice('Choose USB port again for the same device. Set ESP32 to already in ROM, or select the nRF52 DFU port.');
   if (mode === 'tinyusb') $('transport-mode').value = 'no_reset';
 });
 $('probe').onclick = () => operation(async () => {
   if(state.migration) fail('Complete the pending migration before application queries.');
-  await linkOperation(async link => {
-    if($('backup-role').value==='common-cli') {const identity=await link.command('get public.key'), key=/(?<![a-f0-9])[a-f0-9]{64}(?![a-f0-9])/i.exec(identity)?.[0];if(!key)fail('No CommonCLI public identity response. DFU/ROM cannot answer application commands.');const version=await link.command('ver');$('device-name').textContent='MeshCore CommonCLI';$('device-meta').textContent=`Public identity ${key.slice(0,12)}`;log(version);notice('CommonCLI answered. No settings changed.');return;}
-    const mc = new MeshCore(link), self = await mc.self(), info = await mc.info(); $('device-name').textContent = text(self.subarray(58)).replace(/\0/g,''); $('device-meta').textContent = `${text(info.subarray(20,60)).replace(/\0/g,'')} · ${text(info.subarray(60,80)).replace(/\0/g,'')} · public identity ${Array.from(self.subarray(4,10),b => b.toString(16).padStart(2,'0')).join('')}`; log(await mc.cli('version')); notice('MeshCore application answered. No settings changed.');
-  });
+  await linkOperation(readApplication);notice('MeshCore interface, role and identity detected. No settings changed.');
 });
+$('verify-app').onclick=()=>operation(verifyApplication);
+$('retry').onclick=()=>{if(state.esp)$('transport-mode').value='no_reset';return $('prepare').onclick();};
 $('binary-mode').onclick=()=>operation(async()=>{
   if(!await confirm('Enter Full Companion binary mode?','Only use this for MeshCore Full Companion text mode.','This may persistently turn USB logging off so binary commands can work. It does not flash or reboot the radio.','BINARY MODE')) return;
   await linkOperation(link=>enterCompanionBinary(link,{allowLoggingChange:true}));
@@ -131,6 +229,8 @@ $('binary-mode').onclick=()=>operation(async()=>{
 });
 $('prepare').onclick = () => operation(async () => {
   const pkg = state.pkg; if (!pkg) fail('Load firmware first.'); await closeEsp();
+  if(state.recovery&&state.recovery.sha256!==pkg.sha256)fail('nRF52 recovery is pending. Select its original final firmware; another image will not be substituted.');
+  if(state.recovery&&state.recovery.phase!=='final')fail('Erase requires an explicit selection of the same radio’s newly enumerated DFU port.');
   if(state.migration && (pkg.architecture!=='esp32' || state.migration.sha256!==pkg.sha256)) fail('Select the original ESP32 firmware for the pending migration. No reset is permitted for another image.');
   if ($('expected-sha').value.trim() && $('expected-sha').value.trim().toLowerCase() !== pkg.sha256) fail('SHA-256 mismatch.');
   if (pkg.architecture === 'uf2') {
@@ -143,7 +243,13 @@ $('prepare').onclick = () => operation(async () => {
   }
   if (pkg.architecture === 'nrf52') {
     if ($('transport-mode').value !== 'nrf52') fail('Select nRF52 DFU mode and its bootloader port.');
-    state.plan = { generation:state.generation,port:state.port,sha256:pkg.sha256 }; notice('DFU ZIP validated. Browser USB metadata cannot prove the physical board; review the target before writing.'); return;
+    await ensureBackup();
+    if(!state.recovery&&!dfuIds.has(portId(state.port))&&!$('already-bootloader').checked){
+      if(!await confirm('Enter nRF52 serial DFU?',state.device?.model||'Selected application interface','Backup was considered before this reset. Choose the same radio’s DFU serial port when it re-enumerates; no drive is used.','ENTER BOOTLOADER'))return;
+      state.handoff=true;await touch1200(state.port,'nrf52');state.port=null;state.generation++;$('port-status').textContent='Select DFU port';notice('Choose the same radio’s DFU serial port, then inspect again. For an unlisted bootloader, check Already in bootloader.');return;
+    }
+    const wipe=!pkg.erase&&(state.recovery?!state.recovery.eraseComplete:$('flash-action').value==='wipe'),erasePkg=wipe?await erasePackage():null;
+    state.plan = { generation:state.generation,port:state.port,sha256:pkg.sha256,erasePkg };notice(erasePkg?'Both final firmware and destructive erase ZIP validated. Review & flash runs erase first, retains the final image, and requires reselecting the same DFU radio before final write.':'DFU ZIP validated. Board identity and any directional override will be checked immediately before this write.'); return;
   }
   const mode = $('transport-mode').value;
   if(state.migration && !state.migration.uart && mode!=='no_reset') fail('Pending USB migration: use already in ROM / no reset. A reset could interrupt the bridge.');
@@ -152,6 +258,8 @@ $('prepare').onclick = () => operation(async () => {
   const expertText = $('expert-offset').value.trim();
   const expertOffset = pkg.expert && /^(?:0x[0-9a-f]+|[0-9]+)$/i.test(expertText) ? Number(expertText) : undefined;
   if(pkg.expert && !Number.isSafeInteger(expertOffset)) fail('Enter the explicit flash offset for this component. No offset is guessed.');
+  await ensureBackup();
+  state.handoff=true;
   const esp = new EspSession(state.port,log); state.esp = esp;
   try {
     const info = await esp.connect(mode);
@@ -175,18 +283,25 @@ $('prepare').onclick = () => operation(async () => {
     state.plan = { ...prepared,generation:state.generation,port:state.port };
     $('device-name').textContent = `${info.chip} · ${info.mac}`; $('device-meta').textContent = `${size(info.flashBytes)} physical flash · ROM security checks passed`;
     if(prepared.needed) { $('migration-status').textContent=`Verified USB migration for ${prepared.board}; exact firmware ${prepared.firmware_version}. Keep this tab open until final verification.`; notice('Partition expansion is needed. Review & flash writes the verified USB bridge first. No application or bridge has been written yet.'); }
-    else notice(`Read-only plan ready for ${info.mac}. Offsets: ${state.plan.addresses.map(n => '0x' + n.toString(16)).join(', ')}.`);
+    else notice(`Read-only plan ready for ${info.mac}. Offsets: ${state.plan.addresses.map(n => '0x' + n.toString(16)).join(', ')}.${prepared.mirroredSlots?' Missing fallback slots will be populated and independently verified.':''}`);
   }
   catch (error) { await closeEsp(); throw error; }
 });
 $('flash').onclick = () => operation(async () => {
   const plan = state.plan, pkg = state.pkg;
   if (!plan || plan.generation !== state.generation || plan.port !== state.port || plan.sha256 !== pkg.sha256) fail('Selection changed; inspect again.');
-  const rak = pkg.architecture === 'nrf52' && /rak.?4631|wismesh/i.test(pkg.name), token = pkg.expert ? `WRITE 0x${plan.addresses[0].toString(16)}` : rak ? 'unknown-to-rak4631' : pkg.destructive ? 'WIPE WITHOUT BACKUP' : 'FLASH';
-  const detail = `${pkg.name}\nSHA-256 ${pkg.sha256}\n${plan.mac ? 'Verified chip MAC ' + plan.mac : plan.uf2Info || 'Board identity unknown to this browser. Confirm the selected nRF52 board yourself.'}`;
+  if(pkg.architecture==='nrf52')await acknowledgeBoard(pkg);
+  if(plan.erasePkg)await acknowledgeBoard(plan.erasePkg);
+  const token = pkg.expert ? `WRITE 0x${plan.addresses[0].toString(16)}` : pkg.destructive||plan.erasePkg ? 'WIPE WITHOUT BACKUP' : 'FLASH';
+  const detail = `${pkg.name}\nSHA-256 ${pkg.sha256}\n${plan.mac ? 'Verified chip MAC ' + plan.mac : plan.uf2Info || 'Board identity unknown to this browser. Confirm the selected nRF52 board yourself.'}${plan.erasePkg?'\nERASE FIRST: '+plan.erasePkg.name+'\nSHA-256 '+plan.erasePkg.sha256+'\n'+plan.erasePkg.warnings.join(' '):''}`;
   if(plan.needed && !plan.verified && !await confirm('Run USB partition expansion first?',`${plan.board} · ${plan.firmware_version} · ${plan.mac}`,'The verified middle firmware preserves supported identity/settings, not all logs or optional files. Power loss during partition-table replacement can require physical recovery. Keep this tab open and re-select the same chip when asked.','EXPAND PARTITIONS')) return;
   if (!await confirm('Write this firmware?',detail,pkg.warnings.join(' ') + ' Logical backups are not complete flash images. Keep power connected. Wrong bootloader firmware may require SWD recovery.',token)) return;
   if (plan.generation !== state.generation || plan.port !== state.port) fail('Device disconnected or selection changed during confirmation.');
+  if(plan.erasePkg){
+    state.recovery={sha256:pkg.sha256,name:pkg.name,hardware:selectedHardware(),deviceModel:state.device?.model||null,eraseUrls:state.item?.erase||state.recovery?.eraseUrls||[],phase:'erasing',eraseComplete:false};persistFlow('recovery','meshfirmware.nrfRecovery');
+    const link=new SerialLink(state.port);try{await link.open();await flashNrf(link,plan.erasePkg,progress);state.recovery.eraseComplete=true;}finally{await link.close();state.recovery.phase='reselect-dfu';persistFlow('recovery','meshfirmware.nrfRecovery');state.port=null;state.plan=null;state.generation++;$('port-status').textContent='Select same DFU radio';}
+    notice('Erase transfer completed. The original final ZIP remains loaded. Choose the SAME radio’s new DFU serial interface, inspect, then confirm its final firmware write.');return;
+  }
   if (pkg.architecture === 'uf2') {
     if (hash(pkg.payload)!==pkg.payloadHash) fail('UF2 changed after validation.');
     const liveInfo=await (await (await state.directory.getFileHandle('INFO_UF2.TXT')).getFile()).text(); if(liveInfo.slice(0,2048)!==plan.uf2Info) fail('UF2 drive identity changed.');
@@ -198,8 +313,9 @@ $('flash').onclick = () => operation(async () => {
     if(plan.needed && !plan.verified) {state.migration.phase='written';localStorage.setItem('meshfirmware.pendingMigration',JSON.stringify(state.migration));}
     notice(plan.needed && !plan.verified?'USB bridge write verified. Reset verified ESP32 to run the migration, wait for automatic ROM return, select the same device, then inspect again before the final firmware write.':'Target flash MD5 verified. Use Reset verified ESP32, then check application startup.');
     if(plan.verified) { state.migration=null; localStorage.removeItem('meshfirmware.pendingMigration'); }
+    if(!plan.needed||plan.verified)queueVerification(pkg);
   }
-  else { const link = new SerialLink(state.port); try { await link.open(); await flashNrf(link,pkg,progress); notice('DFU transfer completed. Installed firmware / bootloader and application startup remain unverified.'); } finally { await link.close(); state.plan = null; } }
+  else { const link = new SerialLink(state.port); try { await link.open(); await flashNrf(link,pkg,progress);if(!pkg.erase&&pkg.kind==='application'){queueVerification(pkg);state.recovery=null;persistFlow('recovery','meshfirmware.nrfRecovery');state.handoff=false;notice('DFU transfer completed. Choose the application port: the page will verify role, identity, protected board family and payload version when available.');}else notice('DFU component transfer completed. Installed bootloader/SoftDevice startup remains unverified; no application success is claimed.'); } finally { await link.close(); state.plan = null; } }
 });
 async function waitUartMigration() {
   if(!state.migration?.uart || state.migration.settled) fail('No unsettled UART migration is pending.');
@@ -230,13 +346,10 @@ $('finish').onclick = () => operation(async () => {
   await state.esp.finish($('transport-mode').value !== 'default_reset'); await closeEsp();
   if(bridge && state.migration?.uart) await waitUartMigration();
   else if(bridge) {state.port=null;state.generation++;$('transport-mode').value='no_reset';$('port-status').textContent='Wait for ROM return';notice('Migration bridge started. Keep power connected, wait for its automatic ROM return, then choose the same USB device and inspect again without resetting it.');}
-  else notice('Reset requested after verified writes. Re-select the application port and use Read running node to verify startup.');
+  else {state.port=null;state.generation++;$('already-bootloader').checked=false;notice('Reset requested after verified writes. Choose the application port; startup and storage layout will be verified automatically.');}
 });
 $('backup').onclick = () => operation(async () => {
-  if(state.migration) fail('Complete the pending partition migration before opening application USB APIs.');
-  const backup=await linkOperation(async link=>$('backup-role').value === 'common-cli' ? backupCommonCli(link,progress) : new MeshCore(link).backup(progress));verifyBackup(backup);
-  const filename=`mc.config_backup.web.${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
-  download(filename,JSON.stringify(backup,null,2),'application/json');$('backup-summary').textContent=`Downloaded ${filename}. Contains private settings when exposed. Logical backup only; not wipe-safe.`;notice('Backup integrity verified in browser memory and download requested. Confirm it was saved before wiping.');
+  await captureBackup();
 });
 $('backup-file').onchange = () => operation(async () => {
   state.restore=null;const file=$('backup-file').files[0];if(!file)return;if(file.size>(8<<20))fail('Backup exceeds 8 MiB.');
@@ -252,13 +365,14 @@ $('restore').onclick = () => operation(async () => {
   if (state.generation !== generation) fail('Selected device changed during confirmation.');
   await linkOperation(async link => new MeshCore(link).restore(archive,{newHardware:$('new-hardware').checked,replaceIdentity:$('replace-identity').checked},progress)); notice('Supported companion settings restored and read back. Review optional CLI snapshots separately.');
 });
-$('send-command').onclick = () => operation(async () => linkOperation(async link => { const command = $('command').value.trim(); if (!command || /[\r\n\x00]/.test(command)) fail('Enter one command.'); log($('backup-role').value === 'common-cli' ? await link.command(command) : await new MeshCore(link).cli(command)); }));
+$('send-command').onclick = () => operation(async () => linkOperation(async link => { const command = $('command').value.trim(); if (!command || /[\r\n\x00]/.test(command)) fail('Enter one command.');const role=$('backup-role').value==='auto'?(await readApplication(link)).role:$('backup-role').value;log(role === 'common-cli' ? await link.command(command) : await new MeshCore(link).cli(command)); }));
 $('clear-log').onclick = () => { $('log').textContent = 'Log cleared locally.'; };
 window.addEventListener('beforeunload',event => { if (state.busy) { event.preventDefault(); event.returnValue = ''; } });
 if(state.migration) notice('A partition migration is pending in this browser. Keep power connected, select its original firmware and the same device. Application commands are blocked until final verification.');
+if(state.recovery)notice('An nRF52 erase/recovery is pending. Select its original final ZIP and explicitly choose the same radio’s DFU port.');
 if ('serial' in navigator) {
   $('browser-status').textContent = 'Web Serial available';
-  navigator.serial.addEventListener('disconnect',event => { if (event.target === state.port || event.port === state.port) { state.generation++; state.plan = null; $('port-status').textContent = 'Disconnected'; log('Selected USB port disconnected. No different port will be substituted.'); controls(); } });
+  navigator.serial.addEventListener('disconnect',event => { if (event.target === state.port || event.port === state.port) { state.generation++; state.plan = null;if(!state.handoff&&!state.recovery&&!state.migration){state.device=null;state.backupApproved=null;} $('port-status').textContent = 'Disconnected'; log('Selected USB port disconnected. No different port will be substituted.'); controls(); } });
 } else { $('browser-status').textContent = 'Web Serial unavailable'; notice('Use a browser with Web Serial support (typically desktop Chrome or Edge). Catalog browsing and local file inspection still work.',true); }
-getCatalog().then(catalog => { state.items = catalog.items; $('catalog-status').textContent = `${state.items.length.toLocaleString()} artifacts · snapshot ${new Date(catalog.generatedAt).toLocaleString()} · ${catalog.warnings.length} provider warnings`; filterCatalog(); }).catch(error => { $('artifact').replaceChildren(new Option('Catalog unavailable · choose local firmware','')); $('catalog-status').textContent = error.message; controls(); });
+getCatalog().then(catalog => { state.items = catalog.items; $('catalog-status').textContent = `${state.items.length.toLocaleString()} artifacts · snapshot ${new Date(catalog.generatedAt).toLocaleString()} · ${catalog.warnings.length} provider warnings${catalog.cached?' · cached':''}`;let saved={};try{saved=JSON.parse(localStorage.getItem('meshfirmware.selections')||'{}');}catch{}filterCatalog();for(const id of ['provider','hardware','role','version']){if([...$(id).options].some(o=>o.value===saved[id])){$(id).value=saved[id];filterCatalog(id);}} }).catch(error => { $('artifact').replaceChildren(new Option('Catalog unavailable · choose local firmware','')); $('catalog-status').textContent = error.message; controls(); });
 controls();

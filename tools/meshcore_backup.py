@@ -46,7 +46,7 @@ from typing import Any, Awaitable, Callable, Mapping, Optional
 
 SCHEMA = "org.meshfirmware.meshcore-backup/v1"
 ARCHIVE_KIND = "meshcore-logical-usb"
-TOOL_VERSION = "0.2.3"
+TOOL_VERSION = "0.2.4"
 MIN_MESHCORE_VERSION = (2, 3, 9)
 MIN_MESHCORE_CLI_VERSION = (1, 6, 3)
 MIN_PYNACL_VERSION = (1, 5, 0)
@@ -1438,7 +1438,20 @@ def validate_archive_data(
         value = physical_identity.get(field)
         if value is not None and not isinstance(value, str):
             raise BackupError(ExitCode.ARCHIVE_INVALID, "archive USB identity is invalid")
-    if not _has_stable_usb_identity(
+    browser_capture = physical_identity.get("attestation") == "browser-port-permission"
+    if browser_capture:
+        # Web Serial deliberately does not expose serial/location/interface.
+        # Preserve that limitation explicitly rather than inventing a stable
+        # physical identity. Native restore must ask for a real target serial.
+        if (set(physical_identity) != {"serial", "location", "parent", "interface", "device_hint", "attestation", "vendor_id", "product_id"}
+                or source.get("port_at_capture") != "web-serial"
+                or any(physical_identity.get(field) is not None for field in ("serial", "location", "parent", "interface"))
+                or type(physical_identity.get("vendor_id")) is not int
+                or not 1 <= physical_identity["vendor_id"] <= 65535
+                or type(physical_identity.get("product_id")) is not int
+                or not 0 <= physical_identity["product_id"] <= 65535):
+            raise BackupError(ExitCode.ARCHIVE_INVALID, "browser USB permission attestation is invalid")
+    elif not _has_stable_usb_identity(
         physical_identity.get("serial"),
         physical_identity.get("location"),
         physical_identity.get("parent"),
@@ -1451,7 +1464,7 @@ def validate_archive_data(
             ExitCode.ARCHIVE_INVALID,
             "archive was captured through logging-only USB interface 02",
         )
-    if physical_identity.get("attestation") != "caller-provided":
+    if not browser_capture and physical_identity.get("attestation") != "caller-provided":
         raise BackupError(ExitCode.ARCHIVE_INVALID, "archive USB identity attestation is invalid")
 
     node = source.get("node")

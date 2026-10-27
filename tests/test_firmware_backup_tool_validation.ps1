@@ -30,7 +30,7 @@ $oldMode = $env:MESHFIRMWARE_TEST_VERSION_MODE
 $oldMarker = $env:MESHFIRMWARE_TEST_VERSION_MARKER
 $pythonCommand = (Get-Command $Python -ErrorAction Stop).Source
 $realPython = $pythonCommand
-$MESHCORE_BACKUP_TOOL_VERSION = '0.2.3'
+$MESHCORE_BACKUP_TOOL_VERSION = '0.2.4'
 $MESHCORE_BACKUP_TOOL_URL = 'https://invalid.example/fixture-only'
 $script:DownloadCalls = 0
 # Intercept downloads with a copy of the local fixture. Nothing reaches a server.
@@ -59,7 +59,7 @@ try {
         @('invalid', 'invalid JSON'),
         @('ambiguous', 'no single JSON version report'),
         @('not-ok', 'did not report success'),
-        @('version', 'version mismatch.*expected 0.2.3.*found .0.0.0'),
+        @('version', 'version mismatch.*expected 0.2.4.*found .0.0.0'),
         @('schema', 'schema mismatch.*wrong/schema')
     )) {
         $env:MESHFIRMWARE_TEST_VERSION_MODE = $case[0]

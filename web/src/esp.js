@@ -29,6 +29,31 @@ export async function stabilizeS3Jtag(loader) {
   await loader.writeReg(0x600080b8,0);
 }
 
+export function appWriteOrder(parts, otaBytes = null) {
+  const apps=parts.filter(part=>part.type===0),factories=apps.filter(part=>part.subtype===0),otaApps=apps.filter(part=>part.subtype>=0x10&&part.subtype<=0x1f),otas=parts.filter(part=>part.type===1&&part.subtype===0);
+  if(!apps.length||factories.length>1||new Set(apps.map(part=>part.subtype)).size!==apps.length||apps.length!==factories.length+otaApps.length) fail('Application layout has missing, duplicate or unsupported slot identities.');
+  let active;
+  if(otaApps.length) {if(otas.length!==1||otas[0].size<8192||!(otaBytes instanceof Uint8Array)||otaBytes.length!==8192)fail('Actual OTA metadata is required to safely order application writes.');active=activeOta(parts,otaBytes);}
+  else if(factories.length===1)active=factories[0].offset;
+  else fail('No supported bootable application slot.');
+  return apps.slice().sort((a,b)=>a.subtype-b.subtype).map(part=>part.offset).filter(offset=>offset!==active).concat(active);
+}
+
+export function mergedMirrorSegments(pkg, parts, populated) {
+  const ota=parts.filter(part=>part.type===0&&part.subtype>=0x10&&part.subtype<=0x1f).sort((a,b)=>a.subtype-b.subtype);
+  const missing=ota.filter(part=>!populated.has(part.offset));
+  if(ota.length<2||!missing.length)return [];
+  if(ota.map(part=>part.subtype).some((subtype,index)=>subtype!==0x10+index))fail('Merged OTA identities are not unique and contiguous.');
+  const source=ota[0];
+  if(!populated.has(source.offset)||pkg.payload.length>source.offset+source.size)fail('Cannot safely identify the exact merged primary application boundary for fallback mirroring. Select a complete compatible merged image.');
+  // As in the Linux flasher, preserve the entire original app including its
+  // EndF trailer/padding; never invent a boundary from only the ESP checksum.
+  const app=pkg.payload.subarray(source.offset);
+  validateEspImage(app);
+  if(missing.some(part=>app.length>part.size))fail('Embedded application does not fit every secondary OTA slot.');
+  return missing.map(part=>({address:part.offset,sourceOffset:source.offset,length:app.length,payloadHash:hash(app)}));
+}
+
 export class EspSession {
   #planProof = null;
   #written = false;
@@ -57,10 +82,11 @@ export class EspSession {
   }
   async assertMac() { if (!this.mac || (await this.loader.chip.readMac(this.loader)).toLowerCase() !== this.mac) fail('Physical chip MAC changed. Write stopped.'); }
   recordPlan(plan) {
+    if(plan.segments)plan.segments=Object.freeze(plan.segments.map(segment=>Object.freeze({...segment})));
     plan.addresses=Object.freeze([...plan.addresses]); this.plan=plan;
     this.#planProof=this.planProof(plan); this.#written=false; return plan;
   }
-  planProof(plan) { return hash(new TextEncoder().encode(JSON.stringify([plan.sha256,plan.payloadHash,plan.mac,plan.addresses,plan.merged,plan.expert,!!plan.needed,!!plan.verified,plan.bridge_sha256]))); }
+  planProof(plan) { return hash(new TextEncoder().encode(JSON.stringify([plan.sha256,plan.payloadHash,plan.mac,plan.addresses,plan.merged,plan.expert,!!plan.needed,!!plan.verified,plan.bridge_sha256,plan.segments]))); }
   async prepare(pkg, {planner,packageBytes,usbSetBytes,resume,expertOffset} = {}) {
     this.plan=null; this.#planProof=null; this.#written=false;
     if (pkg.architecture !== 'esp32' || pkg.chipId !== this.loader.chip.IMAGE_CHIP_ID || hash(pkg.payload) !== pkg.payloadHash) fail('Firmware chip or immutable payload verification failed.');
@@ -84,20 +110,23 @@ export class EspSession {
       }
       const ota=proposed.filter(p=>p.type===1 && p.subtype===0);
       let bootable=proposed.find(p=>p.type===0 && p.subtype===0)?.offset;
-      if(ota.length) {
-        if(ota.length!==1 || ota[0].size!==8192) fail('Merged OTA metadata is ambiguous.');
+      if(proposed.some(part=>part.type===0&&part.subtype>=0x10&&part.subtype<=0x1f)) {
+        if(ota.length!==1 || ota[0].size<8192) fail('Merged OTA metadata is ambiguous.');
         const metadata=new Uint8Array(8192).fill(255),source=pkg.payload.subarray(ota[0].offset,Math.min(ota[0].offset+8192,pkg.payload.length)); metadata.set(source);
         bootable=activeOta(proposed,metadata);
       }
       if(bootable===undefined || !populated.has(bootable)) fail('Merged install does not contain a valid application in its boot-selected partition.');
-      addresses = [0];
+      const mirrors=mergedMirrorSegments(pkg,proposed,populated),segments=[{address:0,sourceOffset:0,length:pkg.payload.length,payloadHash:pkg.payloadHash},...mirrors];
+      return this.recordPlan({sha256:pkg.sha256,payloadHash:pkg.payloadHash,mac:this.mac,addresses:segments.map(segment=>segment.address),merged:true,parts,segments,mirroredSlots:mirrors.length});
     } else {
       // The shared expansion helper reviews ESP32/C3/S3 only. Other supported
       // chips may update fitting slots, never run an unreviewed migration.
       if (planner && [0,5,9].includes(pkg.chipId)) {
         const nvs=parts.filter(p=>p.type===1 && p.subtype===2),ota=parts.filter(p=>p.type===1 && p.subtype===0);
-        if(nvs.length!==1 || ota.length!==1 || nvs[0].size>1<<20 || ota[0].size!==8192) fail('Ambiguous NVS/OTA layout. Browser migration cannot proceed.');
-        const snapshots={table:await this.loader.readFlash(0x8000,4096),nvs:await this.loader.readFlash(nvs[0].offset,nvs[0].size),ota:await this.loader.readFlash(ota[0].offset,8192),mac:this.mac};
+        if(nvs.length>1 || ota.length>1 || nvs.some(part=>part.size>(1<<20)) || ota.some(part=>part.size<8192)) fail('Ambiguous NVS/OTA layout. Browser migration cannot proceed.');
+        if(resume&&(nvs.length!==1||ota.length!==1))fail('Migration completion requires its exact NVS and OTA snapshots.');
+        const snapshots={table:await this.loader.readFlash(0x8000,4096),nvs:nvs.length?await this.loader.readFlash(nvs[0].offset,nvs[0].size):null,ota:ota.length?await this.loader.readFlash(ota[0].offset,8192):null,mac:this.mac};
+        appWriteOrder(parts,snapshots.ota);
         const result=await planner.call(resume?'verify':'plan',resume?{...snapshots,image:pkg.payload,sha256:pkg.sha256}:{...snapshots,name:pkg.name,image:pkg.payload,chip:this.loader.chip.CHIP_NAME,flashBytes:this.flashBytes,package:packageBytes,usbSet:usbSetBytes});
         this.planner=planner;
         return this.recordPlan({...result,sha256:pkg.sha256,payloadHash:pkg.payloadHash,mac:this.mac,addresses:result.app_offsets,merged:false,parts});
@@ -105,13 +134,11 @@ export class EspSession {
       const apps = parts.filter(p => p.type === 0);
       if (apps.some(p => pkg.payload.length > p.size)) fail('Partition expansion is required, but no reviewed browser migration plan exists for this chip/layout. No write was performed.');
       const nvs = parts.filter(p => p.type === 1 && p.subtype === 2);
-      if (nvs.length !== 1 || nvs[0].size > (1 << 20)) fail('Ambiguous NVS; migration completion cannot be verified.');
-      const state = await this.loader.readFlash(nvs[0].offset,nvs[0].size);
-      if (text(state).includes('mesh-pt-migrate')) fail('NVS has partition migration records, and this chip/layout has no reviewed completion verifier.');
+      if (nvs.length > 1 || nvs.some(part=>part.size > (1 << 20))) fail('Ambiguous NVS; migration completion cannot be verified.');
+      if(nvs.length) {const state = await this.loader.readFlash(nvs[0].offset,nvs[0].size);if (text(state).includes('mesh-pt-migrate')) fail('NVS has partition migration records, and this chip/layout has no reviewed completion verifier.');}
       const ota = parts.filter(p => p.type === 1 && p.subtype === 0);
-      if (ota.length !== 1 || ota[0].size !== 8192) fail('A verified OTA layout is required for a settings-preserving browser update.');
-      const active = activeOta(parts,await this.loader.readFlash(ota[0].offset,8192));
-      addresses = apps.map(p => p.offset).filter(offset => offset !== active).concat(active);
+      if (ota.length > 1 || ota.some(part=>part.size<8192)) fail('Ambiguous OTA metadata layout.');
+      addresses = appWriteOrder(parts,ota.length?await this.loader.readFlash(ota[0].offset,8192):null);
     }
     return this.recordPlan({ sha256: pkg.sha256, payloadHash: pkg.payloadHash, mac: this.mac, addresses, merged: pkg.merged, parts });
   }
@@ -146,14 +173,16 @@ export class EspSession {
     if(!this.#planProof || this.planProof(plan)!==this.#planProof || plan.mac!==this.mac || !plan.addresses.length) fail('Verified flash plan changed after inspection.');
     const bridge=plan.needed && !plan.verified;
     const payload=bridge?Uint8Array.from(plan.bridge):pkg.payload;
-    if(plan.addresses.some(address=>!Number.isInteger(address) || address<0 || address%4096 || address+Math.ceil(payload.length/4)*4>this.flashBytes)) fail('Write exceeds verified physical flash bounds.');
+    const segments=plan.segments||plan.addresses.map(address=>({address,payloadHash:hash(payload),length:payload.length}));
+    if(segments.some((segment,index)=>segment.address!==plan.addresses[index] || !Number.isInteger(segment.address) || segment.address<0 || segment.address%4096 || segment.address+Math.ceil(segment.length/4)*4>this.flashBytes)) fail('Write exceeds verified physical flash bounds.');
     if(bridge) { if(hash(payload)!==plan.bridge_sha256) fail('Verified bridge bytes changed.'); await this.planner.call('begin',{image:pkg.payload}); }
     // Update fallback slots first, active slot last. Erase only on explicit merged install.
     for (let i = 0; i < plan.addresses.length; i++) {
       await this.assertMac();
-      const address = plan.addresses[i];
-      await this.loader.writeFlash({ fileArray: [{ data: payload, address }], flashMode: 'keep', flashFreq: 'keep', flashSize: 'keep', eraseAll: plan.merged && i === 0, compress: true, calculateMD5Hash: md5hex, reportProgress: (_,written,total) => progress((i + written / total) / plan.addresses.length, `Writing + verifying ${bridge?'USB bridge':'application'} 0x${address.toString(16)}`) });
-      if ((await this.loader.flashMd5sum(address,payload.length)).toLowerCase() !== md5hex(payload)) fail('Target MD5 readback differs from the validated bytes. No automatic reset.');
+      const segment=segments[i],address = plan.addresses[i],data=plan.segments?pkg.payload.subarray(segment.sourceOffset,segment.sourceOffset+segment.length):payload;
+      if(data.length!==segment.length||hash(data)!==segment.payloadHash)fail('Write segment changed after inspection.');
+      await this.loader.writeFlash({ fileArray: [{ data, address }], flashMode: 'keep', flashFreq: 'keep', flashSize: 'keep', eraseAll: plan.merged && i === 0, compress: true, calculateMD5Hash: md5hex, reportProgress: (_,written,total) => progress((i + written / total) / plan.addresses.length, `Writing + verifying ${bridge?'USB bridge':i&&plan.merged?'fallback application':'application'} 0x${address.toString(16)}`) });
+      if ((await this.loader.flashMd5sum(address,data.length)).toLowerCase() !== md5hex(data)) fail('Target MD5 readback differs from the validated bytes. No automatic reset.');
     }
     await this.assertMac(); this.#written=true; progress(1,'Flash verified. Reset pending; application startup remains unverified.');
   }

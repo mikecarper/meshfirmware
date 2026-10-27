@@ -30,7 +30,7 @@ export function parseAck(frame) {
   if (frame.length !== 4 + (hasCrc ? 2 : 0) || (hasCrc && crc16(frame.subarray(0,4)) !== (frame[4] | frame[5] << 8))) fail('Invalid DFU acknowledgement CRC/length.');
   return (frame[0] >> 3) & 7;
 }
-export async function flashNrf(link, pkg, onProgress) {
+export async function flashNrf(link, pkg, onProgress, {delay = sleep, now = Date.now} = {}) {
   if (hash(pkg.payload) !== pkg.payloadHash || hash(pkg.init) !== pkg.initHash || nrfMetadataHash(pkg)!==pkg.metadataHash) fail('DFU bytes or component metadata changed after validation.');
   let sequence = 0, receive = [];
   await link.port.setSignals({ dataTerminalReady: true, requestToSend: false });
@@ -38,8 +38,8 @@ export async function flashNrf(link, pkg, onProgress) {
   async function send(payload) {
     sequence = (sequence + 1) & 7; const packet = hciPacket(payload, sequence);
     for (let attempt = 0; attempt < 3; attempt++) {
-      await link.write(packet); const until = Date.now() + 2000;
-      while (Date.now() < until) {
+      await link.write(packet); const until = now() + 2000;
+      while (now() < until) {
         receive.push(...await link.read(100)); if (receive.length > 4096) fail('DFU reply limit exceeded.');
         for (;;) {
           const start = receive.indexOf(0xc0); if (start < 0) { receive = []; break; }
@@ -53,15 +53,15 @@ export async function flashNrf(link, pkg, onProgress) {
     fail(`DFU did not acknowledge packet ${sequence}. No reset will be attempted.`);
   }
   const pages = Math.ceil(pkg.payload.length / 4096) + 1, eraseWait = Math.min(30000,Math.max(500,Math.ceil(pages * 89.7)));
-  onProgress(0,'Preparing DFU'); await send(words(3,pkg.mode,pkg.sdSize,pkg.blSize,pkg.appSize)); await sleep(eraseWait);
+  onProgress(0,'Preparing DFU'); await send(words(3,pkg.mode,pkg.sdSize,pkg.blSize,pkg.appSize)); await delay(eraseWait);
   await send(Uint8Array.from([...words(1),...pkg.init,0,0]));
-  await sleep(205);
+  await delay(205);
   for (let offset = 0; offset < pkg.payload.length; offset += 512) {
     const end = Math.min(offset + 512,pkg.payload.length); await send(Uint8Array.from([...words(4),...pkg.payload.subarray(offset,end)]));
-    onProgress(end / pkg.payload.length * .95,'Writing DFU'); if ((offset / 512 + 1) % 8 === 0) await sleep(205);
+    onProgress(end / pkg.payload.length * .95,'Writing DFU'); if ((offset / 512 + 1) % 8 === 0) await delay(205);
   }
-  await sleep(205); await send(words(5)); onProgress(.96,'Activating; keep power connected');
-  await sleep(eraseWait + Math.ceil(pages * 204.8)); onProgress(1,'DFU transfer completed. Application / installed bootloader remains unverified.');
+  await delay(205); await send(words(5)); onProgress(.96,'Activating; keep power connected');
+  await delay(eraseWait + Math.ceil(pages * 204.8)); onProgress(1,'DFU transfer completed. Application / installed bootloader remains unverified.');
 }
 
 // User gesture only. A re-enumerated port is never silently substituted.

@@ -2,13 +2,22 @@ import { unzipSync } from 'fflate';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { md5 } from '@noble/hashes/legacy.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
+import { endfIdentity, payloadBoardIdentity } from './board-safety.js';
 
 export const hash = data => bytesToHex(sha256(data));
 export const md5hex = data => bytesToHex(md5(data));
 export const text = data => new TextDecoder().decode(data);
 export const fail = message => { throw new Error(message); };
 export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-export const nrfMetadataHash = pkg => hash(new TextEncoder().encode(JSON.stringify([pkg.architecture,pkg.kind,pkg.mode,pkg.sdSize,pkg.blSize,pkg.appSize,pkg.payloadHash,pkg.initHash])));
+export const nrfMetadataHash = pkg => hash(new TextEncoder().encode(JSON.stringify([pkg.name,pkg.architecture,pkg.kind,pkg.mode,pkg.sdSize,pkg.blSize,pkg.appSize,pkg.payloadHash,pkg.initHash,pkg.destructive,pkg.erase,pkg.eraseEvidence,pkg.boardIdentity,pkg.firmwareIdentity])));
+// Hash the actual destructive application, not its ZIP envelope: a renamed or
+// repacked erase package must not become an apparently ordinary app update.
+const knownNrfErasePayloads = new Map([
+  ['f17500b598ce53d4d4183f6bd20e06e9bf2bd3468d9a22ff3af7f148bb0dfc0c','official SoftDevice v6 erase payload'],
+  ['01f8d553e5ce865312fcfe3ddf1eb06f10ed7ca6bd4f34dd81e58b6f8400be8e','official SoftDevice v7 erase payload']
+]);
+const eraseName = value => /(?:^|[\\/_. -])(?:flash[_. -]*)?(?:erase|wipe)(?:[\\/_. -]|$)/i.test(value || '');
+export const nrfEraseIntent = (name,payloadHash,entryNames = []) => knownNrfErasePayloads.get(payloadHash) || ([name,...entryNames].some(eraseName) ? 'erase/wipe package name (conservative destructive classification)' : null);
 export function crc16(data) {
   let crc = 0xffff;
   for (const b of data) { crc ^= b << 8; for (let i = 0; i < 8; i++) crc = ((crc & 0x8000) ? (crc << 1) ^ 0x1021 : crc << 1) & 0xffff; }
@@ -106,7 +115,8 @@ export function nrfPackage(name, bytes) {
     const metadata=entry.init_packet_data, expected={device_type:d.getUint16(0,true),device_revision:d.getUint16(2,true),application_version:d.getUint32(4,true),firmware_crc16:d.getUint16(crcOffset,true)}, requiredIds=Array.from({length:required},(_,i)=>d.getUint16(10+i*2,true));
     if (typeof metadata!=='object' || Array.isArray(metadata) || Object.keys(metadata).some(k=>!Object.hasOwn(expected,k) && k!=='softdevice_req') || Object.entries(expected).some(([k,value])=>Object.hasOwn(metadata,k) && metadata[k]!==value) || (Object.hasOwn(metadata,'softdevice_req') && (!Array.isArray(metadata.softdevice_req) || metadata.softdevice_req.length!==requiredIds.length || metadata.softdevice_req.some((value,i)=>value!==requiredIds[i])))) fail('DFU manifest and DAT metadata disagree.');
   }
-  const pkg={ name, architecture: 'nrf52', kind, mode: kinds[kind], payload, init, sdSize, blSize, appSize, sha256: hash(bytes), payloadHash: hash(payload), initHash: hash(init), destructive: kind !== 'application', warnings: [...(kind!=='application'?['This replaces the bootloader and/or SoftDevice. A wrong target can invalidate the application or require physical SWD recovery; a logical backup cannot recover the bootloader.']:[]),'Browser APIs cannot prove physical identity across a DFU reconnect. Explicitly select the same device.', 'DFU completion does not verify application startup.'] };
+  const payloadHash = hash(payload), eraseEvidence = nrfEraseIntent(name,payloadHash,[entry.bin_file,entry.dat_file]), erase = !!eraseEvidence;
+  const pkg={ name, architecture: 'nrf52', kind, mode: kinds[kind], payload, init, sdSize, blSize, appSize, sha256: hash(bytes), payloadHash, initHash: hash(init), erase, eraseEvidence, boardIdentity:payloadBoardIdentity(payload),firmwareIdentity:endfIdentity(payload),destructive: kind !== 'application' || erase, warnings: [...(erase?['This is an erase/wipe application. Its application-type DFU manifest does NOT make it a non-destructive update. It erases stored identity/settings and must be followed by the intended firmware.']:[]),...(kind!=='application'?['This replaces the bootloader and/or SoftDevice. A wrong target can invalidate the application or require physical SWD recovery; a logical backup cannot recover the bootloader.']:[]),'Browser APIs cannot prove physical identity across a DFU reconnect. Explicitly select the same device.', 'DFU completion does not verify application startup.'] };
   pkg.metadataHash=nrfMetadataHash(pkg); return pkg;
 }
 

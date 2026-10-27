@@ -44,18 +44,22 @@ if (-not $python) {
 }
 
 $targetArgs = @()
+$archiveInfo = Get-Content -LiteralPath $BackupPath -Raw | ConvertFrom-Json
+$BrowserCapture = $archiveInfo.payload.source.physical_usb_identity.attestation -eq 'browser-port-permission'
 if (-not $MoveToNewHardware -and -not $TargetSerial) {
     $choice = Read-Host 'Target: 1. original USB device  2. different hardware [1/2, Enter=1]'
     if ($choice -eq '2') { $MoveToNewHardware = $true }
 }
-if ($MoveToNewHardware) {
+if ($MoveToNewHardware -or $BrowserCapture) {
     if (-not $TargetSerial) {
+        if ($BrowserCapture) { Write-Host 'Browser backups cannot record a physical USB serial. Select the actual target below; its node identity and hardware will still be checked.' }
         Write-Host 'Connected serial devices:'
         & $python.Source $helper ports
         $TargetSerial = Read-Host 'Enter the exact USB serial of the new target'
     }
     if (-not $TargetSerial) { Write-Host 'Cancelled.'; exit 1 }
-    $targetArgs += @('--target-serial', $TargetSerial, '--new-hardware')
+    $targetArgs += @('--target-serial', $TargetSerial)
+    if ($MoveToNewHardware) { $targetArgs += '--new-hardware' }
 } elseif ($TargetSerial) {
     Write-Host 'A different USB serial requires MESH_RESTORE_NEW_HARDWARE=1.' -ForegroundColor Red
     exit 1

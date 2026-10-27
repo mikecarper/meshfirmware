@@ -82,6 +82,29 @@ class RestoreSafetyTests(unittest.IsolatedAsyncioTestCase):
                     await restore.run(args)
                 port.assert_not_called()
 
+    async def test_browser_archive_requires_explicit_real_target_serial(self):
+        args = SimpleNamespace(command="probe", input="unused", target_serial=None,
+                               new_hardware=False, confirmed=False, replace_identity=False)
+        with mock.patch.object(restore, "load_backup", return_value=(archive(), {"sha256": "x"}, None)):
+            with mock.patch.object(restore, "matching_port") as port:
+                with self.assertRaisesRegex(restore.RestoreError, "Browser backups do not expose"):
+                    await restore.run(args)
+                port.assert_not_called()
+
+    async def test_browser_archive_manual_target_still_checks_node_and_model(self):
+        args = SimpleNamespace(command="probe", input="unused", target_serial="REAL-USB-SERIAL",
+                               new_hardware=False, confirmed=False, replace_identity=False)
+        client = SimpleNamespace(disconnect=mock.AsyncMock())
+        status = {"model": "OriginalBoard", "version": "test", "key_prefix": "old", "same_key": True}
+        with mock.patch.object(restore, "load_backup", return_value=(archive(), {"sha256": "x"}, None)), \
+             mock.patch.object(restore, "matching_port", return_value="COM7") as port, \
+             mock.patch.object(restore, "connect", new=mock.AsyncMock(return_value=client)), \
+             mock.patch.object(restore, "inspect", new=mock.AsyncMock(return_value=status)) as inspect:
+            await restore.run(args)
+            port.assert_called_once_with("REAL-USB-SERIAL")
+            inspect.assert_awaited_once_with(client, mock.ANY, new_hardware=False)
+            client.disconnect.assert_awaited_once()
+
     def test_bluetooth_default_is_metadata_not_literal_name(self):
         name, mode = restore.bluetooth_name_status("> MeshCore-example (default from node name)")
         self.assertEqual(name, "MeshCore-example")

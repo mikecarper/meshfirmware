@@ -40,6 +40,12 @@ jobs:
       - name: Unit and protocol tests
         run: pnpm test
         working-directory: web
+      - name: Native archive and migration compatibility
+        run: |
+          python3 -m unittest discover -s tests -p test_meshcore_backup.py
+          python3 -m unittest discover -s tests -p test_meshcore_restore.py
+          python3 -m unittest discover -s tests -p test_meshcore_partition_expansion.py
+          bash tests/test_mcfirmware_backup_integration.sh
       - name: Refresh public release catalog
         run: node scripts/catalog.mjs
         working-directory: web

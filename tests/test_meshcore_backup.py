@@ -229,6 +229,23 @@ def run(coro):
 
 
 class MeshCoreBackupTests(unittest.TestCase):
+    def test_browser_permission_archives_keep_unknown_usb_serial_explicit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            payload = run(backup.collect_companion(FakeClient(), self.make_request(directory)))
+            payload["source"]["port_at_capture"] = "web-serial"
+            identity = {"serial": None, "location": None, "parent": None, "interface": None,
+                        "device_hint": "test-board", "attestation": "browser-port-permission",
+                        "vendor_id": 0x2886, "product_id": 0x8044}
+            payload["source"]["physical_usb_identity"] = identity
+            document = backup.make_archive(payload)
+            self.assertEqual(backup.validate_archive_data(document)["public_key"], PUBLIC_KEY)
+            for update in ({"serial": "invented"}, {"location": "invented"}, {"interface": "00"},
+                           {"vendor_id": True}, {"vendor_id": 0}, {"product_id": None},
+                           {"attestation": "caller-provided"}, {"invented_identity": "not allowed"}):
+                changed = json.loads(json.dumps(document))
+                changed["payload"]["source"]["physical_usb_identity"].update(update)
+                self.assert_recomputed_archive_invalid(changed)
+
     def make_request(self, directory, **changes):
         values = {
             "port": "COM_TEST",
