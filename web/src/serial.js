@@ -30,7 +30,8 @@ export function parseAck(frame) {
   if (frame.length !== 4 + (hasCrc ? 2 : 0) || (hasCrc && crc16(frame.subarray(0,4)) !== (frame[4] | frame[5] << 8))) fail('Invalid DFU acknowledgement CRC/length.');
   return (frame[0] >> 3) & 7;
 }
-export async function flashNrf(link, pkg, onProgress, {delay = sleep, now = Date.now} = {}) {
+export async function flashNrf(link, pkg, onProgress, {delay = sleep, now = Date.now, ackTimeoutMs = 10000} = {}) {
+  if(!Number.isInteger(ackTimeoutMs)||ackTimeoutMs<1||ackTimeoutMs>60000)fail('DFU acknowledgement timeout must be 1–60000 ms.');
   if (hash(pkg.payload) !== pkg.payloadHash || hash(pkg.init) !== pkg.initHash || nrfMetadataHash(pkg)!==pkg.metadataHash) fail('DFU bytes or component metadata changed after validation.');
   let sequence = 0, receive = [];
   await link.port.setSignals({ dataTerminalReady: true, requestToSend: false });
@@ -38,7 +39,9 @@ export async function flashNrf(link, pkg, onProgress, {delay = sleep, now = Date
   async function send(payload) {
     sequence = (sequence + 1) & 7; const packet = hciPacket(payload, sequence);
     for (let attempt = 0; attempt < 3; attempt++) {
-      await link.write(packet); const until = now() + 2000;
+      // Match the native CLI's bounded ten-second allowance for old
+      // single-bank bootloaders which erase before acknowledging START.
+      await link.write(packet); const until = now() + ackTimeoutMs;
       while (now() < until) {
         receive.push(...await link.read(100)); if (receive.length > 4096) fail('DFU reply limit exceeded.');
         for (;;) {

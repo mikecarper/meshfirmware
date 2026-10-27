@@ -168,7 +168,7 @@ json.dumps({'summary': _backup_result, 'payload': _backup_archive['payload'], **
           }
           py.globals.set('plan_path', currentPlan.plan_file); result = JSON.parse(py.runPython('json.dumps(m.begin_plan(Path(plan_path)))'));
         } else {
-          if (!currentPlan) {
+          if (!currentPlan?.plan_file) {
             const directory = '/work/cache/' + data.mac.replace(/:/g, '').toUpperCase();
             const candidates = py.FS.readdir(directory).filter(n => /^[a-f0-9]{64}$/.test(n)).map(n => directory + '/' + n + '/plan.json');
             const plans = candidates.map(path => JSON.parse(new TextDecoder().decode(py.FS.readFile(path)))).filter(p => p.started && p.firmware_sha256 === data.sha256);
@@ -179,6 +179,9 @@ json.dumps({'summary': _backup_result, 'payload': _backup_archive['payload'], **
           if (hash(data.image) !== currentPlan.firmware_sha256) throw new Error('Different final firmware after migration.');
           py.FS.writeFile(currentPlan.firmware_file, data.image);
           py.globals.set('plan_path', currentPlan.plan_file); result = JSON.parse(py.runPython(`json.dumps(m.verify_plan(Path(plan_path), Path('/work/table.bin'), Path('/work/nvs.bin'), Path('/work/ota.bin')))`));
+          // Public provenance lets an interrupted bridge descriptor be
+          // superseded only by completion of that exact cached bridge/geometry.
+          result={...result,completed_bridge_sha256:currentPlan.bridge_sha256,completed_source_table_sha256:currentPlan.source_table_sha256,completed_bridge_segments:currentPlan.bridge_offsets.map(address=>({address,sourceOffset:0,length:currentPlan.bridge_bytes,payloadHash:currentPlan.bridge_sha256}))};
         }
         // The started marker must be durable before authorizing any bridge write.
         if (persistent) await sync(py, false);

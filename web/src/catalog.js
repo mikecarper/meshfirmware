@@ -55,6 +55,32 @@ export function catalogItems(config, releases = [], provider = 'MeshCore') {
   // nRF52 is always the CLI-style serial DFU path, never a UF2 drive action.
   return items.filter(item => item.architecture !== 'nrf52' || /\.zip$/i.test(item.name));
 }
+// Provider manifests often publish only application files. Borrow only missing
+// board-wide utilities from an exact official board/architecture match. A
+// conflicting official inventory is not permission to choose one arbitrarily.
+export function inheritOfficialUtilities(items) {
+  const official=new Map();
+  const key=item=>typeof item.hardware==='string'&&item.hardware.trim()&&['nrf52','esp32'].includes(item.architecture)?JSON.stringify([item.hardware,item.architecture]):null;
+  for(const item of items)if(item.provider==='MeshCore'&&key(item)!==null){
+    const id=key(item);if(!official.has(id))official.set(id,[]);official.get(id).push(item);
+  }
+  let changed=false;
+  const result=items.map(item=>{
+    if(item.provider==='MeshCore'||key(item)===null)return item;
+    const matches=(official.get(key(item))||[]).filter(source=>!item.hardwareVersion||!source.hardwareVersion||item.hardwareVersion===source.hardwareVersion);
+    let enriched=item;
+    for(const field of ['erase','bootloader']){
+      if(item[field]?.length)continue;
+      const choices=new Map();
+      for(const source of matches)if(Array.isArray(source[field])&&source[field].length){
+        const urls=[...new Set(source[field])].sort();choices.set(JSON.stringify(urls),urls);
+      }
+      if(choices.size===1){enriched={...enriched,[field]:[...choices.values()][0]};changed=true;}
+    }
+    return enriched;
+  });
+  return changed?result:items;
+}
 export function validateCatalog(value) {
   if(!value||!Array.isArray(value.items)||value.items.length>50000||!Array.isArray(value.warnings)||!Number.isFinite(Date.parse(value.generatedAt)))throw new Error('Invalid catalog snapshot.');
   let repaired=0;
@@ -67,7 +93,8 @@ export function validateCatalog(value) {
     validateFirmwareUrl(url);for(const source of [...(item.erase||[]),...(item.bootloader||[])])validateFirmwareUrl(source);
     return url===item.url?item:{...item,url};
   });
-  return repaired?{...value,items,warnings:[...value.warnings,`Repaired ${repaired} legacy official release URLs missing the repository path.`]}:value;
+  const linked=repaired?items:value.items,enriched=inheritOfficialUtilities(linked);
+  return repaired||enriched!==linked?{...value,items:enriched,warnings:repaired?[...value.warnings,`Repaired ${repaired} legacy official release URLs missing the repository path.`]:value.warnings}:value;
 }
 function encodeCache(value) {
   const bytes=gzipSync(strToU8(JSON.stringify(value)),{level:6});let binary='';

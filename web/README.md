@@ -16,7 +16,11 @@ Start with a recoverable bench radio, not a remote USB-only node.
 
 1. Open the page in desktop Chrome/Edge and choose a USB port.
 2. Select a release, an HTTPS URL or a local BIN/DFU ZIP/UF2/release ZIP. If a
-   host blocks browser fetches, use Download, then choose that local file.
+   host blocks browser fetches, use Download, then choose that local file. A
+   replacement clears the previous image and plan before reading/downloading;
+   a failed replacement cannot leave the old image ready to flash.
+   Published release-ZIP hashes are checked before indexing; the selected inner
+   image is validated separately, never compared to the enclosing ZIP's hash.
 3. Choose the correct connection type and use **Back up & inspect**. Before
    resetting an application or entering ROM/DFU, the page offers a backup by
    default. Auto-detection distinguishes a binary companion from CommonCLI.
@@ -43,13 +47,13 @@ the shared `303a:1001` ID is not used to guess their reset mechanism.
 
 | Feature | Browser behavior |
 | --- | --- |
-| MeshCore / Keymind catalog | Rebuilt daily/on deployment; repository-aware release URLs, newest Keymind manifest discovery, primary/proxy/validated-cache fallback, variant context and newest-first versions; every raw publication route checked in CI |
+| MeshCore / Keymind catalog | Rebuilt daily/on deployment; repository-aware URLs, newest Keymind manifests, primary/proxy/validated-cache fallback, exact-board official utility fallback and newest-first versions; every raw publication route checked in CI |
 | ESP32/S2/C3/S3/C6 | Validated application updates and merged installs; chip/security/MAC/capacity and silicon-revision checks; factory-only/non-OTA updates and larger OTA metadata partitions supported |
 | Merged ESP32 installs | Populate missing secondary OTA slots from the exact embedded app, with independent readback; refuse ambiguous source boundaries rather than guessing |
 | ESP components | Checksum-valid bootloader/component image, explicit address, typed acknowledgement; never guess an offset |
 | nRF52 | Serial DFU like `adafruit-nrfutil`: application, bootloader, SoftDevice or combined SD/bootloader ZIP; guided erase/reconnect/final-write; no mounted-drive workflow or generic Nordic secure-DFU substitution |
 | Other UF2 boards | Validated blocks; explicitly chosen bootloader directory and identity recheck; nRF52 UF2 is refused in favor of serial DFU ZIP |
-| MeshCore companion backup | Private identity when exposed, channels, contacts, settings, battery/storage and optional CLI snapshots; completeness and unavailable sections shown separately from integrity |
+| MeshCore companion backup | Private identity when exposed, channels, contacts, settings, battery/storage and optional CLI snapshots; bounded asynchronous pushes tolerated during contact enumeration; completeness shown separately from integrity |
 | MeshCore companion restore | New native-format exports, existing script JSON and legacy browser JSON; exact Python serialization/validation in WASM; model/capacity/key checks, TX/logging readback, deliberate cross-hardware identity replacement |
 | Full Companion text mode | Explicit binary handoff; turning USB logging off requires acknowledgement |
 | CommonCLI repeater/room | Partial read-only snapshot, no automatic restore |
@@ -59,7 +63,10 @@ Every web backup is deliberately marked **not wipe-safe**. Unexposed secrets,
 messages, files, logs and firmware may be absent. Imported MeshCore archives
 are validated from their original JSON text to preserve Python's canonical
 floating-point integrity. Diagnostic firmware versions are never restored.
-Unstructured optional CLI settings are retained for manual comparison.
+Known optional CLI settings unsupported by the target produce visible restore
+warnings while core settings can still be restored. Unreadable logging state,
+transport failures and genuine command errors still stop the restore.
+Unstructured optional CLI settings remain available for manual comparison.
 
 Revision-constrained ESP images are checked before erasing or writing. A
 mismatch or unavailable required revision needs a separate **FORCE CHIP
@@ -79,6 +86,13 @@ repacking. A name-marked custom eraser requires an
 additional **CUSTOM ERASE** acknowledgement, not an automatic trust decision.
 Erase packages require destructive acknowledgement even when
 their DFU manifest calls them an `application`.
+
+Missing provider erase/bootloader hints use official metadata only for an
+exact hardware-name and architecture match. Existing provider hints win;
+conflicting official hints or unmatched boards require manual selection.
+This also works with validated older catalog caches. Serial DFU waits up to
+10 seconds per acknowledgement by default; transport callers can supply a
+validated `ackTimeoutMs` instead of relying on short fixed ACK waits.
 
 Protected RAK checks examine embedded payload identity and retained pre-DFU
 board evidence, not just filenames. Unknown or conflicting evidence requires
@@ -144,6 +158,25 @@ start**. The page revalidates the cached package and every on-device bridge
 slot before allowing one reset. A partial/mismatched bridge is not reset.
 Do not clear browser storage during recovery. Lost power during table rewriting
 can still require physical access; there is no atomic/brick-proof claim.
+
+An interrupted bridge write against the unchanged original partition table can
+resume its original plan; a completed target layout still needs final migration
+verification. An interrupted transfer never clears the pending migration.
+
+### Interrupted ESP writes
+
+After a transport failure, reselect **the same physical device** already in ROM
+using **no reset**, then inspect the original image again. The recovery
+descriptor binds the chip MAC, image, layout and write ranges. A separate
+**RETRY IN CHUNKS** acknowledgement permits 16 KiB writes with independent MD5
+readback, for at most three explicitly reselected recovery attempts. It does
+not silently choose a port, reset the device or repeat a whole-chip erase.
+An uncertain erase completion requires a separately authorized fresh install.
+Use **Discard ESP retry record** with **DISCARD RETRY STATE** to clear only the
+public browser retry descriptor after an uncertain erase or exhausted retries.
+This sends no device commands, changes no on-device bytes and never clears a
+pending partition migration. A fresh attempt requires reselection, inspection
+and the normal write/wipe acknowledgements again.
 
 ## Build and test
 

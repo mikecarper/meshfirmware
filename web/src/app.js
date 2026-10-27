@@ -1,7 +1,7 @@
 import './style.css';
 import { inspectFirmware, checkedZip, hash, fail, text } from './firmware.js';
 import { SerialLink, flashNrf, touch1200 } from './serial.js';
-import { EspSession } from './esp.js';
+import { EspSession, validateEspWriteRecovery } from './esp.js';
 import { getCatalog, httpsUrl, compareVersions } from './catalog.js';
 import { MeshCore, backupCommonCli, verifyBackup, parseBackup, enterCompanionBinary, detectMeshCore, backupSummary } from './meshcore.js';
 import { exportNativeBackup } from './backup-native.js';
@@ -10,9 +10,10 @@ import { BrowserPlanner } from './planner.js';
 import { waitForMigration } from './migration.js';
 
 const $ = id => document.getElementById(id);
-const state = { port: null, pkg: null, esp: null, plan: null, generation: 0, busy: false, items: [], restore: null, directory: null, archive:null, planner:null, migration:null, downloaded:new Set(),item:null,device:null,backupApproved:null,backup:null,recovery:null,verification:null,handoff:false };
+const state = { port: null, pkg: null, esp: null, plan: null, generation: 0, busy: false, items: [], restore: null, directory: null, archive:null, archiveContext:null, planner:null, migration:null, downloaded:new Set(),item:null,device:null,backupApproved:null,backup:null,recovery:null,espRecovery:null,verification:null,handoff:false };
 try { const pending=JSON.parse(localStorage.getItem('meshfirmware.pendingMigration') || 'null'); if(pending && /^[a-f0-9:]{17}$/i.test(pending.mac) && /^[a-f0-9]{64}$/.test(pending.sha256)) state.migration=pending; } catch { /* The worker still fails closed on any actual NVS migration state. */ }
 for(const [key,field] of [['meshfirmware.nrfRecovery','recovery'],['meshfirmware.verifyApplication','verification']])try{const saved=JSON.parse(localStorage.getItem(key)||'null');if(saved&&/^[a-f0-9]{64}$/.test(saved.sha256))state[field]=field==='recovery'?{...saved,phase:'reselect-dfu',eraseComplete:saved.eraseComplete===true}:saved;}catch{}
+try{const saved=JSON.parse(localStorage.getItem('meshfirmware.espRecovery')||'null');if(saved)state.espRecovery=validateEspWriteRecovery(saved);}catch{/* Invalid retry state never authorizes a write. */}
 // Exact bootloader IDs shared with the native classifier. Never match a broad
 // vendor/product range: nearby application IDs must still be probed normally.
 const dfuIds = new Set(['2886:0044','2886:0045','2886:0057','2886:1667','239a:0029','239a:002a','239a:0071','239a:00b3','239a:00da']);
@@ -29,6 +30,7 @@ function controls() {
   $('finish').disabled ||= !state.esp || !state.plan?.written;
   $('wait-migration').disabled ||= !state.port || !state.migration?.uart || state.migration?.settled;
   $('recover-bridge').disabled ||= !state.port || !state.pkg || !state.migration;
+  $('discard-esp-recovery').disabled ||= !state.espRecovery;
   $('restore').disabled ||= !state.restore || !state.port || state.restore.schema !== 'org.meshfirmware.web-backup/v1' || state.restore.payload.role !== 'companion';
   for (const id of ['touch','probe','backup','send-command','binary-mode','verify-app']) $(id).disabled ||= !state.port;
   $('verify-app').disabled ||= !state.verification;
@@ -36,16 +38,27 @@ function controls() {
   $('load-bootloader').disabled ||= !$('bootloader-source').value;
   $('retry').disabled ||= !state.port||!state.pkg;
 }
-async function closeEsp() { if (state.esp) { await state.esp.close(); state.esp = null; } state.plan = null; }
+async function closeEsp() { const esp=state.esp;state.esp=null;state.plan=null;if(esp)await esp.close(); }
 async function operation(callback) {
   if (state.busy) return; state.busy = true; controls();
   try { await callback(); }
-  catch (error) { notice(error.message || String(error),true); log(`Stopped: ${error.message || error}`); }
+  catch (error) {
+    let retry=null;if(error.recovery)try{retry=validateEspWriteRecovery(error.recovery);}catch{}
+    if(retry){
+      state.espRecovery=retry;persistEspRecovery();
+      try{await closeEsp();}catch(closeError){log(`Serial close: ${closeError.message}`);}
+      state.port=null;state.generation++;$('transport-mode').value='no_reset';$('already-bootloader').checked=true;$('port-status').textContent='Select same ROM radio';
+      const fresh=retry.attempts>=3||(retry.merged&&!retry.eraseComplete);
+      notice(`${error.message} `+(fresh?'Chunked retry cannot continue: use Discard ESP retry record, then explicitly inspect and authorize a fresh write/wipe. Any partition migration remains pending.':"Select the SAME physical radio's waiting ROM port without resetting, inspect the original image, then acknowledge a bounded chunked retry."),true);
+    }else notice(error.message || String(error),true);
+    log(`Stopped: ${error.message || error}`);
+  }
   finally { state.busy = false; controls(); }
 }
 async function linkOperation(callback) {
   if(state.migration) fail('A partition migration is pending. Application commands and backups are blocked until its final firmware write is verified.');
   if(state.recovery) fail('Finish the pending nRF52 recovery before opening application commands.');
+  if(state.espRecovery) fail('An ESP32 write retry is pending. Re-select the same ROM radio and finish or explicitly discard its retry record before application commands.');
   if (!state.port) fail('Choose a USB port first.');
   if (dfuIds.has(portId(state.port)) || $('already-bootloader').checked) fail('Backup/application commands cannot run in DFU/ROM. Select the application port and clear Already in bootloader.');
   await closeEsp(); const link = new SerialLink(state.port);
@@ -64,6 +77,7 @@ function choose(title,detail,buttons) {
   const dialog=$('question-dialog');dialog.returnValue='cancel';dialog.showModal();return new Promise(resolve=>dialog.addEventListener('close',()=>resolve(dialog.returnValue),{once:true}));
 }
 function persistFlow(field,key) { if(state[field])localStorage.setItem(key,JSON.stringify(state[field]));else localStorage.removeItem(key); }
+function persistEspRecovery(){try{persistFlow('espRecovery','meshfirmware.espRecovery');}catch{log(state.espRecovery?'ESP retry state could not be saved in browser storage. It remains in memory only; keep this page open until recovery finishes.':'The old ESP retry record could not be removed from browser storage and may reappear after reload. Keep this page open and review any stale retry record before another operation.');}}
 function invalidateApplicationEvidence(){state.backupApproved=null;state.backup=null;state.device=null;state.handoff=false;}
 function clearVerification(){state.verification=null;persistFlow('verification','meshfirmware.verifyApplication');}
 const summaryText=s=>`${s.complete?'Complete exposed-API snapshot':'Partial backup'}; ${s.privateIdentity?'private identity included':'private identity unavailable'}. ${(s.reasons||[]).join(' ')}`;
@@ -86,7 +100,7 @@ async function captureBackup() {
   notice('Native-compatible archive validated locally; download requested. No backup or secret was uploaded.');return state.backup;
 }
 async function ensureBackup() {
-  if(state.migration||state.recovery||(state.backupApproved?.sha256===state.pkg?.sha256&&state.backupApproved?.port===state.port))return;
+  if(state.migration||state.recovery||state.espRecovery||(state.backupApproved?.sha256===state.pkg?.sha256&&state.backupApproved?.port===state.port))return;
   const bootloader=dfuIds.has(portId(state.port))||$('already-bootloader').checked;
   if(bootloader) {
     const answer=await choose('Backup cannot be done in ROM/DFU','The application is not running on this interface. Return to application firmware for a logical backup, or explicitly continue without one.',[['cancel','Cancel'],['skip','Continue without backup']]);
@@ -145,24 +159,34 @@ async function verifyApplication() {
   state.verification=null;state.handoff=false;state.backupApproved=null;persistFlow('verification','meshfirmware.verifyApplication');$('already-bootloader').checked=false;
   notice(`Application startup verified: ${device.name||device.model||device.role}. ${layout?'Storage layout answered. ':''}Physical USB serial is not exposed by Web Serial; the port was explicitly reselected.`);log(version);
 }
+async function clearFirmwareSelection() {
+  // Invalidate before fetch, file I/O or validation can fail. A failed attempt
+  // to replace an image must never leave the preceding write plan usable.
+  state.pkg=null;state.plan=null;state.item=null;state.archive=null;state.archiveContext=null;state.directory=null;state.backupApproved=null;state.generation++;
+  $('image-name').textContent='No image loaded';$('image-kind').textContent='—';$('image-size').textContent='—';$('image-sha').textContent='';$('image-warning').textContent='';
+  for(const id of ['expert-fields','archive-picker','nrf-actions'])$(id).hidden=true;
+  $('erase-source').replaceChildren();
+  await closeEsp();
+}
 async function loadFirmware(name, bytes, item = null) {
-  await closeEsp(); state.pkg = null; state.generation++;
+  await clearFirmwareSelection();
   const exact=item?.name===name?item:state.items.find(i=>i.hardware===$('hardware').value&&i.name===name),hints=item||exact||state.items.find(i=>i.hardware===$('hardware').value);
   // Board-wide erase/bootloader hints may be reused for a custom file, never
   // the first catalog entry's unrelated role, variant, version or provider.
   item=exact|| (hints?{hardware:hints.hardware,erase:hints.erase||[],bootloader:hints.bootloader||[]}:null);
+  const expected=$('expected-sha').value.trim().toLowerCase();
+  if(expected&&(!/^[a-f0-9]{64}$/.test(expected)||expected!==hash(bytes)))fail('Published SHA-256 does not match the selected bytes.');
   $('image-name').textContent = 'No image loaded'; $('image-kind').textContent = '—'; $('image-size').textContent = '—'; $('image-sha').textContent = ''; $('expert-fields').hidden = true;
   if (/\.zip$/i.test(name)) {
     const entries = checkedZip(bytes,{maxEntries:8192,maxExpanded:512<<20,directoryOnly:true});
     if (!entries.some(e=>e.name==='manifest.json') || entries.length!==3) {
       const candidates=entries.filter(e=>/\.(?:bin|zip|uf2)$/i.test(e.name) && e.length>0 && e.length<(32<<20));
       if (!candidates.length) fail('No firmware images in this release archive.');
-      state.archive=bytes; $('archive-entry').replaceChildren(...candidates.map(e=>new Option(e.name,e.name))); $('archive-picker').hidden=false;
+      state.archive=bytes;state.archiveContext=item?{hardware:item.hardware,erase:item.erase||[],bootloader:item.bootloader||[]}:null; $('archive-entry').replaceChildren(...candidates.map(e=>new Option(e.name,e.name))); $('archive-picker').hidden=false;
       notice('Release ZIP indexed without expanding every board. Select the exact image for your board.'); return;
     }
   }
-  const pkg = inspectFirmware(name,bytes), expected = $('expected-sha').value.trim().toLowerCase();
-  if (expected && (!/^[a-f0-9]{64}$/.test(expected) || expected !== pkg.sha256)) fail('Published SHA-256 does not match the selected bytes.');
+  const pkg = inspectFirmware(name,bytes);
   state.pkg = pkg;state.item=item;state.backupApproved=null; $('image-name').textContent = pkg.name; $('image-kind').textContent = pkg.kind; $('image-size').textContent = size(bytes.length); $('image-sha').textContent = pkg.sha256; $('image-warning').textContent = pkg.warnings.join(' ');
   $('nrf-actions').hidden=pkg.architecture!=='nrf52';$('erase-source').replaceChildren(...(item?.erase||state.recovery?.eraseUrls||[]).map(url=>new Option(new URL(url).pathname.split('/').pop(),url)));
   if(pkg.architecture==='nrf52')$('transport-mode').value='nrf52';
@@ -195,6 +219,7 @@ $('select-port').onclick = () => operation(async () => {
   if (dfuIds.has(portId(port))) $('transport-mode').value = 'nrf52';
   $('already-bootloader').checked=dfuIds.has(portId(port));
   if(state.recovery){if(!await confirm('Re-select the erased radio',state.recovery.name,'Confirm this selected serial DFU interface is the SAME physical radio. Every recovery port change needs a new acknowledgement.','SAME DEVICE')){state.port=null;fail('Recovery port confirmation cancelled.');}state.recovery.phase='final';persistFlow('recovery','meshfirmware.nrfRecovery');$('transport-mode').value='nrf52';notice(state.recovery.eraseComplete?'Original final firmware retained. Inspect this DFU port, then review the final write.':'Erase completion is uncertain. Inspect to retry the validated erase step before the final image; it will not be silently skipped.');return;}
+  if(state.espRecovery){if(!await confirm('Re-select the interrupted ESP32',`${state.espRecovery.mac}\nOriginal image SHA-256 ${state.espRecovery.sha256}`,'Select the SAME physical radio already waiting in ROM. No reset or write is performed by this selection; its MAC and exact plan will be checked again.','SAME DEVICE')){state.port=null;fail('ESP retry port confirmation cancelled.');}$('transport-mode').value='no_reset';$('already-bootloader').checked=true;notice('Waiting ROM port selected. Load the original exact image and inspect; any chunked retry needs a separate acknowledgement.');return;}
   if(state.handoff&&!state.recovery&&!await confirm('Confirm bootloader handoff',state.device?.model||'Previously selected application','Web Serial does not expose the USB serial number. Confirm this is the same physical radio before reusing its pre-reset board evidence.','SAME DEVICE')){state.port=null;fail('Bootloader handoff confirmation cancelled.');}
   if(state.handoff&&previousApproval)state.backupApproved={...previousApproval,port};
   if(state.verification){state.backupApproved=null;if(!state.verification.publicKey&&!await confirm('Confirm application interface',state.verification.name,'The previous write may have replaced the node identity. Confirm this is the same physical device; Web Serial cannot read its USB serial.','SAME DEVICE')){state.port=null;fail('Application verification port confirmation cancelled.');}$('already-bootloader').checked=false;notice('Application port selected. Verifying running firmware without resetting it…');await verifyApplication();return;}
@@ -203,21 +228,23 @@ $('select-port').onclick = () => operation(async () => {
 $('transport-mode').onchange = () => operation(async () => { await closeEsp(); state.generation++; });
 for (const id of ['expert-offset','migration-package','usb-set','flash-action','erase-source','erase-file']) $(id).onchange = () => operation(async()=>{await closeEsp();state.generation++;});
 $('expected-sha').onchange = () => operation(async () => { await closeEsp(); state.generation++; if (state.pkg && $('expected-sha').value.trim() && $('expected-sha').value.trim().toLowerCase() !== state.pkg.sha256) fail('SHA-256 mismatch. Flash plan invalidated.'); });
-$('firmware-file').onchange = () => operation(async () => { const file = $('firmware-file').files[0]; if (!file) return; if (file.size > 64 << 20) fail('Firmware exceeds 64 MiB.'); await loadFirmware(file.name,new Uint8Array(await file.arrayBuffer())); });
-$('load-entry').onclick = () => operation(async () => { const entry=$('archive-entry').value; if(!state.archive || !entry) fail('Select an archive entry.'); const files=checkedZip(state.archive,{maxEntries:8192,maxExpanded:512<<20,select:name=>name===entry}); await loadFirmware(entry.split('/').pop(),files[entry]); });
-$('fetch-custom').onclick = () => operation(async () => { const url=httpsUrl($('custom-url').value); $('download-firmware').href=url; try { await loadFirmware(new URL(url).pathname.split('/').pop(),await boundedFetch(url)); } catch(error) { throw new Error(`${error.message} If this host blocks browser fetches, download it and select the local file.`); } });
+$('firmware-file').onchange = () => operation(async () => { const file = $('firmware-file').files[0]; if (!file) return; await clearFirmwareSelection();if (file.size > 64 << 20) fail('Firmware exceeds 64 MiB.'); await loadFirmware(file.name,new Uint8Array(await file.arrayBuffer())); });
+$('load-entry').onclick = () => operation(async () => { const entry=$('archive-entry').value,archive=state.archive,item=state.archiveContext;await clearFirmwareSelection();if(!archive || !entry) fail('Select an archive entry.');const expected=$('expected-sha').value.trim().toLowerCase();if(expected&&(!/^[a-f0-9]{64}$/.test(expected)||hash(archive)!==expected))fail('Release ZIP SHA-256 does not match.');const files=checkedZip(archive,{maxEntries:8192,maxExpanded:512<<20,select:name=>name===entry});$('expected-sha').value='';await loadFirmware(entry.split('/').pop(),files[entry],item); });
+$('fetch-custom').onclick = () => operation(async () => { await clearFirmwareSelection();const url=httpsUrl($('custom-url').value); $('download-firmware').href=url; try { await loadFirmware(new URL(url).pathname.split('/').pop(),await boundedFetch(url)); } catch(error) { throw new Error(`${error.message} If this host blocks browser fetches, download it and select the local file.`); } });
 $('artifact').onchange = () => { updateDownload(); controls(); };
 $('bootloader-source').onchange=controls;
-$('load-bootloader').onclick=()=>operation(async()=>{const url=$('bootloader-source').value;if(!url||!$('artifact').value)fail('Choose an explicit board firmware artifact and its bootloader ZIP.');$('download-firmware').href=httpsUrl(url);try{$('expected-sha').value='';await loadFirmware(new URL(url).pathname.split('/').pop(),await boundedFetch(url),state.items[Number($('artifact').value)]);}catch(error){throw new Error(error.message+' If the host blocks fetching, download this exact bootloader ZIP and choose it locally.');}});
+$('load-bootloader').onclick=()=>operation(async()=>{const url=$('bootloader-source').value,item=$('artifact').value?state.items[Number($('artifact').value)]:null;await clearFirmwareSelection();if(!url||!item)fail('Choose an explicit board firmware artifact and its bootloader ZIP.');$('download-firmware').href=httpsUrl(url);try{$('expected-sha').value='';await loadFirmware(new URL(url).pathname.split('/').pop(),await boundedFetch(url),item);}catch(error){throw new Error(error.message+' If the host blocks fetching, download this exact bootloader ZIP and choose it locally.');}});
 for (const id of ['project','provider','hardware','role','version']) $(id).onchange = () => filterCatalog(id);
 $('fetch-firmware').onclick = () => operation(async () => {
   const item = $('artifact').value?state.items[Number($('artifact').value)]:null; if (!item) fail('Choose an artifact.');
+  await clearFirmwareSelection();
   notice('Downloading firmware into browser memory…');
   try { $('expected-sha').value=item.sha256||'';await loadFirmware(item.name,await boundedFetch(item.url),item); }
   catch (error) { throw new Error(`${error.message} If the firmware host blocks browser downloads (CORS), use Download and then choose that local file. No proxy or helper is used.`); }
 });
 $('touch').onclick = () => operation(async () => {
   if(state.migration) fail('A migration is pending. Do not reset the bridge. Complete or recover its verified migration first.');
+  if(state.espRecovery)fail('An interrupted ESP32 write is pending. Select its waiting ROM port without another reset.');
   const mode = $('transport-mode').value;
   if (!['tinyusb','nrf52'].includes(mode)) fail('Use this only for TinyUSB applications or nRF52 runtime. Other modes enter ROM during inspection.');
   if (dfuIds.has(portId(state.port))) fail('Already a known DFU port; no 1200-baud touch is needed.');
@@ -243,6 +270,7 @@ $('prepare').onclick = () => operation(async () => {
   if(state.recovery&&state.recovery.sha256!==pkg.sha256)fail('nRF52 recovery is pending. Select its original final firmware; another image will not be substituted.');
   if(state.recovery&&state.recovery.phase!=='final')fail('Erase requires an explicit selection of the same radio’s newly enumerated DFU port.');
   if(state.migration && (pkg.architecture!=='esp32' || state.migration.sha256!==pkg.sha256)) fail('Select the original ESP32 firmware for the pending migration. No reset is permitted for another image.');
+  if(state.espRecovery&&(pkg.architecture!=='esp32'||state.espRecovery.sha256!==pkg.sha256))fail('Select the original exact ESP32 firmware for this pending write retry.');
   if ($('expected-sha').value.trim() && $('expected-sha').value.trim().toLowerCase() !== pkg.sha256) fail('SHA-256 mismatch.');
   if (pkg.architecture === 'uf2') {
     if($('transport-mode').value==='nrf52') fail('nRF52 uses serial DFU ZIPs, not a mounted drive. Select the matching DFU ZIP.');
@@ -264,8 +292,12 @@ $('prepare').onclick = () => operation(async () => {
   }
   const mode = $('transport-mode').value;
   if(state.migration && !state.migration.uart && mode!=='no_reset') fail('Pending USB migration: use already in ROM / no reset. A reset could interrupt the bridge.');
+  if(state.espRecovery&&mode!=='no_reset')fail('ESP32 write recovery must use the waiting ROM port without resetting it.');
   if (!['no_reset','usb_reset','default_reset'].includes(mode)) fail('Enter the ESP32 bootloader first, then explicitly select its ROM port.');
-  if(state.migration?.uart && !state.migration.settled) fail('The UART migration must report settled state before any ROM reset. Use Wait for migration; keep power connected.');
+  if(state.migration?.uart&&!state.migration.settled){
+    const beforeStart=['writing','written'].includes(state.migration.phase);
+    if(!beforeStart||mode!=='no_reset')fail('The UART migration must report settled state before any ROM reset. Use Wait for migration; a pre-start write retry can only inspect an already waiting ROM without resetting it.');
+  }
   const expertText = $('expert-offset').value.trim();
   const expertOffset = pkg.expert && /^(?:0x[0-9a-f]+|[0-9]+)$/i.test(expertText) ? Number(expertText) : undefined;
   if(pkg.expert && !Number.isSafeInteger(expertOffset)) fail('Enter the explicit flash offset for this component. No offset is guessed.');
@@ -275,10 +307,11 @@ $('prepare').onclick = () => operation(async () => {
   try {
     const info = await esp.connect(mode);
     if(state.migration && (state.migration.sha256!==pkg.sha256 || state.migration.mac!==info.mac)) fail('A migration is pending. Select its original firmware and the same physical chip.');
+    if(state.espRecovery&&info.mac!==state.espRecovery.mac)fail('Different physical ESP32 chip: the interrupted write belongs to another MAC.');
     const planner = pkg.merged || pkg.expert ? null : (state.planner ||= new BrowserPlanner());
     const packageFile=$('migration-package').files[0],setFile=$('usb-set').files[0];
     if((packageFile?.size||0)>(32<<20) || (setFile?.size||0)>(32<<20)) fail('Migration artifact exceeds 32 MiB.');
-    const args={planner,packageBytes:packageFile?new Uint8Array(await packageFile.arrayBuffer()):null,usbSetBytes:setFile?new Uint8Array(await setFile.arrayBuffer()):null,resume:!!state.migration,expertOffset};
+    const args={planner,packageBytes:packageFile?new Uint8Array(await packageFile.arrayBuffer()):null,usbSetBytes:setFile?new Uint8Array(await setFile.arrayBuffer()):null,resume:!!state.migration,expertOffset,recovery:state.espRecovery};
     let prepared;
     for(let attempt=0;attempt<5;attempt++) {
       try { prepared=await esp.prepare(pkg,args);break; }
@@ -291,10 +324,12 @@ $('prepare').onclick = () => operation(async () => {
       }
     }
     if(!prepared) fail('Could not resolve all exact migration artifacts.');
+    if(prepared.recoveryResolved){state.espRecovery=null;persistEspRecovery();}
     state.plan = { ...prepared,generation:state.generation,port:state.port };
     if(prepared.compatibilityWarnings?.length)log(prepared.compatibilityWarnings.join('\n'));
     $('device-name').textContent = `${info.chip} · ${info.mac}`; $('device-meta').textContent = `${size(info.flashBytes)} physical flash · ROM security checks passed`;
-    if(prepared.needed) { $('migration-status').textContent=`Verified USB migration for ${prepared.board}; exact firmware ${prepared.firmware_version}. Keep this tab open until final verification.`; notice('Partition expansion is needed. Review & flash writes the verified USB bridge first. No application or bridge has been written yet.'); }
+    if(prepared.chunkedRecovery)notice('Exact ESP32 write recovery plan verified for this MAC and image. Review & flash offers separately acknowledged 16 KiB writes with independent readback; no whole-chip erase is repeated.');
+    else if(prepared.needed) { $('migration-status').textContent=`Verified USB migration for ${prepared.board}; exact firmware ${prepared.firmware_version}. Keep this tab open until final verification.`; notice(prepared.resume===false&&state.migration?'Original source layout verified. The partial bridge can be rewritten safely before it is started; review and acknowledge the migration again.':'Partition expansion is needed. Review & flash writes the verified USB bridge first. No application or bridge has been written yet.'); }
     else notice(`Read-only plan ready for ${info.mac}. Offsets: ${state.plan.addresses.map(n => '0x' + n.toString(16)).join(', ')}.${prepared.mirroredSlots?' Missing fallback slots will be populated and independently verified.':''}`);
   }
   catch (error) { await closeEsp(); throw error; }
@@ -308,6 +343,7 @@ $('flash').onclick = () => operation(async () => {
   const detail = `${pkg.name}\nSHA-256 ${pkg.sha256}\n${plan.mac ? 'Verified chip MAC ' + plan.mac : plan.uf2Info || 'Board identity unknown to this browser. Confirm the selected nRF52 board yourself.'}${plan.erasePkg?'\nERASE FIRST: '+plan.erasePkg.name+'\nSHA-256 '+plan.erasePkg.sha256+'\n'+plan.erasePkg.warnings.join(' '):''}`;
   let allowRevisionMismatch=false;
   if(plan.requiresRevisionOverride){if(!await confirm('ESP silicon-revision mismatch',detail+'\n'+(plan.compatibilityWarnings||[]).join('\n'),'The image is not compatible with the verified chip revision, or the constrained revision could not be verified. Force only if you accept that it may not boot. This does not override security, chip-family or flash bounds checks.',plan.revisionOverrideToken||'FORCE CHIP REVISION'))return;allowRevisionMismatch=true;}
+  if(plan.chunkedRecovery&&!await confirm('Retry this exact ESP32 write in bounded chunks?',detail,'This retries only the verified same chip/image/addresses, in independent 16 KiB operations with readback. No automatic reconnect, reset or repeated whole-chip erase. At most three user-reselected recovery rounds are allowed.','RETRY IN CHUNKS'))return;
   if(plan.needed && !plan.verified && !await confirm('Run USB partition expansion first?',`${plan.board} · ${plan.firmware_version} · ${plan.mac}`,'The verified middle firmware preserves supported identity/settings, not all logs or optional files. Power loss during partition-table replacement can require physical recovery. Keep this tab open and re-select the same chip when asked.','EXPAND PARTITIONS')) return;
   if (!await confirm('Write this firmware?',detail,[...pkg.warnings,...(plan.compatibilityWarnings||[])].join(' ') + ' Logical backups are not complete flash images. Keep power connected. Wrong bootloader firmware may require SWD recovery.',token)) return;
   if (plan.generation !== state.generation || plan.port !== state.port) fail('Device disconnected or selection changed during confirmation.');
@@ -324,7 +360,8 @@ $('flash').onclick = () => operation(async () => {
     progress(1,'UF2 copy completed. Bootloader activation and application startup remain unverified.'); state.plan=null; notice('UF2 copy completed. A disappearing drive can indicate reboot; it is not proof the intended firmware started.');
   } else if (pkg.architecture === 'esp32') {
     if(plan.needed && !plan.verified) { state.migration={mac:plan.mac,sha256:pkg.sha256,uart:!!plan.uart_completion_status,settled:false,phase:'writing'}; localStorage.setItem('meshfirmware.pendingMigration',JSON.stringify(state.migration)); }
-    await state.esp.flash(pkg,progress,{allowRevisionMismatch}); plan.written = true;
+    await state.esp.flash(pkg,progress,{allowRevisionMismatch,chunkedRecovery:!!plan.chunkedRecovery}); plan.written = true;
+    state.espRecovery=null;persistEspRecovery();
     if(plan.needed && !plan.verified) {state.migration.phase='written';localStorage.setItem('meshfirmware.pendingMigration',JSON.stringify(state.migration));}
     notice(plan.needed && !plan.verified?'USB bridge write verified. Reset verified ESP32 to run the migration, wait for automatic ROM return, select the same device, then inspect again before the final firmware write.':'Target flash MD5 verified. Use Reset verified ESP32, then check application startup.');
     if(plan.verified) { state.migration=null; localStorage.removeItem('meshfirmware.pendingMigration'); }
@@ -354,6 +391,12 @@ $('recover-bridge').onclick=()=>operation(async()=>{
     notice('Original USB bridge bytes match every target slot. Reset verified ESP32 is available once to start/restart that verified bridge. Final firmware still requires full migration proof.');
   } catch(error) {await closeEsp();throw error;}
 });
+$('discard-esp-recovery').onclick=()=>operation(async()=>{
+  if(!state.espRecovery)fail('No ESP32 retry record is pending.');
+  if(!await confirm('Discard the interrupted-write retry record?',`${state.espRecovery.mac}\nImage SHA-256 ${state.espRecovery.sha256}`,'This only discards the browser retry record, not on-device data. It does not undo a partial write. A fresh write requires a new inspection and confirmation. Pending partition-migration state is retained and still must be completed safely.','DISCARD RETRY STATE'))return;
+  state.espRecovery=null;persistEspRecovery();await closeEsp();state.port=null;state.generation++;
+  notice('ESP retry record discarded; no device commands were sent. Re-select and inspect before a fresh write. '+(state.migration?'The partition migration remains pending; use its original image and a no-reset ROM connection.':''));
+});
 $('finish').onclick = () => operation(async () => {
   if (!state.plan?.written) fail('No verified write to finish.');
   const bridge=state.plan.needed && !state.plan.verified;
@@ -378,13 +421,16 @@ $('restore').onclick = () => operation(async () => {
   if (p.role !== 'companion') fail('Partial CommonCLI captures cannot be automatically restored.');
   if (!await confirm('Restore companion settings?',`Backup identity ${p.publicKey}. Different hardware: ${$('new-hardware').checked ? 'YES' : 'NO'}. Replace identity: ${$('replace-identity').checked ? 'YES' : 'NO'}.`,'This writes identity, channels, contacts and core settings. Firmware versions are diagnostic only and are never restored.',`RESTORE ${p.publicKey.slice(0,8)}`)) return;
   if (state.generation !== generation) fail('Selected device changed during confirmation.');
-  invalidateApplicationEvidence();await linkOperation(async link => new MeshCore(link).restore(archive,{newHardware:$('new-hardware').checked,replaceIdentity:$('replace-identity').checked},progress)); notice('Supported companion settings restored and read back. Review optional CLI snapshots separately.');
+  invalidateApplicationEvidence();const result=await linkOperation(async link => new MeshCore(link).restore(archive,{newHardware:$('new-hardware').checked,replaceIdentity:$('replace-identity').checked},progress));
+  if(result?.warnings?.length)log(result.warnings.join('\n'));
+  notice('Supported companion settings restored and read back. '+(result?.warnings?.length?result.warnings.join(' ')+' ':'')+'Review optional CLI snapshots separately.');
 });
 $('send-command').onclick = () => operation(async () => {const command=$('command').value.trim();if(!command||/[\r\n\x00]/.test(command))fail('Enter one command.');invalidateApplicationEvidence();try{await linkOperation(async link=>{const role=$('backup-role').value==='auto'?(await readApplication(link)).role:$('backup-role').value;log(role==='common-cli'?await link.command(command):await new MeshCore(link).cli(command));});}finally{invalidateApplicationEvidence();}});
 $('clear-log').onclick = () => { $('log').textContent = 'Log cleared locally.'; };
 window.addEventListener('beforeunload',event => { if (state.busy) { event.preventDefault(); event.returnValue = ''; } });
 if(state.migration) notice('A partition migration is pending in this browser. Keep power connected, select its original firmware and the same device. Application commands are blocked until final verification.');
 if(state.recovery)notice('An nRF52 erase/recovery is pending. Select its original final ZIP and explicitly choose the same radio’s DFU port.');
+if(state.espRecovery)notice('An interrupted ESP32 write is pending. Select its original exact image and the same radio’s waiting ROM port without resetting it.');
 if ('serial' in navigator) {
   $('browser-status').textContent = 'Web Serial available';
   navigator.serial.addEventListener('disconnect',event => { if (event.target === state.port || event.port === state.port) { state.generation++; state.plan = null;if(!state.handoff&&!state.recovery&&!state.migration){state.device=null;state.backupApproved=null;} $('port-status').textContent = 'Disconnected'; log('Selected USB port disconnected. No different port will be substituted.'); controls(); } });

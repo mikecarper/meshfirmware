@@ -68,7 +68,7 @@ test('CommonCLI backup uses repeater verbs and proves identity stability without
 });
 
 test('unreadable logging state fails before any restore mutation',async()=>{
-  for(const mode of ['throw','unknown']) { const p=payload(),core=new MeshCore({});let writes=0;core.self=async()=>Buffer.from(p.self,'hex');core.info=async()=>Buffer.from(p.info,'hex');core.contacts=async()=>[];core.request=async()=>{writes++;};core.cli=async()=>{if(mode==='throw')throw new Error('logging timeout');return 'unknown command';};await assert.rejects(()=>core.restore(sealBackup(p)),/logging|USB logging/i);assert.equal(writes,0); }
+  for(const mode of ['throw','unknown']) { const p=payload(),core=new MeshCore({});let writes=0;core.self=async()=>Buffer.from(p.self,'hex');core.info=async()=>Buffer.from(p.info,'hex');core.contacts=async()=>[];core.request=async()=>{writes++;};core.cli=async()=>{if(mode==='throw')throw new Error('logging timeout');return 'usb.logging status unavailable';};await assert.rejects(()=>core.restore(sealBackup(p)),/logging|USB logging/i);assert.equal(writes,0); }
 });
 test('identity replacement authorization is checked before even changing USB logging',async()=>{
   const p=payload(),core=new MeshCore({});let writes=0,cliWrites=0;const live=Buffer.from(p.self,'hex');live[4]^=1;

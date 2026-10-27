@@ -42,6 +42,11 @@ function cadStatus(reply) {
   const m = /\bradio\.cad\s+(on|off),\s*scan=(auto|\d+)(?:\(\d+\))?\s+ms,\s*retry=(auto|\d+)\s+ms,\s*max=(auto|\d+)\s+ms/i.exec(reply || '');
   if (!m) fail('Unrecognized radio CAD status.'); return m.slice(1).map(s=>s.toLowerCase());
 }
+const unsupportedCliReply = reply => /\b(?:unknown command|unsupported|not supported)\b/i.test(reply || '');
+function rejectedCommand(command, frame) {
+  const error=new Error(`MeshCore rejected command ${command} (${frame[1] ?? 'disabled'}).`);
+  error.meshcoreCommand=command;error.meshcoreResponseCode=frame[0];error.meshcoreErrorCode=frame[1];return error;
+}
 function validateCompanion(p) {
   const self = unhex(p.self), info = unhex(p.info), key = p.privateKey ? unhex(p.privateKey) : null;
   if (self.length < 59 || self.length > 90 || self[0] !== 5 || self[1] !== 1 || info.length < 80 || info.length > 128 || info[0] !== 13 || info[1] < 3 || p.publicKey !== bytesToHex(self.subarray(4,36))) fail('Invalid companion identity records.');
@@ -139,19 +144,35 @@ export class MeshCore {
   async send(command) { if (command.length > 8192) fail('Command limit exceeded.'); await this.link.write(Uint8Array.from([0x3c,command.length & 255,command.length >> 8,...command])); }
   async request(command, code) {
     if (this.busy) fail('Another MeshCore command is active.'); this.busy = true;
-    try { await this.send(command); const until = Date.now() + this.timeoutMs; while (Date.now() < until) { const frame = await this.frame(Math.max(1,until - Date.now())); if ([1,15].includes(frame[0])) fail(`MeshCore rejected command ${command[0]} (${frame[1] ?? 'disabled'}).`); if (frame[0] === code) return frame; } fail('MeshCore command timed out.'); }
+    try { await this.send(command); const until = Date.now() + this.timeoutMs; while (Date.now() < until) { const frame = await this.frame(Math.max(1,until - Date.now())); if ([1,15].includes(frame[0])) throw rejectedCommand(command[0],frame); if (frame[0] === code) return frame; } fail('MeshCore command timed out.'); }
     finally { this.busy = false; }
   }
   async self() { const result = await this.request([1,3,32,32,32,32,32,32,...encode('meshfirmware-web')],5); if (result.length < 58) fail('Truncated SELF_INFO.'); return result; }
   async info() { const result = await this.request([22,3],13); if (result.length < 80 || result[1] < 3) fail('Unsupported DEVICE_INFO.'); return result; }
   async cli(command) { if (/[\r\n\x00]/.test(command)) fail('CLI commands must be a single line.'); return text((await this.request([66,...encode(command)],29)).subarray(1)); }
   async contacts() {
-    await this.send([4]); const first = await this.frame();
-    if (first[0] !== 2 || first.length !== 5) fail('Contact inventory did not start.');
-    const count = new DataView(first.buffer).getUint32(1,true); if (count > 510) fail('Contact inventory limit exceeded.');
-    const rows = [], keys = new Set(); const until = Date.now() + 30000;
-    while (Date.now() < until) { const row = await this.frame(3000); if (row[0] === 4) { if (rows.length !== count) fail('Incomplete contact inventory.'); return rows; } if (row[0] !== 3) continue; if (row.length !== 148 || rows.length >= count) fail('Unexpected contact record.'); const key = bytesToHex(row.subarray(1,33)); if (keys.has(key)) fail('Duplicate contact.'); keys.add(key); rows.push(row); }
-    fail('Contact inventory timed out.');
+    if(this.busy)fail('Another MeshCore command is active.');this.busy=true;
+    try {
+      await this.send([4]);let first;const startUntil=Date.now()+this.timeoutMs;
+      while(Date.now()<startUntil){
+        const frame=await this.frame(Math.max(1,startUntil-Date.now()));
+        if([1,15].includes(frame[0]))throw rejectedCommand(4,frame);
+        if(frame[0]>=0x80)continue; // Asynchronous adverts/message-waiting/etc.
+        if(frame[0]!==2||frame.length!==5)fail('Contact inventory did not start.');first=frame;break;
+      }
+      if(!first)fail('Contact inventory start timed out.');
+      const count=new DataView(first.buffer,first.byteOffset,first.byteLength).getUint32(1,true);if(count>510)fail('Contact inventory limit exceeded.');
+      const rows=[],keys=new Set(),until=Date.now()+30000;
+      while(Date.now()<until){
+        const row=await this.frame(Math.min(3000,Math.max(1,until-Date.now())));
+        if([1,15].includes(row[0]))throw rejectedCommand(4,row);
+        if(row[0]>=0x80)continue;
+        if(row[0]===4){if(row.length!==5||rows.length!==count)fail('Incomplete contact inventory.');return rows;}
+        if(row[0]!==3||row.length!==148||rows.length>=count)fail('Unexpected contact record.');
+        const key=bytesToHex(row.subarray(1,33));if(keys.has(key))fail('Duplicate contact.');keys.add(key);rows.push(row);
+      }
+      fail('Contact inventory timed out.');
+    } finally {this.busy=false;}
   }
   async backup(progress = () => {}) {
     const self = await this.self(); if (self[1] !== 1) fail('This framed API is not a companion. Choose CommonCLI capture.');
@@ -189,13 +210,39 @@ export class MeshCore {
     if(vars.size) { const target=customVars(bytesToHex(await this.request([40],21)));if([...vars.keys()].some(key=>!target.has(key))) fail('This hardware does not expose all saved custom variables. Nothing was written.'); }
     const sameIdentity=bytesToHex(live.subarray(4,36))===p.publicKey;
     if(!sameIdentity&&(!replaceIdentity||!p.privateKey))fail('Identity differs. Explicit replacement and a verified private-key backup are required. Nothing was written.');
+    const result={warnings:[],optional:{usbLogging:{state:'not-requested'},bluetooth:{state:'not-requested'},bluetoothName:{state:'not-in-backup'},radioCad:{state:'not-in-backup'}}};
+    let cliAvailable=info[1]>=14;
+    const optionalCli=async(command,label,key)=>{
+      let reason;
+      if(!cliAvailable)reason='This companion protocol does not expose the optional CLI API.';
+      else try {
+        const reply=await this.cli(command);
+        if(unsupportedCliReply(reply))reason='The target does not expose this optional command.';
+        else return {supported:true,reply};
+      }catch(error){
+        // Code 1 is UNSUPPORTED_CMD, not a timeout/I/O/bad-state error. Only
+        // this explicit protocol result can establish that CLI is absent.
+        if(error.meshcoreCommand===66&&error.meshcoreResponseCode===1&&error.meshcoreErrorCode===1){cliAvailable=false;reason='The target explicitly reports that the optional CLI API is unsupported.';}
+        else throw error;
+      }
+      result.optional[key]={state:'unsupported',reason};result.warnings.push(`${label} was not restored: ${reason}`);return {supported:false};
+    };
     // Default is off when an older archive has no USB-logging preference.
     // Do not enable logging merely because a Full Companion was in text mode.
     const desiredLogging=loggingState(p.cli['get usb.logging']) || 'off';
-    const priorLogging=loggingState(await this.cli('get usb.logging'));
-    if(priorLogging===null)fail('USB logging status could not be verified. No restore settings were written.');
-    if(priorLogging==='on') { const reply=await this.cli('set usb.logging off');if(!/OK - USB logging off \(saved\)/i.test(reply)||/reboot required/i.test(reply))fail('Cannot safely disable USB logging for restore.'); }
-    if(loggingState(await this.cli('get usb.logging'))!=='off')fail('USB logging did not verify off before restore.');
+    const loggingProbe=await optionalCli('get usb.logging','USB logging','usbLogging'),loggingSupported=loggingProbe.supported;
+    if(loggingSupported){
+      const priorLogging=loggingState(loggingProbe.reply);
+      if(priorLogging===null)fail('USB logging status could not be verified. No restore settings were written.');
+      if(priorLogging==='on') { const reply=await this.cli('set usb.logging off');if(!/OK - USB logging off \(saved\)/i.test(reply)||/reboot required/i.test(reply))fail('Cannot safely disable USB logging for restore.'); }
+      if(loggingState(await this.cli('get usb.logging'))!=='off')fail('USB logging did not verify off before restore.');
+    }
+    const bluetoothProbe=await optionalCli('get bluetooth','Bluetooth resync','bluetooth'),bleState=bluetoothProbe.supported?/\bbluetooth\s+(on|off)\b/i.exec(bluetoothProbe.reply)?.[1].toLowerCase():null;
+    if(bluetoothProbe.supported&&!bleState)fail('Bluetooth state could not be verified. No restore settings were written.');
+    const nameProbe=p.cli['get bluetooth.name']?await optionalCli('get bluetooth.name','Bluetooth name','bluetoothName'):null;
+    if(nameProbe?.supported)bluetoothName(nameProbe.reply);
+    const cadProbe=p.cli['get radio.cad']&&/\bradio\.cad\s+(?:on|off),/i.test(p.cli['get radio.cad'])?await optionalCli('get radio.cad','Radio CAD','radioCad'):null;
+    if(cadProbe?.supported)cadStatus(cadProbe.reply);
     if (!sameIdentity) {
       await this.request([24,...unhex(p.privateKey).subarray(1)],0);
       if (bytesToHex((await this.self()).subarray(4,36)) !== p.publicKey) fail('Restored identity did not verify.');
@@ -228,19 +275,21 @@ export class MeshCore {
       // Empty scope may be represented by the one-byte sentinel or zero fields.
       if(value.some(x=>x!==0)?bytesToHex(verified)!==p.options.scope:verified.subarray(1).some(x=>x!==0))fail('Default scope readback failed.');
     }
-    if (p.cli['get bluetooth.name']) { const desired=bluetoothName(p.cli['get bluetooth.name']), value=desired.default?'default':desired.name;const reply=await this.cli(`set bluetooth.name ${value}`);if(!/OK - Bluetooth name/i.test(reply))fail('Bluetooth name was rejected.');const actual=bluetoothName(await this.cli('get bluetooth.name'));if(actual.default!==desired.default||(!desired.default&&actual.name!==desired.name))fail('Bluetooth name readback failed.'); }
-    if(p.cli['get radio.cad'] && /\bradio\.cad\s+(?:on|off),/i.test(p.cli['get radio.cad'])) {
+    if(nameProbe?.supported) { const desired=bluetoothName(p.cli['get bluetooth.name']), value=desired.default?'default':desired.name;const reply=await this.cli(`set bluetooth.name ${value}`);if(!/OK - Bluetooth name/i.test(reply))fail('Bluetooth name was rejected.');const actual=bluetoothName(await this.cli('get bluetooth.name'));if(actual.default!==desired.default||(!desired.default&&actual.name!==desired.name))fail('Bluetooth name readback failed.');result.optional.bluetoothName={state:'restored'}; }
+    if(cadProbe?.supported) {
       const desired=cadStatus(p.cli['get radio.cad']);for(const command of [`set radio.cad timings ${desired.slice(1).join(' ')}`,`set radio.cad ${desired[0]}`]) if(/error|unknown|unsupported/i.test(await this.cli(command)))fail('Radio CAD setting rejected.');
       if(cadStatus(await this.cli('get radio.cad')).join('|')!==desired.join('|'))fail('Radio CAD readback failed.');
+      result.optional.radioCad={state:'restored'};
     }
     const verified = await this.self();
     if (verified[2]!==saved[2]) fail('TX power readback failed.');
     if (bytesToHex(verified.subarray(4,58)) !== bytesToHex(saved.subarray(4,58)) || text(verified.subarray(58)) !== text(saved.subarray(58))) fail('Companion settings readback failed.');
     // Preserve off by default; cycle BLE only if it was enabled on this target.
-    const bleState=/\bbluetooth\s+(on|off)\b/i.exec(await this.cli('get bluetooth'))?.[1].toLowerCase();if(!bleState)fail('Bluetooth state could not be verified.');
     if (bleState==='on') { try { if(!/OK - Bluetooth off/i.test(await this.cli('set bluetooth off')))fail('Bluetooth off was not confirmed.'); } finally { if(!/OK - Bluetooth on/i.test(await this.cli('set bluetooth on')))fail('Bluetooth could not be re-enabled.'); }if(!/\bbluetooth\s+on\b/i.test(await this.cli('get bluetooth')))fail('Bluetooth did not verify on after resync.'); }
-    const current=loggingState(await this.cli('get usb.logging'));if(current===null)fail('USB logging status could not be verified after restore.');if(current!==desiredLogging) { if(!new RegExp(`OK - USB logging ${desiredLogging} \\(saved\\)`,'i').test(await this.cli(`set usb.logging ${desiredLogging}`)))fail('USB logging preference rejected.'); }if(loggingState(await this.cli('get usb.logging'))!==desiredLogging)fail('USB logging readback failed.');
+    if(bluetoothProbe.supported)result.optional.bluetooth={state:bleState==='on'?'resynced':'unchanged',value:bleState};
+    if(loggingSupported){const current=loggingState(await this.cli('get usb.logging'));if(current===null)fail('USB logging status could not be verified after restore.');if(current!==desiredLogging) { if(!new RegExp(`OK - USB logging ${desiredLogging} \\(saved\\)`,'i').test(await this.cli(`set usb.logging ${desiredLogging}`)))fail('USB logging preference rejected.'); }if(loggingState(await this.cli('get usb.logging'))!==desiredLogging)fail('USB logging readback failed.');result.optional.usbLogging={state:'restored',value:desiredLogging};}
     progress(1,'Restored identity, channels, contacts, core settings, custom variables, scope and supported structured options. Other CLI snapshots remain for manual comparison.');
+    return result;
   }
 }
 

@@ -1,4 +1,4 @@
-import {catalogItems,compareVersions,validateCatalog} from '../src/catalog.js';
+import {catalogItems,compareVersions,validateCatalog,inheritOfficialUtilities} from '../src/catalog.js';
 
 const raw='https://raw.githubusercontent.com/mikecarper/MeshCore/keymindCascade/';
 const treeURL='https://api.github.com/repos/mikecarper/MeshCore/git/trees/keymindCascade?recursive=1';
@@ -26,5 +26,5 @@ export async function buildCatalog({readJson,previous=async()=>null,now=()=>new 
     })()
   ]);
   if(!items.length)throw new Error('No fresh or validated cached MeshCore catalog entries are available. Existing deployed site was not replaced.');
-  const seen=new Set();return {generatedAt:now(),items:items.filter(item=>{const key=JSON.stringify([item.provider,item.hardware,item.role,item.version,item.action,item.url]);if(seen.has(key))return false;seen.add(key);return true;}).sort((a,b)=>a.provider.localeCompare(b.provider)||a.hardware.localeCompare(b.hardware)||a.role.localeCompare(b.role)||compareVersions(a.version,b.version)||a.name.localeCompare(b.name)),warnings};
+  const seen=new Set();return {generatedAt:now(),items:inheritOfficialUtilities(items.filter(item=>{const key=JSON.stringify([item.provider,item.hardware,item.role,item.version,item.action,item.url]);if(seen.has(key))return false;seen.add(key);return true;})).sort((a,b)=>a.provider.localeCompare(b.provider)||a.hardware.localeCompare(b.hardware)||a.role.localeCompare(b.role)||compareVersions(a.version,b.version)||a.name.localeCompare(b.name)),warnings};
 }
