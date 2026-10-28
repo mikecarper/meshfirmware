@@ -3,6 +3,7 @@
 import { verifyBackup, publicFromPrivate } from './meshcore.js';
 import { hash, fail, text } from './firmware.js';
 import { COMMON_CLI_COMMANDS, commonCliReplyState } from './common-cli.js';
+import { validateRegions } from './regions.js';
 const unhex=s=>Uint8Array.from(s.match(/../g)||[],x=>parseInt(x,16));
 const hex=b=>Array.from(b,x=>x.toString(16).padStart(2,'0')).join('');
 const cstr=b=>text(b).split('\0')[0];
@@ -52,6 +53,10 @@ export function nativePayloadFromWeb(archive,{usbIdentity={},deviceHint}={}) {
       return status.state==='complete'?section({text:raw},required):absent(status.reason||'CLI setting unavailable.',required,status.state);
     };
     sections={identity_public_key:section({public_key:p.publicKey}),identity_private_key:privateHex?section({private_key:privateHex}):absent('CommonCLI private key unavailable.'),settings:{...section(settings),...(coreIncomplete.length?{state:'error',reason:'One or more core setting queries failed or were unsupported.'}:{}),query_states:queryStates,diagnostic_scope:'core_settings_only; optional_queries_have_individual_states'},contacts:absent('Not exposed by this repeater/CommonCLI role.',false,'not_applicable'),channels:absent('Not exposed by this repeater/CommonCLI role.',false,'not_applicable'),acl:replySection('get acl'),regions:replySection('region')};
+    const regionRaw=typeof replies.region==='string'?replies.region:'';
+    sections.regions=p.regions?.state==='complete'
+      ?section({snapshot:validateRegions(p.regions.data),raw:regionRaw},true,{restore_method:'reviewed region put/allowf/denyf/home/default/save with readback',capture_scope:'public region hierarchy, flood flags, home and default'})
+      :{...absent(p.regions?.reason||'No complete typed region snapshot was captured; legacy raw text is diagnostic only.',true,p.regions?.state||'unsupported'),data:{raw:regionRaw},diagnostic_scope:'legacy_raw_only; not a restorable region snapshot'};
     for(const [name,command,restore_method]of optionalQueries){
       sections[name]={...replySection(command,false),command,...(restore_method?{restore_method}:{}),...(name==='storage_layout'?{diagnostic_scope:'layout_only; this is not a filesystem consistency check'}:{})};
       if(name==='bluetooth_name'&&sections[name].state==='complete'){

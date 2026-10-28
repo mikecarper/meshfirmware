@@ -258,7 +258,7 @@ writing; no blind retry or 1200-baud fallback follows an uncertain handoff.
 | MeshCore companion backup | Private identity when exposed, channels, contacts, settings, battery/storage and optional CLI snapshots; bounded asynchronous pushes tolerated during contact enumeration; completeness shown separately from integrity |
 | MeshCore companion restore | New native-format exports, existing script JSON and legacy browser JSON; exact Python serialization/validation in WASM; model/capacity/key checks, TX/logging readback, deliberate cross-hardware identity replacement |
 | Full Companion text mode | Explicit binary handoff; turning USB logging off requires acknowledgement |
-| CommonCLI repeater/room | Expanded exposed-settings snapshot; Import JSON previews supported settings, then explicitly restores them over the serial console with target checks and readback |
+| CommonCLI repeater/room | Expanded exposed-settings snapshot, including complete public region trees and policies; Import JSON previews supported settings, then explicitly restores them over the serial console with target checks and readback |
 | OS/tool management | Not a browser operation: no pip/driver installs, Raspberry Pi USB-speed changes or shell execution |
 
 Every web backup is deliberately marked **not wipe-safe**. Unexposed secrets,
@@ -432,9 +432,27 @@ logging-always/debug, Bluetooth state/name, CAD settings, RX/FEM gain, RX power
 saving, display rotation, power saving, and locally exposed administrator,
 guest and Wi-Fi credentials. Unsupported or failed queries are identified rather
 than silently marked complete. Contact/channel inventories are not applicable
-to this role. Regions and other unstructured snapshots remain available for
-manual comparison; a recognized ACL can be merged without deleting existing
-target permissions. No setting absent from the original backup is invented.
+to this role. Complete public region snapshots include hierarchy, flood
+permissions (including the wildcard), home and default scope. Regions and a
+recognized ACL are merged without deleting unrelated target entries. Old raw
+region text and other unstructured snapshots remain available for manual
+comparison; no setting absent from the original backup is invented.
+
+Region capture preserves the firmware export's indentation and terminal newline,
+checks the complete tree is below its 159-byte truncation boundary, and queries
+home/default and individual region records for agreement. Saturated, ambiguous
+or unsupported exports remain explicitly incomplete. Private `$` region transport
+keys are not exposed by this CLI and are not invented. A new backup is needed
+for full region restore when an older JSON contains only the raw tree and no
+verified home/default metadata.
+
+Region restore validates names, parents, cycles and the merged map before writes,
+creates parents before children, reapplies flood policies after default-scope
+selection, saves, and reads the map and selections back. It runs before radio2
+settings because a default-scope change can reconcile radio2 automatically.
+No interactive `region load`, arbitrary definition text, automatic region
+deletion or reboot is used. Large maps that the current firmware cannot export
+completely are reported rather than silently restored from truncated text.
 
 Restore uses allowlisted getter/setter pairs, never the archive's command text or
 `restore_method` metadata as a script. It checks the selected target's public

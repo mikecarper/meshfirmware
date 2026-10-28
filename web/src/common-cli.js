@@ -4,6 +4,7 @@
 import { ed25519 } from '@noble/curves/ed25519';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
 import { fail } from './firmware.js';
+import { regionRestorePreview, prepareRegionRestore, restoreRegions } from './regions.js';
 
 export const COMMON_CLI_OPTIONAL_COMMANDS=Object.freeze([
   'board','get system.watchdog','get storage.layout','get cad','get radio.cad',
@@ -124,12 +125,19 @@ export function commonCliRestorePreview(payload,{newHardware=false}={}){
     if(spec.id==='radio')warnings.push('The primary radio tuple does not record preamble length; restoring it selects the firmware’s automatic preamble.');
     if(spec.id==='wifi.ssid'||spec.id==='wifi.pwd')warnings.push('Wi-Fi credentials are saved and read back; applying the new network may require a later manual reboot.');
   }
+  if(payload.regions?.state==='complete'){
+    const regionPlan=regionRestorePreview(payload.regions.data),index=skipped.findIndex(row=>row.id==='region');if(index>=0)skipped.splice(index,1);
+    operations.push({id:'regions',label:'Region hierarchy and policies (merge)',get:null,desired:payload.regions.data,commands:[]});warnings.push(...regionPlan.warnings);
+  }else if(payload.regions){
+    const index=skipped.findIndex(row=>row.id==='region');if(index>=0)skipped.splice(index,1);
+    addSkip('region','Regions','The backup does not contain a complete, supported region snapshot. Capture regions again on supported firmware.');
+  }
   const aclStatus=commonCliReplyState(payload.replies['get acl'],'get acl');
   if(aclStatus.state==='complete')try{const rows=parseAcl(aclStatus.text);if(rows.length){const index=skipped.findIndex(row=>row.id==='get acl');if(index>=0)skipped.splice(index,1);operations.push({id:'acl',label:'Access permissions (merge)',get:'get acl',desired:rows,commands:rows.map(row=>`setperm ${row.key} ${row.permissions}`)});warnings.push('Access permissions are merged; existing target entries are not deleted. Permission writes may be persisted lazily by firmware.');}}catch{/* Unstructured, paged or truncated ACL remains explicitly manual-only. */}
   const key=privateIdentity(payload);if(key)warnings.push('Private identity replacement is optional and requires its separate checkbox. CommonCLI applies a saved replacement only after a manual reboot.');
   // The archive's object insertion order never determines write order. Keep
   // access permissions before logging and apply noisy logging preferences last.
-  const order=new Map(specs.map((spec,index)=>[spec.id,index]));order.set('acl',specs.length-3.5);
+  const order=new Map(specs.map((spec,index)=>[spec.id,index]));order.set('regions',-1);order.set('acl',specs.length-3.5);
   operations.sort((a,b)=>order.get(a.id)-order.get(b.id));
   return {operations,skipped,warnings:[...new Set(warnings)],privateIdentity:!!key,sourceRole:role};
 }
@@ -153,6 +161,11 @@ export async function restoreCommonCli(link,payload,{newHardware=false,replaceId
   // Probe every target getter before the first setter. Unknown/unsupported
   // settings are skipped, but transport failures and malformed replies stop.
   for(const operation of plan.operations){
+    if(operation.id==='regions'){
+      try{const prepared=await prepareRegionRestore(link,operation.desired,{assertCurrent});ready.push({...operation,prepared});}
+      catch(error){if(!error.regionsUnsupported)throw error;result.skipped.push({id:'regions',label:operation.label,reason:typeof error.message==='string'&&error.message.length<=512?error.message:'Target firmware could not provide a complete supported region snapshot; regions were not changed.'});}
+      continue;
+    }
     const spec=specByQuery.get(operation.get),status=commonCliReplyState(await request(operation.get,operation.label),operation.get);
     if(status.state==='unsupported'){result.skipped.push({id:operation.id,label:operation.label,reason:'Target firmware does not support this setting.'});continue;}
     if(status.state!=='complete')fail(`Target ${operation.label} could not be read. No settings were written.`);
@@ -161,8 +174,20 @@ export async function restoreCommonCli(link,payload,{newHardware=false,replaceId
   }
   await checkIdentity();
   if(!ready.length&&!(replaceIdentity&&key&&targetKey!==sourceKey)){result.warnings.push('No target settings were changed; the saved settings are unsupported on this target.');progress(1,'No supported target settings were changed');return result;}
+  let regionsApplied=false;
   for(const [index,operation] of ready.entries()){
     progress(index/Math.max(1,ready.length),'Restoring '+operation.label);
+    if(operation.id==='regions'){
+      const regionResult=await restoreRegions(link,operation.desired,{prepared:operation.prepared,assertCurrent,beforeWrite:checkIdentity},(value,message)=>progress((index+value)/Math.max(1,ready.length),message));
+      result.restored.push(...regionResult.restored);result.skipped.push(...regionResult.skipped);result.warnings.push(...regionResult.warnings);regionsApplied=true;continue;
+    }
+    // Selecting a default region can reconcile radio2 automatically. Never
+    // skip a later setting using the value read before that policy change.
+    if(regionsApplied){
+      const current=commonCliReplyState(await request(operation.get,operation.label),operation.get);
+      try{if(current.state!=='complete')throw Error();operation.actual=operation.id==='acl'?parseAcl(current.text):operation.spec.parse(current.text);}
+      catch(error){if(current.state==='unsupported'||error.message==='manual-only'){result.skipped.push({id:operation.id,label:operation.label,reason:'Setting became unsupported or automatically managed after region restoration.'});continue;}fail(`Target ${operation.label} could not be checked after restoring regions. Restore stopped.`);}
+    }
     if(operation.id!=='acl'&&(operation.spec.equal?operation.spec.equal(operation.actual,operation.desired):norm(operation.actual)===norm(operation.desired))){result.restored.push({id:operation.id,label:operation.label,unchanged:true});continue;}
     for(const command of operation.commands){
       await checkIdentity();const status=commonCliReplyState(await request(command,operation.label),command);

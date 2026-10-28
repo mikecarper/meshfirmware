@@ -43,3 +43,11 @@ test('script-shaped CommonCLI settings and separately typed identity/ACL/regions
   assert.equal(restored.replies['get name'],'> Bench');assert.equal(restored.replies['get prv.key'],'> '+p.privateKey.slice(2));assert.equal(restored.replies['get acl'],'ACL: empty');assert.equal(restored.replies.region,'0: Global');
   const damaged=structuredClone(sealed.archive);damaged.payload.sections.settings.data['get name'].text='changed';await assert.rejects(()=>parseBackup(JSON.stringify(damaged),{validatePython:args=>service.call('validateBackup',args)}),/digest mismatch/);
 });
+
+test('complete typed public regions survive exact Python sealing, native validation and browser import',async()=>{
+  const p=snapshot().payload,regions={schema:'org.meshfirmware.regions/v1',entries:[{name:'north',parent:'*',floodAllowed:true}],wildcardFloodAllowed:false,home:'north',default:'north'};
+  const common=sealBackup({role:'common-cli',publicKey:p.publicKey,safeForWipe:false,replies:{'get public.key':'> '+p.publicKey,'get prv.key':'> '+p.privateKey.slice(2),'get role':'> repeater','get name':'> Bench','get acl':'ACL: empty',region:'*\n north^ F\n'},regions:{state:'complete',data:regions}});
+  const native=await exportNativeBackup(common,options);assert.equal(native.payload.sections.regions.state,'complete');assert.deepEqual(native.payload.sections.regions.data.snapshot,regions);assert.equal(native.payload.sections.regions.required,true);
+  const imported=await parseBackup(JSON.stringify(native),{validatePython:args=>service.call('validateBackup',args)});assert.deepEqual(verifyBackup(imported).regions,{state:'complete',data:regions});
+  const damaged=structuredClone(native);damaged.payload.sections.regions.data.snapshot.default=null;await assert.rejects(()=>parseBackup(JSON.stringify(damaged),{validatePython:args=>service.call('validateBackup',args)}),/digest mismatch/);
+});
