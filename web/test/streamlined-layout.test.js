@@ -51,12 +51,42 @@ test('essential firmware inputs and both write-stage buttons stay at the top wit
   assert.ok(has(get('flash'),'disabled'),'Initial page must never offer an unprepared flash');
 });
 
+test('firmware file browsing and the selected build download sit beside the main firmware selector',()=>{
+  const field=get('artifact-field'),browse=get('firmware-files'),download=get('download-selected-build'),choices=get('firmware-choices');
+  const row=browse.parent;assert.ok(hasClass(row,'firmware-file-links'));assert.equal(download.parent,row);assert.ok(inside(row,field));assert.ok(inside(row,choices));
+  assert.equal(closedAncestors(browse).length,0,'Browsing public files must not require opening an advanced panel');
+  assert.ok(browse.start>get('artifact-choice-hint').start&&browse.start<get('prepare').start,'File links should follow the selector before numbered preparation');
+  assert.equal(browse.tag,'a');assert.equal(download.tag,'a');assert.ok(!has(browse,'hidden'));assert.ok(has(download,'hidden'),'No exact file can be downloaded before one is selected');assert.ok(!has(download,'href'));
+  const destination=new URL(browse.attrs.href);assert.equal(destination.href,'https://mikecarper.github.io/MeshCore/firmware_picker/#firmware-picker-1-results');assert.equal(destination.search,'','The initial public link must not contain device data');
+  for(const link of [browse,download]){assert.equal(link.attrs.target,'_blank');assert.deepEqual(link.attrs.rel.split(/\s+/).sort(),['noopener','noreferrer']);assert.ok(hasClass(link,'text-link'));assert.ok(!hasClass(link,'step-button'));assert.ok(!has(link,'data-lock'),'Public browsing must not be gated by USB access');assert.ok(!link.children.some(node=>hasClass(node,'action-number')));}
+  assert.match(html.slice(browse.start).split('</a>')[0],/>Firmware files ↗$/);assert.match(html.slice(download.start).split('</a>')[0],/>Download selected build ↗$/);
+  assert.ok(inside(get('download-firmware'),get('image-details')),'The existing fallback download must remain in image details');
+});
+
 test('advanced, backup, console and capability controls are collapsed by default',()=>{
   for(const id of ['advanced-options','backups','console','capabilities']){const node=get(id);assert.equal(node.tag,'details',id);assert.ok(!has(node,'open'),`#${id} must start collapsed`);}
   for(const id of ['connection-options','custom-firmware','bootloader-options','nrf-actions','migration-options','verification-options','esp-retry-options','image-details']){
     const node=get(id);assert.equal(node.tag,'details',id);assert.ok(!has(node,'open'),id);assert.ok(inside(node,get('advanced-options')),`#${id} belongs under extras`);
   }
   for(const id of ['auto-detect-board','auto-backup','auto-finish'])assert.ok(has(get(id),'checked'),`Collapsing #${id} must not change its safe default`);
+});
+
+test('skipping backup is an explicit visible unchecked choice before the review actions',()=>{
+  const option=get('skip-backup-option'),choice=get('skip-backup'),warning=get('skip-backup-warning'),workflow=nodes.find(node=>hasClass(node,'workflow'));
+  const actions=nodes.find(node=>hasClass(node,'review-actions')),label=choice.parent;
+  assert.equal(option.tag,'div');assert.ok(hasClass(option,'skip-backup-option'));assert.ok(inside(option,workflow));assert.equal(closedAncestors(option).length,0);
+  assert.equal(choice.tag,'input');assert.equal(choice.attrs.type,'checkbox');assert.ok(!has(choice,'checked'),'Backing up remains the default');assert.ok(has(choice,'data-lock'),'An active USB operation must lock the skip choice');
+  assert.equal(label.tag,'label');assert.ok(inside(choice,option));assert.match(html.slice(label.start).split('</label>')[0],/Skip backup · go straight to step 4/);
+  assert.equal(choice.attrs['aria-describedby'],warning.attrs.id);assert.ok(option.start>get('expert-fields').start&&option.start<actions.start,'The deliberate skip choice belongs beside the main flash workflow');
+  assert.ok(!nodes.some(node=>inside(node,option)&&hasClass(node,'action-number')),'Skipping backup must not create another numbered step');
+});
+
+test('the skip-backup warning is accessible, conditional and does not claim device checks are skipped',()=>{
+  const option=get('skip-backup-option'),warning=get('skip-backup-warning');
+  assert.equal(warning.tag,'p');assert.ok(has(warning,'hidden'));assert.ok(inside(warning,option));assert.equal(closedAncestors(warning).length,0);assert.equal(warning.attrs.role,'status');assert.equal(warning.attrs['aria-live'],'polite');
+  const text=html.slice(warning.start).split('</p>')[0];assert.match(text,/No backup will be created/);assert.match(text,/Firmware and device checks still run before the final flash confirmation/);
+  assert.ok(declarationsFor('.skip-backup-option label').some(rule=>rule.display==='flex'&&rule['justify-content']==='flex-start'),'The opt-out remains left aligned');
+  assert.ok(declarationsFor('.skip-backup-option.enabled').some(rule=>rule.background&&rule['border-color']),'The active opt-out needs an explicit warning treatment');
 });
 
 test('status, warnings, progress and required expert offsets cannot be trapped in closed extras',()=>{
@@ -190,14 +220,22 @@ test('backup progress and its status precede explanatory text and visible firmwa
   assert.ok(get('firmware-details').start>get('image-warning').start,'Optional release details stay after visible warnings');
   assert.equal(get('workflow-guidance').tag,'p');assert.ok(hasClass(get('workflow-guidance'),'hint'));
   assert.equal(get('image-warning').attrs['aria-live'],'polite');assert.equal(get('install-mode-switch').attrs['aria-describedby'],'install-mode-hint');
-  assert.match(html.slice(get('workflow-guidance').start).split('</p>')[0],/Step 3 offers a backup/);
+  const copy=html.slice(get('workflow-guidance').start).split('</p>')[0];assert.match(copy,/Step 3 offers a backup by default/);assert.match(copy,/Select Skip backup to go straight to step 4/);assert.match(copy,/checks run automatically before confirmation/);
 });
 
 test('main and optional action groups keep left alignment at every breakpoint',()=>{
-  for(const selector of ['.sidebar','.connect-controls','.mode-step','.review-actions','.inline-actions','.bootloader-offer','.console-input','footer'])assertProperty(selector,'justify-content','flex-start');
+  for(const selector of ['.sidebar','.connect-controls','.mode-step','.review-actions','.inline-actions','.bootloader-offer','.console-input','.firmware-file-links','footer'])assertProperty(selector,'justify-content','flex-start');
   assertProperty('.bootloader-offer','align-items','flex-start');assertProperty('.bootloader-offer','flex-direction','column');
   assertProperty('.page-header','align-items','flex-start');assertProperty('.page-header','flex-direction','column');
   for(const selector of ['button','.button']){assertProperty(selector,'justify-content','flex-start');assertProperty(selector,'text-align','left');}
+});
+
+test('firmware links wrap on narrow screens without stretching actions or creating another workflow step',()=>{
+  const rows=declarationsFor('.firmware-file-links');assert.ok(rows.some(rule=>rule.display==='flex'&&rule['flex-wrap']==='wrap'&&rule['min-width']==='0'));
+  assert.ok(rows.some(rule=>/^8px\s+12px$/.test(rule.gap||'')),'The small public links need clear separation without a full-width action');
+  const links=declarationsFor('.firmware-file-links a');assert.ok(links.some(rule=>rule['max-width']==='100%'&&rule['overflow-wrap']==='anywhere'));
+  assert.ok(declarationsFor('.text-link').some(rule=>parseFloat(rule['min-height']||'0')>=32),'Links retain usable touch targets');
+  for(const rule of [...rows,...links]){assert.ok(!/\bauto\b/.test(rule['margin-left']||''),'Links must not be pushed to the right');assert.ok(!/^1(?:\s|$)/.test(rule.flex||''),'Public file links must not grow across empty space');}
 });
 
 test('action buttons are not pushed right by auto margins or stretched to fill their row',()=>{

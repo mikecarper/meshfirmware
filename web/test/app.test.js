@@ -12,6 +12,7 @@ import {MigrationApproval} from '../src/migration-approval.js';
 import {cleanCliReply} from '../src/meshcore.js';
 import {assessBootloaderVersion} from '../src/bootloader-version.js';
 import {fetchFirmwareBytes as verifiedDownload} from '../src/downloads.js';
+import {firmwareFilesLinks} from '../src/firmware-links.js';
 import {gzipSync} from 'node:zlib';
 const html=await readFile(new URL('../index.html',import.meta.url),'utf8');
 const source=(await readFile(new URL('../src/app.js',import.meta.url),'utf8')).replace(/^import .*;\r?$/gm,'');
@@ -27,7 +28,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,catalogPromise=n
   if(recovery)storage.set('meshfirmware.nrfRecovery',JSON.stringify(recovery));
   if(espRecovery)storage.set('meshfirmware.espRecovery',JSON.stringify(espRecovery));
   const context=vm.createContext({document:{getElementById:id=>{assert.ok(elements.has(id),`Missing HTML id ${id}`);return elements.get(id);},querySelectorAll:()=>[...elements.values()]},navigator:{serial:{requestPort:async()=>{calls.push('chooser');return port;},getPorts(){throw new Error('must not enumerate automatically');},addEventListener(type,handler){serialEvents[type]=handler;}}},window:{addEventListener(){}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},Option,URL,Blob,Uint8Array,TextEncoder,TextDecoder,console,setTimeout,clearTimeout,AbortSignal,Date,
-    fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,MigrationApproval,cleanCliReply,assessBootloaderVersion,fetch:async()=>{throw Error('Unexpected network request');},fetchFirmwareBytes:(url,options)=>verifiedDownload(url,{...options,mirrorBase:'https://mirror.example.test/firmware/',pageOrigin:'https://mirror.example.test',fetchImpl:(target,init)=>target==='https://mirror.example.test/firmware/index.json'?Promise.resolve({ok:false,status:404}):options.fetchImpl(target,init)}),assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),
+    fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,MigrationApproval,cleanCliReply,assessBootloaderVersion,firmwareFilesLinks,fetch:async()=>{throw Error('Unexpected network request');},fetchFirmwareBytes:(url,options)=>verifiedDownload(url,{...options,mirrorBase:'https://mirror.example.test/firmware/',pageOrigin:'https://mirror.example.test',fetchImpl:(target,init)=>target==='https://mirror.example.test/firmware/index.json'?Promise.resolve({ok:false,status:404}):options.fetchImpl(target,init)}),assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),
     SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
   });
   vm.runInContext(source,context);
@@ -38,11 +39,63 @@ test('every UI id exists once and all wired controls have matching HTML',()=>{
   for(const match of source.matchAll(/\$\('([^']+)'\)/g))assert.ok(ids.includes(match[1]),match[1]);
 });
 
+test('same-device confirmation uses a button and a following flash still requires its exact typed token',async()=>{
+  const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.evaluate('state.port=selectedPort;');let close;
+  ui.elements.get('confirm-dialog').addEventListener=(type,handler)=>{assert.equal(type,'close');close=handler;};
+  const same=ui.evaluate("confirm('Confirm bootloader handoff','XIAO','Confirm the same radio.','SAME DEVICE',{buttonOnly:true});");
+  assert.equal(ui.elements.get('confirm-token-fields').hidden,true);assert.equal(ui.elements.get('confirm-token').value,'');assert.equal(ui.elements.get('confirm-submit').disabled,false);assert.equal(ui.elements.get('confirm-submit').textContent,'Yes, this is the same radio');assert.equal(ui.elements.get('token-label').textContent,'');
+  ui.elements.get('confirm-dialog').returnValue='confirm';close();assert.equal(await same,true);assert.deepEqual(ui.calls,[]);
+  const flash=ui.evaluate("confirm('Write this firmware?','Exact image','Flash warning','FLASH');");
+  assert.equal(ui.elements.get('confirm-token-fields').hidden,false);assert.equal(ui.elements.get('confirm-submit').disabled,true);assert.equal(ui.elements.get('confirm-submit').textContent,'Confirm operation');assert.equal(ui.elements.get('token-label').textContent,'FLASH');
+  ui.elements.get('confirm-token').value='flash';ui.elements.get('confirm-token').oninput();assert.equal(ui.elements.get('confirm-submit').disabled,true);
+  ui.elements.get('confirm-token').value='FLASH';ui.elements.get('confirm-token').oninput();assert.equal(ui.elements.get('confirm-submit').disabled,false);
+  ui.elements.get('confirm-dialog').returnValue='confirm';close();assert.equal(await flash,true);assert.deepEqual(ui.calls,[]);
+});
+
+test('same-radio button confirmation rejects cancel, Escape and a disconnected or replaced interface',async()=>{
+  for(const action of ['cancel','escape','disconnect','replace','generation']){
+    const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.evaluate('state.port=selectedPort;');let close;
+    ui.elements.get('confirm-dialog').addEventListener=(_type,handler)=>{close=handler;};
+    const pending=ui.evaluate("confirm('Confirm bootloader handoff','XIAO','Same radio','SAME DEVICE',{buttonOnly:true});");
+    ui.elements.get('confirm-dialog').returnValue=action==='cancel'?'cancel':action==='escape'?'':'confirm';
+    if(action==='disconnect')ui.serialEvents.disconnect({port:ui.port});
+    if(action==='replace')ui.evaluate('state.port={getInfo:()=>({})};');
+    if(action==='generation')ui.evaluate('state.generation++;');
+    close();assert.equal(await pending,false,action);assert.deepEqual(ui.calls,[],action);
+  }
+});
+
+test('only same-device port confirmations opt out of typed authorization',()=>{
+  const buttonCalls=source.split('\n').filter(line=>/await confirm\(/.test(line)&&line.includes('{buttonOnly:true}'));
+  assert.equal(buttonCalls.length,4);for(const call of buttonCalls)assert.ok(call.includes("'SAME DEVICE',{buttonOnly:true}"));
+});
+
 test('reconnect guidance warns about VM USB capture without promising a timed return or an administrator CLI',()=>{
   assert.match(html,/pause VMs configured for USB auto-capture/);assert.match(html,/do not assume it will be returned after 30 seconds/);assert.match(html,/No administrator CLI command is part of the browser workflow/);assert.match(html,/Never interrupt an active partition-migration bridge/);
 });
 
 const v4Item={project:'MeshCore',provider:'MeshCore',hardware:'Heltec v4',architecture:'esp32',role:'repeater',version:'v1.18.0',name:'heltec_v4_repeater-v1.18.0.bin',action:'flash-update',url:'https://example.test/v4.bin'};
+
+test('firmware-files link follows exact hardware and role without needing a USB connection or artifact',async()=>{
+  const ui=workbench();await Promise.resolve();ui.context.inventory=[{...v4Item,provider:'Keymind Cascade',hardware:'GAT-IoT GAT562 30s',architecture:'nrf52',role:'companionFull',releaseNotes:'SETUP - https://mikecarper.github.io/MeshCore/firmware_picker/?hardware=GAT562_30S_Mesh_Kit'}];
+  ui.evaluate('state.items=inventory;filterCatalog();');ui.elements.get('hardware').value='GAT-IoT GAT562 30s';ui.elements.get('role').value='companionFull';ui.evaluate("filterCatalog('role');");
+  assert.equal(ui.elements.get('firmware-files').href,'https://mikecarper.github.io/MeshCore/firmware_picker/?s=1.hGAT562_30S_Mesh_Kit.rcompanion#firmware-picker-1-results');assert.equal(ui.elements.get('download-selected-build').hidden,true);assert.equal(ui.evaluate('state.port'),null);assert.equal(ui.evaluate('state.pkg'),null);assert.deepEqual(ui.calls,[]);
+});
+
+test('direct selected-build download keeps the exact filename and version and clears when changing boards',async()=>{
+  const ui=workbench();await Promise.resolve();
+  ui.context.inventory=[{...v4Item,provider:'Keymind Cascade',hardware:'GAT-IoT GAT562 30s',architecture:'nrf52',role:'companionFull',version:'v1.17.0',name:'gat_companion-v1.17.0.zip',url:'https://github.com/mikecarper/MeshCore/releases/download/v1.17.0/gat_companion-v1.17.0.zip',releaseNotes:'SETUP - https://mikecarper.github.io/MeshCore/firmware_picker/?hardware=GAT562_30S_Mesh_Kit'},{...v4Item,provider:'Keymind Cascade',hardware:'Seeed Studio Xiao nRF52 WIO',role:'repeater',releaseNotes:'SETUP - https://mikecarper.github.io/MeshCore/firmware_picker/?hardware=Xiao_nrf52'}];
+  ui.evaluate('state.items=inventory;filterCatalog();');ui.elements.get('artifact').value='0';await ui.elements.get('artifact').onchange();
+  assert.equal(ui.elements.get('download-selected-build').hidden,false);assert.equal(ui.elements.get('download-selected-build').href,ui.context.inventory[0].url);
+  ui.elements.get('artifact').value='';ui.elements.get('hardware').value='Seeed Studio Xiao nRF52 WIO';ui.elements.get('role').value='repeater';ui.evaluate("filterCatalog('role');");
+  assert.equal(ui.elements.get('download-selected-build').hidden,true);assert.match(ui.elements.get('firmware-files').href,/s=1\.hXiao_nrf52\.rrepeater/);assert.ok(!ui.elements.get('firmware-files').href.includes('GAT562'));assert.deepEqual(ui.calls,[]);
+});
+
+test('stock firmware links stay on the official release and never inherit Keymind board links or node secrets',async()=>{
+  const ui=workbench();await Promise.resolve();ui.context.inventory=[{...v4Item,url:'https://github.com/meshcore-dev/MeshCore/releases/download/repeater-v1.17.1/heltec_v4_repeater-v1.17.1.bin'}];
+  ui.evaluate('state.items=inventory;state.device={name:"PRIVATE_NODE_NAME",publicKey:"PRIVATE_IDENTITY"};filterCatalog();');ui.elements.get('artifact').value='0';ui.evaluate('updateDownload();');
+  assert.equal(ui.elements.get('firmware-files').href,'https://github.com/meshcore-dev/MeshCore/releases/tag/repeater-v1.17.1');assert.equal(ui.elements.get('download-selected-build').href,ui.context.inventory[0].url);assert.ok(!ui.elements.get('firmware-files').href.includes('PRIVATE'));assert.deepEqual(ui.calls,[]);
+});
 test('provider picker shows Keymind Cascade and stock and restores a saved historical Logging choice',async()=>{
   let resolveCatalog;const catalogPromise=new Promise(resolve=>resolveCatalog=resolve),ui=workbench({catalogPromise});
   ui.context.localStorage.setItem('meshfirmware.selections',JSON.stringify({provider:'Keymind Cascade Logging',hardware:v4Item.hardware,role:v4Item.role,version:v4Item.version}));
@@ -244,7 +297,7 @@ test('handoff recovery migration and verification re-selection retain the exact 
   for(const mode of ['handoff','recovery','migration','espRecovery','verification']){
     const ui=workbench({productionDefaults:true});await Promise.resolve();
     ui.context.pkg=fakePackage({name:'in-progress.bin',architecture:mode==='recovery'?'nrf52':'esp32'});ui.context.selectedPort=ui.port;ui.evaluate('state.pkg=pkg;state.port=selectedPort;');
-    ui.context.confirm=async()=>{ui.calls.push('same-device');return true;};
+    ui.context.confirm=async(_title,_detail,_warning,token,options)=>{assert.equal(token,'SAME DEVICE');assert.equal(options?.buttonOnly,true);ui.calls.push('same-device');return true;};
     if(mode==='handoff')ui.evaluate('state.handoff=true;');
     else if(mode==='recovery'){ui.evaluate('state.recovery={sha256:pkg.sha256,name:pkg.name,phase:"reselect-dfu",eraseComplete:true};');ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0044});}
     else if(mode==='migration')ui.evaluate('state.migration={mac:"aa:bb:cc:dd:ee:ff",sha256:pkg.sha256,phase:"running"};');
@@ -1344,6 +1397,109 @@ test('four-step guidance keeps mode selection at 2, backup at 3 and final confir
     assert.match(flash,/step\s*4/i);assert.match(flash,/review|flash/i);assert.match(flash,/confirm/i);
   }
   assert.deepEqual(ui.calls,[]);
+});
+
+async function skipBackupWorkbench({catalogOnly=false,runtime=false,architecture='nrf52'}={}){
+  const ui=workbench();await Promise.resolve();serialMock(ui);ui.context.selectedPort=ui.port;
+  ui.context.pkg=fakePackage({name:architecture==='esp32'?'sample.bin':'sample.zip',architecture,kind:'application'});
+  ui.context.inventory=[{...v4Item,architecture,name:ui.context.pkg.name,url:'https://example.test/'+ui.context.pkg.name,action:architecture==='esp32'?'flash-update':'flash'}];
+  ui.evaluate('state.items=inventory;state.port=selectedPort;state.device={model:"Sample radio",role:"common-cli"};');
+  if(catalogOnly){ui.elements.get('artifact').value='0';ui.context.downloadFirmwareBytes=async()=>{ui.calls.push('download');return new Uint8Array(64);};ui.context.checkedZip=()=>[{name:'manifest.json'},{name:'application.bin'},{name:'application.dat'}];ui.context.inspectFirmware=()=>{ui.calls.push('validate-image');return ui.context.pkg;};}
+  else ui.evaluate('state.pkg=pkg;');
+  ui.elements.get('transport-mode').value=architecture==='esp32'?'no_reset':'nrf52';ui.elements.get('auto-backup').checked=true;ui.elements.get('skip-backup').checked=true;
+  if(!runtime&&architecture==='nrf52'){ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0044});ui.elements.get('already-bootloader').checked=true;}
+  ui.context.captureBackup=async()=>{throw Error('Explicit skip must not capture a backup');};
+  ui.context.confirm=async(_title,_detail,warning,token,options)=>{if(token==='SAME DEVICE')assert.equal(options?.buttonOnly,true);else assert.match(warning,/chose to skip backup/i);ui.calls.push('confirm:'+token);return true;};
+  ui.context.flashNrf=async(_link,pkg)=>ui.calls.push(pkg.erase?'write-erase':'write-final');
+  ui.context.touch1200=async(port,mode)=>{assert.equal(port,ui.port);assert.equal(mode,'nrf52');ui.calls.push('enter-dfu');};
+  if(architecture==='esp32')ui.context.EspSession=class{async connect(mode){assert.equal(mode,'no_reset');ui.calls.push('inspect-chip');return {chip:'ESP32-S3',mac:'aa:bb:cc:dd:ee:ff',flashBytes:4<<20};}async prepare(pkg){ui.calls.push('validate-plan');return {sha256:pkg.sha256,addresses:[0x10000],mac:'aa:bb:cc:dd:ee:ff'};}async flash(){ui.calls.push('write-final');}async close(){ui.calls.push('close-rom');}};
+  return ui;
+}
+
+test('skip backup is opt-in and enables step 4 without requiring step 3',async()=>{
+  const ui=await skipBackupWorkbench();ui.elements.get('skip-backup').checked=false;ui.evaluate('controls();');
+  assert.equal(ui.elements.get('flash').disabled,true);assert.equal(ui.elements.get('prepare').disabled,false);assert.equal(ui.elements.get('skip-backup-warning').hidden,true);
+  ui.elements.get('skip-backup').checked=true;await ui.elements.get('skip-backup').onchange();
+  assert.equal(ui.elements.get('flash').disabled,false);assert.equal(ui.elements.get('prepare').disabled,true);assert.equal(ui.elements.get('skip-backup-warning').hidden,false);assert.match(ui.elements.get('step-guidance').textContent,/Step 4.*without backup/);assert.equal(ui.elements.get('auto-backup').checked,true);assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls,[]);
+  const fresh=workbench();assert.equal(fresh.elements.get('skip-backup').checked,false);
+});
+
+test('direct step 4 downloads and validates selected firmware before no-backup confirmation and writing',async()=>{
+  for(const architecture of ['nrf52','esp32']){
+    const ui=await skipBackupWorkbench({catalogOnly:true,architecture});await ui.elements.get('flash').onclick();
+    assert.ok(ui.calls.indexOf('download')<ui.calls.indexOf('validate-image'),architecture);assert.ok(ui.calls.indexOf('validate-image')<ui.calls.indexOf('confirm:FLASH'),architecture);assert.ok(ui.calls.indexOf('confirm:FLASH')<ui.calls.indexOf('write-final'),architecture);
+    if(architecture==='esp32'){assert.ok(ui.calls.indexOf('inspect-chip')<ui.calls.indexOf('validate-plan'));assert.ok(ui.calls.indexOf('validate-plan')<ui.calls.indexOf('confirm:FLASH'));}
+    assert.equal(ui.elements.get('skip-backup').checked,true,architecture);assert.equal(ui.evaluate('state.skipBackupForOperation'),false,architecture);assert.ok(!ui.calls.includes('enter-dfu'),architecture);assert.ok(!ui.elements.get('notice').textContent.includes('JSON backup has been downloaded'),architecture);
+  }
+});
+
+test('skip backup still requires final confirmation and cleans its operation flag on cancellation or errors',async()=>{
+  for(const outcome of ['cancel','invalid-image','hash','missing-target']){
+    const ui=await skipBackupWorkbench({catalogOnly:outcome==='invalid-image'});
+    if(outcome==='cancel')ui.context.confirm=async(_title,_detail,warning,token)=>{assert.equal(token,'FLASH');assert.match(warning,/No new logical backup was created/);return false;};
+    if(outcome==='invalid-image')ui.context.inspectFirmware=()=>{throw Error('Invalid firmware fixture');};
+    if(outcome==='hash')ui.elements.get('expected-sha').value='b'.repeat(64);
+    if(outcome==='missing-target')ui.evaluate('state.port=null;');
+    await ui.elements.get('flash').onclick();assert.ok(!ui.calls.includes('write-final'),outcome);assert.ok(!ui.calls.includes('enter-dfu'),outcome);assert.equal(ui.evaluate('state.skipBackupForOperation'),false,outcome);
+  }
+});
+
+test('direct step 4 stops at DFU handoff and resumes only after an explicit same-radio selection and click',async()=>{
+  const ui=await skipBackupWorkbench({runtime:true});await ui.elements.get('flash').onclick();
+  assert.deepEqual(ui.calls,['enter-dfu']);assert.equal(ui.evaluate('state.port'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.skipBackupForOperation'),false);assert.equal(ui.elements.get('skip-backup').checked,true);assert.match(ui.elements.get('step-guidance').textContent,/Step 1.*Step 4/i);
+  ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0044});await ui.elements.get('select-port').onclick();
+  assert.equal(ui.elements.get('skip-backup').checked,true);assert.equal(ui.elements.get('flash').disabled,false);assert.ok(!ui.calls.includes('write-final'));
+  await ui.elements.get('flash').onclick();assert.equal(ui.calls.filter(call=>call==='enter-dfu').length,1);assert.equal(ui.calls.filter(call=>call==='write-final').length,1);assert.ok(ui.calls.indexOf('confirm:SAME DEVICE')<ui.calls.indexOf('confirm:FLASH'));assert.equal(ui.evaluate('state.skipBackupForOperation'),false);
+});
+
+test('direct erase without backup preserves wipe acknowledgement and erase/reselect/final-write boundaries',async()=>{
+  const ui=await skipBackupWorkbench();ui.evaluate("state.installMode='install';");ui.context.erase=fakePackage({name:'erase.zip',erase:true,destructive:true});ui.context.erasePackage=async()=>ui.context.erase;
+  await ui.elements.get('flash').onclick();assert.ok(ui.calls.includes('confirm:WIPE WITHOUT BACKUP'));assert.deepEqual(ui.calls.filter(call=>call.startsWith('write-')),['write-erase']);assert.equal(ui.evaluate('state.recovery.phase'),'reselect-dfu');assert.equal(ui.evaluate('state.port'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('flash').disabled,true);
+  await ui.elements.get('select-port').onclick();assert.equal(ui.evaluate('state.recovery.phase'),'final');assert.equal(ui.elements.get('skip-backup').checked,true);await ui.elements.get('flash').onclick();
+  assert.deepEqual(ui.calls.filter(call=>call.startsWith('write-')),['write-erase','write-final']);assert.equal(ui.calls.filter(call=>call==='confirm:WIPE WITHOUT BACKUP').length,1);assert.equal(ui.calls.filter(call=>call==='confirm:FLASH').length,1);
+});
+
+test('skip backup never rebuilds a stale plan or bypasses mode and board overrides',async()=>{
+  for(const scenario of ['stale','mode','board']){
+    const ui=await skipBackupWorkbench();
+    if(scenario==='stale'){ui.evaluate('state.plan={generation:-1,port:state.port,sha256:state.pkg.sha256};');ui.context.prepareSelectedFirmware=async()=>{throw Error('A stale plan must not be silently rebuilt');};}
+    if(scenario==='mode'){ui.context.pkg=fakePackage({architecture:'esp32',merged:true,destructive:true});ui.evaluate('state.pkg=pkg;');}
+    if(scenario==='board'){ui.context.assessBoard=()=>({requiresOverride:true,firmwareFamily:'rak4631',deviceFamily:'unknown',token:'unknown-to-rak4631'});ui.context.confirm=async(_title,_detail,_warning,token)=>{assert.equal(token,'unknown-to-rak4631');ui.calls.push('board-override');return false;};}
+    await ui.elements.get('flash').onclick();assert.ok(!ui.calls.includes('write-final'),scenario);assert.ok(!ui.calls.includes('enter-dfu'),scenario);assert.equal(ui.evaluate('state.skipBackupForOperation'),false,scenario);
+    if(scenario==='stale')assert.match(ui.elements.get('notice').textContent,/Selection changed/);
+  }
+});
+
+test('unrelated radio, image and installation selections clear skip intent but internal downloads preserve it',async()=>{
+  for(const change of ['radio','image','mode','application']){
+    const ui=await skipBackupWorkbench();
+    if(change==='radio')await ui.elements.get('select-port').onclick();
+    if(change==='image')await ui.evaluate('clearFirmwareSelection();');
+    if(change==='mode')await ui.evaluate("setInstallMode('install');");
+    if(change==='application')ui.evaluate('invalidateApplicationEvidence();');
+    assert.equal(ui.elements.get('skip-backup').checked,false,change);
+  }
+});
+
+test('without skip opt-in step 4 cannot prepare or download an unprepared image',async()=>{
+  const ui=await skipBackupWorkbench({catalogOnly:true});ui.elements.get('skip-backup').checked=false;await ui.elements.get('flash').onclick();assert.deepEqual(ui.calls,[]);assert.match(ui.elements.get('notice').textContent,/Selection changed/);assert.equal(ui.evaluate('state.skipBackupForOperation'),false);
+});
+
+test('changing the skip choice invalidates an old preparation without resetting the radio',async()=>{
+  const ui=await skipBackupWorkbench();ui.context.record=ui.calls;ui.evaluate('state.plan={generation:state.generation,port:state.port,sha256:state.pkg.sha256};state.backupApproved={sha256:state.pkg.sha256,port:state.port};state.esp={close:async()=>record.push("close-inspection")};');
+  ui.elements.get('skip-backup').checked=false;await ui.elements.get('skip-backup').onchange();assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);assert.equal(ui.elements.get('flash').disabled,true);assert.equal(ui.elements.get('prepare').disabled,false);assert.deepEqual(ui.calls,['close-inspection']);
+});
+
+test('unfinished preparation returns and failed writes cannot leak skip scope or repeat a transferred plan',async()=>{
+  for(const outcome of ['no-plan','throw','written']){
+    const ui=await skipBackupWorkbench();
+    if(outcome==='no-plan')ui.context.prepareSelectedFirmware=async()=>{ui.calls.push('prepare-only');};
+    if(outcome==='throw')ui.context.flashNrf=async()=>{ui.calls.push('write-attempt');throw Error('Transport interrupted');};
+    if(outcome==='written')ui.evaluate('state.plan={generation:state.generation,port:state.port,sha256:state.pkg.sha256,written:true};');
+    await ui.elements.get('flash').onclick();assert.equal(ui.evaluate('state.skipBackupForOperation'),false,outcome);assert.ok(!ui.calls.includes('write-final'),outcome);
+    if(outcome==='no-plan')assert.deepEqual(ui.calls,['prepare-only']);
+    if(outcome==='written'){assert.deepEqual(ui.calls,[]);assert.match(ui.elements.get('notice').textContent,/already been transferred/);}
+  }
 });
 
 test('reselecting a radio shows a prominent existing USB action without opening a chooser or resetting',async()=>{

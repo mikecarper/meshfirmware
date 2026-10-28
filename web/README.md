@@ -59,6 +59,9 @@ visible. The top navigation opens the corresponding tools without touching USB.
    than the node. Backup, compatibility checks and the normal write confirmation
    still apply; downgrading does not bypass any safety check.
 2. Check the automatic summary and the visible **Firmware selection** inputs.
+   **Firmware files** opens the current public picker for the selected board and
+   role; **Download selected build** downloads the exact chosen file/version.
+   Both links are beside the build selector and work without a USB connection.
    **Advanced options & troubleshooting → Connection & automatic setup** retains
    connection overrides. Explicit choices are not
    silently substituted. Choose **Keymind Cascade** or **MeshCore (stock)**;
@@ -119,6 +122,13 @@ visible. The top navigation opens the corresponding tools without touching USB.
    confirmation token. An already-running ROM/DFU interface cannot export
    application settings: select **Already in ROM/DFU** and explicitly accept
    continuing without a backup, or return to the application first.
+
+   To deliberately omit step 3, select **Skip backup · go straight to step 4**.
+   **Review & flash** downloads, validates and prepares the exact firmware before
+   its normal write confirmation, without creating a backup. It does not skip
+   chip, board, partition, erase or readback checks. If a USB handoff is needed,
+   select the same radio's returning port and use step 4 again. Skipping is off
+   by default and is not remembered for an unrelated radio or firmware choice.
 5. ESP32 writes require target MD5 readback before the one-time reset action.
    **Start firmware automatically** is on by default for complete application,
    merged or verified bridge writes, never expert components or failed writes.

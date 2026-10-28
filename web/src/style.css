@@ -109,6 +109,8 @@ input[type=checkbox] { accent-color: var(--teal); vertical-align: middle; }
 .artifact-field.choice-required select { border: 2px solid #a96908; }
 .artifact-step-number { display: inline-grid; place-items: center; min-width: 52px; height: 40px; margin-right: 8px; border-radius: 8px; background: var(--navy); color: #c2f5e9; font-size: 24px; line-height: 1; font-weight: 800; vertical-align: middle; }
 #artifact-choice-hint { margin-top: 7px; color: #784908; font-weight: 600; }
+.firmware-file-links { display: flex; align-items: center; justify-content: flex-start; flex-wrap: wrap; gap: 8px 12px; margin-top: 6px; min-width: 0; }
+.firmware-file-links a { display: inline-flex; align-items: center; max-width: 100%; overflow-wrap: anywhere; }
 .mode-switch { border: 0; padding: 0; margin: 8px 0 0; min-width: 0; }
 .mode-switch legend { padding: 0; margin-bottom: 6px; font-size: 11px; font-weight: 650; color: #526576; }
 .mode-step { display: flex; justify-content: flex-start; align-items: center; gap: 12px; min-height: 42px; }
@@ -131,6 +133,11 @@ input[type=checkbox] { accent-color: var(--teal); vertical-align: middle; }
 .selected-image strong { font-size: 11px; overflow-wrap: anywhere; min-width: 0; }
 #image-warning { color: #9e3c2e; margin-top: 8px; }
 #expert-fields { border: 1px solid #ecd6bd; border-radius: 7px; background: #fff8ed; padding: 0 14px 12px; margin-top: 12px; }
+.skip-backup-option { min-width: 0; margin-top: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 7px; background: #f7fafb; }
+.skip-backup-option label { display: flex; justify-content: flex-start; align-items: center; gap: 8px; margin: 0; font-size: 12px; line-height: 1.5; cursor: pointer; }
+.skip-backup-option input { flex: 0 0 16px; width: 16px; height: 16px; margin: 0; }
+.skip-backup-option.enabled { border-color: #a96908; background: #fff7e8; }
+#skip-backup-warning { margin-top: 7px; color: #784908; }
 .review-actions { display: flex; align-items: center; gap: 10px; justify-content: flex-start; flex-wrap: wrap; margin-top: 12px; }
 .review-actions button { min-width: 160px; }
 .review-actions .step-button { min-width: 205px; }
