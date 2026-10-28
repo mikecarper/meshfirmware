@@ -2,6 +2,7 @@
 import { ed25519 } from '@noble/curves/ed25519';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
 import { fail, hash, words, text } from './firmware.js';
+import { COMMON_CLI_COMMANDS, commonCliReplyState } from './common-cli.js';
 
 const encode = value => new TextEncoder().encode(value);
 const unhex = value => { if (typeof value !== 'string' || !/^(?:[a-f0-9]{2})*$/i.test(value)) fail('Invalid backup hex data.'); return hexToBytes(value); };
@@ -87,6 +88,11 @@ export function verifyBackup(archive) {
   if (!p || !['companion','common-cli'].includes(p.role) || p.safeForWipe !== false) fail('Invalid backup metadata.');
   if (p.role === 'companion') {
     validateCompanion(p);
+  } else {
+    if(typeof p.publicKey!=='string'||!/^[a-f0-9]{64}$/i.test(p.publicKey)||!p.replies||typeof p.replies!=='object'||Array.isArray(p.replies))fail('Invalid CommonCLI identity or settings.');
+    if(Object.keys(p.replies).length>128||Object.entries(p.replies).some(([command,value])=>command.length>80||/[\x00-\x1f\x7f]/.test(command)||typeof value!=='string'||value.length>8192))fail('Invalid CommonCLI reply snapshot.');
+    const privateHex=/(?<![a-f0-9])[a-f0-9]{128}(?![a-f0-9])/i.exec(p.replies['get prv.key']||'')?.[0];
+    if(privateHex&&publicFromPrivate(unhex(privateHex))!==p.publicKey.toLowerCase())fail('CommonCLI private/public identity mismatch.');
   }
   return p;
 }
@@ -105,7 +111,31 @@ export async function parseBackup(raw, { validatePython } = {}) {
 }
 
 function convertPythonBackup(payload) {
-  if(payload?.source?.capture_api==='meshcore-cli-common-cli') return sealBackup({role:'common-cli',publicKey:payload.source.node.public_key,safeForWipe:false,replies:payload.sections.settings.data||{},excluded:['CommonCLI captures are partial','No automatic restore'],nativeCompleteness:payload.completeness});
+  if(payload?.source?.capture_api==='meshcore-cli-common-cli') {
+    const sections=payload.sections||{},allowed=new Set(['get public.key',...COMMON_CLI_COMMANDS]),replies={};
+    const replyText=value=>{
+      const raw=typeof value==='string'?value:value&&typeof value==='object'?(typeof value.text==='string'?value.text:typeof value.raw==='string'?value.raw:null):null;
+      return value&&typeof value==='object'&&value.ok===false&&raw!==null&&commonCliReplyState(raw).state==='complete'?'Error: native setting query did not succeed':raw;
+    };
+    const settings=sections.settings?.data;
+    if(settings&&typeof settings==='object'&&!Array.isArray(settings))for(const [command,value]of Object.entries(settings)){
+      if(!allowed.has(command))continue;const raw=replyText(value),status=sections.settings.query_states?.[command]?.state;
+      if(raw!==null)replies[command]=status==='error'?'Error: backup query was not successful':status==='unsupported'?'Unsupported: backup query was not exposed':raw;
+    }
+    const publicKey=payload.source.node.public_key.toLowerCase();replies['get public.key']=`> ${publicKey}`;
+    delete replies['get prv.key'];
+    if(sections.identity_private_key?.state==='complete')replies['get prv.key']=`> ${sections.identity_private_key.data.private_key.toLowerCase()}`;
+    for(const [name,command]of [['acl','get acl'],['regions','region']])if(sections[name]){
+      const raw=replyText(sections[name].data);if(sections[name].state==='complete'&&raw!==null)replies[command]=raw;else replies[command]=sections[name].state==='unsupported'?'Unsupported: backup section was not exposed':'Error: backup section is not complete';
+    }
+    for(const [name,command]of [['bluetooth_name','get bluetooth.name'],['usb_logging','get usb.logging'],['radio_cad','get radio.cad'],['radio_rxps','get radio.rxps.config'],['radio_rxgain','get radio.rxgain'],['radio_fem_rxgain','get radio.fem.rxgain'],['radio_fem_txgain','get radio.fem.txgain'],['display_rotation','get display.rotation'],['power_saving','get powersaving'],['storage_layout','get storage.layout'],['radio2','get radio2'],['radio2_cross','get radio2.cross'],['bluetooth_status','get bluetooth']])if(sections[name]){
+      if(sections[name].state!=='complete'){replies[command]=sections[name].state==='unsupported'?'Unsupported: backup section was not exposed':'Error: backup section is not complete';continue;}
+      const data=sections[name].data,raw=replyText(data);if(raw!==null)replies[command]=raw;
+      else if(name==='bluetooth_name'&&typeof data?.name==='string'&&typeof data?.default==='boolean')replies[command]=`> ${data.name} (${data.default?'default from node name':'custom'})`;
+    }
+    const result=sealBackup({role:'common-cli',publicKey,safeForWipe:false,replies,excluded:['CommonCLI captures are partial','Unread messages, logs and unexposed preferences are not exported'],nativeCompleteness:JSON.parse(JSON.stringify(payload.completeness)),nativeSource:{role:payload.source.node.role,deviceHint:payload.source.node.device_hint||payload.source.physical_usb_identity?.device_hint||null}});
+    verifyBackup(result);return result;
+  }
   if(payload?.source?.node?.role!=='companion') fail('Only companion or partial CommonCLI archives are supported.');
   const sections=payload.sections;
   for(const name of ['self_info','identity_private_key','device_info','channels','contacts']) if(sections?.[name]?.state!=='complete') fail(`Required backup section incomplete: ${name}.`);
@@ -309,7 +339,7 @@ export async function enterCompanionBinary(link,{allowLoggingChange=false}={}) {
 }
 
 export async function backupCommonCli(link, progress = () => {}) {
-  const commands = ['ver','get role','get prv.key','get name','get radio','get lat','get lon','get tx','get repeat','get rxdelay','get txdelay','get af','get multi.acks','get advert.interval','get flood.advert.interval','get flood.max','get flood.max.advert','get flood.max.unscoped','get flood.channel.data','get allow.read.only','get telemetry.access','get system.watchdog','get radio2','get radio2.cross','get storage.layout','get acl','region'];
+  const commands = COMMON_CLI_COMMANDS;
   const replies = {'get public.key':await link.command('get public.key',600)};
   const key=/(?<![a-f0-9])[a-f0-9]{64}(?![a-f0-9])/i.exec(replies['get public.key'])?.[0].toLowerCase();
   if(!key)fail('No MeshCore CommonCLI public identity response. A connected DFU/ROM port cannot provide a configuration backup.');
@@ -318,13 +348,16 @@ export async function backupCommonCli(link, progress = () => {}) {
   if(final!==key)fail('CommonCLI identity changed during backup.');
   const privateHex=/(?<![a-f0-9])[a-f0-9]{128}(?![a-f0-9])/i.exec(replies['get prv.key'])?.[0];
   if(privateHex&&publicFromPrivate(unhex(privateHex))!==key)fail('CommonCLI private/public identity mismatch.');
-  progress(1,'CommonCLI partial backup captured; no automatic restore or wipe-safe claim.');
-  return sealBackup({role:'common-cli',publicKey:key,safeForWipe:false,replies,excluded:['Private identity may not be exposed','Not an atomic/bulk export','No automatic restore']});
+  progress(1,'CommonCLI exposed settings captured; unsupported settings are reported separately. This is not a wipe-safe image.');
+  return sealBackup({role:'common-cli',publicKey:key,safeForWipe:false,replies,excluded:['Private identity may not be exposed','Not an atomic/bulk export','Unread messages, logs and unexposed preferences are not exported']});
 }
 
 export function backupSummary(archive) {
   const p=verifyBackup(archive),missing=[];
-  if(p.role==='common-cli')return {role:p.role,complete:false,privateIdentity:!!/(?<![a-f0-9])[a-f0-9]{128}(?![a-f0-9])/i.exec(p.replies?.['get prv.key']||''),reasons:['CommonCLI has no versioned bulk export and cannot be automatically restored.'],safeForWipe:false};
+  if(p.role==='common-cli'){
+    const states=Object.entries(p.replies).map(([command,raw])=>({command,...commonCliReplyState(raw,command)})),errors=states.filter(row=>row.state==='error'),unsupported=states.filter(row=>row.state==='unsupported');
+    return {role:p.role,complete:false,privateIdentity:!!/(?<![a-f0-9])[a-f0-9]{128}(?![a-f0-9])/i.exec(p.replies?.['get prv.key']||''),reasons:['CommonCLI exports exposed settings, not an atomic or whole-flash backup.',...errors.map(row=>`${row.command}: ${row.reason||'query failed'}`),...unsupported.map(row=>`${row.command}: unsupported by this firmware`)],safeForWipe:false,queryErrors:errors.map(row=>row.command),unsupportedQueries:unsupported.map(row=>row.command)};
+  }
   const info=unhex(p.info);if([[8,20],[20,60],[60,80]].some(([from,to])=>!text(info.subarray(from,to)).split('\0')[0]))missing.push('DEVICE_INFO has incomplete build/model/version diagnostics.');
   if(!p.privateKey)missing.push('Private identity was not captured; moving the node identity cannot be completed.');
   for(const name of ['autoadd','tuning','custom','scope'])if(typeof p.options[name]!=='string')missing.push(`${name} settings unavailable.`);

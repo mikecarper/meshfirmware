@@ -36,7 +36,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
   if(espRecovery)storage.set('meshfirmware.espRecovery',JSON.stringify(espRecovery));
   if(verification)storage.set('meshfirmware.verifyApplication',JSON.stringify(verification));
   const context=vm.createContext({lookupUsbConnectionMap,usbConnectionMap:{schemaVersion:1,builds:[]},document:{getElementById:id=>{assert.ok(elements.has(id),`Missing HTML id ${id}`);return elements.get(id);},querySelectorAll:()=>[...elements.values()]},navigator:{serial:{requestPort:async()=>{calls.push('chooser');return port;},getPorts(){throw new Error('must not enumerate automatically');},addEventListener(type,handler){serialEvents[type]=handler;}}},window:{addEventListener(type,handler){windowEvents[type]=handler;}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},Option,URL,Blob,Uint8Array,TextEncoder,TextDecoder,console,setTimeout,clearTimeout,AbortSignal,Date,
-    fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,parseUsbMode,MigrationApproval,cleanCliReply,assessBootloaderVersion,firmwareFilesLinks,fetch:async()=>{throw Error('Unexpected network request');},fetchFirmwareBytes:(url,options)=>verifiedDownload(url,{...options,mirrorBase:'https://mirror.example.test/firmware/',pageOrigin:'https://mirror.example.test',fetchImpl:(target,init)=>target==='https://mirror.example.test/firmware/index.json'?Promise.resolve({ok:false,status:404}):options.fetchImpl(target,init)}),assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),
+    fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,parseUsbMode,MigrationApproval,cleanCliReply,assessBootloaderVersion,firmwareFilesLinks,fetch:async()=>{throw Error('Unexpected network request');},fetchFirmwareBytes:(url,options)=>verifiedDownload(url,{...options,mirrorBase:'https://mirror.example.test/firmware/',pageOrigin:'https://mirror.example.test',fetchImpl:(target,init)=>target==='https://mirror.example.test/firmware/index.json'?Promise.resolve({ok:false,status:404}):options.fetchImpl(target,init)}),assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),commonCliRestorePreview:()=>({operations:[],skipped:[],warnings:[]}),restoreCommonCli:async()=>{throw Error('Unexpected CommonCLI restore');},
     createNextStepScroller,tryNativeUsbFallback,SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
   });
   vm.runInContext(source,context);
@@ -1347,6 +1347,69 @@ test('importing a validated backup reveals restore controls without restoring or
   const archive={schema:'org.meshfirmware.web-backup/v1',payload:{role:'companion',publicKey:'a'.repeat(64),channels:[],contacts:[]}};
   ui.elements.get('backup-file').files=[{name:'backup.json',size:2,text:async()=>'{}'}];ui.context.parseBackup=async()=>archive;ui.context.verifyBackup=value=>value.payload;
   await ui.elements.get('backup-file').onchange();assert.equal(ui.elements.get('backups').open,true);assert.equal(ui.evaluate('state.restore'),archive);assert.equal(ui.elements.get('restore').disabled,true);assert.deepEqual(ui.calls,[]);
+});
+
+async function commonRestoreWorkbench(){
+  const ui=workbench();await Promise.resolve();const archive={schema:'org.meshfirmware.web-backup/v1',sha256:'a'.repeat(64),payload:{role:'common-cli',publicKey:'11'.repeat(32),replies:{'get name':'> Restored'}}};
+  const preview={operations:[{id:'name',label:'Node name'}],skipped:[{id:'region',label:'Regions',reason:'Unstructured snapshot requires manual review.'}],warnings:['The primary radio tuple does not record preamble length; restoring it selects the firmware’s automatic preamble.'],privateIdentity:true};
+  ui.context.parseBackup=async()=>archive;ui.context.verifyBackup=value=>{assert.ok(value);return value.payload;};ui.context.commonCliRestorePreview=()=>preview;ui.context.selectedPort=ui.port;ui.evaluate('state.port=selectedPort;');
+  ui.elements.get('backup-file').files=[{name:'saved.json',size:2,text:async()=>'{}'}];await ui.elements.get('backup-file').onchange();return {...ui,archive,preview};
+}
+
+test('Import JSON opens only a local file chooser and never opens USB or restores automatically',async()=>{
+  const ui=workbench();await Promise.resolve();let picker=0;ui.elements.get('backup-file').click=()=>picker++;
+  ui.elements.get('import-backup-json').onclick();assert.equal(picker,1);assert.deepEqual(ui.calls,[]);ui.evaluate('state.busy=true;');ui.elements.get('import-backup-json').onclick();assert.equal(picker,1);
+});
+
+test('CommonCLI JSON import previews supported and skipped settings, resets old identity approvals and enables review only',async()=>{
+  const ui=await commonRestoreWorkbench();assert.equal(ui.evaluate('state.restore'),ui.archive);assert.equal(ui.elements.get('restore-preview').hidden,false);assert.equal(ui.elements.get('restore').disabled,false);assert.match(ui.elements.get('restore-report').textContent,/Ready: Node name/);assert.match(ui.elements.get('restore-report').textContent,/Skipped: Regions/);assert.match(ui.elements.get('backup-summary').textContent,/serial console.*Nothing uploaded or written/);assert.deepEqual(ui.calls,[]);
+  ui.elements.get('new-hardware').checked=true;ui.elements.get('replace-identity').checked=true;await ui.elements.get('backup-file').onchange();assert.equal(ui.elements.get('new-hardware').checked,false);assert.equal(ui.elements.get('replace-identity').checked,false);assert.deepEqual(ui.calls,[]);
+});
+
+test('invalid imports cannot leave an older restore ready and unsupported-only JSON cannot authorize writes',async()=>{
+  const ui=await commonRestoreWorkbench();ui.context.parseBackup=async()=>{throw Error('Backup digest mismatch');};await ui.elements.get('backup-file').onchange();assert.equal(ui.evaluate('state.restore'),null);assert.equal(ui.evaluate('state.restorePreview'),null);assert.equal(ui.elements.get('restore-preview').hidden,true);assert.equal(ui.elements.get('restore').disabled,true);
+  ui.context.parseBackup=async()=>ui.archive;ui.context.commonCliRestorePreview=()=>({operations:[],skipped:[],warnings:[],privateIdentity:false});await ui.elements.get('backup-file').onchange();assert.equal(ui.elements.get('restore').disabled,true);ui.context.confirm=async()=>assert.fail('No supported setting means no write confirmation');await ui.elements.get('restore').onclick();assert.match(ui.elements.get('notice').textContent,/no supported settings/);assert.deepEqual(ui.calls,[]);
+});
+
+test('cross-hardware and identity choices refresh the local preview without changing the node',async()=>{
+  const ui=await commonRestoreWorkbench();ui.context.commonCliRestorePreview=(_payload,options)=>{assert.equal(options.newHardware,true);return {...ui.preview,operations:[],skipped:[{id:'rxgain',label:'RX gain',reason:'Retained on the new board.'}]};};ui.elements.get('new-hardware').checked=true;ui.elements.get('new-hardware').onchange();assert.match(ui.elements.get('restore-report').textContent,/Retained on the new board/);assert.equal(ui.elements.get('restore').disabled,true);ui.elements.get('replace-identity').checked=true;ui.elements.get('replace-identity').onchange();assert.equal(ui.elements.get('restore').disabled,false);assert.deepEqual(ui.calls,[]);
+});
+
+test('restore cancellation retains the old flash proof and includes limitations in the final button confirmation',async()=>{
+  const ui=await commonRestoreWorkbench();ui.context.plan={sha256:'b'.repeat(64)};ui.evaluate('state.plan=plan;');ui.context.confirm=async(title,detail,warning,action)=>{assert.match(title,/serial console/);assert.match(detail,/1 serial settings/);assert.match(warning,/automatic preamble/);assert.match(warning,/not atomic/);assert.match(action,/^RESTORE /);return false;};await ui.elements.get('restore').onclick();assert.equal(ui.evaluate('state.plan'),ui.context.plan);assert.deepEqual(ui.calls,[]);
+});
+
+test('changed target, imported JSON, flash context or identity choices stop restore before opening serial',async()=>{
+  for(const change of ['port','generation','archive','new-hardware','replace-identity','pkg','plan','mode']){
+    const ui=await commonRestoreWorkbench();ui.context.confirm=async()=>{if(change==='port')ui.evaluate('state.port=null;');if(change==='generation')ui.evaluate('state.generation++;');if(change==='archive')ui.evaluate('state.restore={};');if(change==='new-hardware'||change==='replace-identity')ui.elements.get(change).checked=true;if(change==='pkg'||change==='plan')ui.evaluate(`state.${change}={};`);if(change==='mode')ui.evaluate("state.installMode='install';");return true;};await ui.elements.get('restore').onclick();assert.match(ui.elements.get('notice').textContent,/changed during confirmation/,change);assert.deepEqual(ui.calls,[],change);
+  }
+});
+
+test('reviewed CommonCLI restore uses guarded serial settings, invalidates flash approval and reports without logging secrets',async()=>{
+  const ui=await commonRestoreWorkbench();ui.context.plan={sha256:'b'.repeat(64)};ui.evaluate('state.plan=plan;state.backupApproved={};state.verification={sha256:"c".repeat(64)};');ui.context.confirm=async()=>true;
+  ui.context.SerialLink=class{async open(){ui.calls.push('open');}async close(){ui.calls.push('close');}async command(command){ui.calls.push(command);return 'SECRET_TEST_VALUE';}};
+  ui.context.restoreCommonCli=async(link,payload,options,report)=>{assert.equal(payload,ui.archive.payload);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.evaluate('state.verification'),null);options.assertCurrent();assert.equal(await link.command('get name'),'SECRET_TEST_VALUE');await link.command('set name Restored');report(.9,'Node name checked');return {restored:[{id:'name',label:'Node name'}],skipped:ui.preview.skipped,warnings:['Some saved options require a manual restart.']};};
+  await ui.elements.get('restore').onclick();assert.deepEqual(ui.calls,['open','get name','set name Restored','close']);assert.match(ui.elements.get('restore-summary').textContent,/1 settings restored; 1 skipped/);assert.match(ui.elements.get('restore-report').textContent,/Restored: Node name/);assert.match(ui.elements.get('notice').textContent,/serial settings restored and checked/);assert.ok(!ui.elements.get('log').textContent.includes('SECRET_TEST_VALUE'));assert.equal(ui.evaluate('state.restore'),ui.archive);
+});
+
+test('serial context changes during restore prevent another setter and never claim completion',async()=>{
+  const ui=await commonRestoreWorkbench();ui.context.confirm=async()=>true;ui.context.SerialLink=class{async open(){ui.calls.push('open');}async close(){ui.calls.push('close');}async command(command){ui.calls.push(command);ui.evaluate('state.generation++;');return '> value';}};ui.context.restoreCommonCli=async link=>{await link.command('get name');await link.command('set name Do not write');};await ui.elements.get('restore').onclick();assert.deepEqual(ui.calls,['open','get name','close']);assert.match(ui.elements.get('notice').textContent,/Restore stopped/);assert.match(ui.elements.get('restore-summary').textContent,/Restore stopped.*Earlier settings may already have changed/);assert.doesNotMatch(ui.elements.get('notice').textContent,/restored and checked/);
+});
+
+test('restore completion distinguishes skipped-only results, saved identity and changes requiring restart',async()=>{
+  for(const outcome of ['skipped-only','identity','restart']){
+    const ui=await commonRestoreWorkbench();ui.context.confirm=async()=>true;ui.context.SerialLink=class{async open(){}async close(){}};
+    ui.context.restoreCommonCli=async()=>({restored:outcome==='restart'?[{id:'wifi.ssid',label:'Wi-Fi SSID'}]:[],skipped:[],warnings:[],identityPendingReboot:outcome==='identity',restartRequired:outcome!=='skipped-only'});
+    await ui.elements.get('restore').onclick();const status=ui.elements.get('notice').textContent;
+    if(outcome==='skipped-only'){assert.match(status,/No settings were changed/);assert.doesNotMatch(status,/restored and checked/);}else if(outcome==='identity'){assert.match(status,/requires a manual reboot/);assert.match(status,/identity has not yet been verified/);}else assert.match(status,/manual restart is required/);
+    assert.deepEqual(ui.calls,[]);
+  }
+});
+
+test('restore cannot discard active write sessions, reset proofs, migration or recovery records',async()=>{
+  for(const field of ['esp','written','migrationApproval','migration','recovery','espRecovery','handoff','dfu','already-bootloader']){
+    const ui=await commonRestoreWorkbench();ui.context.protectedState={revoke:()=>assert.fail('A disabled restore must not revoke migration approval')};if(field==='dfu')ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0044});else if(field==='already-bootloader')ui.elements.get(field).checked=true;else if(field==='written')ui.evaluate('state.plan={written:true};');else ui.evaluate(`state.${field}=protectedState;`);ui.evaluate('controls();');assert.equal(ui.elements.get('restore').disabled,true,field);ui.context.confirm=async()=>assert.fail('Blocked restores stop before prompting');await ui.elements.get('restore').onclick();assert.deepEqual(ui.calls,[],field);if(field==='written')assert.equal(ui.evaluate('state.plan.written'),true);else if(!['dfu','already-bootloader'].includes(field))assert.equal(ui.evaluate(`state.${field}`),ui.context.protectedState,field);
+  }
 });
 
 test('a blocked custom URL download reveals its exact download link and local-file alternative',async()=>{

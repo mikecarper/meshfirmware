@@ -5,6 +5,7 @@ import { EspSession, validateEspWriteRecovery } from './esp.js';
 import { getCatalog, catalogProvider, catalogItemKey, httpsUrl, compareVersions } from './catalog.js';
 import { MeshCore, backupCommonCli, verifyBackup, parseBackup, enterCompanionBinary, detectMeshCore, backupSummary, cleanCliReply } from './meshcore.js';
 import { exportNativeBackup } from './backup-native.js';
+import { commonCliRestorePreview, restoreCommonCli } from './common-cli.js';
 import { assessBoard, rakFamily, endfIdentity } from './board-safety.js';
 import { BrowserPlanner } from './planner.js';
 import { waitForMigration } from './migration.js';
@@ -31,6 +32,7 @@ state.nextActionElement=null;state.nextDialogAction=null;state.finishedFirmware=
 state.flashProgress=null;
 state.knownApplicationPort=null;state.autoVerifyAttempt=null;state.autoVerificationRunning=false;
 state.connectionTrial=null;
+state.restorePreview=null;
 const nextStepScroller=createNextStepScroller({window,document});
 $('skip-backup').checked=false;
 const bootloaderOffersShown=new Set();
@@ -293,7 +295,8 @@ function controls() {
   $('wait-migration').disabled ||= !state.port || !state.migration?.uart || state.migration?.settled;
   $('recover-bridge').disabled ||= !state.port || !state.pkg || !state.migration;
   $('discard-esp-recovery').disabled ||= !state.espRecovery;
-  $('restore').disabled ||= !state.restore || !state.port || state.restore.schema !== 'org.meshfirmware.web-backup/v1' || state.restore.payload.role !== 'companion';
+  $('restore').disabled ||= !state.restore || !state.restorePreview || !state.port || restoreWorkflowBlocked() || $('already-bootloader').checked || dfuIds.has(portId(state.port));
+  $('restore').disabled ||= state.restore?.payload?.role==='common-cli'&&!state.restorePreview?.operations?.length&&!($('replace-identity').checked&&state.restorePreview?.privateIdentity);
   for (const id of ['touch','probe','backup','send-command','binary-mode','verify-app']) $(id).disabled ||= !state.port;
   $('verify-app').disabled ||= !state.verification||!!state.esp||!!state.plan?.written||$('already-bootloader').checked||dfuIds.has(portId(state.port))||!!state.migration||!!state.recovery||!!state.espRecovery;
   $('fetch-firmware').disabled ||= !$('artifact').value;
@@ -582,7 +585,7 @@ async function captureBackup() {
   const json=JSON.stringify(native,null,2);state.backup={archive,summary,filename,port,json};
   $('backup-json').value=json;$('backup-json-view').hidden=false;
   download(filename,json,'application/json');
-  $('backup-summary').textContent=`Download requested: ${filename}. ${summary.complete?'Complete exposed-API snapshot.':'Partial backup; automatic restore is unavailable.'} Keep it private.`;
+  $('backup-summary').textContent=`Download requested: ${filename}. ${summary.complete?'Complete exposed-API snapshot.':summary.role==='common-cli'?'Partial backup; import JSON to restore supported serial settings.':'Partial backup; automatic restore is unavailable.'} Keep it private.`;
   notice('Backup ready. Keep it private.');return state.backup;
 }
 async function ensureBackup() {
@@ -603,7 +606,7 @@ async function ensureBackup() {
       let result;try{result=await captureBackup();}catch(error){if(!await confirm('Backup did not complete',error.message,'No reset or write has occurred. Continue only if you accept having no complete backup.','CONTINUE WITHOUT BACKUP'))throw error;}
       if(result){
         const port=state.port,generation=state.generation,pkg=state.pkg;
-        const answer=await choose('Backup JSON','',[['stop','Stop'],['continue','Continue with flashing']],{backupJson:result.json,backupWarning:result.summary.complete===false?'Partial backup: automatic restore is unavailable. An erase is not protected by this backup.':''});
+        const answer=await choose('Backup JSON','',[['stop','Stop'],['continue','Continue with flashing']],{backupJson:result.json,backupWarning:result.summary.complete===false?(result.summary.role==='common-cli'?'Partial backup: import JSON to restore supported serial settings. An erase is not protected by this backup.':'Partial backup: automatic restore is unavailable. An erase is not protected by this backup.'):''});
         if(answer!=='continue')fail('Backup stopped. Preparation cancelled before reset or flash.');
         if(state.backup!==result||result.port!==state.port||state.port!==port||state.generation!==generation||state.pkg!==pkg)fail('Selected device or firmware changed while the backup window was open. Prepare again.');
       }
@@ -1277,23 +1280,63 @@ $('flash-stop-auto').onclick=()=>{if(state.flashProgress&&state.migrationApprova
 $('backup').onclick = () => operation(async () => {
   await captureBackup();
 });
+function restoreWorkflowBlocked(){return !!(state.migrationApproval||state.migration||state.recovery||state.espRecovery||state.esp||state.plan?.written||state.handoff);}
+function showRestorePreview(){
+  state.restorePreview=null;$('restore-preview').hidden=!state.restore;$('restore-summary').textContent='';$('restore-report').textContent='';
+  if(!state.restore)return;
+  const p=verifyBackup(state.restore);
+  if(p.role==='common-cli'){
+    const preview=commonCliRestorePreview(p,{newHardware:$('new-hardware').checked,replaceIdentity:$('replace-identity').checked});state.restorePreview=preview;
+    $('restore-summary').textContent=`${preview.operations.length} supported serial settings ready for review. No commands have been sent.`;
+    $('restore-report').textContent=[...preview.operations.map(item=>'Ready: '+item.label),...(preview.skipped||[]).map(item=>`Skipped: ${item.label||item.id} — ${item.reason}`),...(preview.warnings||[])].join('\n');
+  }else if(p.role==='companion'){
+    state.restorePreview={role:'companion'};$('restore-summary').textContent=`Companion backup: ${p.channels.length} channels and ${p.contacts.length} contacts. No settings have been written.`;
+    $('restore-report').textContent='Identity, channels, contacts and supported settings will be checked against the selected companion before writing. Firmware versions are diagnostic only.';
+  }else fail('This backup role is not supported for restore.');
+}
+$('import-backup-json').onclick=()=>{if(!state.busy){$('backup-file').value='';$('backup-file').click();}};
+for(const id of ['new-hardware','replace-identity'])$(id).onchange=()=>{if(state.busy)return;try{showRestorePreview();}catch(error){notice(error.message||String(error),true);}controls();};
 $('backup-file').onchange = () => operation(async () => {
   revealPanel('backups');
-  state.restore=null;const file=$('backup-file').files[0];if(!file)return;if(file.size>(8<<20))fail('Backup exceeds 8 MiB.');
+  state.restore=null;state.restorePreview=null;$('restore-preview').hidden=true;$('restore-summary').textContent='';$('restore-report').textContent='';$('new-hardware').checked=false;$('replace-identity').checked=false;
+  const file=$('backup-file').files[0];if(!file)return;if(file.size>(8<<20))fail('Backup exceeds 8 MiB.');
   const raw=await file.text();
   notice('Validating backup integrity locally…');
   const archive=await parseBackup(raw,{validatePython:args=>(state.planner ||=new BrowserPlanner()).call('validateBackup',args)}),p=verifyBackup(archive);state.restore=archive;
-  $('backup-summary').textContent=p.role==='companion'?`Verified local archive: ${p.publicKey.slice(0,12)} · ${p.channels.length} channels · ${p.contacts.length} contacts. Nothing uploaded or restored.`:'Verified partial CommonCLI capture. Automatic restore is unavailable.';
+  try{showRestorePreview();}catch(error){state.restore=null;state.restorePreview=null;$('restore-preview').hidden=true;throw error;}
+  $('backup-summary').textContent=p.role==='companion'?`Verified local archive: ${p.publicKey.slice(0,12)} · ${p.channels.length} channels · ${p.contacts.length} contacts. Nothing uploaded or restored.`:'Verified CommonCLI JSON. Review supported settings, then restore through the serial console. Nothing uploaded or written.';
 });
-$('restore').onclick = () => operation(async () => {
-  const archive = state.restore, generation = state.generation, p = verifyBackup(archive);
-  if (p.role !== 'companion') fail('Partial CommonCLI captures cannot be automatically restored.');
-  if (!await confirm('Restore companion settings?',`Backup identity ${p.publicKey}. Different hardware: ${$('new-hardware').checked ? 'YES' : 'NO'}. Replace identity: ${$('replace-identity').checked ? 'YES' : 'NO'}.`,'This writes identity, channels, contacts and core settings. Firmware versions are diagnostic only and are never restored.',`RESTORE ${p.publicKey.slice(0,8)}`)) return;
-  if (state.generation !== generation) fail('Selected device changed during confirmation.');
-  invalidateApplicationEvidence();const result=await linkOperation(async link => new MeshCore(link).restore(archive,{newHardware:$('new-hardware').checked,replaceIdentity:$('replace-identity').checked},progress));
+$('restore').onclick = () => {
+  if(state.busy)return;
+  if(restoreWorkflowBlocked()){notice('Finish the pending write, reset, migration or recovery before restoring settings.',true);return;}
+  return operation(async () => {
+  if(restoreWorkflowBlocked())fail('Finish the pending write, reset, migration or recovery before restoring settings.');
+  if(!state.port||dfuIds.has(portId(state.port))||$('already-bootloader').checked)fail('Select the radio’s application USB port before restoring settings; restore cannot run in ROM/DFU.');
+  const archive=state.restore,generation=state.generation,port=state.port,pkg=state.pkg,plan=state.plan,installMode=state.installMode,p=verifyBackup(archive),options={newHardware:$('new-hardware').checked,replaceIdentity:$('replace-identity').checked};
+  const common=p.role==='common-cli',preview=common?commonCliRestorePreview(p,options):null;
+  if(!common&&p.role!=='companion')fail('This backup role is not supported for restore.');
+  if(common&&!preview.operations.length&&!(options.replaceIdentity&&preview.privateIdentity))fail('This JSON has no supported settings selected for restore. Review the skipped-settings report.');
+  const current=()=>state.restore===archive&&state.port===port&&state.generation===generation&&state.pkg===pkg&&state.plan===plan&&state.installMode===installMode&&$('new-hardware').checked===options.newHardware&&$('replace-identity').checked===options.replaceIdentity&&!restoreWorkflowBlocked()&&!$('already-bootloader').checked;
+  const detail=`Backup identity ${p.publicKey}. Different hardware: ${options.newHardware?'YES':'NO'}. Replace identity: ${options.replaceIdentity?'YES':'NO'}.`+(common?` ${preview.operations.length} serial settings will be reviewed; unsupported settings are reported, not replayed.`:'');
+  const warning=['This writes only supported configuration values. It is not atomic. Firmware versions, partition layout, messages and logs are never restored. The previous startup reminder and prepared flash approval will be cleared. Keep power connected.',...(preview?.warnings||[])].join('\n');
+  if(!await confirm(common?'Restore settings through the serial console?':'Restore companion settings?',detail,warning,`RESTORE ${p.publicKey.slice(0,8)}`))return;
+  if(!current())fail('Selected device, backup or restore options changed during confirmation. Nothing was written.');
+  verifyBackup(archive);if(state.verification)clearVerification();invalidateApplicationEvidence();invalidateFirmwareSelection();const approvedGeneration=state.generation;
+  const assertCurrent=()=>{if(state.restore!==archive||state.port!==port||state.generation!==approvedGeneration||$('new-hardware').checked!==options.newHardware||$('replace-identity').checked!==options.replaceIdentity||restoreWorkflowBlocked()||$('already-bootloader').checked)fail('Selected device, backup or restore options changed. Restore stopped; earlier settings may already have been applied.');};
+  const report=(value,message)=>{progress(value,message);$('restore-summary').textContent=`${Number.isFinite(value)?Math.round(Math.max(0,Math.min(1,value))*100):0}% · ${message}`;log('Restore: '+message);};
+  let result;try{result=await linkOperation(async link=>{
+    assertCurrent();const guarded={};for(const method of ['command','read','write'])guarded[method]=async(...args)=>{assertCurrent();const value=await link[method](...args);assertCurrent();return value;};
+    return common?restoreCommonCli(guarded,p,{...options,assertCurrent},report):new MeshCore(guarded).restore(archive,options,report);
+  });}catch(error){$('restore-summary').textContent='Restore stopped. Earlier settings may already have changed; see the operation log before retrying.';throw error;}
+  assertCurrent();
   if(result?.warnings?.length)log(result.warnings.join('\n'));
-  notice('Supported companion settings restored and read back. '+(result?.warnings?.length?result.warnings.join(' ')+' ':'')+'Review optional CLI snapshots separately.');
-});
+  if(common){
+    const restored=result?.restored||[],skipped=result?.skipped||[];$('restore-summary').textContent=`${restored.length} settings restored; ${skipped.length} skipped.`;
+    $('restore-report').textContent=[...restored.map(item=>'Restored: '+item.label),...skipped.map(item=>`Skipped: ${item.label||item.id} — ${item.reason}`),...(result?.warnings||[])].join('\n');
+    notice(result?.identityPendingReboot?'Supported settings restored. The replacement identity is saved but requires a manual reboot; its running identity has not yet been verified.':!restored.length?'No settings were changed. Review the skipped-settings report.':result?.restartRequired?'Supported settings saved and checked. A manual restart is required to apply some changes; see the restore report.':`Supported serial settings restored and checked. ${skipped.length} skipped; see the restore report${result?.warnings?.length?' for limitations and any manual restart requirements':''}.`);
+  }else notice('Supported companion settings restored and read back. '+(result?.warnings?.length?result.warnings.join(' ')+' ':'')+'Review optional CLI snapshots separately.');
+  });
+};
 $('send-command').onclick = () => operation(async () => {const command=$('command').value.trim();if(!command||/[\r\n\x00]/.test(command))fail('Enter one command.');invalidateApplicationEvidence();try{await linkOperation(async link=>{const role=$('backup-role').value==='auto'?(await readApplication(link)).role:$('backup-role').value;log(role==='common-cli'?await link.command(command):await new MeshCore(link).cli(command));});}finally{invalidateApplicationEvidence();}});
 $('clear-log').onclick = () => { $('log').textContent = 'Log cleared locally.';syncFlashConsole({follow:true}); };
 $('flash-progress-dialog').addEventListener('cancel',event=>{if(state.flashProgress)event.preventDefault();});

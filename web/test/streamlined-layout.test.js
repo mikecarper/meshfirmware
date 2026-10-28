@@ -423,6 +423,33 @@ test('captured backup JSON has hidden-by-default read-only private text views in
   assert.ok(inside(get('question-backup-json-view'),get('question-dialog')));assert.ok(get('question-backup-json-view').start<get('question-actions').start);
 });
 
+test('Import JSON is an explicit unnumbered backup tool with a hidden JSON-only file input',()=>{
+  const button=get('import-backup-json'),input=get('backup-file'),panel=get('backups');
+  assert.equal(button.tag,'button');assert.equal(button.attrs.type,'button');assert.ok(hasClass(button,'secondary'));assert.ok(has(button,'data-lock'));assert.ok(!has(button,'disabled'));
+  assert.ok(inside(button,panel));assert.ok(!hasClass(button,'step-button'));assert.ok(!button.children.some(node=>hasClass(node,'action-number')));assert.match(html.slice(button.start).split('</button>')[0],/>Import JSON$/);
+  assert.equal(input.tag,'input');assert.equal(input.attrs.type,'file');assert.ok(has(input,'hidden'));assert.ok(has(input,'data-lock'));assert.equal(input.attrs.accept,'.json,application/json');assert.equal(input.parent,button.parent);assert.ok(input.start>button.start);
+  assert.ok(!nodes.some(node=>node.tag==='label'&&node.attrs.for==='backup-file'),'The chooser is opened by the named Import JSON button, not a second anonymous control');
+});
+
+test('restore preview and its accessible bounded report precede a separate disabled restore action',()=>{
+  const preview=get('restore-preview'),summary=get('restore-summary'),report=get('restore-report'),restore=get('restore');
+  assert.ok(inside(preview,get('backups')));assert.ok(has(preview,'hidden'),'Import must not pre-populate a restore plan');assert.ok(inside(summary,preview));assert.equal(summary.attrs.role,'status');assert.equal(summary.attrs['aria-live'],'polite');
+  assert.equal(report.tag,'pre');assert.ok(inside(report,preview));assert.equal(report.attrs.tabindex,'0');assert.equal(report.attrs['aria-label'],'Settings restore report');assert.ok(hasClass(report,'restore-report'));assert.equal(html.slice(report.start).split('>')[1].split('</pre')[0],'','Static HTML cannot contain saved commands or private settings');
+  assert.ok(preview.start>get('backup-file').start&&preview.start<restore.start);assert.equal(restore.tag,'button');assert.ok(has(restore,'disabled'));assert.ok(has(restore,'data-lock'));assert.ok(hasClass(restore,'secondary'));assert.ok(!hasClass(restore,'step-button'));assert.match(html.slice(restore.start).split('</button>')[0],/Review\s*(?:&amp;|&)\s*restore settings/);
+  const copy=html.slice(preview.start).split('</div>')[0];assert.match(copy,/serial console/);assert.match(copy,/Unsupported or uncaptured settings are skipped/);assert.match(copy,/No firmware, partition layout, messages or logs are restored/);assert.match(copy,/not atomic/);
+  assert.ok(declarationsFor('.restore-report').some(rule=>rule['max-width']==='100%'&&rule['max-height']==='280px'&&rule.overflow==='auto'&&rule['white-space']==='pre-wrap'&&rule['overflow-wrap']==='anywhere'),'The keyboard-readable report must fit narrow screens and scroll rather than grow without bound');
+});
+
+test('different-hardware and identity replacement remain separate unchecked restore permissions, not numbered workflow steps',()=>{
+  const restore=get('restore');
+  for(const id of ['new-hardware','replace-identity']){
+    const choice=get(id),label=choice.parent;assert.equal(choice.tag,'input');assert.equal(choice.attrs.type,'checkbox');assert.ok(!has(choice,'checked'));assert.ok(has(choice,'data-lock'));assert.equal(label.tag,'label');assert.ok(inside(choice,get('backups')));assert.ok(choice.start>get('restore-preview').start&&choice.start<restore.start);assert.ok(!label.children.some(node=>hasClass(node,'action-number')));
+  }
+  assert.match(html.slice(get('replace-identity').parent.start).split('</label>')[0],/Explicitly replace the target identity/);
+  assert.match(html.slice(get('new-hardware').parent.start).split('</label>')[0],/Moving to different hardware/);
+  assert.ok(!html.includes('No automatic CommonCLI restore'),'Capabilities must describe reviewed CommonCLI restore instead of denying the new path');
+});
+
 test('backup download status is a conditional H1 before the JSON while ordinary questions keep their H2',()=>{
   const title=get('question-backup-title'),generic=get('question-title'),dialog=get('question-dialog'),view=get('question-backup-json-view'),hint=get('question-backup-download-hint');
   assert.equal(title.tag,'h1');assert.ok(has(title,'hidden'),'No downloaded-backup claim may be visible before a successful capture');assert.ok(inside(title,dialog));

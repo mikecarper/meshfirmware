@@ -28,8 +28,18 @@ test('browser native export seals with exact Python and round-trips through nati
   const damaged=structuredClone(native);damaged.payload.sections.self_info.data.tx_power=7;
   await assert.rejects(()=>parseBackup(JSON.stringify(damaged),{validatePython:args=>service.call('validateBackup',args)}),/digest mismatch/);
 });
-test('partial CommonCLI native exports validate without pretending they can restore automatically',async()=>{
+test('partial CommonCLI native exports retain identity and configuration for an explicit supported-settings restore',async()=>{
   const input=snapshot(),p=input.payload,common=sealBackup({role:'common-cli',publicKey:p.publicKey,replies:{'get public.key':'> '+p.publicKey,'get prv.key':'> '+p.privateKey.slice(2),ver:'MeshCore Repeater test','get acl':'empty',region:'empty'},safeForWipe:false});
   const native=await exportNativeBackup(common,options);assert.equal(native.payload.completeness.status,'partial');assert.equal(native.payload.completeness.safe_for_wipe,false);
-  const imported=await parseBackup(JSON.stringify(native),{validatePython:args=>service.call('validateBackup',args)});assert.equal(verifyBackup(imported).role,'common-cli');
+  const imported=await parseBackup(JSON.stringify(native),{validatePython:args=>service.call('validateBackup',args)}),restored=verifyBackup(imported);assert.equal(restored.role,'common-cli');assert.equal(restored.replies['get prv.key'],'> '+p.privateKey.slice(2));assert.equal(restored.replies['get acl'],'empty');assert.equal(restored.replies.region,'empty');assert.equal(restored.nativeCompleteness.safe_for_wipe,false);assert.equal(native.payload.restore_plan.executor_implemented,false);
+});
+
+test('script-shaped CommonCLI settings and separately typed identity/ACL/regions pass the exact validator before browser import',async()=>{
+  const p=snapshot().payload,common=sealBackup({role:'common-cli',publicKey:p.publicKey,replies:{'get public.key':'> '+p.publicKey,'get prv.key':'> '+p.privateKey.slice(2),ver:'MeshCore Repeater test','get role':'> repeater','get name':'> Bench','get acl':'ACL: empty',region:'0: Global'},safeForWipe:false});
+  const original=await exportNativeBackup(common,options),payload=structuredClone(original.payload);
+  payload.sections.settings.data=Object.fromEntries(Object.entries(payload.sections.settings.data).map(([command,value])=>[command,{ok:true,text:value}]));
+  payload.sections.acl.data={raw:'ACL: empty'};payload.sections.regions.data={raw:'0: Global'};
+  const sealed=await service.call('sealBackup',{payload,privateHex:p.privateKey.slice(2),expectedPub:p.publicKey}),raw=JSON.stringify(sealed.archive),imported=await parseBackup(raw,{validatePython:args=>service.call('validateBackup',args)}),restored=verifyBackup(imported);
+  assert.equal(restored.replies['get name'],'> Bench');assert.equal(restored.replies['get prv.key'],'> '+p.privateKey.slice(2));assert.equal(restored.replies['get acl'],'ACL: empty');assert.equal(restored.replies.region,'0: Global');
+  const damaged=structuredClone(sealed.archive);damaged.payload.sections.settings.data['get name'].text='changed';await assert.rejects(()=>parseBackup(JSON.stringify(damaged),{validatePython:args=>service.call('validateBackup',args)}),/digest mismatch/);
 });

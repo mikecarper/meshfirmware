@@ -258,7 +258,7 @@ writing; no blind retry or 1200-baud fallback follows an uncertain handoff.
 | MeshCore companion backup | Private identity when exposed, channels, contacts, settings, battery/storage and optional CLI snapshots; bounded asynchronous pushes tolerated during contact enumeration; completeness shown separately from integrity |
 | MeshCore companion restore | New native-format exports, existing script JSON and legacy browser JSON; exact Python serialization/validation in WASM; model/capacity/key checks, TX/logging readback, deliberate cross-hardware identity replacement |
 | Full Companion text mode | Explicit binary handoff; turning USB logging off requires acknowledgement |
-| CommonCLI repeater/room | Partial read-only snapshot, no automatic restore |
+| CommonCLI repeater/room | Expanded exposed-settings snapshot; Import JSON previews supported settings, then explicitly restores them over the serial console with target checks and readback |
 | OS/tool management | Not a browser operation: no pip/driver installs, Raspberry Pi USB-speed changes or shell execution |
 
 Every web backup is deliberately marked **not wipe-safe**. Unexposed secrets,
@@ -401,7 +401,10 @@ Valid negative TX powers use signed comparisons against the target maximum.
 Legacy browser archives receive contact type, coordinate and path validation
 before any restore write, in addition to checksum and identity checks.
 
-CommonCLI captures remain partial and cannot be automatically restored.
+CommonCLI captures remain partial, but supported settings can be restored through
+this page's **Import JSON** flow below. This does not add CommonCLI restore to
+`restore.cmd`: the native Python archive's executor flag remains false, and the
+browser performs its own reviewed, explicitly confirmed serial operations.
 Missing private identity or unavailable required sections cannot become a
 complete restore merely because the archive checksum is valid. Files are
 downloaded through the browser: the page cannot prove the download reached
@@ -413,6 +416,49 @@ identity and channel secrets. Use **Clear text** to remove the displayed copies;
 the prompt's copy is cleared when it closes. Copying is not proof that a private
 file was saved, and clearing the text does not recall anything already copied
 to the system clipboard or delete a downloaded backup.
+
+### Import JSON and restore repeater settings
+
+Open **Backup & restore → Import JSON**, choose a downloaded script or browser
+backup, then select the target radio's application USB port. Importing only
+validates the archive and displays a **Restore preview**; it does not open a
+serial port or write settings. Review the supported operations and skipped
+settings, then press **Review & restore settings** and confirm with the button.
+The archive stays on this computer. Firmware versions, partition layout, unread
+messages, logs and arbitrary commands embedded in JSON are never restored.
+
+Repeater/CommonCLI backups now read the available core settings plus USB logging,
+logging-always/debug, Bluetooth state/name, CAD settings, RX/FEM gain, RX power
+saving, display rotation, power saving, and locally exposed administrator,
+guest and Wi-Fi credentials. Unsupported or failed queries are identified rather
+than silently marked complete. Contact/channel inventories are not applicable
+to this role. Regions and other unstructured snapshots remain available for
+manual comparison; a recognized ACL can be merged without deleting existing
+target permissions. No setting absent from the original backup is invented.
+
+Restore uses allowlisted getter/setter pairs, never the archive's command text or
+`restore_method` metadata as a script. It checks the selected target's public
+identity, role and available board model, probes supported settings before
+writing, and reads each applied value back. Unsupported target settings are
+reported and skipped; malformed values, rejected commands, transport failures
+or changed target identity stop further writes. A restore is not atomic: earlier
+settings may already have changed when a later step fails. The report lists
+restored, unchanged and skipped items without exposing saved secrets.
+
+**Moving to different hardware** must be selected deliberately; hardware-specific
+TX power, gain/CAD, RX power-saving, display and power-saving preferences are
+retained on the new board rather than copied blindly. **Explicitly replace the
+target identity** is a separate unchecked choice. If CommonCLI accepts a saved
+private identity replacement, it is staged until a **manual reboot**; the page
+does not reboot the radio or claim the replacement is already active. Reconnect
+after reboot and verify the expected identity before using that radio.
+
+The current primary-radio getter returns its frequency/BW/SF/CR tuple but not a
+saved custom preamble. The preview warns that restoring this tuple selects the
+firmware's **automatic preamble**; it cannot reconstruct an unexported custom
+length. Secondary-radio preamble and other settings are restored only when their
+saved replies can be parsed and the target supports them. Backups remain logical
+and **not wipe-safe**, even when every supported restore operation succeeds.
 
 ### Settings-preserving partition expansion
 
