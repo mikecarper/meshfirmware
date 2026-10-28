@@ -120,7 +120,6 @@ input[type=checkbox] { accent-color: var(--teal); vertical-align: middle; }
 #image-warning { color: #9e3c2e; margin-top: 8px; }
 #expert-fields { border: 1px solid #ecd6bd; border-radius: 7px; background: #fff8ed; padding: 0 14px 12px; margin-top: 12px; }
 .review-actions { display: flex; align-items: center; gap: 10px; justify-content: flex-start; flex-wrap: wrap; margin-top: 12px; }
-.review-actions > p { margin: 0; font-size: 11px; color: var(--muted); line-height: 1.6; }
 .review-actions button { min-width: 160px; }
 .review-actions .step-button { min-width: 205px; }
 progress { width: 100%; height: 5px; accent-color: var(--teal); margin-top: 14px; }
@@ -171,13 +170,15 @@ dialog { border: 1px solid var(--line); border-radius: 12px; max-width: 560px; m
 dialog::backdrop { background: #101c2ccc; backdrop-filter: blur(3px); }
 dialog h2 { font-size: 21px; }
 dialog p { font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
-#question-dialog:has(#question-backup-json-view:not([hidden])) { max-width: 720px; padding: 22px; }
+#question-dialog:has(#question-backup-json-view:not([hidden])) { max-width: 900px; padding: 22px; }
 #question-dialog:has(#question-backup-json-view:not([hidden])) form { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 0 9px; }
-#question-dialog:has(#question-backup-json-view:not([hidden])) h2 { flex-basis: 100%; margin: 0 0 8px; }
+#question-dialog:has(#question-backup-json-view:not([hidden])) h2 { flex-basis: 100%; margin: 0 0 8px; font-size: 26px; }
+#question-dialog:has(#question-backup-json-view:not([hidden])) p, #question-dialog:has(#question-backup-json-view:not([hidden])) label, #question-dialog:has(#question-backup-json-view:not([hidden])) button { font-size: 16px; line-height: 1.5; }
 #question-backup-json-view:not([hidden]) { display: contents; }
-#question-backup-json-view > label, #question-backup-json-warning, #question-backup-json, #question-backup-json-status { flex-basis: 100%; }
+#question-backup-json-view > label, #question-backup-json-warning, #question-backup-summary, #question-backup-json, #question-backup-json-status { flex-basis: 100%; }
 #question-backup-json-view > label { margin-top: 0; }
-#question-backup-json { min-height: 160px; height: min(45dvh, 360px); }
+#question-backup-summary { color: #9e3c2e; }
+#question-backup-json { min-height: 160px; height: min(45dvh, 360px); font-size: 16px; line-height: 1.6; }
 #question-backup-json-status { order: 1; }
 #question-backup-json-status:empty { display: none; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
@@ -208,7 +209,6 @@ dialog p { font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
   .device-display svg { width: 27px; }
   .device-display > .tag { font-size: 9px; padding: 5px 6px; }
   .firmware-fields { gap: 0 10px; grid-template-columns: 1fr 1fr; }
-  .review-actions > p { flex-basis: 100%; }
   .review-actions button { flex: 0 1 auto; min-width: 0; padding: 11px 10px; }
   .review-actions .step-button { width: 100%; min-width: 0; }
   .disclosure > summary { padding: 14px 15px; }

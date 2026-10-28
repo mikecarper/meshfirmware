@@ -103,8 +103,22 @@ test('USB and flash actions precede non-action badges and explanatory copy',()=>
   const usb=get('select-port'),badge=get('browser-status'),prepare=get('prepare'),flash=get('flash');
   assert.equal(usb.parent,badge.parent);assert.ok(usb.start<badge.start,'USB must be the leftmost header control');
   assert.equal(prepare.parent,flash.parent);assert.ok(prepare.start<flash.start);
-  const explanation=prepare.parent.children.find(node=>node.tag==='p');
-  assert.ok(explanation);assert.ok(flash.start<explanation.start,'Explanation must not push the main actions away from the left edge');
+  assert.ok(prepare.parent.children.every(node=>node.tag==='button'),'The action row must contain only its two buttons');
+  assert.ok(get('workflow-guidance').start>get('progress-label').start,'Explanatory copy belongs below progress, not beside the buttons');
+});
+
+test('backup progress and its status precede explanatory text and visible firmware warnings',()=>{
+  const workflow=nodes.find(node=>hasClass(node,'workflow')),actions=get('prepare').parent,bar=get('progress'),status=get('progress-label');
+  assert.equal(actions.parent,workflow);assert.equal(bar.parent,workflow);assert.equal(status.parent,workflow);
+  const actionIndex=workflow.children.indexOf(actions),barIndex=workflow.children.indexOf(bar);
+  assert.deepEqual(workflow.children.slice(actionIndex+1,barIndex),[get('stop-migration-auto')],'Only the conditional stop control may appear between buttons and progress');
+  assert.equal(workflow.children[barIndex+1],status,'Current operation status must stay directly below its progress bar');
+  const detailIds=['workflow-guidance','install-mode-hint','automatic-summary','image-name','image-warning'];
+  for(const id of detailIds){const node=get(id);assert.ok(inside(node,workflow));assert.ok(node.start>status.start,`#${id} must be below backup progress/status`);assert.equal(closedAncestors(node).length,0,`#${id} must not be hidden in optional details`);}
+  assert.ok(get('firmware-details').start>get('image-warning').start,'Optional release details stay after visible warnings');
+  assert.equal(get('workflow-guidance').tag,'p');assert.ok(hasClass(get('workflow-guidance'),'hint'));
+  assert.equal(get('image-warning').attrs['aria-live'],'polite');assert.equal(get('install-mode-switch').attrs['aria-describedby'],'install-mode-hint');
+  assert.match(html.slice(get('workflow-guidance').start).split('</p>')[0],/Step 3 offers a backup/);
 });
 
 test('main and optional action groups keep left alignment at every breakpoint',()=>{
@@ -115,7 +129,7 @@ test('main and optional action groups keep left alignment at every breakpoint',(
 });
 
 test('action buttons are not pushed right by auto margins or stretched to fill their row',()=>{
-  for(const selector of ['.review-actions > p','.card-title > button','.primary span'])for(const rule of declarationsFor(selector))for(const property of ['margin','margin-left','margin-right']){
+  for(const selector of ['#workflow-guidance','.card-title > button','.primary span'])for(const rule of declarationsFor(selector))for(const property of ['margin','margin-left','margin-right']){
     assert.ok(!/\bauto\b/.test(rule[property]||''),`${selector} ${property} cannot push user actions right`);
   }
   for(const selector of ['.inline-actions > .secondary','.review-actions button','#select-port','.console-input input'])for(const rule of declarationsFor(selector))if(Object.hasOwn(rule,'flex')){
@@ -188,13 +202,35 @@ test('backup JSON copy and tools-only clear remain usable without submitting the
   assert.ok(rules.some(rule=>rule.resize==='vertical'&&/monospace/.test(rule['font-family']||'')),'JSON should be legible and vertically resizable');
 });
 
-test('the backup popup has one Copy text action beside the dynamic Close action and no clear or save controls',()=>{
+test('the backup popup has one Copy text action beside dynamic Stop and Continue actions without clear or save controls',()=>{
   const view=get('question-backup-json-view'),copy=get('copy-question-backup-json'),actions=get('question-actions'),dialog=get('question-dialog');
   const buttons=nodes.filter(node=>node.tag==='button'&&inside(node,view));assert.deepEqual(buttons,[copy]);assert.ok(!byId.has('clear-question-backup-json'));
   assert.match(html.slice(copy.start).split('</button>')[0],/>Copy text$/);assert.ok(hasClass(copy,'primary'));
-  assert.ok(inside(actions,dialog));assert.equal(actions.children.length,0,'Close is created for the active prompt, not a second static save acknowledgement');
+  assert.ok(inside(actions,dialog));assert.equal(actions.children.length,0,'Stop and Continue are created for the active prompt, not a second static save acknowledgement');
   const dialogRule='#question-dialog:has(#question-backup-json-view:not([hidden])) form';
   assert.ok(declarationsFor(dialogRule).some(rule=>rule.display==='flex'&&rule['flex-wrap']==='wrap'),'Backup actions share a wrapping row');
-  assert.ok(declarationsFor('#question-backup-json-view:not([hidden])').some(rule=>rule.display==='contents'),'Copy and Close must remain adjacent in the same form layout');
-  assert.ok(declarationsFor('#question-backup-json').some(rule=>rule.height==='min(45dvh, 360px)'),'Backup text stays scrollable within short screens');
+  assert.ok(declarationsFor('#question-backup-json-view:not([hidden])').some(rule=>rule.display==='contents'),'Copy, Stop and Continue must remain adjacent in the same wrapping form layout');
+  assert.ok(declarationsFor('#question-backup-json').some(rule=>/^min\(\d+(?:\.\d+)?dvh,\s*\d+px\)$/.test(rule.height||'')),'Backup text stays bounded by the viewport and an explicit pixel ceiling');
+});
+
+test('a partial-backup warning has a brief readable place in the same copy popup',()=>{
+  const summary=get('question-backup-summary'),view=get('question-backup-json-view');
+  assert.equal(summary.tag,'p');assert.ok(inside(summary,view));assert.ok(has(summary,'hidden'),'No partial-backup warning is shown before a capture is classified');
+  assert.ok(summary.start<get('question-backup-json').start,'The concise partial warning must precede its backup text');
+  assert.equal(closedAncestors(summary).length,0,'The warning cannot depend on opening optional details');
+  assert.ok(declarationsFor('#question-backup-summary').some(rule=>rule['flex-basis']==='100%'),'The partial warning needs its own full-width row');
+  assert.equal(html.slice(summary.start).split('>')[1].split('</p')[0],'','Static HTML cannot pre-classify the backup or expose captured data');
+});
+
+test('backup popup JSON and controls use larger text without overflowing phones',()=>{
+  const popup='#question-dialog:has(#question-backup-json-view:not([hidden]))';
+  for(const selector of ['#question-backup-json',`${popup} p`,`${popup} label`,`${popup} button`]){
+    const sizes=declarationsFor(selector).filter(rule=>Object.hasOwn(rule,'font-size')).map(rule=>rule['font-size']);
+    assert.ok(sizes.length,`Missing enlarged text for ${selector}`);assert.ok(sizes.every(size=>/^\d+(?:\.\d+)?px$/.test(size)&&parseFloat(size)>=16),`${selector} needs at least 16px readable text, including responsive overrides`);
+  }
+  const headings=declarationsFor(`${popup} h2`).filter(rule=>rule['font-size']);assert.ok(headings.some(rule=>parseFloat(rule['font-size'])>=26),'The popup heading should scale with its larger content');
+  assert.ok(declarationsFor(popup).some(rule=>parseFloat(rule['max-width'])>=900),'The enlarged text needs a wider desktop popup');
+  assert.ok(declarationsFor('dialog').some(rule=>rule.width==='calc(100% - 30px)'&&rule['max-height']==='calc(100dvh - 30px)'&&rule.overflow==='auto'),'The dialog must still fit and scroll on phones');
+  assert.ok(declarationsFor('.backup-json').some(rule=>rule.width==='100%'&&rule['max-width']==='100%'&&rule['min-width']==='0'&&rule.overflow==='auto'),'Large JSON remains within its scrollable text box');
+  assert.ok(has(get('question-backup-json'),'readonly'),'Increasing readability must not make the backup editable');
 });

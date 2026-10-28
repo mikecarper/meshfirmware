@@ -175,12 +175,13 @@ function confirm(title, detail, warning, token) {
   return new Promise(resolve => dialog.addEventListener('close',() => resolve(dialog.returnValue === 'confirm' && $('confirm-token').value === token),{once:true}));
 }
 function download(name, bytes, type = 'application/octet-stream') { const url = URL.createObjectURL(new Blob([bytes],{type})); const a = document.createElement('a'); a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url),30000); }
-function choose(title,detail,buttons,{backupJson=null}={}) {
+function choose(title,detail,buttons,{backupJson=null,backupWarning=''}={}) {
   $('question-title').textContent=title;$('question-detail').textContent=backupJson?'':detail;$('question-detail').hidden=!!backupJson;
   state.backupTextGeneration++;
   $('question-backup-json-view').hidden=!backupJson;$('question-backup-json').value=backupJson||'';$('question-backup-json-status').textContent='';
-  const form=$('question-actions');form.replaceChildren(...buttons.map(([value,label])=>{const button=document.createElement('button');button.value=value;button.textContent=label;button.className=value==='backup'?'primary':'secondary';return button;}));
-  const dialog=$('question-dialog');dialog.returnValue='cancel';dialog.showModal();return new Promise(resolve=>dialog.addEventListener('close',()=>{state.backupTextGeneration++;$('question-backup-json').value='';$('question-backup-json-view').hidden=true;resolve(dialog.returnValue);},{once:true}));
+  $('question-backup-summary').textContent=backupJson?backupWarning:'';$('question-backup-summary').hidden=!backupJson||!backupWarning;
+  const form=$('question-actions');form.replaceChildren(...buttons.map(([value,label])=>{const button=document.createElement('button');button.value=value;button.textContent=label;button.className=['backup','continue'].includes(value)?'primary':'secondary';return button;}));
+  const dialog=$('question-dialog');dialog.returnValue='cancel';dialog.showModal();return new Promise(resolve=>dialog.addEventListener('close',()=>{state.backupTextGeneration++;$('question-backup-json').value='';$('question-backup-json-view').hidden=true;$('question-backup-summary').textContent='';$('question-backup-summary').hidden=true;resolve(dialog.returnValue);},{once:true}));
 }
 function persistFlow(field,key) { if(state[field])localStorage.setItem(key,JSON.stringify(state[field]));else localStorage.removeItem(key); }
 function persistEspRecovery(){try{persistFlow('espRecovery','meshfirmware.espRecovery');}catch{log(state.espRecovery?'ESP retry state could not be saved in browser storage. It remains in memory only; keep this page open until recovery finishes.':'The old ESP retry record could not be removed from browser storage and may reappear after reload. Keep this page open and review any stale retry record before another operation.');}}
@@ -312,6 +313,7 @@ async function detectSelectedBoard() {
 function clearBackupJson(){
   state.backupTextGeneration++;
   for(const prefix of ['backup','question-backup']){$(`${prefix}-json`).value='';$(`${prefix}-json-view`).hidden=true;$(`${prefix}-json-status`).textContent='';}
+  $('question-backup-summary').textContent='';$('question-backup-summary').hidden=true;
   if(state.backup)delete state.backup.json;
 }
 async function copyBackupJson(prefix){
@@ -356,10 +358,10 @@ async function ensureBackup() {
       let result;try{result=await captureBackup();}catch(error){if(!await confirm('Backup did not complete',error.message,'No reset or write has occurred. Continue only if you accept having no complete backup.','CONTINUE WITHOUT BACKUP'))throw error;}
       if(result){
         const port=state.port,generation=state.generation,pkg=state.pkg;
-        const answer=await choose('Backup JSON','',[['close','Close']],{backupJson:result.json});
-        if(answer!=='close')fail('Backup window dismissed. Preparation cancelled before reset or flash.');
+        const answer=await choose('Backup JSON','',[['stop','Stop'],['continue','Continue with flashing']],{backupJson:result.json,backupWarning:result.summary.complete===false?'Partial backup: automatic restore is unavailable. An erase is not protected by this backup.':''});
+        if(answer!=='continue')fail('Backup stopped. Preparation cancelled before reset or flash.');
         if(state.backup!==result||result.port!==state.port||state.port!==port||state.generation!==generation||state.pkg!==pkg)fail('Selected device or firmware changed while the backup window was open. Prepare again.');
-        if(result.summary.complete===false&&!await confirm('Continue with a partial backup?',summaryText(result.summary),'A partial logical archive cannot authorize a wipe.','CONTINUE WITH PARTIAL BACKUP'))fail('Partial-backup continuation cancelled.');}
+      }
     } else if(answer!=='skip')fail('Cancelled before reset or flash.');
     if(!state.device)try{await linkOperation(readApplication);}catch(error){log(`Application identity unavailable: ${error.message}`);}
   }

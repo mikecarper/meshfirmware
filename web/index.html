@@ -38,14 +38,15 @@
         <fieldset id="install-mode-switch" class="mode-switch" aria-describedby="install-mode-hint"><legend><span class="sr-only">Step 2: </span>Installation</legend><div class="mode-step"><span class="action-number" aria-hidden="true">2</span><div class="mode-options"><label><input type="radio" id="install-mode-update" name="install-mode" value="update" checked data-lock> Update</label><label><input type="radio" id="install-mode-install" name="install-mode" value="install" data-lock> Erase &amp; new install</label></div></div></fieldset>
         <div class="artifact-field"><label for="artifact">Firmware build</label><select id="artifact" data-lock><option value="">Loading public catalog…</option></select></div>
       </details>
-      <p id="install-mode-hint" class="hint" role="status" aria-live="polite">Update writes the application without a whole-chip erase. Required partition migration is checked separately.</p>
       <div id="expert-fields" hidden><label for="expert-offset">Expert component write offset · required</label><input id="expert-offset" placeholder="For example 0x1000 — use your board's documented offset" spellcheck="false" data-lock><p class="hint">Bootloader/component writes can make USB recovery unavailable. This is not an application update. No offset or compatibility is inferred from the filename; confirmation includes the exact address.</p></div>
-      <div class="review-actions"><button id="prepare" class="primary step-button" aria-label="Step 3: Backup and prepare update" data-lock><span class="action-number" aria-hidden="true">3</span><span id="prepare-label" class="action-label">Backup &amp; prepare update</span></button><button id="flash" class="primary step-button" aria-label="Step 4: Review and flash firmware" disabled data-lock><span class="action-number" aria-hidden="true">4</span><span class="action-label">Review &amp; flash</span><span class="action-icon" aria-hidden="true">→</span></button><p>Step 3 offers a backup; skipping needs your acknowledgement.<br>Step 4 asks once for supported expansion + final firmware, then completes both automatically. A new USB interface may still need step 1.</p></div>
+      <div class="review-actions"><button id="prepare" class="primary step-button" aria-label="Step 3: Backup and prepare update" data-lock><span class="action-number" aria-hidden="true">3</span><span id="prepare-label" class="action-label">Backup &amp; prepare update</span></button><button id="flash" class="primary step-button" aria-label="Step 4: Review and flash firmware" disabled data-lock><span class="action-number" aria-hidden="true">4</span><span class="action-label">Review &amp; flash</span><span class="action-icon" aria-hidden="true">→</span></button></div>
       <button id="stop-migration-auto" class="secondary" hidden>Stop automatic continuation</button>
+      <progress id="progress" value="0" max="1" aria-label="Operation progress"></progress><p id="progress-label" class="hint" aria-live="polite">Waiting for an image and a selected USB port.</p>
+      <p id="workflow-guidance" class="hint">Step 3 offers a backup; skipping needs your acknowledgement.<br>Step 4 asks once for supported expansion + final firmware, then completes both automatically. A new USB interface may still need step 1.</p>
+      <p id="install-mode-hint" class="hint" role="status" aria-live="polite">Update writes the application without a whole-chip erase. Required partition migration is checked separately.</p>
       <p id="automatic-summary" class="selection-summary" aria-live="polite">Keymind Cascade is selected by default. Connecting selects matching hardware and the newest compatible update when unambiguous.</p>
       <div class="selected-image"><span>Loaded image</span><strong id="image-name">No image loaded</strong></div>
       <p id="image-warning" class="hint" aria-live="polite"></p>
-      <progress id="progress" value="0" max="1" aria-label="Operation progress"></progress><p id="progress-label" class="hint" aria-live="polite">Waiting for an image and a selected USB port.</p>
       <details id="firmware-details"><summary>Firmware details</summary><p id="catalog-detail" class="hint"></p></details>
     </section>
 
@@ -102,6 +103,7 @@ No hardware operations have been performed.</pre><div class="console-input"><lab
     <div id="question-backup-json-view" class="backup-json-view" hidden>
       <label for="question-backup-json">Backup JSON</label>
       <p id="question-backup-json-warning" class="hint">Contains private identity and channel secrets. Keep it private.</p>
+      <p id="question-backup-summary" class="hint" role="status" aria-live="polite" hidden></p>
       <textarea id="question-backup-json" class="backup-json" rows="10" readonly spellcheck="false" autocomplete="off" aria-describedby="question-backup-json-warning"></textarea>
       <div class="inline-actions"><button id="copy-question-backup-json" class="primary" type="button">Copy text</button></div>
       <p id="question-backup-json-status" class="hint" role="status" aria-live="polite"></p>
