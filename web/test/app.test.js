@@ -574,6 +574,28 @@ test('Stop or Escape on either complete or partial backup prevents preparation a
   }
 });
 
+test('nRF52 backup Continue enters DFU once without another typed prompt and Stop sends no reset',async()=>{
+  for(const answer of ['continue','stop','cancel']){
+    const ui=await backupJsonWorkbench();ui.context.pkg=fakePackage({architecture:'nrf52',kind:'application'});ui.evaluate('state.pkg=pkg;');ui.elements.get('auto-backup').checked=true;ui.elements.get('transport-mode').value='nrf52';
+    ui.context.backupSummary=()=>({complete:false,privateIdentity:true,reasons:[]});
+    ui.context.choose=async(title,_detail,buttons,options)=>{assert.equal(title,'Backup JSON');assert.deepEqual(Array.from(buttons,pair=>Array.from(pair)),[['stop','Stop'],['continue','Continue with flashing']]);assert.match(options.backupWarning,/partial backup/i);return answer;};
+    ui.context.confirm=async()=>{throw Error('nRF52 DFU entry must not ask for another typed confirmation');};
+    ui.context.touch1200=async(port,mode)=>{assert.equal(port,ui.port);assert.equal(mode,'nrf52');ui.calls.push('enter-dfu');};ui.context.flashNrf=async()=>{throw Error('DFU entry is not permission to write firmware');};
+    await ui.elements.get('prepare').onclick();
+    assert.deepEqual(ui.calls,answer==='continue'?['open','capture-backup','close','enter-dfu']:['open','capture-backup','close'],answer);
+    assert.equal(ui.evaluate('state.plan'),null,answer);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg,answer);
+    if(answer==='continue'){assert.equal(ui.evaluate('state.port'),null);assert.equal(ui.evaluate('state.handoff'),true);assert.match(ui.elements.get('notice').textContent,/same radio.*DFU serial port/i);}
+    else{assert.equal(ui.evaluate('state.port'),ui.port);assert.match(ui.elements.get('notice').textContent,/Backup stopped/);}
+  }
+});
+
+test('explicit nRF52 Enter USB bootloader uses the considered backup without a repeated typed entry prompt',async()=>{
+  const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.evaluate('state.port=selectedPort;');ui.elements.get('transport-mode').value='nrf52';
+  ui.context.ensureBackup=async()=>ui.calls.push('backup-considered');ui.context.confirm=async()=>{throw Error('Explicit DFU action must not ask for another typed confirmation');};
+  ui.context.touch1200=async(port,mode)=>{assert.equal(port,ui.port);assert.equal(mode,'nrf52');ui.calls.push('enter-dfu');};
+  await ui.elements.get('touch').onclick();assert.deepEqual(ui.calls,['backup-considered','enter-dfu']);assert.equal(ui.evaluate('state.port'),null);assert.equal(ui.evaluate('state.handoff'),true);assert.equal(ui.evaluate('state.plan'),null);
+});
+
 test('partial backup warning belongs to its active popup only and never leaks into a generic question',async()=>{
   const ui=await backupJsonWorkbench();await ui.elements.get('backup').onclick();ui.context.json=ui.downloads[0].json;let close;
   ui.context.document.createElement=()=>({});ui.elements.get('question-dialog').addEventListener=(_event,handler)=>{close=handler;};
@@ -1319,6 +1341,41 @@ test('four-step guidance keeps mode selection at 2, backup at 3 and final confir
     assert.match(flash,/step\s*4/i);assert.match(flash,/review|flash/i);assert.match(flash,/confirm/i);
   }
   assert.deepEqual(ui.calls,[]);
+});
+
+test('a required firmware-build choice is highlighted and revealed without choosing, focusing or opening USB',async()=>{
+  const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.inventory=[v4Item];
+  const highlights=[],aria=[];ui.elements.get('artifact-field').classList.toggle=(name,value)=>highlights.push([name,value]);ui.elements.get('artifact').setAttribute=(name,value)=>aria.push([name,value]);
+  ui.elements.get('artifact').focus=()=>{throw Error('A required choice must not steal keyboard focus');};
+  ui.evaluate('state.items=inventory;state.port=selectedPort;filterCatalog();');ui.elements.get('firmware-choices').open=false;ui.evaluate('controls();');
+  assert.deepEqual(highlights.at(-1),['choice-required',true]);assert.deepEqual(aria.at(-1),['aria-required','true']);assert.equal(ui.elements.get('artifact-required').hidden,false);assert.equal(ui.elements.get('artifact-choice-hint').hidden,false);assert.equal(ui.elements.get('firmware-choices').open,true);
+  assert.equal(ui.elements.get('artifact').value,'');assert.equal(ui.elements.get('prepare').disabled,true);assert.deepEqual(ui.calls,[]);
+});
+
+test('selecting a firmware build clears the highlight immediately and clearing the choice restores it',async()=>{
+  const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.inventory=[v4Item];ui.evaluate('state.items=inventory;state.port=selectedPort;filterCatalog();');
+  const highlights=[],aria=[];ui.elements.get('artifact-field').classList.toggle=(name,value)=>highlights.push([name,value]);ui.elements.get('artifact').setAttribute=(name,value)=>aria.push([name,value]);
+  ui.elements.get('artifact').value='0';await ui.elements.get('artifact').onchange();
+  assert.deepEqual(highlights.at(-1),['choice-required',false]);assert.deepEqual(aria.at(-1),['aria-required','false']);assert.equal(ui.elements.get('artifact-choice-hint').hidden,true);assert.equal(ui.elements.get('artifact-required').hidden,true);assert.equal(ui.elements.get('prepare').disabled,false);
+  ui.elements.get('artifact').value='';await ui.elements.get('artifact').onchange();assert.deepEqual(highlights.at(-1),['choice-required',true]);assert.equal(ui.elements.get('prepare').disabled,true);assert.deepEqual(ui.calls,[]);
+});
+
+test('build highlights do not claim a choice is needed for custom images, idle pages or pending device flows',async()=>{
+  for(const scenario of ['disconnected','busy','custom','empty','migration','recovery','esp-recovery','verification','handoff','approval']){
+    const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.inventory=[v4Item];ui.context.pkg=fakePackage();ui.evaluate('state.items=inventory;state.port=selectedPort;filterCatalog();');
+    if(scenario==='disconnected')ui.evaluate('state.port=null;');
+    if(scenario==='busy')ui.evaluate('state.busy=true;');
+    if(scenario==='custom')ui.evaluate('state.pkg=pkg;');
+    if(scenario==='empty')ui.elements.get('artifact').options=[new ui.context.Option('No files','')];
+    if(scenario==='migration')ui.evaluate('state.migration={};');
+    if(scenario==='recovery')ui.evaluate('state.recovery={};');
+    if(scenario==='esp-recovery')ui.evaluate('state.espRecovery={};');
+    if(scenario==='verification')ui.evaluate('state.verification={};');
+    if(scenario==='handoff')ui.evaluate('state.handoff=true;');
+    if(scenario==='approval')ui.evaluate('state.migrationApproval={};');
+    const highlights=[];ui.elements.get('artifact-field').classList.toggle=(name,value)=>highlights.push([name,value]);ui.elements.get('firmware-choices').open=false;ui.evaluate('updateArtifactChoiceHighlight();');
+    assert.deepEqual(highlights.at(-1),['choice-required',false],scenario);assert.equal(ui.elements.get('artifact-choice-hint').hidden,true,scenario);assert.equal(ui.elements.get('artifact-required').hidden,true,scenario);assert.equal(ui.elements.get('firmware-choices').open,false,scenario);assert.deepEqual(ui.calls,[],scenario);
+  }
 });
 
 // Real immutable byte/table proofs, with all USB and timers supplied by mocks.

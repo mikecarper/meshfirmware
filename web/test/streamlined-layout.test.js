@@ -99,6 +99,35 @@ function assertProperty(selector,property,expected){
   for(const value of values)assert.equal(value,expected,`${selector} ${property} must remain left-aligned, including responsive overrides`);
 }
 
+test('the firmware build picker has adjacent accessible selection guidance without stealing focus',()=>{
+  const field=get('artifact-field'),picker=get('artifact'),hint=get('artifact-choice-hint'),badge=get('artifact-required'),choices=get('firmware-choices');
+  assert.equal(field.tag,'div');assert.ok(hasClass(field,'artifact-field'));assert.ok(inside(field,choices));
+  assert.ok(!hasClass(field,'choice-required'),'A missing-choice highlight must be computed from current state, not shown unconditionally');
+  assert.equal(picker.parent,field);assert.equal(picker.tag,'select');assert.ok(!has(picker,'required'),'A deliberate custom file can satisfy the firmware requirement without a catalog choice');
+  assert.ok(!has(picker,'aria-required')||picker.attrs['aria-required']==='false','Required state must be computed dynamically, not forced for every workflow');
+  assert.ok((picker.attrs['aria-describedby']||'').split(/\s+/).includes(hint.attrs.id),'Screen readers must receive the same selection prompt');
+  assert.equal(hint.parent,field);assert.ok(hint.start>picker.start,'Selection guidance must follow its own picker');
+  assert.equal(hint.tag,'p');assert.ok(hasClass(hint,'hint'));assert.equal(hint.attrs.role,'status');assert.equal(hint.attrs['aria-live'],'polite');assert.ok(has(hint,'hidden'),'Guidance starts hidden until a choice is needed');
+  assert.match(html.slice(hint.start).split('</p>')[0],/Choose a firmware build to continue/);
+  assert.equal(badge.tag,'span');assert.ok(has(badge,'hidden'));assert.equal(badge.parent.tag,'label');assert.equal(badge.parent.attrs.for,picker.attrs.id);assert.match(html.slice(badge.start).split('</span>')[0],/>Selection needed$/);
+  assert.equal(closedAncestors(picker).length,0);assert.equal(closedAncestors(hint).length,0);
+  assert.ok(!has(picker,'autofocus')&&!has(field,'tabindex'),'Highlighting a missing build must not move focus or add a fake control');
+});
+
+test('missing-build highlighting is scoped to the required field and preserves keyboard focus',()=>{
+  const panel=declarationsFor('.artifact-field.choice-required'),picker=declarationsFor('.artifact-field.choice-required select');
+  assert.ok(panel.some(rule=>Object.hasOwn(rule,'background')||Object.hasOwn(rule,'background-color')),'The required build needs a visible background');
+  assert.ok(panel.some(rule=>Object.hasOwn(rule,'border')||Object.hasOwn(rule,'border-color')),'The required build needs a visible boundary');
+  assert.ok(picker.some(rule=>Object.hasOwn(rule,'border')||Object.hasOwn(rule,'border-color')),'The picker itself must be visibly highlighted');
+  const requiredRules=styleRules.filter(rule=>rule.selectors.some(selector=>selector.includes('choice-required')));
+  for(const rule of requiredRules){
+    assert.ok(rule.selectors.every(selector=>selector.includes('.artifact-field.choice-required')),'Required highlighting must not recolor unrelated inputs');
+    assert.ok(!Object.hasOwn(rule.declarations,'animation'),'The required field should not flash or pulse');
+    assert.ok(!/^(?:none|0)(?:\s|$)/.test(rule.declarations.outline||''),'Required styling must not erase focus outlines');
+  }
+  assert.ok(declarationsFor('select:focus-visible').some(rule=>/^[1-9]\d*(?:\.\d+)?px\s+solid\s+/.test(rule.outline||'')),'Keyboard users must retain a visible focus ring');
+});
+
 test('USB and flash actions precede non-action badges and explanatory copy',()=>{
   const usb=get('select-port'),badge=get('browser-status'),prepare=get('prepare'),flash=get('flash');
   assert.equal(usb.parent,badge.parent);assert.ok(usb.start<badge.start,'USB must be the leftmost header control');

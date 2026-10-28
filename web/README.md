@@ -110,6 +110,9 @@ visible. The top navigation opens the corresponding tools without touching USB.
    normal flash review; it does not write firmware or claim the file was saved.
    The JSON download still starts automatically. Keep the download or copied
    text privately. Failed backups still need separate acknowledgement.
+   nRF52 continues directly into serial DFU after backup continuation, without
+   another typed bootloader-entry prompt. Re-select the same radio's DFU port
+   when asked; the final flash/wipe and board checks still apply.
    A copy and backup-only button remain available under Backup & restore.
    Lengthy release notes stay in the collapsed **Firmware details** section.
 4. Review the exact file, operation, target evidence and hash, then type the

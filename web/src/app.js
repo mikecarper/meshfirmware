@@ -104,6 +104,14 @@ function updateStepGuidance(){
   else message='Step 3: Backup & prepare. Follow the backup prompts and USB-port instructions; step 4 flashes only after confirmation.';
   $('step-guidance').textContent=message;
 }
+function updateArtifactChoiceHighlight(){
+  const picker=$('artifact'),hasChoices=[...picker.options].some(option=>option.value!==''&&!option.disabled);
+  const needed=!!state.port&&!state.busy&&!state.pkg&&!picker.value&&hasChoices&&!continuingDeviceFlow();
+  $('artifact-field').classList.toggle('choice-required',needed);
+  $('artifact-required').hidden=!needed;$('artifact-choice-hint').hidden=!needed;
+  picker.setAttribute('aria-required',String(needed));
+  if(needed)$('firmware-choices').open=true;
+}
 function controls() {
   document.querySelectorAll('[data-lock]').forEach(el => { el.disabled = state.busy; });
   $('select-port').disabled ||= !('serial' in navigator);
@@ -122,6 +130,7 @@ function controls() {
   $('retry').disabled ||= !state.port||!state.pkg;
   syncInstallMode();
   updateStepGuidance();
+  updateArtifactChoiceHighlight();
   updateBootloaderOffer();
   // Extras stay collapsed for ordinary updates, but never conceal a required
   // recovery/migration step or a deliberately selected destructive action.
@@ -660,7 +669,7 @@ $('touch').onclick = () => operation(async () => {
   if (!['tinyusb','nrf52'].includes(mode)) fail('Use this only for TinyUSB applications or nRF52 runtime. Other modes enter ROM during inspection.');
   if (dfuIds.has(portId(state.port))) fail('Already a known DFU port; no 1200-baud touch is needed.');
   await ensureBackup();
-  if (!await confirm('Enter USB bootloader?','This resets the selected application USB interface. A new port may appear.','Bluetooth may disconnect. Select the same physical device again after the touch.','ENTER BOOTLOADER')) return;
+  if (mode!=='nrf52'&&!await confirm('Enter USB bootloader?','This resets the selected application USB interface. A new port may appear.','Bluetooth may disconnect. Select the same physical device again after the touch.','ENTER BOOTLOADER')) return;
   await closeEsp();state.handoff=true; try { await touch1200(state.port,mode); } catch (error) { log(`The touch was interrupted (${error.message}). Delivery is uncertain; no second touch was sent.`); }
   state.handoff=true;state.port = null; state.generation++; $('port-status').textContent = 'Select bootloader port'; $('device-name').textContent = 'USB handoff requested'; notice('Choose USB port again for the same device. Set ESP32 to already in ROM, or select the nRF52 DFU port. If a VM captures the reconnect, pause its USB auto-capture before retrying.');
   if (mode === 'tinyusb') $('transport-mode').value = 'no_reset';
@@ -694,7 +703,6 @@ async function prepareSelectedFirmware({waitForRom=false}={}) {
     if (connectionMode() !== 'nrf52') fail('Select nRF52 DFU mode and its bootloader port.');
     await ensureBackup();
     if(!state.recovery&&!dfuIds.has(portId(state.port))&&!$('already-bootloader').checked){
-      if(!await confirm('Enter nRF52 serial DFU?',state.device?.model||'Selected application interface','Backup was considered before this reset. Choose the same radio’s DFU serial port when it re-enumerates; no drive is used.','ENTER BOOTLOADER'))return;
       state.handoff=true;await touch1200(state.port,'nrf52');state.port=null;state.generation++;$('port-status').textContent='Select DFU port';notice('Choose the same radio’s DFU serial port, then inspect again. For an unlisted bootloader, check Already in bootloader.');return;
     }
     const wipe=!pkg.erase&&(state.recovery?!state.recovery.eraseComplete:pkg.kind==='application'&&$('flash-action').value==='wipe'),erasePkg=wipe?await erasePackage():null;
