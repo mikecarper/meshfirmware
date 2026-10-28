@@ -114,7 +114,7 @@ function syncInstallMode(){
   $('prepare').setAttribute('aria-label',`Step 3: Backup and prepare ${modeLabel}`);
   const locked=installModeLocked();for(const id of ['install-mode-update','install-mode-install'])$(id).disabled=state.busy||locked;
   const component=state.pkg&&(state.pkg.expert||(state.pkg.architecture==='nrf52'&&(state.pkg.kind!=='application'||state.pkg.erase)));
-  $('install-mode-hint').textContent=locked?'Finish the pending USB handoff, recovery, migration or verification before changing the installation mode. The original image and recovery checks are retained.':component?'Advanced component/recovery file loaded. Its own board, offset and destructive-write checks still apply; this switch filters application builds.':state.installMode==='install'?'Erase & new install deletes node identity and settings. ESP32 uses a merged image; nRF52 validates an erase ZIP first, then writes the application after you reselect the same radio.':'Update writes the application without a whole-chip erase. Required partition migration is checked separately.';
+  $('install-mode-hint').textContent=locked?(canStartNewRadio()?'Use Flash a new device to begin another update, or optionally verify the previous device.':'Finish the pending USB handoff, reset, recovery or migration before changing the installation mode. The original image and recovery checks are retained.'):component?'Advanced component/recovery file loaded. Its own board, offset and destructive-write checks still apply; this switch filters application builds.':state.installMode==='install'?'Erase & new install deletes node identity and settings. ESP32 uses a merged image; nRF52 validates an erase ZIP first, then writes the application after you reselect the same radio.':'Update writes the application without a whole-chip erase. Required partition migration is checked separately.';
   $('install-mode-hint').classList.toggle('mode-warning',state.installMode==='install'||!!component);
 }
 function modePairKey(item){
@@ -123,7 +123,7 @@ function modePairKey(item){
 async function setInstallMode(mode){
   if(!['update','install'].includes(mode))fail('Choose Update or Erase & new install.');
   if(mode===state.installMode)return;
-  if(installModeLocked())fail('Finish the pending handoff, recovery, migration or verification before changing installation mode.');
+  if(installModeLocked())fail(canStartNewRadio()?'Use Flash a new device to begin another update, or optionally verify the previous device.':'Finish the pending handoff, reset, recovery or migration before changing installation mode.');
   const previous=$('artifact').value?state.items[Number($('artifact').value)]:state.item?.role?state.item:null;
   clearAutomaticSha();await clearFirmwareSelection();state.handoff=false;state.installMode=mode;syncInstallMode();filterCatalog();
   const pairs=previous?state.items.map((item,index)=>({item,index})).filter(({item})=>matchesCatalogInstallMode(item,mode)&&modePairKey(item)===modePairKey(previous)):[];
@@ -147,6 +147,7 @@ function updateStepGuidance(buildChoiceNeeded=false){
   let message;
   if(state.migrationApproval)message=state.busy?'Automatically completing the approved expansion and final firmware. Keep USB and power connected.':'Automatic completion is waiting for the same radio. Its granted USB port resumes automatically; if it does not return, use step 1 to select it. No Prepare/Flash presses are needed.';
   else if(state.busy)message='Follow the current prompt. Keep the radio connected and power stable.';
+  else if(canStartNewRadio())message='Next: Flash a new device, or optionally verify the previous radio’s startup.';
   else if(state.verification)message=state.port?'Follow the verification controls to restart verified firmware, then use step 1 for its application port and startup check.':'Step 1 again: choose the same radio’s application port to check that the new firmware started.';
   else if(state.plan?.written)message='Transfer finished; startup is not yet verified. Follow the verification controls before starting another update.';
   else if(state.recovery?.phase==='reselect-dfu'||(state.handoff&&!state.port))message='Step 1 again: choose the same radio’s requested USB port. '+($('skip-backup').checked?'Then step 4: Review & flash without backup; preparation and device checks still run.':'Then repeat step 3: Backup & prepare before step 4: Flash.');
@@ -172,14 +173,20 @@ function updateArtifactChoiceHighlight(){
 function updateReconnectCallout(){
   const waitingApproval=state.migrationApproval&&['waiting-rom','waiting-application'].includes(state.migrationApproval.phase);
   const application=!!state.verification||state.migrationApproval?.phase==='waiting-application';
+  const nextDevice=canStartNewRadio(),ready=nextDevice&&!state.busy;
   const verificationNeedsPort=application&&(!state.port||dfuIds.has(portId(state.port))||$('already-bootloader').checked)&&!state.esp&&!state.plan?.written;
-  const needed=!state.busy&&((!state.port&&!!(state.handoff||state.recovery||state.espRecovery||state.verification||state.migration||waitingApproval))||verificationNeedsPort);
+  const needed=!state.busy&&!nextDevice&&((!state.port&&!!(state.handoff||state.recovery||state.espRecovery||state.verification||state.migration||waitingApproval))||verificationNeedsPort);
   const verified=!state.busy&&!state.verification&&state.finishedFirmware?.verified&&(!state.pkg||state.finishedFirmware.sha256===state.pkg.sha256);
   const checking=state.autoVerificationRunning;
-  $('flasher').classList.toggle('reconnect-needed',needed||checking);$('flasher').classList.toggle('verification-complete',!!verified);$('reconnect-callout').hidden=!(needed||checking||verified);
-  $('reconnect-title').textContent=verified?'Firmware verified':checking?'Checking firmware startup…':application?'Firmware transferred — verify startup':'Select the same radio again';
-  $('select-port-label').textContent=verified?'Choose another radio':checking?'Verifying firmware…':needed&&application?'Reconnect to verify firmware':needed?'Select the same radio again':'Choose USB port';
-  $('select-port').setAttribute('aria-label',verified?'Optional: choose another radio’s USB port':needed&&application?'Step 1 again: Reconnect the application USB port to verify firmware':needed?'Step 1 again: Select the same radio’s USB port':'Step 1: Choose USB port');
+  $('start-new-radio').hidden=!state.verification;$('start-new-radio').disabled=state.busy||!canStartNewRadio();$('new-radio-hint').hidden=!state.verification;
+  $('new-radio-hint').textContent=nextDevice?'Flash another device, or optionally verify the previous radio’s startup.':'Finish the pending write, reset, migration or recovery before changing radios.';
+  $('flasher').classList.toggle('reconnect-needed',needed||checking);$('flasher').classList.toggle('verification-complete',!!verified);$('flasher').classList.toggle('next-device',ready);$('reconnect-callout').hidden=!(needed||checking||verified||ready);
+  $('reconnect-callout').setAttribute('role',ready||verified?'status':'alert');$('reconnect-callout').setAttribute('aria-live',ready||verified?'polite':'assertive');
+  $('reconnect-title').textContent=verified?'Firmware verified':checking?'Checking firmware startup…':ready?'Firmware transferred':application?'Firmware transferred — verify startup':'Select the same radio again';
+  $('select-port-label').textContent=verified?'Flash a new device':checking?'Verifying firmware…':nextDevice?'Verify previous device (optional)':needed&&application?'Reconnect to verify firmware':needed?'Select the same radio again':'Choose USB port';
+  $('select-port').classList.toggle('primary',!nextDevice);$('select-port').classList.toggle('secondary',nextDevice);
+  $('select-port').setAttribute('aria-label',verified?'Step 1: Choose a new device’s USB port':nextDevice?'Optional: Reconnect the previous device’s application USB port to verify firmware':needed&&application?'Step 1 again: Reconnect the application USB port to verify firmware':needed?'Step 1 again: Select the same radio’s USB port':'Step 1: Choose USB port');
+  if(ready)$('reconnect-detail').textContent='The firmware transfer finished. Flash a new device to continue, or optionally reconnect the same radio’s application USB port — not DFU/ROM — to check startup. Its startup has not been verified.';
   if(needed){
     const nrf=state.recovery||state.pkg?.architecture==='nrf52'||$('transport-mode').value==='nrf52';
     $('reconnect-detail').textContent=application?'The transfer finished, but startup is not verified yet. Click below and choose the same radio’s application USB port — not DFU/ROM. Verification starts automatically; it does not flash or reset the radio. The browser requires a fresh click if that interface needs permission.':nrf?'The radio restarted into DFU mode. Click below and select the same radio’s DFU USB port to continue.':'Click below and select the same radio’s returning USB bootloader port to continue. Keep USB and power connected.';
@@ -194,6 +201,40 @@ function canPrepareWithoutBackup(){
   const selected=$('artifact').value,hasImage=!!state.pkg||!!(selected&&state.items[Number(selected)]);
   return $('skip-backup').checked&&hasImage&&!!(state.port||state.pkg?.architecture==='uf2')&&!state.verification&&!state.plan?.written&&!state.migrationApproval&&state.recovery?.phase!=='reselect-dfu';
 }
+function canStartNewRadio(){
+  return !!state.verification&&!state.flashProgress&&!state.autoVerificationRunning&&!state.migrationApproval&&!state.migration&&!state.recovery&&!state.espRecovery&&!state.esp&&!state.plan?.written;
+}
+async function startNewRadio(){
+  // This is a browser-only dismissal, not a hardware operation. In particular,
+  // cancellation/errors must not resume verification or revoke a newer recovery.
+  if(state.busy||!canStartNewRadio())return;
+  state.busy=true;controls();
+  try{
+  const expected=state.verification,expectedJson=JSON.stringify(expected),port=state.port,generation=state.generation,pkg=state.pkg,plan=state.plan,installMode=state.installMode;
+  const recoveryKeys=['meshfirmware.pendingMigration','meshfirmware.nrfRecovery','meshfirmware.espRecovery'],savedRecovery=recoveryKeys.map(key=>localStorage.getItem(key));
+  if(savedRecovery.some(Boolean))fail('A saved write recovery or migration is pending. Reload and review it before starting a new radio.');
+  if(!await confirm('Flash a new device?',expected.name||expected.model||'Previous radio','The previous firmware transfer remains startup-unverified. Only its browser verification reminder and current selections are cleared. No radio is reset, erased or written; downloaded backups and recovery records are kept.','START NEW RADIO'))return;
+  if(state.verification!==expected||JSON.stringify(state.verification)!==expectedJson||state.port!==port||state.generation!==generation||state.pkg!==pkg||state.plan!==plan||state.installMode!==installMode||!canStartNewRadio()||recoveryKeys.some((key,index)=>localStorage.getItem(key)!==savedRecovery[index]))fail('The previous radio’s verification or recovery state changed. No reminder was cleared.');
+  const key='meshfirmware.verifyApplication',saved=localStorage.getItem(key);
+  if(saved){let record;try{record=JSON.parse(saved);}catch{fail('The saved verification reminder changed. Reload and review it before starting a new radio.');}if(JSON.stringify(record)!==JSON.stringify(expected))fail('Another page changed the saved verification reminder. Reload and review it before starting a new radio.');}
+  // Remove only this reminder before unlocking the UI. A storage failure must
+  // leave the current workflow intact, and must never clear recovery records.
+  localStorage.removeItem(key);if(localStorage.getItem(key))fail('The previous verification reminder could not be cleared. The current workflow was retained.');
+  const provider=state.manualSelections.provider;
+  state.verification=null;state.port=null;state.handoff=false;state.device=null;state.detectedHardware=null;state.boardDetected=false;state.connection=null;state.connectionTrial=null;
+  state.knownApplicationPort=null;state.autoVerifyAttempt=null;state.backup=null;state.backupApproved=null;state.recoveryManual=false;state.recoveryDetectionRequested=false;state.manualSelections=provider?{provider}:{};
+  clearBackupJson();invalidateFirmwareSelection();state.installMode='update';$('transport-mode').value='auto';$('already-bootloader').checked=false;$('skip-backup').checked=false;
+  for(const id of ['expected-sha','expert-offset','firmware-file','custom-url'])$(id).value='';
+  $('device-name').textContent='No USB port selected';$('device-meta').textContent='Choose the next radio’s USB port. Board and role are detected after connecting.';$('port-status').textContent='Not connected';
+  $('backup-summary').textContent='';$('board-detection').textContent='Choose a USB port to detect the next radio.';$('recovery-profile').value='';$('installed-identity').value='';$('recovery-detection').textContent='';
+  resetAutomaticBoardSelection('Ready for a new radio. Choose USB port to detect it; the previous image and identity are no longer selected.');
+  $('connection-summary').textContent='Connection method is selected automatically after the running node is identified.';
+  progress(0,'Ready for a new radio. Choose USB port to begin.');
+  log('Previous radio startup verification was skipped by request; its transfer is not being claimed as startup-verified.');
+  notice('Ready for a new radio. Click Choose USB port. Nothing was sent to either radio.');
+  }catch(error){notice(error.message||String(error),true);log(`Stopped: ${error.message||error}`);}
+  finally{state.busy=false;controls();}
+}
 function setNextAction(element=null){
   if(state.nextActionElement){state.nextActionElement.classList.toggle('next-action',false);state.nextActionElement.removeAttribute('aria-current');}
   state.nextActionElement=element&&!element.disabled&&!element.hidden?element:null;
@@ -204,7 +245,9 @@ function nextFlasherControl(){
   if(state.busy)return null;
   if(state.migrationApproval)return !state.port&&['waiting-rom','waiting-application'].includes(state.migrationApproval.phase)?'select-port':null;
   if(state.plan?.written)return state.esp?'finish':null;
+  if(canStartNewRadio())return 'start-new-radio';
   if(state.verification)return !state.port||dfuIds.has(portId(state.port))||$('already-bootloader').checked?'select-port':'verify-app';
+  if(state.finishedFirmware?.verified&&(!state.pkg||state.finishedFirmware.sha256===state.pkg.sha256)&&!continuingDeviceFlow()&&!state.esp)return 'select-port';
   if(!state.port&&state.pkg?.architecture!=='uf2')return 'select-port';
   if(state.recovery?.phase==='reselect-dfu')return 'select-port';
   if(state.migration?.uart&&!state.migration.settled&&!['writing','written'].includes(state.migration.phase))return 'wait-migration';
@@ -234,6 +277,7 @@ function updateNextAction(){
   if(id==='load-entry'||id==='archive-entry')revealPanel('archive-picker');
   const messages={hardware:'Step 2: Choose the exact hardware for this radio.',role:'Step 2: Choose the firmware role.',artifact:'Step 2.5: Choose a firmware build to continue.',finish:'Next: Reset verified ESP32 to start the firmware that was written. Keep USB and power connected.','verify-app':'Step 5: Verify running application to check startup without flashing again.','wait-migration':'Next: Wait for UART migration to verify it has settled. Do not reset an active bridge.','load-entry':'Next: Load this archive entry for the exact board, then continue preparation.','archive-entry':'Next: Choose the exact board image from this release ZIP.','expert-offset':'Next: Enter the documented flash offset for this component. No offset is guessed.','transport-mode':'Next: Choose the correct bootloader connection method; automatic detection was ambiguous.'};
   if(messages[id])$('step-guidance').textContent=messages[id];
+  if(id==='select-port'&&state.finishedFirmware?.verified&&!state.verification)$('step-guidance').textContent='Firmware startup verified. Next: Flash a new device — choose its USB port.';
   if(state.finishedFirmware?.kind==='temporary-recovery'&&state.finishedFirmware.sha256===state.pkg?.sha256&&['load-bootloader','hardware'].includes(id))$('step-guidance').textContent='Next: choose the actual physical board and load its NORMAL bootloader. Do not flash the temporary recovery bridge again.';
   if(state.finishedFirmware?.kind==='erase'&&id==='artifact')$('step-guidance').textContent='Next: select the intended final application build. Do not repeat the erase utility.';
   if(id==='select-port'&&state.verification)$('step-guidance').textContent='Step 1 again: choose the same radio’s application USB port, not its ROM/DFU port, to check startup.';
@@ -321,6 +365,7 @@ function confirmationActionLabel(action,pkg=null,plan=null) {
     'CUSTOM ERASE':'Use custom erase utility',
     'ENTER BOOTLOADER':'Enter USB bootloader',
     'BINARY MODE':'Enable binary USB mode',
+    'START NEW RADIO':'Flash a new device',
     'FORCE CHIP REVISION':'Flash despite revision mismatch',
     'RETRY IN CHUNKS':'Retry write in chunks',
     'EXPAND AND FLASH':'Expand & flash firmware',
@@ -615,7 +660,7 @@ function completeNrfTransfer(pkg){
     clearVerification();state.recovery=null;persistFlow('recovery','meshfirmware.nrfRecovery');state.handoff=true;state.backupApproved=null;state.port=null;state.plan=null;state.generation++;$('port-status').textContent='Select same recovery DFU radio';
     notice(`Temporary R_${temporary.id} transfer completed; activation and installed identity remain unverified. Re-select the SAME radio's DFU port, then install the NORMAL bootloader for its actual physical board and reinstall the compatible application. Do not leave the allow-all recovery bridge installed.`);return;
   }
-  if(pkg.kind==='application'){queueVerification(pkg);notice('DFU transfer completed. Choose the application port: the page will verify role, identity, protected board family and payload version when available.');}
+  if(pkg.kind==='application'){queueVerification(pkg);notice('DFU transfer completed. Flash a new device, or optionally reconnect this radio’s application port to verify startup.');}
   else{clearVerification();if(state.device)state.device.bootloaderVersion=null;notice('DFU component transfer completed. Installed bootloader/SoftDevice startup remains unverified; the completed recovery is released so you can select the application ZIP next.');}
   state.recovery=null;persistFlow('recovery','meshfirmware.nrfRecovery');state.handoff=false;state.backupApproved=null;
   if(returnToApplication){
@@ -646,7 +691,7 @@ function requestAutomaticVerification(){
         notice(error.message,true);log(`Post-verification operation stopped: ${error.message}`);return;
       }
       state.knownApplicationPort=null;state.port=null;state.generation++;state.device=null;state.boardDetected=false;
-      notice(`Automatic startup verification did not complete: ${error.message} Click Reconnect to verify firmware and choose the same radio’s application port. No flash or reset was sent.`,true);log(`Automatic verification stopped: ${error.message}`);
+      notice(`Automatic startup verification did not complete: ${error.message} Flash a new device, or use Verify previous device (optional) to choose the same radio’s application port and retry. No flash or reset was sent.`,true);log(`Automatic verification stopped: ${error.message}`);
     }finally{state.autoVerificationRunning=false;}
   });
 }
@@ -671,7 +716,7 @@ async function verifyApplication({automaticApproval=null,automaticReconnect=fals
     const mc=device.role==='companion'?new MeshCore(link):null;
     version=mc?await mc.cli('version'):await link.command('ver',700);
     if(expected.version){const actual=/\bv?(\d+\.\d+\.\d+(?:\.\d+)?)/i.exec(version)?.[1],normalize=s=>s.replace(/^v/,'').replace(/(?:\.0)+$/,'');if(!actual||normalize(actual)!==normalize(expected.version))fail('Running firmware version does not match the verified payload.');}
-    if(expected.architecture==='esp32'){layout=mc?await mc.cli('get storage.layout'):await link.command('get storage.layout',700);if(!/\bint:esp32-\d+K\b/i.test(layout))fail('Application answered, but storage-layout verification is unavailable or invalid. Flash transfer is verified; application verification remains incomplete.');}
+    if(expected.architecture==='esp32'){layout=mc?await mc.cli('get storage.layout'):await link.command('get storage.layout',700);if(!/\bint:esp32=\d+K\b/i.test(layout))fail('Application answered, but storage-layout verification is unavailable or invalid. Flash transfer is verified; application verification remains incomplete.');}
     if(state.port!==port||state.generation!==generation||state.verification!==expected)fail('Application port changed during verification.');
   }finally{await link.close();}
   if(automaticApproval&&state.migrationApproval!==automaticApproval)fail('Automatic continuation was stopped; startup verification remains available manually.');
@@ -821,6 +866,7 @@ async function downloadFirmwareBytes(url,name,expectedSha256=''){
   }
 }
 
+$('start-new-radio').onclick=startNewRadio;
 $('select-port').onclick = () => operation(async () => {
   const port = await navigator.serial.requestPort(); // Must remain the first awaited browser operation after the click.
   const previousApproval=state.backupApproved,continuation=continuingDeviceFlow();
@@ -858,7 +904,7 @@ $('auto-detect-board').onchange=()=>operation(async()=>{state.manualSelections={
 for (const id of ['expert-offset','migration-package','usb-set','erase-source','erase-file']) $(id).onchange = () => operation(async()=>{await closeEsp();state.generation++;});
 $('expected-sha').onchange = () => operation(async () => { state.automaticSha=null;state.automaticShaName=null;await closeEsp(); state.generation++; if (state.pkg && $('expected-sha').value.trim() && $('expected-sha').value.trim().toLowerCase() !== state.pkg.sha256) fail('SHA-256 mismatch. Flash plan invalidated.'); });
 $('skip-backup').onchange=()=>operation(async()=>{
-  if(state.verification||state.plan?.written||state.migrationApproval)fail('Finish the current transfer or verification before changing the backup choice.');
+  if(state.verification||state.plan?.written||state.migrationApproval)fail(canStartNewRadio()?'Use Flash a new device to begin another update, or optionally verify the previous device.':'Finish the current transfer, reset or migration before changing the backup choice.');
   state.backupApproved=null;await closeEsp();
 });
 $('firmware-file').onchange = () => operation(async () => { const file = $('firmware-file').files[0]; if (!file) return; clearAutomaticSha(file.name);await clearFirmwareSelection();if (file.size > 64 << 20) fail('Firmware exceeds 64 MiB.'); await loadFirmware(file.name,new Uint8Array(await file.arrayBuffer())); });
@@ -1095,9 +1141,9 @@ async function flashPreparedFirmware() {
   else { const link = new SerialLink(state.port); try { await link.open(); await withFlashProgress(pkg.name,'Preparing DFU…',()=>flashNrf(link,pkg,progress));completeNrfTransfer(pkg); } finally { await link.close(); state.plan = null; } }
 }
 async function reviewAndFlashSelectedFirmware(){
-  if(state.plan?.written)fail('Firmware has already been transferred. Finish startup verification before another flash.');
+  if(state.plan?.written)fail('Firmware has already been transferred. Finish the pending reset before starting another update.');
   if(state.plan)return flashPreparedFirmware();
-  if(state.verification)fail('Firmware has already been transferred. Finish startup verification before another flash.');
+  if(state.verification)fail('Firmware has already been transferred. Use Flash a new device to begin another update, or optionally verify the previous device.');
   if(state.migrationApproval)fail('An approved automatic update is already in progress.');
   if(!$('skip-backup').checked)return flashPreparedFirmware();
   if(!canPrepareWithoutBackup())fail('Select an exact firmware build and the intended radio’s USB port first.');
@@ -1160,7 +1206,7 @@ async function finishVerifiedEsp(){
   }
   else if(bridge) {state.port=null;state.generation++;$('transport-mode').value='no_reset';$('port-status').textContent='Wait for ROM return';notice(approval?'Expansion bridge started. Waiting for the same granted ROM port; if the browser requires a new permission, choose the same radio with step 1. The final write continues automatically after chip, layout and restoration checks.':'Migration bridge started. Keep power connected, wait for its automatic ROM return, then choose the same USB device and inspect again without resetting it.');}
   else {
-    state.port=null;state.generation++;$('already-bootloader').checked=false;notice('Reset requested after verified writes. Choose the application port; startup and storage layout will be verified automatically.');
+    state.port=null;state.generation++;$('already-bootloader').checked=false;notice(approval?'Reset requested after verified writes. Choose the application port; startup and storage layout will be verified automatically.':'Reset requested after verified writes. Flash a new device, or optionally reconnect this radio’s application port to verify startup.');
     if(approval&&state.migrationApproval===approval&&(transport==='default_reset'||physical.mode==='default_reset')){state.port=previousPort;await continueApprovedMigration();}
   }
 }

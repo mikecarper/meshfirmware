@@ -21,9 +21,9 @@ actions are at the top. Buttons and user actions are left-aligned, including
 advanced tools, backup/restore, console commands and confirmation dialogs.
 Large numbers mark the main actions: **1 Choose USB port**, **2 Update or Erase &
 new install**, **3 Backup & prepare**, **4 Review & flash**, **5 Verify running
-application**. Step 5 sits immediately left of button 4 in the main action row,
-not under Advanced options. It remains disabled until startup verification is
-pending and an application port is selected; a pending ESP32 reset must finish
+application**. Step 5 is an optional secondary action immediately right of button
+4 in the main action row, not under Advanced options. It remains disabled until
+startup verification is pending and an application port is selected; a pending ESP32 reset must finish
 first. Backup & prepare is
 a dark primary button, matching USB selection and Flash. The installation
 choices share one numbered, accessible radio group—not another action button.
@@ -38,6 +38,18 @@ radio. Supported partition expansion instead uses one scoped confirmation for
 the bridge and final firmware and continues automatically; only a newly
 ungranted USB interface may still require step 1. The numbers never imply that
 a backup or application startup was verified.
+
+After an ordinary completed transfer, **Flash a new device** is the main action;
+verification of the previous radio is an optional alternate path. The new-device
+button comes first and is highlighted; reconnecting to verify is secondary.
+Refreshing restores the same choice with an unfinished startup reminder.
+To switch to another radio, click **Flash a new device**, confirm with
+the button, then **1 Choose USB port**. This dismisses only the previous radio's
+startup reminder and clears its image, identity and selections; its startup is
+still unverified. No radio is reset or written, and downloaded backups are kept.
+An unfinished write, reset, migration or recovery must be resolved first; this
+action cannot discard those records.
+
 The **Installation** switch defaults to **Update** and filters the build list.
 **Erase & new install** selects merged ESP32 installations, or validates a
 separate erase ZIP before an nRF52 application install. It warns about identity
@@ -178,9 +190,10 @@ visible. The top navigation opens the corresponding tools without touching USB.
    **Start firmware automatically** is on by default for complete application,
    merged or verified bridge writes, never expert components or failed writes.
    It retains the actual session transport instead of re-guessing USB vs UART.
-   After transfer, **Firmware transferred — verify startup** means the write
-   is finished, but application startup has not yet been checked. When asked,
-   use **Reconnect to verify firmware** and select the same radio's **APPLICATION**
+   After transfer, **Firmware transferred** means the write is finished, but
+   application startup has not yet been checked. **Flash a new device** is the
+   main next action. To optionally check the previous radio instead, use
+   **Verify previous device (optional)** and select the same radio's **APPLICATION**
    USB port, not its DFU/ROM port. Verification then starts automatically; it
    does not flash or reset the radio. **Firmware verified** marks a successful
    startup check, not merely a completed transfer.
@@ -192,9 +205,9 @@ visible. The top navigation opens the corresponding tools without touching USB.
    **Finish**, it tries startup verification once if that same port is available;
    the identity must match. This read-only attempt never opens a chooser, resets
    or writes. It does not scan or guess from shared USB IDs. An unknown identity,
-   different interface or failed attempt leaves **Reconnect to verify firmware**
-   as the one-click fallback. The successful green **Firmware verified** status
-   leaves **Choose USB port** available for the next radio.
+   different interface or failed attempt leaves **Verify previous device (optional)**
+   as an optional secondary path. The successful green **Firmware verified** status
+   leaves **Flash a new device** available for the next radio.
    The page checks retained node identity/model when applicable, protected
    nRF52 board family, payload version when verified metadata is available,
    and an ESP32 `get storage.layout` response. **Verify running application**

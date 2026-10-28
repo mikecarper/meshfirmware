@@ -52,6 +52,9 @@ main { max-width: 1280px; margin: 0 auto; padding: 18px 28px 28px; }
 h1 { font-size: 28px; line-height: 1.15; letter-spacing: -.9px; font-weight: 700; margin: 0 0 5px; }
 .page-heading p { margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted); }
 .connect-controls { display: flex; align-items: center; justify-content: flex-start; flex-wrap: wrap; gap: 12px; }
+#start-new-radio { min-height: 64px; padding: 14px 22px; font-size: 16px; }
+.page-header.next-device { width: 100%; padding: 24px; border: 1px solid #cce0df; border-radius: 12px; background: #eaf4f2; }
+.page-header.next-device #reconnect-title { color: var(--navy); font-size: clamp(24px, 3vw, 32px); }
 .page-header.reconnect-needed { width: 100%; padding: 24px; border: 3px solid #a96908; border-radius: 12px; background: #fff7e8; gap: 18px; }
 .reconnect-callout { min-width: 0; }
 #reconnect-title { display: block; font-size: clamp(28px, 4vw, 44px); line-height: 1.15; font-weight: 800; color: #784908; overflow-wrap: anywhere; }
