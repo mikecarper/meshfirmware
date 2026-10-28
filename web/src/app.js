@@ -45,7 +45,14 @@ if(state.recovery||state.espRecovery?.merged)state.installMode='install';
 const dfuIds = new Set(['2886:0044','2886:0045','2886:0057','2886:1667','239a:0029','239a:002a','239a:0071','239a:00b3','239a:00da']);
 const portId = port => { const info = port?.getInfo() || {}; return info.usbVendorId === undefined ? 'USB serial' : [info.usbVendorId,info.usbProductId].map(n => n.toString(16).padStart(4,'0')).join(':'); };
 const size = bytes => `${(bytes / (1 << 20)).toFixed(2)} MiB`;
-function log(message) { $('log').textContent = ($('log').textContent + '\n' + String(message).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'')).slice(-100000); $('log').scrollTop = $('log').scrollHeight; }
+function syncFlashConsole({follow=false}={}){
+  if(!state.flashProgress)return;
+  const output=$('flash-progress-log'),previousTop=Number(output.scrollTop)||0;
+  const atBottom=follow||!Number.isFinite(output.clientHeight)||output.scrollHeight-previousTop-output.clientHeight<=24;
+  output.textContent=$('log').textContent.slice(-32000);
+  output.scrollTop=atBottom?output.scrollHeight:previousTop;
+}
+function log(message) { $('log').textContent = ($('log').textContent + '\n' + String(message).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'')).slice(-100000); $('log').scrollTop = $('log').scrollHeight; syncFlashConsole(); }
 function notice(message, error = false) { $('notice').textContent = message; $('notice').classList.toggle('error',error); }
 function progress(value, message) {
   $('progress').value = value; $('progress-label').textContent = message;
@@ -62,7 +69,7 @@ function renderFlashProgress(value,message,{complete=false}={}){
   // Reserve completion for the successful write promise, not that callback.
   $('flash-progress-percent').textContent=(complete?100:Math.min(99,Math.floor(fraction*100)))+'%';
   const stage=complete?'Transfer stage finished. Application startup remains unverified.':fraction>=1?'Finishing the transfer and final checks…':String(message||'Preparing firmware transfer…');
-  if($('flash-progress-stage').textContent!==stage)$('flash-progress-stage').textContent=stage;
+  if($('flash-progress-stage').textContent!==stage){$('flash-progress-stage').textContent=stage;log(stage);}
   syncFlashStop();
 }
 async function withFlashProgress(name,initialStage,callback){
@@ -70,7 +77,7 @@ async function withFlashProgress(name,initialStage,callback){
   const transfer={name},dialog=$('flash-progress-dialog');state.flashProgress=transfer;
   try{
     $('flash-progress-file').textContent=name;progress(0,initialStage);setNextAction(null);
-    dialog.showModal();
+    dialog.showModal();syncFlashConsole({follow:true});
     const result=await callback();
     $('progress').value=1;renderFlashProgress(1,'',{complete:true});return result;
   }finally{
@@ -221,11 +228,11 @@ function updateNextAction(){
   const id=nextFlasherControl();setNextAction(id?$(id):null);
   if(!state.nextActionElement)return;
   if(['hardware','role','artifact'].includes(id))$('firmware-choices').open=true;
-  if(['finish','verify-app','wait-migration'].includes(id))revealPanel('verification-options');
+  if(['finish','wait-migration'].includes(id))revealPanel('verification-options');
   if(id==='transport-mode')revealPanel('connection-options');
   if(id==='load-bootloader')revealPanel('bootloader-options');
   if(id==='load-entry'||id==='archive-entry')revealPanel('archive-picker');
-  const messages={hardware:'Step 2: Choose the exact hardware for this radio.',role:'Step 2: Choose the firmware role.',artifact:'Step 2.5: Choose a firmware build to continue.',finish:'Next: Reset verified ESP32 to start the firmware that was written. Keep USB and power connected.','verify-app':'Next: Verify running application to check startup without flashing again.','wait-migration':'Next: Wait for UART migration to verify it has settled. Do not reset an active bridge.','load-entry':'Next: Load this archive entry for the exact board, then continue preparation.','archive-entry':'Next: Choose the exact board image from this release ZIP.','expert-offset':'Next: Enter the documented flash offset for this component. No offset is guessed.','transport-mode':'Next: Choose the correct bootloader connection method; automatic detection was ambiguous.'};
+  const messages={hardware:'Step 2: Choose the exact hardware for this radio.',role:'Step 2: Choose the firmware role.',artifact:'Step 2.5: Choose a firmware build to continue.',finish:'Next: Reset verified ESP32 to start the firmware that was written. Keep USB and power connected.','verify-app':'Step 5: Verify running application to check startup without flashing again.','wait-migration':'Next: Wait for UART migration to verify it has settled. Do not reset an active bridge.','load-entry':'Next: Load this archive entry for the exact board, then continue preparation.','archive-entry':'Next: Choose the exact board image from this release ZIP.','expert-offset':'Next: Enter the documented flash offset for this component. No offset is guessed.','transport-mode':'Next: Choose the correct bootloader connection method; automatic detection was ambiguous.'};
   if(messages[id])$('step-guidance').textContent=messages[id];
   if(state.finishedFirmware?.kind==='temporary-recovery'&&state.finishedFirmware.sha256===state.pkg?.sha256&&['load-bootloader','hardware'].includes(id))$('step-guidance').textContent='Next: choose the actual physical board and load its NORMAL bootloader. Do not flash the temporary recovery bridge again.';
   if(state.finishedFirmware?.kind==='erase'&&id==='artifact')$('step-guidance').textContent='Next: select the intended final application build. Do not repeat the erase utility.';
@@ -244,7 +251,7 @@ function controls() {
   $('discard-esp-recovery').disabled ||= !state.espRecovery;
   $('restore').disabled ||= !state.restore || !state.port || state.restore.schema !== 'org.meshfirmware.web-backup/v1' || state.restore.payload.role !== 'companion';
   for (const id of ['touch','probe','backup','send-command','binary-mode','verify-app']) $(id).disabled ||= !state.port;
-  $('verify-app').disabled ||= !state.verification;
+  $('verify-app').disabled ||= !state.verification||!!state.esp||!!state.plan?.written||$('already-bootloader').checked||dfuIds.has(portId(state.port))||!!state.migration||!!state.recovery||!!state.espRecovery;
   $('fetch-firmware').disabled ||= !$('artifact').value;
   $('load-bootloader').disabled ||= !$('bootloader-source').value;
   $('load-recovery').disabled ||= !state.recoveryCatalog||!$('recovery-profile').value;
@@ -257,7 +264,7 @@ function controls() {
   if(state.espRecovery)revealPanel('esp-retry-options');
   if(state.migration||state.plan?.needed)revealPanel('migration-options');
   if(state.recovery||(!$('nrf-actions').hidden&&$('flash-action').value==='wipe'))revealPanel('nrf-actions');
-  if(state.verification||state.plan?.written)revealPanel('verification-options');
+  if(state.plan?.written)revealPanel('verification-options');
   if(state.migrationApproval){
     document.querySelectorAll('[data-lock]').forEach(el=>{el.disabled=true;});
     $('select-port').disabled=state.busy||!('serial'in navigator)||!['waiting-rom','waiting-application'].includes(state.migrationApproval.phase);
@@ -645,6 +652,8 @@ function requestAutomaticVerification(){
 }
 async function verifyApplication({automaticApproval=null,automaticReconnect=false}={}) {
   const expected=state.verification;if(!expected)fail('No flashed application is awaiting verification.');
+  if(state.esp||state.plan?.written)fail('Finish the pending ESP32 session/reset before verifying the running application.');
+  if($('already-bootloader').checked)fail('Choose the running application interface, not ROM/DFU, before verifying startup.');
   state.autoVerifyAttempt={expected,port:state.knownApplicationPort?.port||null};
   if(state.migration||state.recovery||state.espRecovery||dfuIds.has(portId(state.port)))fail('Finish any pending write recovery and choose the running application interface, not ROM/DFU.');
   await closeEsp();const port=state.port,generation=state.generation,link=new SerialLink(port);let device,version,layout;
@@ -1240,7 +1249,7 @@ $('restore').onclick = () => operation(async () => {
   notice('Supported companion settings restored and read back. '+(result?.warnings?.length?result.warnings.join(' ')+' ':'')+'Review optional CLI snapshots separately.');
 });
 $('send-command').onclick = () => operation(async () => {const command=$('command').value.trim();if(!command||/[\r\n\x00]/.test(command))fail('Enter one command.');invalidateApplicationEvidence();try{await linkOperation(async link=>{const role=$('backup-role').value==='auto'?(await readApplication(link)).role:$('backup-role').value;log(role==='common-cli'?await link.command(command):await new MeshCore(link).cli(command));});}finally{invalidateApplicationEvidence();}});
-$('clear-log').onclick = () => { $('log').textContent = 'Log cleared locally.'; };
+$('clear-log').onclick = () => { $('log').textContent = 'Log cleared locally.';syncFlashConsole({follow:true}); };
 $('flash-progress-dialog').addEventListener('cancel',event=>{if(state.flashProgress)event.preventDefault();});
 $('flash-progress-dialog').addEventListener('keydown',event=>{if(state.flashProgress&&event.key==='Escape'){event.preventDefault();event.stopPropagation();}});
 window.addEventListener('beforeunload',event => { if (state.busy||state.flashProgress||state.migrationApproval) { event.preventDefault(); event.returnValue = ''; } });

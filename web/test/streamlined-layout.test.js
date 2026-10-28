@@ -159,6 +159,12 @@ function assertProperty(selector,property,expected){
   for(const value of values)assert.equal(value,expected,`${selector} ${property} must remain left-aligned, including responsive overrides`);
 }
 
+test('the flashing popup includes a bounded, keyboard-scrollable plain-text console below its power warning',()=>{
+  const dialog=get('flash-progress-dialog'),output=get('flash-progress-log'),heading=get('flash-progress-log-title');
+  assert.equal(output.tag,'pre');assert.ok(inside(output,dialog));assert.ok(inside(heading,dialog));assert.equal(output.attrs['aria-label'],'Flashing console');assert.equal(output.attrs['aria-labelledby'],heading.attrs.id);assert.equal(output.attrs.tabindex,'0');assert.equal(output.attrs['aria-live'],'off');assert.ok(output.start>get('flash-progress-warning').start);assert.equal(closedAncestors(output).length,0);
+  assert.ok(declarationsFor('#flash-progress-log').some(rule=>rule.width==='100%'&&rule.overflow==='auto'&&rule['white-space']==='pre-wrap'&&rule['overflow-wrap']==='anywhere'&&rule['max-height']?.includes('dvh')&&parseFloat(rule['font-size'])>=13),'Console text must be readable, internally scrollable and wrap on narrow screens');
+});
+
 test('write progress is very large, static and readable while still fitting a phone viewport',()=>{
   const modal='#flash-progress-dialog';assert.ok(declarationsFor(modal).some(rule=>parseFloat(rule['max-width'])>=900&&rule.width==='calc(100% - 30px)'&&rule['max-height']==='calc(100dvh - 30px)'&&rule.overflow==='auto'),'The large progress modal must fit and scroll on narrow or short screens');
   assert.ok(declarationsFor('#flash-progress-title').some(rule=>/^clamp\(28px,\s*4vw,\s*40px\)$/.test(rule['font-size']||'')),'The write heading must be prominent');
@@ -267,7 +273,7 @@ test('firmware build has a conditional non-action step 2.5 badge without renumbe
   assert.match(html.slice(badge.start).split('</label>')[0],/^<[^>]+>2\.5<\/span>\s*Firmware build/,'The optional number must appear before Firmware build');
   assert.ok(!/Step 2\.5/.test(picker.attrs['aria-label']||''),'The initial picker must not announce an inactive conditional step');
   const numbers=nodes.filter(node=>hasClass(node,'action-number')).map(node=>/^<[^>]+>([^<]*)</.exec(html.slice(node.start))?.[1].trim());
-  assert.deepEqual(numbers,['1','2','3','4'],'The original main steps must keep their numbering');
+  assert.deepEqual(numbers,['1','2','3','5','4'],'The main steps retain their numbers with verification immediately left of flash');
   const rules=declarationsFor('.artifact-step-number');
   assert.ok(rules.some(rule=>parseFloat(rule['min-width']||'0')>=52),'The decimal step badge needs enough room for 2.5');
   assert.ok(rules.some(rule=>parseFloat(rule.height||'0')>=40),'Step 2.5 should match the main badge height');
@@ -293,7 +299,7 @@ test('USB and flash actions precede non-action badges and explanatory copy',()=>
   const usb=get('select-port'),badge=get('browser-status'),prepare=get('prepare'),flash=get('flash');
   assert.equal(usb.parent,badge.parent);assert.ok(usb.start<badge.start,'USB must be the leftmost header control');
   assert.equal(prepare.parent,flash.parent);assert.ok(prepare.start<flash.start);
-  assert.ok(prepare.parent.children.every(node=>node.tag==='button'),'The action row must contain only its two buttons');
+  assert.ok(prepare.parent.children.every(node=>node.tag==='button'),'The action row must contain only its numbered buttons');
   assert.ok(get('workflow-guidance').start>get('progress-label').start,'Explanatory copy belongs below progress, not beside the buttons');
 });
 
@@ -344,15 +350,16 @@ test('one visible Update or Erase/new-install switch precedes the build list and
   assert.equal(get('flash-action').tag,'input');assert.equal(get('flash-action').attrs.type,'hidden','The legacy nRF action is a mirror, not a second conflicting user choice');
 });
 
-test('USB, backup and flash buttons are dark primary actions with stable step numbers 1, 3 and 4',()=>{
-  for(const [id,number]of [['select-port','1'],['prepare','3'],['flash','4']]){
+test('USB, backup, flash and verification buttons are dark primary actions with stable numbered labels',()=>{
+  for(const [id,number]of [['select-port','1'],['prepare','3'],['flash','4'],['verify-app','5']]){
     const button=get(id),badge=button.children.find(node=>hasClass(node,'action-number')),label=button.children.find(node=>hasClass(node,'action-label'));
     assert.ok(hasClass(button,'primary'),`#${id} must use the dark primary style`);assert.ok(!hasClass(button,'secondary'),`#${id} cannot use the light secondary style`);assert.ok(hasClass(button,'step-button'),id);assert.ok(badge,`#${id} needs a persistent number badge`);assert.ok(label,`#${id} needs a separate editable label`);
     assert.equal(badge.attrs['aria-hidden'],'true');assert.equal(/^<[^>]+>([^<]*)</.exec(html.slice(badge.start))?.[1].trim(),number,id);
     assert.match(button.attrs['aria-label']||'',new RegExp(`Step ${number}\\b`),`#${id} must announce its step`);
   }
   assert.ok(inside(get('prepare-label'),get('prepare')));assert.match(html.slice(get('prepare-label').start).split('</span>')[0],/Backup\s*(?:&amp;|&)\s*prepare/i);
-  assert.ok(!nodes.filter(node=>node.tag==='button'&&!['select-port','prepare','flash'].includes(node.attrs.id)).some(node=>hasClass(node,'step-button')),'Optional tools must not suggest extra mandatory workflow steps');
+  assert.ok(!nodes.filter(node=>node.tag==='button'&&!['select-port','prepare','flash','verify-app'].includes(node.attrs.id)).some(node=>hasClass(node,'step-button')),'Optional tools must not suggest extra mandatory workflow steps');
+  const verify=get('verify-app'),row=get('flash').parent;assert.equal(verify.parent,row);assert.deepEqual(row.children.map(node=>node.attrs.id),['prepare','verify-app','flash'],'Step 5 must sit directly to the left of button 4');assert.equal(closedAncestors(verify).length,0);assert.ok(!inside(verify,get('verification-options')));assert.ok(has(verify,'disabled')&&has(verify,'data-lock'));
 });
 
 test('step 2 numbers the installation choices once without creating a fake action or hiding their group label',()=>{
@@ -363,7 +370,7 @@ test('step 2 numbers the installation choices once without creating a fake actio
   assert.ok(!has(row,'role')&&!has(row,'tabindex'),'The shared step badge is not another input or button');
   for(const id of ['install-mode-update','install-mode-install'])assert.ok(inside(get(id),row));
   const numbers=nodes.filter(node=>hasClass(node,'action-number')).map(node=>/^<[^>]+>([^<]*)</.exec(html.slice(node.start))?.[1].trim());
-  assert.deepEqual(numbers,['1','2','3','4'],'Four steps must appear once, in workflow order');
+  assert.deepEqual(numbers,['1','2','3','5','4'],'Each numbered step must appear once, with verification left of flash');
   const backgrounds=declarationsFor('.mode-step > .action-number').filter(rule=>Object.hasOwn(rule,'background'));assert.equal(backgrounds.at(-1)?.background,'var(--navy)','The installation badge must finish with the dark primary color');
 });
 

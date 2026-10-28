@@ -56,6 +56,29 @@ test('large flashing progress appears only for the scoped write and waits for fi
   finish('verified-result');assert.equal(await pending,'verified-result');assert.equal(dialog.open,false);assert.equal(ui.elements.get('flash-progress-percent').textContent,'100%');assert.match(ui.elements.get('flash-progress-stage').textContent,/startup remains unverified/);assert.equal(ui.evaluate('state.flashProgress'),null);assert.deepEqual(ui.calls,[]);
 });
 
+test('the flashing popup shows recent console context and live plain-text output while retaining the normal log',async()=>{
+  const ui=workbench();await Promise.resolve();const output=ui.elements.get('flash-progress-log');ui.evaluate("log('USB connection verified');");assert.equal(output.textContent,'');let finish;
+  ui.context.transfer=()=>new Promise(resolve=>{finish=resolve;});const pending=ui.evaluate("withFlashProgress('firmware.bin','Preparing firmware transfer',transfer);");
+  assert.match(output.textContent,/USB connection verified/);assert.match(output.textContent,/Preparing firmware transfer/);
+  ui.evaluate("log('\\x1b[32mWriting bytes <not-html>\\x1b[0m');");assert.match(output.textContent,/Writing bytes <not-html>/);assert.ok(!output.textContent.includes('\x1b'));assert.match(ui.elements.get('log').textContent,/Writing bytes <not-html>/);
+  finish();await pending;assert.match(output.textContent,/Transfer stage finished/);const closedText=output.textContent;ui.evaluate("log('Read-only startup verification');");assert.equal(output.textContent,closedText);assert.match(ui.elements.get('log').textContent,/Read-only startup verification/);assert.deepEqual(ui.calls,[]);
+});
+
+test('flashing console follows new output at the bottom but does not jump while reading earlier lines',async()=>{
+  const ui=workbench();await Promise.resolve();const output=ui.elements.get('flash-progress-log');output.clientHeight=200;output.scrollHeight=1000;let finish;
+  ui.context.transfer=()=>new Promise(resolve=>{finish=resolve;});const pending=ui.evaluate("withFlashProgress('firmware.bin','Writing firmware',transfer);");assert.equal(output.scrollTop,1000);
+  output.scrollTop=100;ui.evaluate("log('Next chunk');");assert.equal(output.scrollTop,100);
+  output.scrollTop=800;ui.evaluate("log('Another chunk');");assert.equal(output.scrollTop,1000);finish();await pending;assert.deepEqual(ui.calls,[]);
+});
+
+test('popup console is bounded, stage changes are logged once and reopening refreshes the current context',async()=>{
+  const ui=workbench();await Promise.resolve();let finish;ui.context.transfer=()=>new Promise(resolve=>{finish=resolve;});let pending=ui.evaluate("withFlashProgress('firmware.bin','Preparing DFU',transfer);");
+  ui.evaluate("progress(.1,'Writing DFU');progress(.2,'Writing DFU');");assert.equal(ui.elements.get('log').textContent.split('Writing DFU').length-1,1);assert.match(ui.elements.get('flash-progress-log').textContent,/Writing DFU/);
+  ui.context.longMessage='x'.repeat(110000);ui.evaluate('log(longMessage);');assert.equal(ui.elements.get('log').textContent.length,100000);assert.equal(ui.elements.get('flash-progress-log').textContent.length,32000);
+  ui.elements.get('clear-log').onclick();assert.equal(ui.elements.get('flash-progress-log').textContent,'Log cleared locally.');finish();await pending;
+  ui.evaluate("log('Final image after expansion');");pending=ui.evaluate("withFlashProgress('final.bin','Writing final image',transfer);");assert.match(ui.elements.get('flash-progress-log').textContent,/Final image after expansion/);assert.match(ui.elements.get('flash-progress-log').textContent,/Writing final image/);finish();await pending;assert.deepEqual(ui.calls,[]);
+});
+
 test('progress modal prevents Escape and requests a browser leave warning only while transfer is active',async()=>{
   const ui=workbench();await Promise.resolve();let finish;ui.context.transfer=()=>new Promise(resolve=>{finish=resolve;});const pending=ui.evaluate("withFlashProgress('app.bin','Writing firmware',transfer);");
   let prevented=0,stopped=0;const leave={preventDefault(){prevented++;}};ui.elements.get('flash-progress-dialog').emit('cancel',{preventDefault(){prevented++;}});ui.elements.get('flash-progress-dialog').emit('keydown',{key:'Escape',preventDefault(){prevented++;},stopPropagation(){stopped++;}});ui.windowEvents.beforeunload(leave);assert.equal(prevented,3);assert.equal(stopped,1);assert.equal(leave.returnValue,'');assert.equal(ui.elements.get('flash-progress-dialog').open,true);
@@ -164,6 +187,25 @@ test('reconnect guidance warns about VM USB capture without promising a timed re
 
 const v4Item={project:'MeshCore',provider:'MeshCore',hardware:'Heltec v4',architecture:'esp32',role:'repeater',version:'v1.18.0',name:'heltec_v4_repeater-v1.18.0.bin',action:'flash-update',url:'https://example.test/v4.bin'};
 const nextHighlight=ui=>[...ui.elements.values()].filter(element=>element.classList.contains('next-action')).map(element=>element.id);
+
+test('step 5 verification stays in the main workflow and does not open advanced reset controls',async()=>{
+  const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.evaluate("state.port=selectedPort;state.verification={sha256:'a'.repeat(64)};controls();");
+  assert.equal(ui.elements.get('verify-app').disabled,false);assert.deepEqual(nextHighlight(ui),['verify-app']);assert.match(ui.elements.get('step-guidance').textContent,/^Step 5:/);assert.ok(!ui.elements.get('verification-options').open);assert.ok(!ui.elements.get('advanced-options').open);assert.deepEqual(ui.calls,[]);
+  ui.evaluate("state.verification=null;state.finishedFirmware={sha256:'a'.repeat(64),verified:true};controls();");assert.equal(ui.elements.get('verify-app').disabled,true);
+});
+
+test('verification cannot discard an ESP session or its pending reset proof',async()=>{
+  for(const written of [true,false]){
+    const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.written=written;ui.context.session={close:async()=>ui.calls.push('unsafe-close')};ui.evaluate("state.port=selectedPort;state.verification={sha256:'a'.repeat(64)};state.esp=session;state.plan={written};controls();");
+    assert.equal(ui.elements.get('verify-app').disabled,true);const plan=ui.evaluate('state.plan'),verification=ui.evaluate('state.verification');await assert.rejects(ui.evaluate('verifyApplication();'),/pending ESP32 session\/reset/);assert.equal(ui.evaluate('state.esp'),ui.context.session);assert.equal(ui.evaluate('state.plan'),plan);assert.equal(ui.evaluate('state.verification'),verification);assert.equal(ui.evaluate('state.autoVerifyAttempt'),null);assert.deepEqual(ui.calls,[]);
+  }
+});
+
+test('step 5 is disabled for known bootloader ports and unfinished recovery flows',async()=>{
+  for(const scenario of ['dfu','already-bootloader','migration','recovery','espRecovery']){
+    const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.evaluate("state.port=selectedPort;state.verification={sha256:'a'.repeat(64)};");if(scenario==='dfu')ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0044});else if(scenario==='already-bootloader')ui.elements.get('already-bootloader').checked=true;else ui.evaluate(`state.${scenario}={};`);ui.evaluate('controls();');assert.equal(ui.elements.get('verify-app').disabled,true,scenario);await assert.rejects(ui.evaluate('verifyApplication();'),/running application|pending write recovery/);assert.deepEqual(ui.calls,[],scenario);
+  }
+});
 
 async function automaticStartupWorkbench(){
   const ui=workbench();await Promise.resolve();const appPort={getInfo:()=>({usbVendorId:0x303a,usbProductId:0x1001})},dfuPort={getInfo:()=>({usbVendorId:0x2886,usbProductId:0x0044})};
@@ -1147,8 +1189,8 @@ test('revealing a required nested input opens every details ancestor without a h
   assert.equal(archive.hidden,false);assert.equal(custom.open,true);assert.equal(advanced.open,true);assert.equal(advanced.hidden,false);assert.equal(ui.elements.get('connection-options').open,false);assert.deepEqual(ui.calls,[]);
 });
 
-test('pending recovery and verification controls reveal themselves but never reset, retry or write automatically',async()=>{
-  for(const [state,panel]of [['migration','migration-options'],['needed','migration-options'],['espRecovery','esp-retry-options'],['recovery','nrf-actions'],['verification','verification-options'],['written','verification-options']]){
+test('pending recovery and reset controls reveal themselves but never reset, retry or write automatically',async()=>{
+  for(const [state,panel]of [['migration','migration-options'],['needed','migration-options'],['espRecovery','esp-retry-options'],['recovery','nrf-actions'],['written','verification-options']]){
     const ui=workbench();await Promise.resolve();const advanced=collapsedPanels(ui);ui.elements.get(panel).hidden=true;
     ui.context.pendingPanelState=state;ui.evaluate("if(['written','needed'].includes(pendingPanelState))state.plan={[pendingPanelState]:true};else state[pendingPanelState]={};controls();");
     assert.equal(ui.elements.get(panel).open,true,state);assert.equal(ui.elements.get(panel).hidden,false,state);assert.equal(advanced.open,true,state);assert.deepEqual(ui.calls,[],state);

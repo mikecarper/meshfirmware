@@ -20,7 +20,11 @@ The USB button, firmware/hardware/role/version/build selectors, and Prepare/Flas
 actions are at the top. Buttons and user actions are left-aligned, including
 advanced tools, backup/restore, console commands and confirmation dialogs.
 Large numbers mark the main actions: **1 Choose USB port**, **2 Update or Erase &
-new install**, **3 Backup & prepare**, **4 Review & flash**. Backup & prepare is
+new install**, **3 Backup & prepare**, **4 Review & flash**, **5 Verify running
+application**. Step 5 sits immediately left of button 4 in the main action row,
+not under Advanced options. It remains disabled until startup verification is
+pending and an application port is selected; a pending ESP32 reset must finish
+first. Backup & prepare is
 a dark primary button, matching USB selection and Flash. The installation
 choices share one numbered, accessible radio group—not another action button.
 The next-step hint follows the current stage. The next required control has an
@@ -162,6 +166,10 @@ visible. The top navigation opens the corresponding tools without touching USB.
    by default and is not remembered for an unrelated radio or firmware choice.
    During an active firmware write, a large progress window shows the percentage,
    current stage and file, with a reminder to keep the tab open and power connected.
+   The same window includes a live, scrollable console with recent connection
+   context and transfer output. It follows new lines while at the bottom;
+   scrolling back keeps your reading position. The normal operation log remains
+   available after the window closes. Console text is local, bounded and read-only.
    It closes when the write succeeds or fails. The browser's leave-page warning
    is best-effort, not a guarantee against closing the tab or interrupting power.
    During automatic migration, **Stop after this write** stops later steps;
