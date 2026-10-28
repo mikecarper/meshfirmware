@@ -68,6 +68,14 @@ test('status, warnings, progress and required expert offsets cannot be trapped i
   assert.ok(has(get('confirm-submit'),'disabled'),'Typed flash authorization must remain required');
 });
 
+test('release notes and catalog metadata stay behind a collapsed Firmware details disclosure',()=>{
+  const details=get('firmware-details'),metadata=get('catalog-detail'),workflow=nodes.find(node=>hasClass(node,'workflow'));
+  assert.equal(details.tag,'details');assert.ok(!has(details,'open'));assert.ok(inside(details,workflow));assert.ok(inside(metadata,details));
+  assert.ok(details.start>get('progress-label').start,'Optional metadata must not interrupt required actions and progress');
+  assert.match(html.slice(details.start).split('</summary>')[0],/>Firmware details/);
+  assert.equal(closedAncestors(get('image-warning')).length,0,'Hiding release notes must not hide write warnings');
+});
+
 test('the connected nRF52 bootloader status is separate from firmware choices and hidden until supported detection',()=>{
   const offer=get('nrf-bootloader-offer'),status=get('nrf-bootloader-status'),button=get('prepare-bootloader-update'),warning=get('nrf-bootloader-warning'),workflow=nodes.find(node=>hasClass(node,'workflow')),device=nodes.find(node=>hasClass(node,'device-display'));
   assert.equal(offer.tag,'div');assert.ok(hasClass(offer,'bootloader-offer'));assert.ok(has(offer,'hidden'));assert.ok(inside(offer,workflow));assert.equal(closedAncestors(offer).length,0);
@@ -156,13 +164,14 @@ test('next-step instructions stay visible and numbered actions remain legible on
   assert.ok(labelRules.some(rule=>rule['min-width']==='0'),'Long labels need room to shrink and wrap');assert.ok(!labelRules.some(rule=>rule['white-space']==='nowrap'||rule.overflow==='hidden'),'Step instructions must not be clipped or forced onto one line');
 });
 
-test('captured backup JSON has hidden-by-default read-only private text views in tools and the save prompt',()=>{
+test('captured backup JSON has hidden-by-default read-only private text views in tools and the copy popup',()=>{
   for(const prefix of ['', 'question-']){
     const view=get(prefix+'backup-json-view'),field=get(prefix+'backup-json'),warning=get(prefix+'backup-json-warning'),status=get(prefix+'backup-json-status');
     assert.ok(has(view,'hidden'),'No backup text is revealed on page load');assert.ok(inside(field,view));assert.equal(field.tag,'textarea');assert.ok(hasClass(field,'backup-json'));
     assert.ok(has(field,'readonly'));assert.equal(field.attrs.rows,'10');assert.equal(field.attrs.spellcheck,'false');assert.equal(field.attrs.autocomplete,'off');assert.equal(field.attrs['aria-describedby'],warning.attrs.id);
     assert.ok(nodes.some(node=>node.tag==='label'&&node.attrs.for===field.attrs.id&&inside(node,view)),'A visible label must identify each text box');
-    assert.match(html.slice(warning.start).split('</p>')[0],/private identity and channel secrets/);assert.match(html.slice(warning.start).split('</p>')[0],/page memory only/);
+    const warningText=html.slice(warning.start).split('</p>')[0];assert.match(warningText,/private identity and channel secrets/);
+    if(!prefix)assert.match(warningText,/page memory only/);else assert.ok(warningText.replace(/<[^>]*>/g,'').length<100,'The copy popup needs only a brief privacy reminder');
     assert.equal(status.attrs.role,'status');assert.equal(status.attrs['aria-live'],'polite');assert.ok(inside(status,view));
     assert.equal(html.slice(field.start).split('>')[1].split('</textarea')[0],'','Static HTML cannot contain any captured data');
   }
@@ -170,11 +179,22 @@ test('captured backup JSON has hidden-by-default read-only private text views in
   assert.ok(inside(get('question-backup-json-view'),get('question-dialog')));assert.ok(get('question-backup-json-view').start<get('question-actions').start);
 });
 
-test('backup JSON copy and clear remain usable during the save prompt without submitting it',()=>{
-  for(const [prefix,ids]of [['',['copy-backup-json','clear-backup-json']],['question-',['copy-question-backup-json','clear-question-backup-json']]])for(const id of ids){
+test('backup JSON copy and tools-only clear remain usable without submitting the popup',()=>{
+  for(const [prefix,ids]of [['',['copy-backup-json','clear-backup-json']],['question-',['copy-question-backup-json']]])for(const id of ids){
     const button=get(id);assert.equal(button.tag,'button');assert.equal(button.attrs.type,'button');assert.ok(inside(button,get(prefix+'backup-json-view')));
     assert.ok(!has(button,'data-lock'),'Copy and clear are local text actions, not busy-locked USB operations');assert.ok(!has(button,'disabled'));
   }
   const rules=declarationsFor('.backup-json');assert.ok(rules.some(rule=>rule.width==='100%'&&rule['max-width']==='100%'&&rule['min-width']==='0'),'Text boxes must fit their container on phones and dialogs');
   assert.ok(rules.some(rule=>rule.resize==='vertical'&&/monospace/.test(rule['font-family']||'')),'JSON should be legible and vertically resizable');
+});
+
+test('the backup popup has one Copy text action beside the dynamic Close action and no clear or save controls',()=>{
+  const view=get('question-backup-json-view'),copy=get('copy-question-backup-json'),actions=get('question-actions'),dialog=get('question-dialog');
+  const buttons=nodes.filter(node=>node.tag==='button'&&inside(node,view));assert.deepEqual(buttons,[copy]);assert.ok(!byId.has('clear-question-backup-json'));
+  assert.match(html.slice(copy.start).split('</button>')[0],/>Copy text$/);assert.ok(hasClass(copy,'primary'));
+  assert.ok(inside(actions,dialog));assert.equal(actions.children.length,0,'Close is created for the active prompt, not a second static save acknowledgement');
+  const dialogRule='#question-dialog:has(#question-backup-json-view:not([hidden])) form';
+  assert.ok(declarationsFor(dialogRule).some(rule=>rule.display==='flex'&&rule['flex-wrap']==='wrap'),'Backup actions share a wrapping row');
+  assert.ok(declarationsFor('#question-backup-json-view:not([hidden])').some(rule=>rule.display==='contents'),'Copy and Close must remain adjacent in the same form layout');
+  assert.ok(declarationsFor('#question-backup-json').some(rule=>rule.height==='min(45dvh, 360px)'),'Backup text stays scrollable within short screens');
 });

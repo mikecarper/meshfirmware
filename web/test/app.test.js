@@ -417,15 +417,15 @@ test('downgrade can prepare and continue after the ordinary FLASH warning acknow
   let warnings=[];ui.context.confirm=async(title,_detail,warning,token)=>{assert.equal(title,'Write this firmware?');assert.equal(token,'FLASH');warnings.push(warning);return false;};ui.context.flashNrf=async()=>ui.calls.push('mock-write');await ui.elements.get('flash').onclick();assert.match(warnings[0],/downgrade/i);assert.match(warnings[0],/v1\.18\.0\.2/);assert.match(warnings[0],/v1\.17\.0/);assert.ok(!ui.calls.includes('mock-write'));
   ui.context.confirm=async(_title,_detail,warning,token)=>{assert.equal(token,'FLASH');assert.match(warning,/downgrade/i);return true;};await ui.elements.get('flash').onclick();assert.ok(ui.calls.includes('mock-write'));assert.equal(ui.evaluate('state.verification.version'),'v1.17.0');
 });
-test('default backup flow finishes and acknowledges the saved archive before ROM entry',async()=>{
+test('default backup flow validates the archive and closes its compact window before ROM entry',async()=>{
   const ui=workbench();serialMock(ui);ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({name:'app.bin',architecture:'esp32'});ui.evaluate('state.port=selectedPort;state.pkg=pkg;');ui.elements.get('backup-role').value='auto';
-  ui.context.choose=async title=>{ui.calls.push(title);return title.startsWith('Back up')?'backup':'saved';};
+  ui.context.choose=async title=>{ui.calls.push(title);return title.startsWith('Back up')?'backup':'close';};
   ui.context.detectMeshCore=async()=>({role:'companion',publicKey:'11'.repeat(32),model:'test',name:'test'});
   ui.context.MeshCore=class{async backup(){ui.calls.push('backup');return {payload:{role:'companion'}};}};
   ui.context.exportNativeBackup=async()=>({schema:'native'});ui.context.download=()=>ui.calls.push('download');
   ui.context.EspSession=class{async connect(){ui.calls.push('enter-rom');return {chip:'ESP32-S3',mac:'aa:bb:cc:dd:ee:ff',flashBytes:4<<20};}async prepare(){return {addresses:[0x10000],sha256:ui.context.pkg.sha256};}async close(){}};
   await ui.elements.get('prepare').onclick();
-  assert.ok(ui.calls.indexOf('backup')<ui.calls.indexOf('enter-rom'));assert.ok(ui.calls.indexOf('Confirm your backup download')<ui.calls.indexOf('enter-rom'));assert.equal(ui.evaluate('state.plan.sha256'),ui.context.pkg.sha256);
+  assert.ok(ui.calls.indexOf('backup')<ui.calls.indexOf('enter-rom'));assert.ok(ui.calls.indexOf('Backup JSON')<ui.calls.indexOf('enter-rom'));assert.equal(ui.evaluate('state.plan.sha256'),ui.context.pkg.sha256);
 });
 
 async function backupJsonWorkbench(){
@@ -443,7 +443,7 @@ test('validated backup JSON is byte-identical to its download, kept as safe text
   await ui.elements.get('backup').onclick();
   const json=JSON.stringify(ui.native,null,2);
   assert.equal(ui.downloads.length,1);assert.equal(ui.downloads[0].json,json);assert.equal(ui.downloads[0].type,'application/json');assert.equal(ui.evaluate('state.backup.json'),json);
-  assert.equal(ui.elements.get('backup-json').value,json);assert.equal(ui.elements.get('backup-json-view').hidden,false);assert.equal(ui.elements.get('backups').open,true);
+  assert.equal(ui.elements.get('backup-json').value,json);assert.equal(ui.elements.get('backup-json-view').hidden,false);assert.equal(ui.elements.get('backups').open,false);
   assert.equal(ui.elements.get('question-backup-json').value,'');assert.equal(ui.elements.get('question-backup-json-view').hidden,true);assert.equal(clipboardWrites,0);
   assert.ok(ui.elements.get('backup-json').value.includes('<script>not executable</script>'));assert.equal(ui.elements.get('backup-json').innerHTML,undefined);
   assert.ok(ui.stored.every(([_key,value])=>!String(value).includes(ui.sentinel)));assert.ok(!ui.elements.get('log').textContent.includes(ui.sentinel));assert.ok(!ui.elements.get('notice').textContent.includes(ui.sentinel));
@@ -457,7 +457,7 @@ test('copy JSON needs its explicit button and does not grant flash or saved-back
   await ui.elements.get('copy-backup-json').onclick();await ui.elements.get('copy-question-backup-json').onclick();
   assert.deepEqual(clipboard,[json,json]);assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls.slice(before),[]);
   for(const prefix of ['backup','question-backup']){assert.match(ui.elements.get(prefix+'-json-status').textContent,/copied|privately|secrets/i);assert.ok(!ui.elements.get(prefix+'-json-status').textContent.includes(ui.sentinel));}
-  ui.elements.get('clear-question-backup-json').onclick();
+  ui.elements.get('clear-backup-json').onclick();
   for(const prefix of ['backup','question-backup']){assert.equal(ui.elements.get(prefix+'-json').value,'');assert.equal(ui.elements.get(prefix+'-json-view').hidden,true);assert.equal(ui.elements.get(prefix+'-json-status').textContent,'');}
   assert.equal(ui.evaluate('state.backup.json'),undefined);assert.equal(ui.downloads.length,1);assert.equal(ui.downloads[0].json,json);assert.deepEqual(clipboard,[json,json]);assert.deepEqual(ui.calls.slice(before),[]);
   assert.match(ui.elements.get('notice').textContent,/downloaded files and your clipboard were not changed/i);
@@ -517,24 +517,53 @@ test('closing and reopening a same-JSON save dialog invalidates an older pending
   }
 });
 
-test('the save-acknowledgement dialog alone receives backup JSON and clears its copy when closed',async()=>{
+test('backup prompts hide verbose details and clear their JSON when closed without changing generic questions',async()=>{
   const ui=await backupJsonWorkbench();await ui.elements.get('backup').onclick();const json=ui.downloads[0].json;let close;
   ui.context.document.createElement=()=>({});ui.elements.get('question-dialog').addEventListener=(event,handler)=>{assert.equal(event,'close');close=handler;};ui.context.json=json;
   const pending=ui.evaluate("choose('Confirm your backup download','Save privately',[['saved','I saved the backup']],{backupJson:json});");
   assert.equal(ui.elements.get('question-backup-json').value,json);assert.equal(ui.elements.get('question-backup-json-view').hidden,false);assert.equal(ui.elements.get('backup-json').value,json);
+  assert.equal(ui.elements.get('question-detail').textContent,'');assert.equal(ui.elements.get('question-detail').hidden,true);
   ui.elements.get('question-dialog').returnValue='saved';close();assert.equal(await pending,'saved');
   assert.equal(ui.elements.get('question-backup-json').value,'');assert.equal(ui.elements.get('question-backup-json-view').hidden,true);assert.equal(ui.elements.get('backup-json').value,json);
   const other=ui.evaluate("choose('Unrelated question','No secrets here',[['cancel','Cancel']]);");
+  assert.equal(ui.elements.get('question-detail').hidden,false);assert.equal(ui.elements.get('question-detail').textContent,'No secrets here');
   assert.equal(ui.elements.get('question-backup-json').value,'');assert.equal(ui.elements.get('question-backup-json-view').hidden,true);close();await other;
   assert.ok(!ui.elements.get('question-detail').textContent.includes(ui.sentinel));assert.ok(!ui.elements.get('log').textContent.includes(ui.sentinel));
 });
 
-test('copying a captured backup cannot replace the separate save acknowledgement before ROM entry',async()=>{
+test('copying a captured backup cannot start preparation when its compact window is dismissed',async()=>{
   const ui=await backupJsonWorkbench();ui.context.pkg=fakePackage({architecture:'esp32'});ui.evaluate('state.pkg=pkg;');ui.elements.get('auto-backup').checked=true;
   let copied='';ui.context.navigator.clipboard={writeText:async value=>{copied=value;}};
-  ui.context.choose=async(title,_detail,_buttons,options)=>{assert.equal(title,'Confirm your backup download');assert.equal(options.backupJson,ui.downloads[0].json);ui.elements.get('question-backup-json').value=options.backupJson;await ui.elements.get('copy-question-backup-json').onclick();return 'cancel';};
-  await assert.rejects(ui.evaluate('ensureBackup();'),/Backup save was not acknowledged/);
+  ui.context.choose=async(title,_detail,_buttons,options)=>{assert.equal(title,'Backup JSON');assert.equal(options.backupJson,ui.downloads[0].json);ui.elements.get('question-backup-json').value=options.backupJson;await ui.elements.get('copy-question-backup-json').onclick();return 'cancel';};
+  await assert.rejects(ui.evaluate('ensureBackup();'),/Preparation cancelled before reset or flash/);
   assert.equal(copied,ui.downloads[0].json);assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls,['open','capture-backup','close']);
+});
+
+test('the backup window has only copyable JSON and Close, without a save claim or automatic clipboard write',async()=>{
+  const ui=await backupJsonWorkbench();ui.context.pkg=fakePackage({architecture:'esp32'});ui.evaluate('state.pkg=pkg;');ui.elements.get('auto-backup').checked=true;
+  let copied=0;ui.context.navigator.clipboard={writeText:async()=>copied++};
+  ui.context.choose=async(title,detail,buttons,options)=>{
+    assert.equal(title,'Backup JSON');assert.equal(detail,'');assert.deepEqual(Array.from(buttons,pair=>Array.from(pair)),[['close','Close']]);assert.equal(options.backupJson,ui.downloads[0].json);return 'close';
+  };
+  await ui.evaluate('ensureBackup();');
+  assert.equal(copied,0);assert.equal(ui.evaluate('state.backupApproved.port'),ui.port);assert.equal(ui.evaluate('state.backupApproved.sha256'),ui.context.pkg.sha256);assert.equal(ui.evaluate('state.plan'),null);
+  assert.deepEqual(ui.calls,['open','capture-backup','close']);assert.equal(ui.elements.get('backups').open,false);
+});
+
+test('a device disconnect or firmware change during the backup window cannot approve preparation',async()=>{
+  for(const change of ['disconnect','firmware']){
+    const ui=await backupJsonWorkbench();ui.context.pkg=fakePackage({architecture:'esp32'});ui.evaluate('state.pkg=pkg;');ui.elements.get('auto-backup').checked=true;
+    ui.context.choose=async()=>{if(change==='disconnect')ui.serialEvents.disconnect({port:ui.port});else ui.evaluate('state.pkg={...state.pkg,sha256:"different"};');return 'close';};
+    await assert.rejects(ui.evaluate('ensureBackup();'),/changed while the backup window was open/);
+    assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls,['open','capture-backup','close']);
+  }
+});
+
+test('a compact backup window still requires separate acknowledgement for a partial capture',async()=>{
+  const ui=await backupJsonWorkbench();ui.context.pkg=fakePackage({architecture:'esp32'});ui.evaluate('state.pkg=pkg;');ui.elements.get('auto-backup').checked=true;
+  ui.context.backupSummary=()=>({complete:false,privateIdentity:false,reasons:['Unsupported query']});ui.context.choose=async()=> 'close';
+  ui.context.confirm=async(title,_detail,_warning,token)=>{assert.equal(title,'Continue with a partial backup?');assert.equal(token,'CONTINUE WITH PARTIAL BACKUP');return false;};
+  await assert.rejects(ui.evaluate('ensureBackup();'),/Partial-backup continuation cancelled/);assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.evaluate('state.plan'),null);
 });
 
 test('failed captures and changed ports during export cannot display stale JSON or grant saved-backup approval',async()=>{

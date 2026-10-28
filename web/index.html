@@ -43,10 +43,10 @@
       <div class="review-actions"><button id="prepare" class="primary step-button" aria-label="Step 3: Backup and prepare update" data-lock><span class="action-number" aria-hidden="true">3</span><span id="prepare-label" class="action-label">Backup &amp; prepare update</span></button><button id="flash" class="primary step-button" aria-label="Step 4: Review and flash firmware" disabled data-lock><span class="action-number" aria-hidden="true">4</span><span class="action-label">Review &amp; flash</span><span class="action-icon" aria-hidden="true">→</span></button><p>Step 3 offers a backup; skipping needs your acknowledgement.<br>Step 4 asks once for supported expansion + final firmware, then completes both automatically. A new USB interface may still need step 1.</p></div>
       <button id="stop-migration-auto" class="secondary" hidden>Stop automatic continuation</button>
       <p id="automatic-summary" class="selection-summary" aria-live="polite">Keymind Cascade is selected by default. Connecting selects matching hardware and the newest compatible update when unambiguous.</p>
-      <p id="catalog-detail" class="hint"></p>
       <div class="selected-image"><span>Loaded image</span><strong id="image-name">No image loaded</strong></div>
       <p id="image-warning" class="hint" aria-live="polite"></p>
       <progress id="progress" value="0" max="1" aria-label="Operation progress"></progress><p id="progress-label" class="hint" aria-live="polite">Waiting for an image and a selected USB port.</p>
+      <details id="firmware-details"><summary>Firmware details</summary><p id="catalog-detail" class="hint"></p></details>
     </section>
 
     <details id="advanced-options" class="card disclosure">
@@ -100,10 +100,10 @@ No hardware operations have been performed.</pre><div class="console-input"><lab
   <dialog id="confirm-dialog"><form method="dialog"><div class="eyebrow">EXPLICIT AUTHORIZATION</div><h2 id="confirm-title">Confirm operation</h2><p id="confirm-detail"></p><p id="confirm-warning" class="notice"></p><label for="confirm-token">Type <strong id="token-label"></strong> to continue</label><input id="confirm-token" autocomplete="off" spellcheck="false"><div class="inline-actions"><button value="cancel" class="secondary">Cancel</button><button id="confirm-submit" value="confirm" class="danger" disabled>Confirm operation</button></div></form></dialog>
   <dialog id="question-dialog"><form method="dialog"><h2 id="question-title"></h2><p id="question-detail"></p>
     <div id="question-backup-json-view" class="backup-json-view" hidden>
-      <label for="question-backup-json">Captured backup JSON · copy before continuing</label>
-      <p id="question-backup-json-warning" class="hint">May contain private identity and channel secrets. This copy stays in page memory only; it is not uploaded or saved in browser storage. Copy it only to a trusted private location.</p>
+      <label for="question-backup-json">Backup JSON</label>
+      <p id="question-backup-json-warning" class="hint">Contains private identity and channel secrets. Keep it private.</p>
       <textarea id="question-backup-json" class="backup-json" rows="10" readonly spellcheck="false" autocomplete="off" aria-describedby="question-backup-json-warning"></textarea>
-      <div class="inline-actions"><button id="copy-question-backup-json" class="secondary" type="button">Copy JSON</button><button id="clear-question-backup-json" class="secondary" type="button">Clear text</button></div>
+      <div class="inline-actions"><button id="copy-question-backup-json" class="primary" type="button">Copy text</button></div>
       <p id="question-backup-json-status" class="hint" role="status" aria-live="polite"></p>
     </div>
     <div id="question-actions" class="inline-actions"></div></form></dialog>

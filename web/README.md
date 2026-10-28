@@ -104,10 +104,12 @@ visible. The top navigation opens the corresponding tools without touching USB.
    at 115200, including the Windows DTR-refresh workaround, not a 1200-baud open.
    nRF52 retains its 1200-baud touch. TinyUSB entry is offered after backup; re-select the
    same radio's ROM port and prepare again without choosing a reset strategy.
-   Confirm that the downloaded archive was saved; partial/failed backups need
-   separate acknowledgement. The save prompt also shows the validated backup
-   JSON in a read-only text box with Copy JSON and Clear text controls; a copy
-   remains available under Backup & restore. A backup-only button is also available.
+   The backup window shows validated JSON with **Copy text** and **Close**.
+   The JSON download still starts automatically; Close resumes preparation, not
+   flashing, and does not claim the file was saved. Keep the download or copied
+   text privately. Partial/failed backups still need separate acknowledgement.
+   A copy and backup-only button remain available under Backup & restore.
+   Lengthy release notes stay in the collapsed **Firmware details** section.
 4. Review the exact file, operation, target evidence and hash, then type the
    confirmation token. An already-running ROM/DFU interface cannot export
    application settings: select **Already in ROM/DFU** and explicitly accept

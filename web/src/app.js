@@ -176,7 +176,7 @@ function confirm(title, detail, warning, token) {
 }
 function download(name, bytes, type = 'application/octet-stream') { const url = URL.createObjectURL(new Blob([bytes],{type})); const a = document.createElement('a'); a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url),30000); }
 function choose(title,detail,buttons,{backupJson=null}={}) {
-  $('question-title').textContent=title;$('question-detail').textContent=detail;
+  $('question-title').textContent=title;$('question-detail').textContent=backupJson?'':detail;$('question-detail').hidden=!!backupJson;
   state.backupTextGeneration++;
   $('question-backup-json-view').hidden=!backupJson;$('question-backup-json').value=backupJson||'';$('question-backup-json-status').textContent='';
   const form=$('question-actions');form.replaceChildren(...buttons.map(([value,label])=>{const button=document.createElement('button');button.value=value;button.textContent=label;button.className=value==='backup'?'primary':'secondary';return button;}));
@@ -258,7 +258,7 @@ function updateFirmwareSelectionSummary({item,automatic=false,reason=''}={}) {
     ?`The connected node reports ${state.detectedHardware}; the selected firmware target is ${hardware}. Changing Hardware does not change the USB port. Choose the other radio's USB port to switch connected devices.`:'';
   const detail=item?`${item.hardware} · ${item.provider} · ${item.title||item.role} · ${item.version}\n${item.name}\n${state.installMode==='install'?'Erase & new install selected.':automatic?'Write-only update selected.':'Manual firmware selection.'} Prepare ${state.installMode==='install'?'install':'update'} downloads, validates and offers backup before bootloader entry. Nothing is flashed until you confirm.`
     :[fields.length?`Firmware target: ${fields.join(' · ')}.`:'',reason||'Choose hardware, role and a firmware artifact. No image has been loaded or written.'].filter(Boolean).join('\n');
-  $('automatic-summary').textContent=[item?firmwareDowngradeWarning(null,item):'',mismatch,detail].filter(Boolean).join('\n');
+  $('automatic-summary').textContent=[item&&!state.pkg?firmwareDowngradeWarning(null,item):'',mismatch,detail].filter(Boolean).join('\n');
 }
 function continuingDeviceFlow(){return !!(state.migrationApproval||state.handoff||state.recovery||state.espRecovery||state.migration||state.verification);}
 function resetAutomaticBoardSelection(message) {
@@ -318,13 +318,13 @@ async function copyBackupJson(prefix){
   const field=$(`${prefix}-json`),status=$(`${prefix}-json-status`),value=field.value,generation=state.backupTextGeneration;
   if(!value){status.textContent='No backup JSON is available to copy.';return;}
   if(!navigator.clipboard?.writeText){field.focus?.();field.select?.();status.textContent='Clipboard access is unavailable. Select the JSON and copy it manually.';return;}
-  try{await navigator.clipboard.writeText(value);if(generation===state.backupTextGeneration&&field.value===value)status.textContent='Backup JSON copied. Save it privately; your clipboard now contains node secrets.';}
+  try{await navigator.clipboard.writeText(value);if(generation===state.backupTextGeneration&&field.value===value)status.textContent='Copied. Keep it private.';}
   catch{if(generation!==state.backupTextGeneration||field.value!==value)return;field.focus?.();field.select?.();status.textContent='Clipboard permission was not granted. Select the JSON and copy it manually.';}
 }
 for(const prefix of ['backup','question-backup']){
   $(`copy-${prefix}-json`).onclick=()=>copyBackupJson(prefix);
-  $(`clear-${prefix}-json`).onclick=()=>{clearBackupJson();notice('Backup JSON boxes cleared. Existing downloaded files and your clipboard were not changed.');};
 }
+$('clear-backup-json').onclick=()=>{clearBackupJson();notice('Backup JSON boxes cleared. Existing downloaded files and your clipboard were not changed.');};
 async function captureBackup() {
   clearBackupJson();state.backup=null;state.backupApproved=null;
   const port=state.port,generation=state.generation;
@@ -338,10 +338,10 @@ async function captureBackup() {
   const summary=backupSummary(archive),completeness=native.payload?.completeness;if(completeness){summary.complete=completeness.status==='api-snapshot-complete';summary.reasons=[...new Set([...summary.reasons,...(completeness.missing_required||[]).map(n=>'Missing '+n),...(completeness.optional_errors||[]).map(n=>'Query failed: '+n)])];}
   const filename=`mc.config_backup.web.${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
   const json=JSON.stringify(native,null,2);state.backup={archive,summary,filename,port,json};
-  $('backup-json').value=json;$('backup-json-view').hidden=false;revealPanel('backups');
+  $('backup-json').value=json;$('backup-json-view').hidden=false;
   download(filename,json,'application/json');
-  $('backup-summary').textContent=`Download requested: ${filename}. ${summaryText(summary)} The same validated JSON is shown below for copying. Logical backup only; not wipe-safe. Save the download or copied JSON privately.`;
-  notice('Native-compatible archive validated locally; JSON is available to copy and download. No backup or secret was uploaded.');return state.backup;
+  $('backup-summary').textContent=`Download requested: ${filename}. ${summary.complete?'Complete exposed-API snapshot.':'Partial backup; automatic restore is unavailable.'} Keep it private.`;
+  notice('Backup ready. Keep it private.');return state.backup;
 }
 async function ensureBackup() {
   if(state.migration||state.recovery||state.espRecovery||(state.backupApproved?.sha256===state.pkg?.sha256&&state.backupApproved?.port===state.port))return;
@@ -354,7 +354,11 @@ async function ensureBackup() {
     if(answer==='cancel')fail('Cancelled before reset or flash.');
     if(answer==='backup') {
       let result;try{result=await captureBackup();}catch(error){if(!await confirm('Backup did not complete',error.message,'No reset or write has occurred. Continue only if you accept having no complete backup.','CONTINUE WITHOUT BACKUP'))throw error;}
-      if(result){const saved=await choose('Confirm your backup download',`${result.filename}. ${summaryText(result.summary)} Save the download or copy the JSON below into a private file. The browser cannot confirm it reached disk.`,[['cancel','Cancel'],['saved','I saved the backup']],{backupJson:result.json});if(saved!=='saved')fail('Backup save was not acknowledged.');
+      if(result){
+        const port=state.port,generation=state.generation,pkg=state.pkg;
+        const answer=await choose('Backup JSON','',[['close','Close']],{backupJson:result.json});
+        if(answer!=='close')fail('Backup window dismissed. Preparation cancelled before reset or flash.');
+        if(state.backup!==result||result.port!==state.port||state.port!==port||state.generation!==generation||state.pkg!==pkg)fail('Selected device or firmware changed while the backup window was open. Prepare again.');
         if(result.summary.complete===false&&!await confirm('Continue with a partial backup?',summaryText(result.summary),'A partial logical archive cannot authorize a wipe.','CONTINUE WITH PARTIAL BACKUP'))fail('Partial-backup continuation cancelled.');}
     } else if(answer!=='skip')fail('Cancelled before reset or flash.');
     if(!state.device)try{await linkOperation(readApplication);}catch(error){log(`Application identity unavailable: ${error.message}`);}
