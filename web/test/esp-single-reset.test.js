@@ -1,7 +1,8 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {ESPError} from 'esptool-js';
+import {ESPError,Transport,ESPLoader} from 'esptool-js';
 import {EspSession} from '../src/esp.js';
+import {tryNativeUsbFallback} from '../src/connection-fallback.js';
 
 // Real ESPLoader reset factories/connection fallback, but no serial hardware.
 function session({usb=false}={}) {
@@ -115,6 +116,39 @@ test('only bounded pre-sync ROM timeouts are marked eligible for another native 
   loader.sync=originalSync;
   await assert.rejects(s.connect('no_reset',{singleReset:true}),error=>error.romHandshakeFailed===true&&/Failed to connect/.test(error.message));
   assert.equal(loader.sync,originalSync);assert.equal(loader.command,originalCommand);assert.ok(!calls.includes('stub'));
+});
+
+test('the actual empty Transport.read error advances from the no-reset test to one working USB-JTAG method',async()=>{
+  const steps=[],fixtures=[];let active;
+  const result=await tryNativeUsbFallback({
+    connect:async(mode,options)=>{
+      steps.push('connect:'+mode);const f=session({usb:true});fixtures.push(f);active=f.session;
+      if(mode==='no_reset')f.loader.sync=ESPLoader.prototype.sync;
+      return {session:active,info:await active.connect(mode,options)};
+    },
+    close:async()=>{steps.push('close');await active.close({strict:true});},touch:async()=>assert.fail('A successful hardware connection must not try TinyUSB'),
+    isCurrent:()=>true,portAvailable:()=>true,
+  });
+  assert.deepEqual(steps,['connect:no_reset','close','connect:usb_reset']);assert.equal(result.mode,'usb_reset');assert.equal(result.session,fixtures[1].session);assert.equal(result.info.mac,'aa:bb:cc:dd:ee:ff');assert.deepEqual(fixtures[0].signals,[]);assert.equal(fixtures[1].signals.filter(value=>value.requestToSend===true).length,2);
+});
+
+test('a live quiet serial reader permits the exact library silence error but restores its reader hook',async()=>{
+  const {session:s,loader,port}=session({usb:true});let controller;
+  port.readable=new ReadableStream({start(value){controller=value;}});loader.transport.readLoop=Transport.prototype.readLoop;loader.transport.trace=()=>{};
+  const original=loader.transport.readLoop;loader.sync=async()=>loader.transport.read(1);
+  await assert.rejects(s.connect('no_reset',{singleReset:true}),error=>error.romHandshakeFailed===true);assert.equal(loader.transport.readLoop,original);
+  controller.close();await Promise.resolve();
+});
+
+test('fatal reader errors, EOF and locked-reader failures cannot turn the same empty-buffer timeout into reset permission',async()=>{
+  for(const failure of ['done','NetworkError','NotAllowedError','locked']){
+    const {session:s,loader,port,calls}=session({usb:true});let streamController;
+    port.readable=new ReadableStream({start(controller){streamController=controller;}});let lock;
+    if(failure==='done')streamController.close();else if(failure==='locked')lock=port.readable.getReader();else streamController.error(Object.assign(new Error('Reader failure'),{name:failure}));
+    loader.transport.readLoop=Transport.prototype.readLoop;loader.transport.trace=()=>{};const original=loader.transport.readLoop;loader.sync=async()=>loader.transport.read(1);
+    await assert.rejects(s.connect('no_reset',{singleReset:true}),error=>!error.romHandshakeFailed&&(failure==='locked'?error instanceof TypeError:/reader stopped/.test(error.message)),failure);assert.equal(loader.transport.readLoop,original);assert.ok(!calls.includes('stub'));
+    lock?.releaseLock();
+  }
 });
 
 test('permission and disconnect errors swallowed by the loader sync loop cannot acquire fallback authority',async()=>{

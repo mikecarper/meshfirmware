@@ -6,10 +6,23 @@ const RECOVERY_FORMAT='meshfirmware-esp-write-recovery-v1';
 const RECOVERY_CHUNK=16384;
 const MAX_RECOVERY_ATTEMPTS=3;
 const interruptedTransport=error=>/NetworkError|NotFoundError|TimeoutError|InvalidStateError/.test(error?.name||'')||/disconnect|device (?:lost|removed)|port.*closed|closed.*port|timed? ?out|timeout|serial.*(?:exception|stopped|error)|no more data|stream.*(?:closed|stopped)|packet.*(?:stopped|header)|lost connection/i.test(error?.message||'');
-const handshakeReadiness=error=>['Error','ESPError','TimeoutError'].includes(error?.name||'Error')&&!/permission|denied|not.?allowed|security|disconnect|device (?:lost|removed)|port.*closed|not open|invalid state/i.test(error?.message||'')&&/timeout|timed out|no response|no serial data|invalid head of packet|failed to connect with the device/i.test(error?.message||'');
+const quietStreamMessage='Serial data stream stopped: Possible serial noise or corruption.';
+const handshakeReadiness=error=>['Error','ESPError','TimeoutError'].includes(error?.name||'Error')&&!/permission|denied|not.?allowed|security|disconnect|device (?:lost|removed)|port.*closed|not open|invalid state/i.test(error?.message||'')&&(error?.message===quietStreamMessage||/timeout|timed out|no response|no serial data|invalid head of packet|failed to connect with the device/i.test(error?.message||''));
 async function detectForConnection(loader,mode,singleReset){
   const originalSync=loader.sync,originalCommand=loader.command;
+  const transport=loader.transport,originalReadLoop=transport?.readLoop;
   let attempted=false,responded=false,blocked=false;
+  let readerStopped=false,readerFailure=null;
+  if(singleReset&&typeof originalReadLoop==='function')transport.readLoop=function(...args){
+    let running;
+    try{running=Reflect.apply(originalReadLoop,this,args);}
+    catch(error){readerStopped=true;readerFailure=error;throw error;}
+    // esptool's readLoop swallows fatal reader errors and EOF. An ordinary
+    // empty application port keeps it pending; a settled loop is NOT silence
+    // that may authorize another reset, even if read() later reports timeout.
+    if(running&&typeof running.then==='function')void running.then(()=>{readerStopped=true;},error=>{readerStopped=true;readerFailure=error;});
+    return running;
+  };
   if(typeof originalSync==='function')loader.sync=async function(...args){
     attempted=true;
     try{const result=await Reflect.apply(originalSync,this,args);responded=true;return result;}
@@ -28,13 +41,15 @@ async function detectForConnection(loader,mode,singleReset){
   }catch(error){
     // The loader collapses exhausted pre-sync timeouts to a generic ESPError.
     // Never mark permission failures or failures after even one valid reply.
-    if(singleReset&&attempted&&!responded&&!blocked&&handshakeReadiness(error)){
+    if(singleReset&&!responded&&readerStopped)throw readerFailure||new Error('USB serial reader stopped before ROM synchronization. Reconnect the same radio; no automatic reset retry was sent.');
+    if(singleReset&&attempted&&!responded&&!blocked&&!readerStopped&&handshakeReadiness(error)){
       const failure=new Error(error.message,{cause:error});failure.name=error.name;failure.romHandshakeFailed=true;throw failure;
     }
     throw error;
   }finally{
     if(typeof originalSync==='function')loader.sync=originalSync;
     if(typeof originalCommand==='function')loader.command=originalCommand;
+    if(singleReset&&typeof originalReadLoop==='function')transport.readLoop=originalReadLoop;
   }
 }
 async function detectWithSingleReset(loader,mode) {
