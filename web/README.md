@@ -63,7 +63,7 @@ visible. The top navigation opens the corresponding tools without touching USB.
    silently substituted. Choose **Keymind Cascade** or **MeshCore (stock)**;
    the old separate Logging provider is folded into Keymind Cascade because
    current releases use the same binaries, with runtime logging where supported.
-   Duplicate files are removed, distinct historical builds remain available,
+   Duplicate files are removed, distinct historical application builds remain available,
    and saved Logging-provider selections still work. Changing hardware or firmware filters refreshes the
    summary and available files; changing the USB port clears the previous
    automatic board choice before reading the new node. A failed or unknown
@@ -178,6 +178,12 @@ bounds checks. Forced transfers still do not prove that the image will boot.
 
 ### nRF52 erase and recovery
 
+The normal nRF52 firmware list contains application-only serial DFU ZIPs in
+both **Update** and **Erase & new install** modes. Embedded `with-bootloader`
+variants are not offered there; bootloader replacement is a separate operation.
+Deliberately supplied custom files remain available through **Custom file or
+download URL**, with the existing payload, board and destructive-write checks.
+
 Bootloader recommendations use the latest stable release of our
 `mikecarper/Adafruit_nRF52_Bootloader_OTAFIX` fork, refreshed with the catalog
 on deployment and daily. Its checksum-verified release manifest supplies exact
@@ -190,6 +196,27 @@ board names. Missing, ambiguous or unqualified profiles
 have no automatic recommendation. If the latest-release check fails, only a
 validated last-known fork snapshot may be retained, with a catalog warning;
 old upstream bootloader links are not silently substituted.
+
+On a connected nRF52 application with an exact verified board mapping, the page
+uses the read-only `get bootloader.ver` response to compare the installed
+bootloader with that board's latest stable OTAFIX release. A known older or
+preview bootloader offers **Prepare bootloader update** beside the connected
+device; a current, newer or custom bootloader does not. Unknown/unsupported
+responses, older companion interfaces and DFU-only connections are reported as
+unknown, never inferred from application versions, filenames or shared USB IDs.
+Reading this status does not reset, enter DFU or write firmware. Preparing an
+update opens the separate exact-board bootloader workflow; backup consideration
+and explicit flash acknowledgement still apply.
+
+If the current firmware cannot report `bootloader.ver`, install the selected
+Keymind application normally first. After its USB application startup is
+verified, the page reads `get bootloader.ver` again and asks whether to prepare
+the separate update if it now reports an older OTAFIX version or a replaceable
+preview. It does not update the bootloader silently, and an unknown response
+still does not count as outdated. Declining keeps the running application.
+The exact application choice remains selected after a normal bootloader
+transfer so it can be reinstalled through the normal same-radio USB handoff,
+backup consideration and final write confirmation.
 
 These combined SoftDevice/bootloader ZIPs require the exact compatible
 application to be reinstalled afterward. Application-owned data is not

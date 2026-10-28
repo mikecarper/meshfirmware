@@ -9,6 +9,8 @@ import {chooseConnection} from '../src/connection-choice.js';
 import {catalogProvider,catalogItemKey} from '../src/catalog.js';
 import {hash as firmwareHash,md5hex,partitionTable as parsePartitionTable} from '../src/firmware.js';
 import {MigrationApproval} from '../src/migration-approval.js';
+import {cleanCliReply} from '../src/meshcore.js';
+import {assessBootloaderVersion} from '../src/bootloader-version.js';
 const html=await readFile(new URL('../index.html',import.meta.url),'utf8');
 const source=(await readFile(new URL('../src/app.js',import.meta.url),'utf8')).replace(/^import .*;\r?$/gm,'');
 const ids=[...html.matchAll(/\bid="([^"]+)"/g)].map(m=>m[1]);
@@ -23,7 +25,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,catalogPromise=n
   if(recovery)storage.set('meshfirmware.nrfRecovery',JSON.stringify(recovery));
   if(espRecovery)storage.set('meshfirmware.espRecovery',JSON.stringify(espRecovery));
   const context=vm.createContext({document:{getElementById:id=>{assert.ok(elements.has(id),`Missing HTML id ${id}`);return elements.get(id);},querySelectorAll:()=>[...elements.values()]},navigator:{serial:{requestPort:async()=>{calls.push('chooser');return port;},getPorts(){throw new Error('must not enumerate automatically');},addEventListener(type,handler){serialEvents[type]=handler;}}},window:{addEventListener(){}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},Option,URL,Blob,Uint8Array,TextEncoder,TextDecoder,console,setTimeout,clearTimeout,AbortSignal,Date,
-    fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,MigrationApproval,assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),
+    fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,MigrationApproval,cleanCliReply,assessBootloaderVersion,assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),
     SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
   });
   vm.runInContext(source,context);
@@ -214,7 +216,7 @@ test('switching connected radios refreshes hardware provider role and artifact f
   await ui.elements.get('select-port').onclick();
   assert.equal(ui.evaluate('state.port'),secondPort);assert.equal(ui.elements.get('hardware').value,second.hardware);assert.equal(ui.elements.get('provider').value,'Keymind Cascade');assert.equal(ui.elements.get('role').value,'repeater');assert.equal(ui.elements.get('version').value,second.version);assert.equal(ui.elements.get('artifact').value,'1');
   const summary=ui.elements.get('automatic-summary').textContent;assert.ok(summary.includes(second.name));assert.ok(!summary.includes(first.name));assert.doesNotMatch(summary,/downgrade/i);
-  assert.equal(ui.evaluate('state.device.architecture'),'nrf52');assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(ui.calls,['chooser','open','close','chooser','open','close']);
+  assert.equal(ui.evaluate('state.device.architecture'),'nrf52');assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(ui.calls,['chooser','open','close','chooser','open','get bootloader.ver','close']);
 });
 
 test('a manual hardware override with automatic setup on immediately refreshes the chosen target',async()=>{
@@ -1020,12 +1022,189 @@ test('standalone nRF52 bootloader and SoftDevice components do not inherit an ap
   }
 });
 
-test('mode-filtered catalogs retain manual embedded-bootloader applications and legacy wrappers without auto-selecting them',async()=>{
+test('normal catalogs hide embedded nRF52 bootloaders while retaining legacy application wrappers',async()=>{
   const ui=workbench();await Promise.resolve();const embedded=xiaoRepeaterItem({name:'Xiao_nrf52_repeater-full-ota-with-bootloader-2.4.12-v1.18.0.1.zip'}),wrapper={...v4Item,name:'esp32_repeater-v1.18.0.zip',action:'download'},uf2={...v4Item,architecture:'noflash',name:'pico_repeater-v1.18.0.uf2',action:'download'};
   ui.context.inventory=[embedded,wrapper,uf2,{...embedded,name:'board_bootloader-v0.11.0.zip'},{...embedded,name:'FLASH_ERASE.zip'}];ui.evaluate('state.items=inventory;filterCatalog();');
-  assert.deepEqual(artifactChoices(ui),['0','1','2']);ui.elements.get('artifact').value='0';await ui.elements.get('artifact').onchange();assert.equal(ui.elements.get('artifact').value,'0');assert.equal(ui.evaluate('state.pkg'),null);assert.deepEqual(ui.calls,[]);
-  await ui.evaluate("setInstallMode('install');");assert.deepEqual(artifactChoices(ui),['0']);assert.equal(ui.elements.get('artifact').value,'0');
-  ui.elements.get('auto-detect-board').checked=true;ui.evaluate("state.manualSelections={provider:'MeshCore'};state.device={model:'Seeed Xiao-nrf52',catalogRole:'repeater'};selectDetectedBoard();");assert.equal(ui.elements.get('artifact').value,'');assert.deepEqual(artifactChoices(ui),['0']);assert.equal(ui.evaluate('state.pkg'),null);assert.deepEqual(ui.calls,[]);
+  assert.deepEqual(artifactChoices(ui),['1','2']);ui.elements.get('artifact').value='1';await ui.elements.get('artifact').onchange();assert.equal(ui.elements.get('artifact').value,'1');assert.equal(ui.evaluate('state.pkg'),null);assert.deepEqual(ui.calls,[]);
+  await ui.evaluate("setInstallMode('install');");assert.deepEqual(artifactChoices(ui),[]);assert.equal(ui.elements.get('artifact').value,'');
+  ui.elements.get('auto-detect-board').checked=true;ui.evaluate("state.manualSelections={provider:'MeshCore'};state.device={model:'Seeed Xiao-nrf52',catalogRole:'repeater'};selectDetectedBoard();");assert.equal(ui.elements.get('artifact').value,'');assert.deepEqual(artifactChoices(ui),[]);assert.equal(ui.evaluate('state.pkg'),null);assert.deepEqual(ui.calls,[]);
+});
+
+test('nRF52 firmware choices contain only the two application profiles in both Update and Install modes',async()=>{
+  const full=xiaoRepeaterItem({name:'Xiao_nrf52_repeater-full-ota-v1.18.0.1.zip',sha256:'c'.repeat(64),subtitle:'Full supported sensors + LoRa OTA'}),reduced=xiaoRepeaterItem({name:'Xiao_nrf52_repeater-reduced-ota-v1.18.0.1.zip',url:'https://example.test/xiao-reduced.zip',sha256:'d'.repeat(64),subtitle:'Reduced optional sensors + LoRa OTA'});
+  const embedded=[full,reduced].map(item=>({...item,name:item.name.replace('-v1.18','-with-bootloader-2.4.12-v1.18'),url:item.url.replace('.zip','-with-bootloader.zip'),subtitle:item.subtitle+' + OTAFIX 2.4.12 bootloader'}));
+  const ui=workbench();await Promise.resolve();ui.context.inventory=[full,reduced,...embedded];ui.evaluate('state.items=inventory;filterCatalog();');
+  for(const [id,value]of [['provider','MeshCore'],['hardware',full.hardware],['role','repeater'],['version',full.version]])ui.elements.get(id).value=value;
+  for(const mode of ['update','install','update']){
+    await ui.evaluate(`setInstallMode('${mode}');`);ui.evaluate('filterCatalog();');
+    assert.deepEqual(artifactChoices(ui),['0','1'],mode);assert.equal(ui.elements.get('provider').value,'MeshCore');assert.equal(ui.elements.get('hardware').value,full.hardware);assert.equal(ui.elements.get('role').value,'repeater');assert.equal(ui.elements.get('version').value,full.version);
+    assert.equal(ui.evaluate('state.items[0].sha256'),full.sha256);assert.equal(ui.evaluate('state.items[1].url'),reduced.url);assert.ok(!ui.elements.get('artifact').options.some(option=>/with.bootloader/i.test(option.text)));assert.equal(ui.evaluate('state.pkg'),null);
+  }
+  assert.deepEqual(ui.calls,[]);
+});
+
+async function bootloaderOfferWorkbench({reported='0.11.0-OTAFIX2.4.10',role='common-cli',protocol=14,model='Seeed Xiao-nrf52',cached=false}={}){
+  const ui=workbench();await Promise.resolve();
+  const info={version:'2.4.12',profile:'xiao_nrf52840_ble',hardwareId:'xiao_nrf52',url:'https://example.test/xiao_nrf52840_ble_bootloader-v0.11.0-OTAFIX2.4.12_s140_7.3.0.zip',sha256:'c'.repeat(64),size:64,cached};
+  const item=xiaoRepeaterItem({bootloader:[info.url],bootloaderInfo:info});
+  ui.context.inventory=[item];ui.context.selectedPort=ui.port;ui.evaluate('state.items=inventory;state.port=selectedPort;filterCatalog();');
+  for(const [id,value]of [['provider','MeshCore'],['hardware',item.hardware],['role','repeater'],['version',item.version],['artifact','0']])ui.elements.get(id).value=value;
+  ui.evaluate('updateDownload();');
+  const device={role,protocol,model,name:'Test XIAO',catalogRole:role==='companion'?'companionFull':'repeater',publicKey:'11'.repeat(32),version:'v1.18.0.2'};
+  ui.context.detectMeshCore=async()=>({...device});
+  const reply=()=>{if(reported instanceof Error)throw reported;return reported;};
+  const link={async command(command,timeout){ui.calls.push('query:'+command);assert.equal(command,'get bootloader.ver');assert.equal(timeout,350);return reply();}};
+  ui.context.testLink=link;
+  ui.context.MeshCore=class{constructor(selected,options){assert.equal(selected,link);assert.equal(options.timeoutMs,700);}async cli(command){ui.calls.push('binary-query:'+command);assert.equal(command,'get bootloader.ver');return reply();}};
+  await ui.evaluate('readApplication(testLink);');ui.evaluate('controls();');
+  return {...ui,info,item,device,link};
+}
+
+test('a read-only nRF52 bootloader query offers the exact board update separately without loading or resetting',async()=>{
+  const ui=await bootloaderOfferWorkbench({reported:'\u001b[32m> get bootloader.ver\r\n> 0.11.0-OTAFIX2.4.10\u001b[0m\r\n'});
+  assert.equal(ui.evaluate('state.device.bootloaderVersion'),'0.11.0-OTAFIX2.4.10');assert.equal(ui.evaluate('state.device.architecture'),'nrf52');
+  assert.equal(ui.elements.get('nrf-bootloader-offer').hidden,false);assert.equal(ui.elements.get('prepare-bootloader-update').hidden,false);assert.equal(ui.elements.get('prepare-bootloader-update').disabled,false);assert.match(ui.elements.get('nrf-bootloader-status').textContent,/2\.4\.10/);assert.match(ui.elements.get('nrf-bootloader-status').textContent,/2\.4\.12.*separate/i);
+  assert.equal(ui.elements.get('artifact').value,'0');assert.deepEqual(artifactChoices(ui),['0']);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls,['query:get bootloader.ver']);
+});
+
+test('companion bootloader version reads use only the supported read-only CLI and older companions stay usable',async()=>{
+  for(const protocol of [13,14,15]){
+    const ui=await bootloaderOfferWorkbench({role:'companion',protocol});
+    assert.deepEqual(ui.calls,protocol>=14?['binary-query:get bootloader.ver']:[]);assert.equal(ui.evaluate('state.device.publicKey'),'11'.repeat(32));assert.equal(ui.elements.get('prepare-bootloader-update').hidden,protocol<14);
+    if(protocol<14){assert.equal(ui.evaluate('state.device.bootloaderVersion'),null);assert.match(ui.elements.get('nrf-bootloader-status').textContent,/could not be verified|unknown/i);}
+  }
+});
+
+test('bootloader reporting never treats current, newer, custom, upstream or unavailable versions as an outdated stable',async()=>{
+  for(const [reported,pattern,offer]of [
+    ['0.11.0-OTAFIX2.4.12',/matches.*2\.4\.12|No bootloader update is needed/i,false],
+    ['0.11.0-OTAFIX2.4.13',/newer.*No downgrade/i,false],
+    ['OTAFIX2.4.12-custom',/custom.*not treated as.*outdated/i,false],
+    ['0.11.0',/could not be verified|unknown/i,false],
+    ['unknown command',/could not be verified|unknown/i,false],
+    [new Error('Optional CLI unavailable'),/could not be verified|unknown/i,false],
+    ['OTAFIX2.4.12-preview.1',/preview.*replace the preview/i,true]
+  ]){
+    const ui=await bootloaderOfferWorkbench({reported,cached:true});assert.equal(ui.elements.get('nrf-bootloader-offer').hidden,false);assert.equal(ui.elements.get('prepare-bootloader-update').hidden,!offer);assert.match(ui.elements.get('nrf-bootloader-status').textContent,pattern);assert.match(ui.elements.get('nrf-bootloader-status').textContent,/last verified stable/);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.device.publicKey'),'11'.repeat(32));assert.deepEqual(ui.calls,['query:get bootloader.ver']);
+  }
+});
+
+test('bootloader updates need the exact detected nRF52 board and cannot be offered during another workflow',async()=>{
+  for(const scenario of ['other-board','unknown-model','no-version-mapping','no-port','dfu','already-bootloader','handoff','recovery','migration','espRecovery','verification','session','plan','package']){
+    const ui=await bootloaderOfferWorkbench();ui.calls.length=0;
+    if(scenario==='other-board'){ui.context.other=xiaoRepeaterItem({hardware:'Different nRF52 board',bootloader:[ui.info.url],bootloaderInfo:ui.info});ui.evaluate('state.items.push(other);');ui.elements.get('artifact').value='1';}
+    if(scenario==='unknown-model')ui.evaluate("state.device.model='Seeed Xiao-nrf';");
+    if(scenario==='no-version-mapping')ui.evaluate('delete state.items[0].bootloaderInfo;');
+    if(scenario==='no-port')ui.evaluate('state.port=null;');
+    if(scenario==='dfu')ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0044});
+    if(scenario==='already-bootloader')ui.elements.get('already-bootloader').checked=true;
+    if(scenario==='handoff')ui.evaluate('state.handoff=true;');
+    for(const field of ['recovery','migration','espRecovery','verification'])if(scenario===field)ui.evaluate(`state.${field}={sha256:'a'.repeat(64)};`);
+    if(scenario==='session')ui.evaluate('state.esp={};');
+    if(scenario==='plan')ui.evaluate('state.plan={};');
+    if(scenario==='package'){ui.context.pkg=fakePackage({kind:'softdevice_bootloader',destructive:true});ui.evaluate('state.pkg=pkg;');}
+    ui.evaluate('controls();');assert.equal(ui.elements.get('prepare-bootloader-update').hidden,true,scenario);assert.equal(ui.elements.get('prepare-bootloader-update').disabled,true,scenario);
+    ui.context.loadBootloaderFirmware=async()=>ui.calls.push('unexpected-load');await ui.elements.get('prepare-bootloader-update').onclick();assert.deepEqual(ui.calls,[],scenario);
+  }
+});
+
+test('non-nRF and bootloader interfaces never receive an application bootloader-version query',async()=>{
+  for(const scenario of ['esp32','dfu','already-bootloader']){
+    const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.inventory=[scenario==='esp32'?headlessV4Item():xiaoRepeaterItem()];ui.evaluate('state.items=inventory;state.port=selectedPort;');
+    if(scenario==='dfu')ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0044});
+    if(scenario==='already-bootloader')ui.elements.get('already-bootloader').checked=true;
+    ui.context.detectMeshCore=async()=>({role:'common-cli',model:scenario==='esp32'?'Heltec V4.2 none detected':'Seeed Xiao-nrf52',publicKey:'11'.repeat(32)});ui.context.testLink={command:async()=>{throw new Error('An excluded interface must not be probed');}};
+    await ui.evaluate('readApplication(testLink);');assert.equal(ui.evaluate('state.device.bootloaderVersion'),null);assert.deepEqual(ui.calls,[]);
+  }
+});
+
+test('disconnecting during optional bootloader reporting cannot retain version evidence for another port',async()=>{
+  const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.inventory=[xiaoRepeaterItem()];ui.evaluate('state.items=inventory;state.port=selectedPort;');
+  ui.context.detectMeshCore=async()=>({role:'common-cli',model:'Seeed Xiao-nrf52',publicKey:'11'.repeat(32)});ui.context.testLink={command:async()=>{ui.serialEvents.disconnect({port:ui.port});return 'OTAFIX2.4.10';}};
+  await assert.rejects(ui.evaluate('readApplication(testLink);'),/changed or disconnected.*bootloader/i);assert.equal(ui.evaluate('state.device'),null);assert.equal(ui.evaluate('state.port'),null);assert.equal(ui.elements.get('prepare-bootloader-update').hidden,true);assert.deepEqual(ui.calls,[]);
+});
+
+test('preparing a recommended nRF52 bootloader only loads the hash-checked ZIP and preserves the selected application',async()=>{
+  const ui=await bootloaderOfferWorkbench();ui.calls.length=0;
+  const name=new URL(ui.info.url).pathname.split('/').pop();ui.context.bootPkg=fakePackage({name,kind:'softdevice_bootloader',destructive:true,sha256:ui.info.sha256});
+  ui.context.boundedFetch=async url=>{assert.equal(url,ui.info.url);ui.calls.push('download-bootloader');return new Uint8Array(ui.info.size);};ui.context.hash=()=>ui.info.sha256;ui.context.checkedZip=()=>[{name:'manifest.json'},{name:'bootloader.bin'},{name:'bootloader.dat'}];ui.context.inspectFirmware=()=>ui.context.bootPkg;
+  await ui.elements.get('prepare-bootloader-update').onclick();
+  assert.deepEqual(ui.calls,['download-bootloader']);assert.equal(ui.evaluate('state.pkg'),ui.context.bootPkg);assert.equal(ui.evaluate('state.item.bootloaderInfo.profile'),ui.info.profile);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.port'),ui.port);assert.equal(ui.elements.get('artifact').value,'0');assert.equal(ui.elements.get('expected-sha').value,ui.info.sha256);assert.match(ui.elements.get('image-warning').textContent,/requires reinstalling/);
+  assert.equal(ui.elements.get('prepare-bootloader-update').hidden,true);
+  serialMock(ui);ui.context.ensureBackup=async()=>ui.calls.push('backup-before-component');ui.elements.get('transport-mode').value='nrf52';ui.elements.get('already-bootloader').checked=true;
+  await ui.elements.get('prepare').onclick();assert.equal(ui.evaluate('state.plan.erasePkg'),null);assert.ok(ui.calls.includes('backup-before-component'));
+  const confirmations=[];ui.context.confirm=async(_title,_detail,_warning,token)=>{confirmations.push(token);return false;};ui.context.flashNrf=async()=>ui.calls.push('flash-bootloader');await ui.elements.get('flash').onclick();assert.deepEqual(confirmations,['WIPE WITHOUT BACKUP']);assert.ok(!ui.calls.includes('flash-bootloader'));
+  ui.context.confirm=async()=>true;await ui.elements.get('flash').onclick();assert.ok(ui.calls.includes('flash-bootloader'));assert.equal(ui.elements.get('artifact').value,'0');assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.port'),null);assert.equal(ui.evaluate('state.handoff'),true);assert.equal(ui.evaluate('state.device.bootloaderVersion'),null);assert.equal(ui.evaluate('state.verification'),null);assert.match(ui.elements.get('notice').textContent,/application build remains selected|reinstall.*application/i);assert.match(ui.elements.get('notice').textContent,/not yet verified/i);
+});
+
+function prepareNrfStartup(ui,{reported='0.11.0-OTAFIX2.4.10',publicKey=ui.device.publicKey}={}){
+  ui.context.detectMeshCore=async()=>({...ui.device,role:'common-cli',version:'v1.18.0.2',publicKey});
+  ui.context.SerialLink=class{async open(_baud,options){assert.equal(options.application,true);ui.calls.push('application-open');}async close(){ui.calls.push('application-close');}async command(command){ui.calls.push('application-query:'+command);if(command==='get bootloader.ver')return reported;if(command==='ver')return 'MeshCore v1.18.0.2';throw new Error('Unexpected application query '+command);}};
+  ui.context.expected={sha256:'a'.repeat(64),architecture:'nrf52',role:'common-cli',model:ui.device.model,publicKey:ui.device.publicKey,version:'v1.18.0.2'};ui.context.appPkg=fakePackage({name:ui.item.name});
+  ui.evaluate('state.verification=expected;state.handoff=true;state.pkg=appPkg;');ui.elements.get('already-bootloader').checked=false;ui.calls.length=0;
+}
+
+test('installing an application that can report bootloader version prompts only after startup is verified',async()=>{
+  const ui=await bootloaderOfferWorkbench({reported:'unknown command'});assert.equal(ui.elements.get('prepare-bootloader-update').hidden,true);
+  prepareNrfStartup(ui);const prompts=[];
+  ui.context.choose=async(title,detail,buttons)=>{prompts.push({title,detail,buttons});ui.calls.push('bootloader-offer');assert.equal(ui.evaluate('state.verification'),null);assert.match(ui.elements.get('notice').textContent,/startup verified/i);return 'later';};
+  ui.context.loadBootloaderFirmware=async()=>ui.calls.push('unexpected-component-load');await ui.evaluate('verifyApplication();');
+  assert.deepEqual(ui.calls,['application-open','application-query:get bootloader.ver','application-query:ver','application-close','bootloader-offer']);assert.equal(prompts.length,1);assert.match(prompts[0].title,/Bootloader update available/i);assert.match(prompts[0].detail,/2\.4\.10/);assert.match(prompts[0].detail,/2\.4\.12/);assert.match(prompts[0].detail,/application started successfully/i);assert.match(prompts[0].detail,/Backup.*DFU.*confirmation/i);assert.equal(prompts[0].buttons[0][0],'later');assert.equal(prompts[0].buttons[1][0],'prepare');assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.evaluate('state.pkg'),ui.context.appPkg);assert.match(ui.elements.get('notice').textContent,/startup verified/i);
+  await ui.evaluate('offerBootloaderAfterStartup();');assert.equal(prompts.length,1,'The same identity/reported version/verified bootloader is only prompted once per page');
+});
+
+test('current, unknown, newer and custom bootloaders do not prompt after successful application startup',async()=>{
+  for(const reported of ['0.11.0-OTAFIX2.4.12','0.11.0-OTAFIX2.4.13','0.11.0','unknown command','OTAFIX2.4.12-custom']){
+    const ui=await bootloaderOfferWorkbench();prepareNrfStartup(ui,{reported});ui.context.choose=async()=>{ui.calls.push('unexpected-offer');return 'prepare';};ui.context.loadBootloaderFirmware=async()=>ui.calls.push('unexpected-load');await ui.evaluate('verifyApplication();');
+    assert.equal(ui.evaluate('state.verification'),null,reported);assert.match(ui.elements.get('notice').textContent,/startup verified/i,reported);assert.deepEqual(ui.calls,['application-open','application-query:get bootloader.ver','application-query:ver','application-close'],reported);
+  }
+});
+
+test('the post-startup bootloader prompt only prepares after an explicit choice and retains successful application verification on preparation failure',async()=>{
+  for(const failure of [false,true]){
+    const ui=await bootloaderOfferWorkbench();prepareNrfStartup(ui);ui.context.choose=async()=>{ui.calls.push('accepted-prepare');return 'prepare';};ui.context.loadBootloaderFirmware=async()=>{ui.calls.push('load-component-only');if(failure)throw Error('Fixture download failure');};
+    if(failure)await assert.rejects(ui.evaluate('verifyApplication();'),/Application startup was verified.*bootloader preparation failed.*Fixture download failure/i);else await ui.evaluate('verifyApplication();');
+    assert.deepEqual(ui.calls,['application-open','application-query:get bootloader.ver','application-query:ver','application-close','accepted-prepare','load-component-only']);assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.port'),ui.port);assert.equal(ui.elements.get('artifact').value,'0');
+  }
+});
+
+test('post-startup bootloader preparation rejects changed evidence or a new pending workflow while the prompt is open',async()=>{
+  for(const change of ['port','generation','board','sha256','url','sha256-in-place','url-in-place','pending-recovery','component']){
+    const ui=await bootloaderOfferWorkbench();prepareNrfStartup(ui);ui.context.choose=async()=>{
+      if(change==='port')ui.evaluate('state.port={getInfo:()=>({})};');
+      if(change==='generation')ui.evaluate('state.generation++;');
+      if(change==='board')ui.evaluate("state.device.model='Different nRF52 board';");
+      if(change==='sha256')ui.evaluate("state.items[0]={...state.items[0],bootloaderInfo:{...state.items[0].bootloaderInfo,sha256:'d'.repeat(64)}};");
+      if(change==='url')ui.evaluate("state.items[0]={...state.items[0],bootloaderInfo:{...state.items[0].bootloaderInfo,url:'https://example.test/replaced-bootloader.zip'}};");
+      if(change==='sha256-in-place')ui.evaluate("state.items[0].bootloaderInfo.sha256='d'.repeat(64);");
+      if(change==='url-in-place')ui.evaluate("state.items[0].bootloaderInfo.url='https://example.test/replaced-bootloader.zip';");
+      if(change==='pending-recovery')ui.evaluate("state.espRecovery={sha256:'d'.repeat(64),mac:'aa:bb:cc:dd:ee:ff'};");
+      if(change==='component'){ui.context.component=fakePackage({kind:'softdevice_bootloader',destructive:true});ui.evaluate('state.pkg=component;');}
+      return 'prepare';
+    };ui.context.loadBootloaderFirmware=async()=>ui.calls.push('unexpected-component-load');
+    await assert.rejects(ui.evaluate('verifyApplication();'),/device or verified bootloader changed/i,change);assert.equal(ui.evaluate('state.verification'),null,change);assert.ok(!ui.calls.includes('unexpected-component-load'),change);assert.equal(ui.evaluate('state.plan'),null,change);
+  }
+});
+
+test('a pending ESP write blocks stale nRF52 application verification before opening USB or offering another image',async()=>{
+  const ui=await bootloaderOfferWorkbench();prepareNrfStartup(ui);ui.context.pendingEsp={sha256:'d'.repeat(64),mac:'aa:bb:cc:dd:ee:ff',name:'interrupted.bin'};ui.evaluate('state.espRecovery=pendingEsp;');
+  const originalPackage=ui.evaluate('state.pkg'),originalVerification=ui.evaluate('state.verification');ui.context.choose=async()=>{ui.calls.push('unexpected-offer');return 'prepare';};ui.context.loadBootloaderFirmware=async()=>ui.calls.push('unexpected-image-load');
+  await assert.rejects(ui.evaluate('verifyApplication();'),/pending write recovery/i);assert.deepEqual(ui.calls,[]);assert.equal(ui.evaluate('state.verification'),originalVerification);assert.equal(ui.evaluate('state.pkg'),originalPackage);assert.equal(ui.evaluate('state.espRecovery'),ui.context.pendingEsp);assert.equal(ui.evaluate('state.port'),ui.port);
+});
+
+test('direct post-startup bootloader offers cannot supersede pending ESP recovery or a loaded component',async()=>{
+  for(const scenario of ['esp-recovery','component']){
+    const ui=await bootloaderOfferWorkbench();ui.calls.length=0;
+    if(scenario==='esp-recovery')ui.evaluate("state.espRecovery={sha256:'d'.repeat(64),mac:'aa:bb:cc:dd:ee:ff'};");
+    else{ui.context.component=fakePackage({kind:'softdevice_bootloader',destructive:true});ui.evaluate('state.pkg=component;');}
+    const originalPackage=ui.evaluate('state.pkg'),originalRecovery=ui.evaluate('state.espRecovery');ui.context.choose=async()=>{ui.calls.push('unexpected-offer');return 'prepare';};ui.context.loadBootloaderFirmware=async()=>ui.calls.push('unexpected-image-load');
+    await ui.evaluate('offerBootloaderAfterStartup();');assert.deepEqual(ui.calls,[],scenario);assert.equal(ui.evaluate('state.pkg'),originalPackage,scenario);assert.equal(ui.evaluate('state.espRecovery'),originalRecovery,scenario);
+  }
+});
+
+test('an application identity mismatch never reaches the optional bootloader update prompt',async()=>{
+  const ui=await bootloaderOfferWorkbench();prepareNrfStartup(ui,{publicKey:'22'.repeat(32)});ui.context.choose=async()=>ui.calls.push('unexpected-offer');ui.context.loadBootloaderFirmware=async()=>ui.calls.push('unexpected-load');
+  await assert.rejects(ui.evaluate('verifyApplication();'),/identity differs/i);assert.ok(ui.evaluate('state.verification'));assert.deepEqual(ui.calls,['application-open','application-query:get bootloader.ver','application-close']);
 });
 
 test('numbered backup/prepare labels survive control refreshes and install-mode changes without replacing button children',async()=>{

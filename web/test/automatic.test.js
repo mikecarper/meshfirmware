@@ -236,13 +236,42 @@ test('nRF52 uses the same ordinary application DFU ZIP for either mode without c
   }
 });
 
-test('catalog retains qualified embedded-bootloader application bundles without auto-suggesting them',()=>{
+test('nRF52 embedded-bootloader application bundles are absent from both ordinary installation modes',()=>{
   const embedded=app({architecture:'nrf52',action:'flash',name:'board_repeater-with-bootloader-2.4.12-full-ota-v1.18.0.zip'});
   for(const mode of ['update','install']){
-    assert.equal(matchesCatalogInstallMode(embedded,mode),true);
+    assert.equal(matchesCatalogInstallMode(embedded,mode),false);
     assert.equal(matchesInstallMode(embedded,mode),false);assert.equal(choose([embedded],{installMode:mode}).artifactIndex,null);
-    for(const name of ['board_bootloader-v2.4.12.zip','board_repeater-with-bootloader-latest-full-v1.18.0.zip','board_repeater-with-bootloader-2.4.12-FLASH_ERASE.zip','board_repeater-with-bootloader-2.4.12-with-bootloader-2.4.12-full-v1.18.0.zip'])assert.equal(matchesCatalogInstallMode({...embedded,name},mode),false,name);
+    for(const name of ['board_bootloader-v2.4.12.zip','board_repeater-with-bootloader-latest-full-v1.18.0.zip','board_repeater_WITH_BOOTLOADER_2.4.12_FULL.ZIP','board_repeater-with-softdevice-bootloader-v1.18.0.zip','board_repeater_SOFTDEVICE_v1.18.0.zip','board_repeater-with-bootloader-2.4.12-FLASH_ERASE.zip','board_repeater-with-bootloader-2.4.12-with-bootloader-2.4.12-full-v1.18.0.zip'])assert.equal(matchesCatalogInstallMode({...embedded,name},mode),false,name);
     for(const difference of [{role:'bootloader'},{architecture:'esp32'},{action:'download'},{project:'Meshtastic'}])assert.equal(matchesCatalogInstallMode({...embedded,...difference},mode),false);
+  }
+});
+
+test('explicit nRF52 bundled-content metadata or an embedded asset basename cannot hide behind an ordinary filename',()=>{
+  const nrf=app({architecture:'nrf52',action:'flash',name:'board_repeater-v1.18.0.zip',url:'https://example.test/board_repeater-v1.18.0.zip'});
+  const embedded=[
+    {url:'https://example.test/board_repeater_WITH_BOOTLOADER_2.4.12.zip'},
+    {url:'https://example.test/board%5Frepeater%5Fsoftdevice%5Fv1.18.0.zip'},
+    {subtitle:'Full supported sensors + LoRa OTA + OTAFIX 2.4.12 bootloader'},
+    {artifactTitle:'Includes the exact-board OTAFIX 2.4.12 bootloader'},
+    {title:'Application bundles SoftDevice'},
+    {includesBootloader:true},{containsBootloader:true},{embeddedBootloader:true},
+    {includesSoftdevice:true},{containsSoftdevice:true},{embeddedSoftdevice:true},
+    {components:['application','bootloader']},{components:['SoftDevice','application']}
+  ];
+  for(const mode of ['update','install'])for(const difference of embedded){
+    const item={...nrf,...difference};assert.equal(matchesInstallMode(item,mode),false,JSON.stringify(difference));assert.equal(matchesCatalogInstallMode(item,mode),false,JSON.stringify(difference));assert.equal(choose([item],{installMode:mode}).artifactIndex,null);
+  }
+});
+
+test('ordinary nRF52 applications retain separate bootloader recommendations and harmless compatibility text',()=>{
+  const nrf=app({architecture:'nrf52',action:'flash',name:'board_repeater-v1.18.0.zip',url:'https://example.test/board_repeater-v1.18.0.zip',
+    title:'Repeater',subtitle:'Supports bootloader updates; includes bootloader compatibility advice',
+    artifactTitle:'Serial DFU application package',bootloaderInfo:{version:'2.4.12',profile:'board',url:'https://example.test/board_bootloader.zip'},bootloader:['https://example.test/board_bootloader.zip'],
+    releaseNotes:'INSTALL - Ordinary application firmware preserves the installed bootloader. LoRa updates require the matching OTAFIX bootloader.'});
+  const embedded={...nrf,name:'board_repeater-with-bootloader-2.4.12-full-ota-v9.0.0.zip',version:'v9.0.0'};
+  for(const mode of ['update','install']){
+    assert.equal(matchesInstallMode(nrf,mode),true);assert.equal(matchesCatalogInstallMode(nrf,mode),true);
+    const result=choose([embedded,nrf],{installMode:mode});assert.equal(result.artifactIndex,1);assert.equal(result.selections.version,nrf.version);
   }
 });
 

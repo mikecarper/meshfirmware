@@ -3,7 +3,7 @@ import { inspectFirmware, checkedZip, hash, fail, text } from './firmware.js';
 import { SerialLink, flashNrf, touch1200 } from './serial.js';
 import { EspSession, validateEspWriteRecovery } from './esp.js';
 import { getCatalog, catalogProvider, catalogItemKey, httpsUrl, compareVersions } from './catalog.js';
-import { MeshCore, backupCommonCli, verifyBackup, parseBackup, enterCompanionBinary, detectMeshCore, backupSummary } from './meshcore.js';
+import { MeshCore, backupCommonCli, verifyBackup, parseBackup, enterCompanionBinary, detectMeshCore, backupSummary, cleanCliReply } from './meshcore.js';
 import { exportNativeBackup } from './backup-native.js';
 import { assessBoard, rakFamily, endfIdentity } from './board-safety.js';
 import { BrowserPlanner } from './planner.js';
@@ -13,12 +13,14 @@ import { detectBoard, detectRecoveryProfile } from './board-detection.js';
 import { chooseFirmware, firmwareVersionWarning, matchesCatalogInstallMode } from './automatic.js';
 import { chooseConnection } from './connection-choice.js';
 import { MigrationApproval } from './migration-approval.js';
+import { assessBootloaderVersion } from './bootloader-version.js';
 
 const $ = id => document.getElementById(id);
 const state = { installMode:'update', port: null, pkg: null, esp: null, plan: null, generation: 0, busy: false, items: [], restore: null, directory: null, archive:null, archiveContext:null, automaticSha:null, automaticShaName:null, recoveryCatalog:null,loadedRecovery:null,planner:null, migration:null, downloaded:new Set(),item:null,device:null,manualSelections:{},detectedHardware:null,connection:null,boardDetected:false,recoveryManual:false,recoveryDetectionRequested:false,backupApproved:null,backup:null,recovery:null,espRecovery:null,verification:null,handoff:false };
 // This write authorization is deliberately never saved in browser storage.
 state.migrationApproval=null;state.approvalPort=null;state.approvalResetPort=null;state.approvalResumeRequested=null;
 state.backupTextGeneration=0;
+const bootloaderOffersShown=new Set();
 try { const pending=JSON.parse(localStorage.getItem('meshfirmware.pendingMigration') || 'null'); if(pending && /^[a-f0-9:]{17}$/i.test(pending.mac) && /^[a-f0-9]{64}$/.test(pending.sha256)) state.migration=pending; } catch { /* The worker still fails closed on any actual NVS migration state. */ }
 for(const [key,field] of [['meshfirmware.nrfRecovery','recovery'],['meshfirmware.verifyApplication','verification']])try{const saved=JSON.parse(localStorage.getItem(key)||'null');if(saved&&/^[a-f0-9]{64}$/.test(saved.sha256))state[field]=field==='recovery'?{...saved,phase:'reselect-dfu',eraseComplete:saved.eraseComplete===true}:saved;}catch{}
 try{const saved=JSON.parse(localStorage.getItem('meshfirmware.espRecovery')||'null');if(saved)state.espRecovery=validateEspWriteRecovery(saved);}catch{/* Invalid retry state never authorizes a write. */}
@@ -119,6 +121,7 @@ function controls() {
   $('retry').disabled ||= !state.port||!state.pkg;
   syncInstallMode();
   updateStepGuidance();
+  updateBootloaderOffer();
   // Extras stay collapsed for ordinary updates, but never conceal a required
   // recovery/migration step or a deliberately selected destructive action.
   if(state.espRecovery)revealPanel('esp-retry-options');
@@ -189,6 +192,15 @@ async function readApplication(link) {
   const board=detectBoard({items:state.items,deviceModel:device.model,usbInfo:port?.getInfo()||{}});
   const architectures=new Set(state.items.filter(i=>i.hardware===board.hardware).map(i=>i.architecture));
   if(board.hardware&&architectures.size===1)device.architecture=[...architectures][0];
+  device.bootloaderVersion=null;
+  if(device.architecture==='nrf52'&&!dfuIds.has(portId(port))&&!$('already-bootloader').checked){
+    try{
+      const command='get bootloader.ver';
+      const reply=device.role==='common-cli'?await link.command(command,350):device.role==='companion'&&device.protocol>=14?await new MeshCore(link,{timeoutMs:700}).cli(command):null;
+      device.bootloaderVersion=reply===null?null:cleanCliReply(reply,command);
+    }catch{/* Optional read-only version reporting must never block application updates. */}
+    if(state.port!==port||state.generation!==generation)fail('Selected port changed or disconnected while checking the bootloader. Re-select and detect again.');
+  }
   state.device=device;
   refreshFirmwareWarnings();
   $('device-name').textContent=device.name||device.model||'MeshCore';$('device-meta').textContent=`${device.model||device.role} · ${device.version||'version not reported'} · identity ${(device.publicKey||'').slice(0,12)}`;
@@ -388,18 +400,25 @@ function verificationRecord(pkg) {
 function queueVerification(pkg){state.verification=verificationRecord(pkg);persistFlow('verification','meshfirmware.verifyApplication');}
 function completeNrfTransfer(pkg){
   if(pkg.erase){notice('Erase transfer completed; no application startup is claimed. Select the intended final firmware.');return;}
+  const applicationIndex=$('artifact').value?Number($('artifact').value):-1,application=state.items[applicationIndex],normalBootloader=selectedBootloader(pkg);
+  const returnToApplication=normalBootloader&&application?.architecture==='nrf52'&&application.hardware===state.item?.hardware&&matchesCatalogInstallMode(application,state.installMode);
   const temporary=selectedRecovery(pkg);
   if(temporary){
     clearVerification();state.recovery=null;persistFlow('recovery','meshfirmware.nrfRecovery');state.handoff=true;state.backupApproved=null;state.port=null;state.plan=null;state.generation++;$('port-status').textContent='Select same recovery DFU radio';
     notice(`Temporary R_${temporary.id} transfer completed; activation and installed identity remain unverified. Re-select the SAME radio's DFU port, then install the NORMAL bootloader for its actual physical board and reinstall the compatible application. Do not leave the allow-all recovery bridge installed.`);return;
   }
   if(pkg.kind==='application'){queueVerification(pkg);notice('DFU transfer completed. Choose the application port: the page will verify role, identity, protected board family and payload version when available.');}
-  else{clearVerification();notice('DFU component transfer completed. Installed bootloader/SoftDevice startup remains unverified; the completed recovery is released so you can select the application ZIP next.');}
+  else{clearVerification();if(state.device)state.device.bootloaderVersion=null;notice('DFU component transfer completed. Installed bootloader/SoftDevice startup remains unverified; the completed recovery is released so you can select the application ZIP next.');}
   state.recovery=null;persistFlow('recovery','meshfirmware.nrfRecovery');state.handoff=false;state.backupApproved=null;
+  if(returnToApplication){
+    clearAutomaticSha();invalidateFirmwareSelection();$('artifact').value=String(applicationIndex);updateDownload();updateFirmwareSelectionSummary({item:application});
+    state.port=null;state.handoff=true;$('port-status').textContent='Select same DFU radio';
+    notice('Bootloader DFU transfer completed; the installed version is not yet verified. Your application build remains selected. Use step 1 to choose the SAME radio’s DFU port, then step 3 and step 4 to reinstall its application. Nothing is flashed automatically.');
+  }
 }
 async function verifyApplication({automaticApproval=null}={}) {
   const expected=state.verification;if(!expected)fail('No flashed application is awaiting verification.');
-  if(state.migration||state.recovery||dfuIds.has(portId(state.port)))fail('Choose the running application interface, not ROM/DFU.');
+  if(state.migration||state.recovery||state.espRecovery||dfuIds.has(portId(state.port)))fail('Finish any pending write recovery and choose the running application interface, not ROM/DFU.');
   await closeEsp();const port=state.port,generation=state.generation,link=new SerialLink(port);let device,version,layout;
   try {
     try{await link.open(115200,{application:true});device=await readApplication(link);}
@@ -421,6 +440,7 @@ async function verifyApplication({automaticApproval=null}={}) {
   if(automaticApproval&&state.migrationApproval!==automaticApproval)fail('Automatic continuation was stopped; startup verification remains available manually.');
   state.verification=null;state.handoff=false;state.backupApproved=null;persistFlow('verification','meshfirmware.verifyApplication');$('already-bootloader').checked=false;
   notice(`Application startup verified: ${device.name||device.model||device.role}. ${layout?'Storage layout answered. ':''}${automaticApproval?(expected.publicKey?'Pre-flash public identity matches.':'No pre-flash public identity was available; physical device identity could not be independently verified.'):'Physical USB serial is not exposed by Web Serial; the port was explicitly reselected.'}`);log(version);
+  if(expected.architecture==='nrf52')await offerBootloaderAfterStartup();
 }
 function invalidateFirmwareSelection() {
   // Invalidate before fetch, file I/O or validation can fail. A failed attempt
@@ -494,6 +514,44 @@ function bootloaderItem(){
   if(choices.size!==1||items.some(i=>i.architecture!=='nrf52'||!i.bootloaderInfo))return null;
   const item=[...choices.values()][0];return {hardware:item.hardware,architecture:item.architecture,bootloader:item.bootloader,bootloaderInfo:item.bootloaderInfo};
 }
+function bootloaderUpdateContext(){
+  const board=bootloaderItem(),device=state.device,info=board?.bootloaderInfo;
+  if(!state.port||device?.architecture!=='nrf52'||!info||board.architecture!=='nrf52'||dfuIds.has(portId(state.port))||$('already-bootloader').checked)return null;
+  const detected=detectBoard({items:state.items,deviceModel:device.model||'',usbInfo:state.port.getInfo()});
+  // Only an exact running model can bind this advisory to the selected board.
+  // Shared USB IDs and a manually selected different board never offer a ZIP.
+  if(!detected.hardware||detected.hardware!==board.hardware)return null;
+  return {board,info,assessment:assessBootloaderVersion(device.bootloaderVersion,info.version)};
+}
+function canPrepareBootloaderUpdate(context){return !!context?.assessment.offerUpdate&&!continuingDeviceFlow()&&!state.esp&&!state.plan&&(!state.pkg||state.pkg.architecture==='nrf52'&&state.pkg.kind==='application'&&!state.pkg.erase);}
+function updateBootloaderOffer(){
+  const context=bootloaderUpdateContext(),panel=$('nrf-bootloader-offer'),button=$('prepare-bootloader-update');
+  panel.hidden=!context;button.hidden=true;button.disabled=true;if(!context)return;
+  const {info,assessment:a}=context,reference=`${info.cached?'last verified stable':'stable'} OTAFIX ${info.version}`;
+  let message;
+  if(a.status==='current')message=`Reported bootloader ${a.reported} matches our ${reference}. No bootloader update is needed.`;
+  else if(a.status==='older')message=`Reported bootloader ${a.reported}; ${reference} is available as a separate board-specific update.`;
+  else if(a.status==='preview')message=`Reported preview bootloader ${a.reported}; ${reference} is available if you want to replace the preview.`;
+  else if(a.status==='newer')message=`Reported bootloader ${a.reported} is newer than our ${reference}. No downgrade is suggested.`;
+  else if(a.status==='custom')message=`Reported custom bootloader ${a.reported}; our ${reference} is available in advanced options. It is not treated as an outdated stable release.`;
+  else message=`The installed bootloader version could not be verified. Our ${reference} is available in advanced options; an unknown version is not assumed outdated. Application updates can continue.`;
+  $('nrf-bootloader-status').textContent=message;
+  const canOffer=canPrepareBootloaderUpdate(context);
+  button.hidden=!canOffer;button.disabled=state.busy||!canOffer;button.textContent=`Prepare OTAFIX ${info.version} bootloader update`;
+  $('nrf-bootloader-warning').hidden=!canOffer;
+}
+async function offerBootloaderAfterStartup(){
+  const context=bootloaderUpdateContext();if(!canPrepareBootloaderUpdate(context))return;
+  const {info,assessment}=context,port=state.port,generation=state.generation,key=JSON.stringify([state.device.publicKey||state.device.model,assessment.reported,info.sha256]);
+  const approved={sha256:info.sha256,url:info.url,version:info.version,hardware:context.board.hardware,reported:assessment.reported,publicKey:state.device.publicKey,model:state.device.model};
+  if(bootloaderOffersShown.has(key))return;bootloaderOffersShown.add(key);
+  const answer=await choose('Bootloader update available',`The application started successfully. It reports ${assessment.reported}; our ${info.cached?'last verified':'latest verified'} stable is OTAFIX ${info.version}. ${bootloaderReinstallWarning} Preparing downloads and validates the separate ZIP only. Backup, DFU handoff and write confirmation still apply.`,[['later','Keep current bootloader'],['prepare','Prepare bootloader update']]);
+  if(answer!=='prepare')return;
+  const live=bootloaderUpdateContext();
+  if(state.port!==port||state.generation!==generation||!canPrepareBootloaderUpdate(live)||live.info.sha256!==approved.sha256||live.info.url!==approved.url||live.info.version!==approved.version||live.board.hardware!==approved.hardware||live.assessment.reported!==approved.reported||state.device.publicKey!==approved.publicKey||state.device.model!==approved.model)fail('The selected device or verified bootloader changed. Review the bootloader offer again; nothing was reset or written.');
+  updateDownload();$('bootloader-source').value=approved.url;revealPanel('bootloader-options');
+  try{await loadBootloaderFirmware();}catch(error){throw new Error(`Application startup was verified. Separate bootloader preparation failed: ${error.message}`);}
+}
 function updateDownload() { const item = $('artifact').value?state.items[Number($('artifact').value)]:null,board=bootloaderItem(),info=board?.bootloaderInfo,urls=board?.architecture==='nrf52'?(info?[info.url]:[]):board?.bootloader||[];$('bootloader-source').replaceChildren(...urls.map(url=>new Option(`${info?(info.cached?'Last verified ':'')+'OTAFIX '+info.version+' · ':''}${new URL(url).pathname.split('/').pop()}`,url)));$('bootloader-detail').textContent=info?`${info.cached?'Latest release could not be checked; using our last verified stable':'Our stable'} OTAFIX ${info.version} · ${info.profile}. SHA-256 is checked before loading. ${bootloaderReinstallWarning}`:item?.bootloaderUnavailable||'Select exact hardware or a firmware artifact for its board-specific bootloader recommendation; conflicting profiles require an explicit artifact.';if (item) { $('download-firmware').href = item.url; $('download-firmware').removeAttribute('aria-disabled');$('catalog-detail').textContent=[firmwareDowngradeWarning(null,item),item.subtitle,item.notice,item.releaseNotes,item.bootloaderUnavailable].filter(Boolean).join('\n'); } else { $('download-firmware').removeAttribute('href'); $('download-firmware').setAttribute('aria-disabled','true');$('catalog-detail').textContent=''; } }
 async function boundedFetch(url) {
   const response = await fetch(httpsUrl(url),{signal:AbortSignal.timeout(120000),credentials:'omit'});
@@ -553,7 +611,14 @@ $('load-entry').onclick = () => operation(async () => { const entry=$('archive-e
 $('fetch-custom').onclick = () => operation(async () => { clearAutomaticSha();await clearFirmwareSelection();const url=httpsUrl($('custom-url').value),name=new URL(url).pathname.split('/').pop();$('download-firmware').href=url;const bytes=await downloadFirmwareBytes(url,name);await loadFirmware(name,bytes); });
 $('artifact').onchange = () => operation(async()=>{await clearFirmwareSelection();updateDownload();updateFirmwareSelectionSummary();controls();});
 $('bootloader-source').onchange=controls;
-$('load-bootloader').onclick=()=>operation(async()=>{const url=$('bootloader-source').value,item=bootloaderItem(),info=item?.bootloaderInfo;await clearFirmwareSelection();if(!url||!item)fail('Choose exact hardware or an explicit board firmware artifact and its bootloader ZIP.');if(item.architecture==='nrf52'&&(!info||info.url!==url||!item.bootloader?.includes(url)))fail('No verified stable bootloader from our fork is available for this exact hardware. Select a custom ZIP manually if you intend a recovery.');$('download-firmware').href=httpsUrl(url);try{setAutomaticSha(info?.sha256||'',new URL(url).pathname.split('/').pop());const bytes=await boundedFetch(url);if(info&&bytes.length!==info.size)fail('Published bootloader size does not match the downloaded ZIP.');await loadFirmware(new URL(url).pathname.split('/').pop(),bytes,item);if(info)notice(`Our stable OTAFIX ${info.version} loaded and SHA-256 verified. ${bootloaderReinstallWarning}`);}catch(error){revealPanel('image-details');revealPanel('custom-firmware');throw new Error(error.message+' If the host blocks fetching, download this exact bootloader ZIP and choose it locally.');}});
+async function loadBootloaderFirmware(){const url=$('bootloader-source').value,item=bootloaderItem(),info=item?.bootloaderInfo;await clearFirmwareSelection();if(!url||!item)fail('Choose exact hardware or an explicit board firmware artifact and its bootloader ZIP.');if(item.architecture==='nrf52'&&(!info||info.url!==url||!item.bootloader?.includes(url)))fail('No verified stable bootloader from our fork is available for this exact hardware. Select a custom ZIP manually if you intend a recovery.');$('download-firmware').href=httpsUrl(url);try{setAutomaticSha(info?.sha256||'',new URL(url).pathname.split('/').pop());const bytes=await boundedFetch(url);if(info&&bytes.length!==info.size)fail('Published bootloader size does not match the downloaded ZIP.');await loadFirmware(new URL(url).pathname.split('/').pop(),bytes,item);if(info)notice(`Our stable OTAFIX ${info.version} loaded and SHA-256 verified. ${bootloaderReinstallWarning}`);}catch(error){revealPanel('image-details');revealPanel('custom-firmware');throw new Error(error.message+' If the host blocks fetching, download this exact bootloader ZIP and choose it locally.');}}
+$('load-bootloader').onclick=()=>operation(loadBootloaderFirmware);
+$('prepare-bootloader-update').onclick=()=>operation(async()=>{
+  const context=bootloaderUpdateContext();
+  if(!canPrepareBootloaderUpdate(context))fail('No separate bootloader update is currently recommended for this connected board.');
+  updateDownload();$('bootloader-source').value=context.info.url;revealPanel('bootloader-options');
+  await loadBootloaderFirmware();
+});
 $('recovery-profile').onchange=()=>{state.recoveryManual=true;$('recovery-detection').textContent=$('recovery-profile').value?`Manual choice R_${$('recovery-profile').value}; confirm it matches the currently installed bootloader, not the physical target board.`:'';controls();};
 $('match-recovery').onclick=()=>operation(async()=>{if(state.migration||state.recovery||state.espRecovery)fail('Finish the pending write or migration before selecting a different recovery profile.');matchInstalledRecovery($('installed-identity').value.trim());});
 $('load-recovery').onclick=()=>operation(async()=>{

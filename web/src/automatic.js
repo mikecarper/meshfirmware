@@ -26,9 +26,24 @@ function inferredRole(device){
   const roles=patterns.filter(([,pattern])=>pattern.test(version)).map(([role])=>role);
   return roles.length===1?roles[0]:'';
 }
+function nrfBundledComponents(item){
+  if(item.architecture!=='nrf52')return false;
+  // Contents must be explicit. Every ordinary nRF52 application can carry
+  // bootloaderInfo/utility links and compatibility advice for a separate update.
+  // Those recommendations are not evidence that this application embeds one.
+  if(['includesBootloader','containsBootloader','embeddedBootloader','includesSoftdevice','containsSoftdevice','embeddedSoftdevice'].some(key=>item[key]===true))return true;
+  if(Array.isArray(item.components)&&item.components.some(component=>typeof component==='string'&&/^(?:bootloader|softdevice)$/i.test(component.trim())))return true;
+  const names=[item.name];
+  try{names.push(decodeURIComponent(new URL(item.url).pathname.split('/').pop()));}catch{/* The catalog validates URLs separately. */}
+  if(names.some(name=>/(?:^|[_.\s-])(?:bootloader|softdevice)(?:[_.\s-]|$)/i.test(name)))return true;
+  const description=[item.title,item.subtitle,item.artifactTitle].filter(value=>typeof value==='string').join('\n');
+  const component='(?:bootloader|softdevice)',version='(?:(?:OTAFIX|Adafruit)\\s+)?(?:v?\\d+(?:\\.\\d+){1,3}\\s+)?';
+  return new RegExp(`(?:\\b(?:includes?|bundles?|carries|embeds?)\\s+(?:the\\s+)?(?:exact[- ]board\\s+)?|\\+\\s*)${version}${component}\\b(?!\\s+(?:support|compatibility|requirements?))`,'i').test(description);
+}
 export function matchesInstallMode(item,installMode='update'){
   if(!['update','install'].includes(installMode))return false;
   if(!item||item.project!=='MeshCore'||!applicationRoles.has(item.role)||typeof item.name!=='string'||typeof item.version!=='string'||typeof item.url!=='string')return false;
+  if(nrfBundledComponents(item))return false;
   if(/(?:^|[_.\s-])(?:bootloader|softdevice|erase|formatter|format)(?:[_.\s-]|$)|^R_/i.test(item.name))return false;
   const merged=/(?:^|[_.\s-])merged(?:[_.\s-]|$)/i.test(item.name);
   if(item.architecture==='esp32')return installMode==='install'
@@ -38,17 +53,13 @@ export function matchesInstallMode(item,installMode='update'){
   // erase package and explicit erase/reconnect consent in the flashing flow.
   return item.architecture==='nrf52'&&item.action==='flash'&&/\.zip$/i.test(item.name)&&!merged;
 }
-// Catalog visibility is broader than automatic suggestions. These historical
-// manual choices still need byte inspection and their ordinary confirmations;
-// retaining a file in the list never makes it eligible for automatic selection.
+// Catalog visibility is broader only for historical application wrappers.
+// nRF52 embedded-bootloader variants stay out of the normal firmware list;
+// bootloader updates have their own exact-board, separately confirmed workflow.
 export function matchesCatalogInstallMode(item,installMode='update'){
   if(matchesInstallMode(item,installMode))return true;
   if(!['update','install'].includes(installMode)||!item||item.project!=='MeshCore'||!applicationRoles.has(item.role))return false;
   if(![item.name,item.version,item.url].every(value=>typeof value==='string'&&value.trim()))return false;
-  if(item.architecture==='nrf52'&&item.action==='flash'&&/\.zip$/i.test(item.name)){
-    const name=item.name.replace(/-with-bootloader-\d+(?:\.\d+){1,3}-/i,'-');
-    if(name!==item.name)return matchesInstallMode({...item,name},installMode);
-  }
   if(installMode!=='update'||/(?:^|[_.\s-])(?:merged|bootloader|softdevice|erase|formatter|format)(?:[_.\s-]|$)|^R_/i.test(item.name))return false;
   if(item.architecture==='noflash')return item.action==='download'&&/\.(?:bin|zip|uf2)$/i.test(item.name);
   return item.architecture==='esp32'&&['flash','download'].includes(item.action)&&/\.(?:zip|uf2)$/i.test(item.name);

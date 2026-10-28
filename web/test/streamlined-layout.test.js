@@ -53,7 +53,7 @@ test('essential firmware inputs and both write-stage buttons stay at the top wit
 
 test('advanced, backup, console and capability controls are collapsed by default',()=>{
   for(const id of ['advanced-options','backups','console','capabilities']){const node=get(id);assert.equal(node.tag,'details',id);assert.ok(!has(node,'open'),`#${id} must start collapsed`);}
-  for(const id of ['connection-options','custom-firmware','nrf-actions','migration-options','verification-options','esp-retry-options','image-details']){
+  for(const id of ['connection-options','custom-firmware','bootloader-options','nrf-actions','migration-options','verification-options','esp-retry-options','image-details']){
     const node=get(id);assert.equal(node.tag,'details',id);assert.ok(!has(node,'open'),id);assert.ok(inside(node,get('advanced-options')),`#${id} belongs under extras`);
   }
   for(const id of ['auto-detect-board','auto-backup','auto-finish'])assert.ok(has(get(id),'checked'),`Collapsing #${id} must not change its safe default`);
@@ -66,6 +66,16 @@ test('status, warnings, progress and required expert offsets cannot be trapped i
   assert.ok(inside(get('archive-picker'),get('custom-firmware')));assert.ok(inside(get('download-migration'),get('migration-options')));
   for(const id of ['confirm-dialog','question-dialog']){assert.equal(get(id).tag,'dialog');assert.equal(closedAncestors(get(id)).length,0);}
   assert.ok(has(get('confirm-submit'),'disabled'),'Typed flash authorization must remain required');
+});
+
+test('the connected nRF52 bootloader status is separate from firmware choices and hidden until supported detection',()=>{
+  const offer=get('nrf-bootloader-offer'),status=get('nrf-bootloader-status'),button=get('prepare-bootloader-update'),warning=get('nrf-bootloader-warning'),workflow=nodes.find(node=>hasClass(node,'workflow')),device=nodes.find(node=>hasClass(node,'device-display'));
+  assert.equal(offer.tag,'div');assert.ok(hasClass(offer,'bootloader-offer'));assert.ok(has(offer,'hidden'));assert.ok(inside(offer,workflow));assert.equal(closedAncestors(offer).length,0);
+  assert.ok(device.start<offer.start&&offer.start<get('firmware-choices').start,'Version status belongs beside the connected device, before application selection');
+  assert.ok(inside(status,offer));assert.equal(status.attrs.role,'status');assert.equal(status.attrs['aria-live'],'polite');
+  assert.ok(inside(button,offer));assert.equal(button.tag,'button');assert.equal(button.attrs.type,'button');assert.ok(has(button,'hidden'));assert.ok(has(button,'data-lock'));assert.ok(hasClass(button,'secondary'));assert.ok(!hasClass(button,'step-button'));
+  assert.equal(button.attrs['aria-describedby'],warning.attrs.id);assert.ok(inside(warning,offer));assert.match(html.slice(warning.start).split('</p>')[0],/Back up first/);assert.match(html.slice(warning.start).split('</p>')[0],/reinstalling the exact compatible application/);assert.match(html.slice(warning.start).split('</p>')[0],/never resets.*writes firmware automatically/);
+  assert.ok(!nodes.some(node=>inside(node,offer)&&hasClass(node,'action-number')),'A conditional bootloader offer cannot add a mandatory numbered step');
 });
 
 // Read individual declaration blocks, including responsive overrides, rather
@@ -90,7 +100,8 @@ test('USB and flash actions precede non-action badges and explanatory copy',()=>
 });
 
 test('main and optional action groups keep left alignment at every breakpoint',()=>{
-  for(const selector of ['.sidebar','.connect-controls','.mode-step','.review-actions','.inline-actions','.console-input','footer'])assertProperty(selector,'justify-content','flex-start');
+  for(const selector of ['.sidebar','.connect-controls','.mode-step','.review-actions','.inline-actions','.bootloader-offer','.console-input','footer'])assertProperty(selector,'justify-content','flex-start');
+  assertProperty('.bootloader-offer','align-items','flex-start');assertProperty('.bootloader-offer','flex-direction','column');
   assertProperty('.page-header','align-items','flex-start');assertProperty('.page-header','flex-direction','column');
   for(const selector of ['button','.button']){assertProperty(selector,'justify-content','flex-start');assertProperty(selector,'text-align','left');}
 });
