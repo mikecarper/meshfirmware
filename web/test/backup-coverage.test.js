@@ -10,7 +10,8 @@ test('common configuration lists captured values and normal exclusions without c
   const archive=common(),metadata=native({identity_private_key:{state:'complete'},regions:{state:'complete'},contacts:{state:'not_applicable'},channels:{state:'not_applicable'}}),before=JSON.stringify({archive,metadata});
   const result=backupCoverage(archive,metadata);
   for(const label of ['Public identity','Private identity','Node name','Primary radio settings','Region hierarchy, flood permissions, home and default scope'])assert.ok(result.included.includes(label),label);
-  for(const label of ['Firmware and bootloader files','Stored messages','Runtime logs','Preferences without an export command'])assert.ok(labels(result).includes(label),label);
+  for(const label of ['Firmware and bootloader files','Stored messages','Runtime logs'])assert.ok(labels(result).includes(label),label);
+  assert.ok(!labels(result).includes('Preferences without an export command'));
   assert.ok(!labels(result).includes('Contacts'));assert.ok(!labels(result).includes('Channels and channel secrets'));assert.deepEqual(result.failed,[]);
   assert.doesNotMatch(JSON.stringify(result),/partial|incomplete|wipe.safe|not protected|automatic restore is unavailable/i);assert.match(result.notIncludedText,/^Not backed up:/);assert.equal(result.summaryText,'Captured values are saved in the JSON.');assert.equal(JSON.stringify({archive,metadata}),before);
   assert.match(result.notIncludedText,/Firmware and bootloader files; Stored messages; Runtime logs/);assert.doesNotMatch(result.notIncludedText,/not firmware images|queue is not read|Logs are not exported/);

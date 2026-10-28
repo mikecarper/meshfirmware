@@ -5,9 +5,10 @@ import { ed25519 } from '@noble/curves/ed25519';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
 import { fail } from './firmware.js';
 import { regionRestorePreview, prepareRegionRestore, restoreRegions } from './regions.js';
+import { captureSettingCapabilities, settingCapability, validateSettingCapabilityRecord } from './setting-capabilities.js';
 
 export const COMMON_CLI_OPTIONAL_COMMANDS=Object.freeze([
-  'board','get system.watchdog','get storage.layout','get cad','get radio.cad',
+  'board','get system.watchdog','get storage.layout','get cad','get radio.cad','get radio.preamble',
   'get radio.rxgain','get radio.fem.rxgain','get radio.fem.txgain',
   'get radio.rxps.config','get radio.rxps.rfrx_disabled',
   'get bluetooth','get bluetooth.name','get display.rotation','get powersaving',
@@ -48,6 +49,7 @@ const flag=value=>choice(value,['on','off']);
 const finiteText=(value,max,{empty=false}={})=>{const s=one(value);if((!empty&&!s)||encode(s).length>max)throw Error();return s;};
 const credential=(value,max,{empty=false}={})=>{if(value!==value.trim())throw Error('manual-only');return finiteText(value,max,{empty});};
 const radioTuple=value=>{const fields=one(value).split(',');if(fields.length!==4)throw Error();return [decimal(fields[0],100,3000),decimal(fields[1],1,1000),decimal(fields[2],5,12,true),decimal(fields[3],5,8,true)];};
+const radioPreamble=value=>{const s=one(value).replace(/^radio\.preamble\s+/i,'');return s.toLowerCase()==='auto'||s==='0'?'auto':decimal(s,8,65528,true);};
 const norm=value=>JSON.stringify(value);
 function parseCad(value){
   const match=/^(?:radio\.cad\s+)?(on|off),\s*scan=(auto|\d+)(?:\(\d+\))?\s*ms,\s*retry=(auto|\d+)\s*ms,\s*max=(auto|\d+)\s*ms(?:,\s*busy=\d+)?$/i.exec(one(value));
@@ -112,19 +114,28 @@ function privateIdentity(p){
 export function commonCliRestorePreview(payload,{newHardware=false}={}){
   if(payload?.role!=='common-cli'||!/^[a-f0-9]{64}$/i.test(payload.publicKey||'')||!payload.replies||typeof payload.replies!=='object'||Array.isArray(payload.replies))fail('A verified CommonCLI settings backup is required.');
   const operations=[],skipped=[],warnings=[],role=sourceRole(payload);if(!['repeater','roomserver','sensor','commoncli'].includes(role))fail('The backup role is not a supported CommonCLI role.');
+  if(payload.capabilities!==undefined)validateSettingCapabilityRecord(payload.capabilities);
+  const savedPreamble=commonCliReplyState(payload.replies['get radio.preamble'],'get radio.preamble');
+  const preambleReadFailed=Object.hasOwn(payload.replies,'get radio.preamble')&&savedPreamble.state==='error';
+  if(preambleReadFailed&&(savedPreamble.reason==='Invalid or oversized serial reply.'||savedPreamble.text.includes('\n')))fail('Saved primary radio preamble is invalid; nothing was restored.');
+  let preamble;if(savedPreamble.state==='complete')try{preamble=radioPreamble(savedPreamble.text);}catch{fail('Saved primary radio preamble is invalid; nothing was restored.');}
   const addSkip=(id,label,reason)=>skipped.push({id,label,reason});
   for(const [command,raw] of Object.entries(payload.replies)){
     if(typeof raw!=='string'||raw.length>8192)fail('Saved CommonCLI replies are invalid or oversized.');
-    if(command==='get public.key'||command==='get prv.key')continue;
+    if(command==='get public.key'||command==='get prv.key'||command==='get radio.preamble')continue;
     const spec=specByQuery.get(command),status=commonCliReplyState(raw,command);
     if(!spec){if(!['ver','board','get role'].includes(command))addSkip(command,command==='region'?'Regions':command==='get acl'?'Access permissions':'Diagnostic snapshot',status.state==='complete'?'Not automatically restored from unstructured text.':status.reason);continue;}
+    const capability=settingCapability(payload.capabilities,command.slice(4));
+    if(capability&&(capability.state==='not_applicable'||capability.state==='fixed'||capability.readable&&!capability.writable)){addSkip(spec.id,spec.label,'This is not a configurable setting in the source firmware.');continue;}
     if(status.state!=='complete'){addSkip(spec.id,spec.label,status.reason);continue;}
+    if(spec.id==='radio'&&preambleReadFailed){addSkip(spec.id,spec.label,'The saved primary-radio preamble query failed; radio settings are retained instead of guessing automatic preamble.');continue;}
     if(newHardware&&spec.hardware){addSkip(spec.id,spec.label,'Hardware-specific setting is retained on the new board.');continue;}
     let value;try{value=spec.parse(status.text);}catch(error){if(error.message==='manual-only'){addSkip(spec.id,spec.label,'Automatic or masked state needs manual review.');continue;}fail(`Saved ${spec.label} is invalid; nothing was restored.`);}
-    operations.push({id:spec.id,label:spec.label,get:spec.get,desired:value,commands:spec.commands(value)});
-    if(spec.id==='radio')warnings.push('The primary radio tuple does not record preamble length; restoring it selects the firmware’s automatic preamble.');
+    operations.push({id:spec.id,label:spec.label,get:spec.get,desired:value,commands:spec.id==='radio'&&preamble!==undefined?[`set radio ${value.join(',')},${preamble}`]:spec.commands(value),...(spec.id==='radio'&&preamble!==undefined?{preamble}:{})});
+    if(spec.id==='radio'&&preamble===undefined)warnings.push('The primary radio tuple does not record preamble length; restoring it selects the firmware’s automatic preamble.');
     if(spec.id==='wifi.ssid'||spec.id==='wifi.pwd')warnings.push('Wi-Fi credentials are saved and read back; applying the new network may require a later manual reboot.');
   }
+  if(preamble!==undefined&&!operations.some(row=>row.id==='radio'))addSkip('radio.preamble','Primary radio preamble','The radio tuple is unavailable; a preamble is never applied to an unknown radio configuration.');
   if(payload.regions?.state==='complete'){
     const regionPlan=regionRestorePreview(payload.regions.data),index=skipped.findIndex(row=>row.id==='region');if(index>=0)skipped.splice(index,1);
     operations.push({id:'regions',label:'Region hierarchy and policies (merge)',get:null,desired:payload.regions.data,commands:[]});warnings.push(...regionPlan.warnings);
@@ -157,6 +168,7 @@ export async function restoreCommonCli(link,payload,{newHardware=false,replaceId
   if(!newHardware&&hint&&boardStatus.state==='complete'&&hint.trim().toLowerCase()!==boardStatus.text.trim().toLowerCase())fail('Target board differs. Select Moving to different hardware before restoring.');
   if(!hint||boardStatus.state!=='complete')result.warnings.push('Exact board identity could not be compared; only validated supported settings are restored.');
   const checkIdentity=async()=>{if(await getKey()!==targetKey)fail('Target identity changed during restore. No further settings were written.');};
+  const targetCapabilities=await captureSettingCapabilities({command:command=>request(command,'setting capabilities')},{assertCurrent});
   const ready=[];
   // Probe every target getter before the first setter. Unknown/unsupported
   // settings are skipped, but transport failures and malformed replies stop.
@@ -166,11 +178,21 @@ export async function restoreCommonCli(link,payload,{newHardware=false,replaceId
       catch(error){if(!error.regionsUnsupported)throw error;result.skipped.push({id:'regions',label:operation.label,reason:typeof error.message==='string'&&error.message.length<=512?error.message:'Target firmware could not provide a complete supported region snapshot; regions were not changed.'});}
       continue;
     }
+    const capability=settingCapability(targetCapabilities,operation.get.slice(4));
+    if(capability&&(capability.state==='not_applicable'||capability.state==='fixed'||capability.readable&&!capability.writable)){result.skipped.push({id:operation.id,label:operation.label,reason:'This is not a configurable setting on the target.'});continue;}
     const spec=specByQuery.get(operation.get),status=commonCliReplyState(await request(operation.get,operation.label),operation.get);
     if(status.state==='unsupported'){result.skipped.push({id:operation.id,label:operation.label,reason:'Target firmware does not support this setting.'});continue;}
     if(status.state!=='complete')fail(`Target ${operation.label} could not be read. No settings were written.`);
     let actual;try{actual=operation.id==='acl'?parseAcl(status.text):spec.parse(status.text);}catch(error){if(error.message==='manual-only'){result.skipped.push({id:operation.id,label:operation.label,reason:'Target automatic or masked state needs manual review.'});continue;}fail(`Target ${operation.label} reply is not recognized. No settings were written.`);}
-    ready.push({...operation,actual,spec});
+    let actualPreamble;
+    if(operation.id==='radio'&&operation.preamble!==undefined){
+      const preambleCapability=settingCapability(targetCapabilities,'radio.preamble');
+      if(preambleCapability&&(preambleCapability.state==='not_applicable'||preambleCapability.state==='fixed'||preambleCapability.readable&&!preambleCapability.writable)){result.skipped.push({id:'radio',label:operation.label,reason:'Target firmware cannot configure the saved preamble; primary radio settings were retained.'});continue;}
+      const saved=commonCliReplyState(await request('get radio.preamble','primary radio preamble'),'get radio.preamble');
+      if(saved.state==='unsupported'){result.skipped.push({id:'radio',label:operation.label,reason:'Target firmware cannot verify the saved preamble; primary radio settings were retained.'});continue;}
+      try{if(saved.state!=='complete')throw Error();actualPreamble=radioPreamble(saved.text);}catch{fail('Target primary radio preamble could not be verified. No settings were written.');}
+    }
+    ready.push({...operation,actual,spec,...(actualPreamble!==undefined?{actualPreamble}:{})});
   }
   await checkIdentity();
   if(!ready.length&&!(replaceIdentity&&key&&targetKey!==sourceKey)){result.warnings.push('No target settings were changed; the saved settings are unsupported on this target.');progress(1,'No supported target settings were changed');return result;}
@@ -187,8 +209,9 @@ export async function restoreCommonCli(link,payload,{newHardware=false,replaceId
       const current=commonCliReplyState(await request(operation.get,operation.label),operation.get);
       try{if(current.state!=='complete')throw Error();operation.actual=operation.id==='acl'?parseAcl(current.text):operation.spec.parse(current.text);}
       catch(error){if(current.state==='unsupported'||error.message==='manual-only'){result.skipped.push({id:operation.id,label:operation.label,reason:'Setting became unsupported or automatically managed after region restoration.'});continue;}fail(`Target ${operation.label} could not be checked after restoring regions. Restore stopped.`);}
+      if(operation.id==='radio'&&operation.preamble!==undefined){const saved=commonCliReplyState(await request('get radio.preamble','primary radio preamble'),'get radio.preamble');try{if(saved.state!=='complete')throw Error();operation.actualPreamble=radioPreamble(saved.text);}catch{fail('Target primary radio preamble could not be checked after restoring regions. Restore stopped.');}}
     }
-    if(operation.id!=='acl'&&(operation.spec.equal?operation.spec.equal(operation.actual,operation.desired):norm(operation.actual)===norm(operation.desired))){result.restored.push({id:operation.id,label:operation.label,unchanged:true});continue;}
+    if(operation.id!=='acl'&&(operation.spec.equal?operation.spec.equal(operation.actual,operation.desired):norm(operation.actual)===norm(operation.desired))&&(operation.preamble===undefined||operation.actualPreamble===operation.preamble)){result.restored.push({id:operation.id,label:operation.label,unchanged:true});continue;}
     for(const command of operation.commands){
       await checkIdentity();const status=commonCliReplyState(await request(command,operation.label),command);
       const accepted=operation.id==='password'?status.state==='complete'&&status.text===`password now: ${operation.desired}`:status.state==='complete'&&/^OK\b/i.test(status.text);
@@ -200,6 +223,7 @@ export async function restoreCommonCli(link,payload,{newHardware=false,replaceId
     try{if(status.state!=='complete')throw Error();actual=operation.id==='acl'?parseAcl(status.text):operation.spec.parse(status.text);}catch{fail(`${operation.label} readback failed. Restore stopped; earlier settings may already have changed.`);}
     const matches=operation.id==='acl'?operation.desired.every(row=>actual.some(candidate=>candidate.key===row.key&&candidate.permissions===row.permissions)):operation.spec.equal?operation.spec.equal(actual,operation.desired):norm(actual)===norm(operation.desired);
     if(!matches)fail(`${operation.label} readback did not match. Restore stopped; earlier settings may already have changed.`);
+    if(operation.id==='radio'&&operation.preamble!==undefined){const saved=commonCliReplyState(await request('get radio.preamble','primary radio preamble'),'get radio.preamble');let actualPreamble;try{if(saved.state!=='complete')throw Error();actualPreamble=radioPreamble(saved.text);}catch{fail('Primary radio preamble readback failed. Restore stopped; earlier settings may already have changed.');}if(actualPreamble!==operation.preamble)fail('Primary radio preamble readback did not match. Restore stopped; earlier settings may already have changed.');}
     result.restored.push({id:operation.id,label:operation.label});
   }
   await checkIdentity();

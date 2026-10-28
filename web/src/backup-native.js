@@ -4,12 +4,26 @@ import { verifyBackup, publicFromPrivate } from './meshcore.js';
 import { hash, fail, text } from './firmware.js';
 import { COMMON_CLI_COMMANDS, commonCliReplyState } from './common-cli.js';
 import { validateRegions } from './regions.js';
+import { validateSettingCapabilityRecord, settingCapability, shouldSkipSetting } from './setting-capabilities.js';
 const unhex=s=>Uint8Array.from(s.match(/../g)||[],x=>parseInt(x,16));
 const hex=b=>Array.from(b,x=>x.toString(16).padStart(2,'0')).join('');
 const cstr=b=>text(b).split('\0')[0];
 const section=(data,required=true,extra={})=>({state:'complete',required,data,...extra});
 const absent=(reason,required=true,state='unsupported')=>({state,required,reason});
-const cliQueries=[['storage_layout','get storage.layout',null],['radio_cad','get radio.cad','set radio.cad'],['radio_rxgain','get radio.rxgain','set radio.rxgain'],['radio_fem_rxgain','get radio.fem.rxgain','set radio.fem.rxgain'],['radio_fem_txgain','get radio.fem.txgain','set radio.fem.txgain'],['bluetooth_name','get bluetooth.name','set bluetooth.name'],['display_rotation','get display.rotation','set display.rotation'],['power_saving','get powersaving','powersaving on/off'],['usb_logging','get usb.logging','set usb.logging'],['radio_rxps','get radio.rxps.config','set radio.rxps']];
+const cliQueries=[['storage_layout','get storage.layout',null],['radio_cad','get radio.cad','set radio.cad'],['radio_rxgain','get radio.rxgain','set radio.rxgain'],['radio_fem_rxgain','get radio.fem.rxgain','set radio.fem.rxgain'],['radio_fem_txgain','get radio.fem.txgain','set radio.fem.txgain'],['bluetooth_name','get bluetooth.name','set bluetooth.name'],['display_rotation','get display.rotation','set display.rotation'],['power_saving','get powersaving','powersaving on/off'],['usb_logging','get usb.logging','set usb.logging'],['usb_logging_always','get usb.logging.always','set usb.logging.always'],['usb_debug','get usb.debug','set usb.debug'],['system_watchdog','get system.watchdog','set system.watchdog'],['radio_rxps','get radio.rxps.config','set radio.rxps'],['radio_rxps_rfrx_disabled','get radio.rxps.rfrx_disabled','set radio.rxps.rfrx_disabled'],['radio_preamble','get radio.preamble',null]];
+function capabilitySection(p,command,raw,required=false){
+  const failed=raw===null||typeof raw==='string'&&commonCliReplyState(raw,command).state==='error';
+  if(failed||!shouldSkipSetting(p.capabilities,command))return null;
+  const cap=settingCapability(p.capabilities,command.replace(/^get /,''));
+  return {...absent(cap.state==='fixed'?'This value is fixed by firmware, not a saved preference.':'This setting is not applicable to this firmware role or hardware.',required,'not_applicable'),command,capability_state:cap.state};
+}
+function preambleSection(value,required=false){
+  const status=commonCliReplyState(value,'get radio.preamble');
+  if(status.state!=='complete')return absent(status.reason||'Saved primary-radio preamble is unavailable.',required,status.state);
+  const raw=status.text.toLowerCase().replace(/^radio\.preamble\s+/,''),preamble=raw==='auto'||raw==='0'?'auto':/^\d+$/.test(raw)?Number(raw):null;
+  if(preamble!=='auto'&&(!Number.isInteger(preamble)||preamble<8||preamble>65528))return absent('Saved primary-radio preamble reply was invalid.',required,'error');
+  return section({text:value,value:preamble},required,{command:'get radio.preamble',restore_method:'set radio (fifth preamble field)'});
+}
 
 export function nativePayloadFromWeb(archive,{usbIdentity={},deviceHint}={}) {
   const p=verifyBackup(archive),vendor=usbIdentity.usbVendorId??usbIdentity.vendor_id,product=usbIdentity.usbProductId??usbIdentity.product_id;
@@ -36,18 +50,31 @@ export function nativePayloadFromWeb(archive,{usbIdentity={},deviceHint}={}) {
       sections[name]=section(data,true,{restore_method:method});
     }
     sections.battery_and_storage=p.batteryAndStorage&&!p.batteryAndStorage.unavailable?section(p.batteryAndStorage,false):absent(p.batteryAndStorage?.unavailable||'Battery/storage API unavailable.',false,'error');
-    for(const [name,command,restore_method] of cliQueries){const value=p.cli[command];if(value==null){sections[name]=absent('CLI setting unavailable.',false);continue;}if(typeof value==='string'&&/unknown command|unsupported/i.test(value)){sections[name]=absent('Firmware does not expose this setting.',false);continue;}if(typeof value==='string'&&/^\s*(?:->\s*)?error/i.test(value)){sections[name]=absent('Firmware reported a query error.',false,'error');continue;}sections[name]=section(name==='bluetooth_name'&&typeof value==='object'?value:{text:value},false,{command,...(restore_method?{restore_method}:{}),...(name==='storage_layout'?{diagnostic_scope:'layout_only; this is not a filesystem consistency check'}:{})});}
-    for(const [name,command] of [['radio2','get radio2'],['radio2_cross','get radio2.cross'],['bluetooth_status','get bluetooth']])if(typeof p.cli[command]==='string')sections[name]=section({text:p.cli[command]},false,{command,diagnostic_scope:'manual comparison only'});
+    for(const [name,command,restore_method] of cliQueries){
+      const value=p.cli[command],cap=capabilitySection(p,command,value);if(cap){sections[name]=cap;continue;}
+      const extra={command,...(restore_method?{restore_method}:{}),...(name==='storage_layout'?{diagnostic_scope:'layout_only; this is not a filesystem consistency check'}:{})};
+      if(value===undefined){sections[name]={...absent('CLI setting unavailable.',false),...extra};continue;}
+      if(value===null){sections[name]={...absent('The setting query failed.',false,'error'),...extra};continue;}
+      if(name==='radio_preamble'){sections[name]={...preambleSection(value),...extra};continue;}
+      const status=typeof value==='string'?commonCliReplyState(value,command):{state:'complete'};
+      if(status.state!=='complete'){sections[name]={...absent(status.reason||'CLI setting unavailable.',false,status.state),...extra};continue;}
+      sections[name]=section(name==='bluetooth_name'&&typeof value==='object'?value:{text:value},false,extra);
+    }
+    for(const [name,command] of [['radio2','get radio2'],['radio2_cross','get radio2.cross'],['bluetooth_status','get bluetooth']]){
+      const value=p.cli[command],cap=capabilitySection(p,command,value);if(cap){sections[name]=cap;continue;}
+      if(typeof value==='string'){const status=commonCliReplyState(value,command);sections[name]=status.state==='complete'?section({text:value},false,{command,diagnostic_scope:'manual comparison only'}):{...absent(status.reason,false,status.state),command};}
+    }
   } else {
     const replies=p.replies||{},privateHex=/(?<![a-f0-9])[a-f0-9]{128}(?![a-f0-9])/i.exec(replies['get prv.key']||'')?.[0]?.toLowerCase();
     if(privateHex&&publicFromPrivate(unhex(privateHex))!==p.publicKey)fail('CommonCLI private/public identity mismatch.');
-    const optionalQueries=[...cliQueries,['radio2','get radio2','set radio2'],['radio2_cross','get radio2.cross','set radio2.cross'],['bluetooth_status','get bluetooth','set bluetooth'],['system_watchdog','get system.watchdog','set system.watchdog']];
+    const optionalQueries=[...cliQueries,['radio2','get radio2','set radio2'],['radio2_cross','get radio2.cross','set radio2.cross'],['bluetooth_status','get bluetooth','set bluetooth']];
     const coreCommands=new Set(['get name','get radio','get lat','get lon','get tx','get repeat','get rxdelay','get txdelay','get af','get multi.acks','get advert.interval','get flood.advert.interval','get flood.max','get flood.max.advert','get flood.max.unscoped','get flood.channel.data','get allow.read.only','get telemetry.access']);
     const typedCommands=new Set(optionalQueries.map(([,command])=>command));
     for(const command of COMMON_CLI_COMMANDS)if(!coreCommands.has(command)&&!typedCommands.has(command)&&!['get prv.key','get acl','region'].includes(command))optionalQueries.push(['cli_'+command.replace(/[^a-z0-9]/gi,'_'),command,null]);
     const settings=Object.fromEntries(Object.entries(replies).filter(([command])=>!['get public.key','get prv.key','get acl','region'].includes(command))),queryStates=Object.fromEntries(Object.entries(settings).map(([command,raw])=>{const {state,reason}=commonCliReplyState(raw,command);return [command,{state,...(reason?{reason}:{})}];}));
     const coreIncomplete=Object.entries(queryStates).filter(([command,value])=>coreCommands.has(command)&&value.state!=='complete');
     const replySection=(command,required=true)=>{
+      const cap=capabilitySection(p,command,replies[command],required);if(cap)return cap;
       if(!Object.hasOwn(replies,command))return absent('Not captured by this backup version.',required);
       const raw=replies[command],status=commonCliReplyState(raw,command);
       return status.state==='complete'?section({text:raw},required):absent(status.reason||'CLI setting unavailable.',required,status.state);
@@ -59,6 +86,7 @@ export function nativePayloadFromWeb(archive,{usbIdentity={},deviceHint}={}) {
       :{...absent(p.regions?.reason||'No complete typed region snapshot was captured; legacy raw text is diagnostic only.',true,p.regions?.state||'unsupported'),data:{raw:regionRaw},diagnostic_scope:'legacy_raw_only; not a restorable region snapshot'};
     for(const [name,command,restore_method]of optionalQueries){
       sections[name]={...replySection(command,false),command,...(restore_method?{restore_method}:{}),...(name==='storage_layout'?{diagnostic_scope:'layout_only; this is not a filesystem consistency check'}:{})};
+      if(name==='radio_preamble'&&sections[name].state==='complete')sections[name]=preambleSection(replies[command]);
       if(name==='bluetooth_name'&&sections[name].state==='complete'){
         const normalized=commonCliReplyState(replies[command],command).text.replace(/^>\s*/,''),match=/^(.*?)\s+\((default from node name|custom)\)$/i.exec(normalized);
         if(match&&match[1]&&!/[\x00-\x1f\x7f]/.test(match[1])&&new TextEncoder().encode(match[1]).length<=32)sections[name].data={name:match[1],default:match[2].toLowerCase()!=='custom'};
@@ -66,6 +94,7 @@ export function nativePayloadFromWeb(archive,{usbIdentity={},deviceHint}={}) {
       }
     }
   }
+  if(p.capabilities!==undefined){const record=validateSettingCapabilityRecord(p.capabilities);sections.config_capabilities=record.state==='complete'?section(record.data,false,{command:'get config.cap',diagnostic_scope:'setting_support_only; not node configuration values'}):{...absent(record.reason||'Capability discovery unavailable; individual getters were queried.',false,record.state),command:'get config.cap',diagnostic_scope:'setting_support_only; legacy getters remain authoritative'};}
   sections.identity_stability=section({stable:true});
   const missing=Object.entries(sections).filter(([,v])=>v.required&&v.state!=='complete').map(([k])=>k).sort(),errors=Object.entries(sections).filter(([,v])=>!v.required&&v.state==='error').map(([k])=>k).sort();
   return {source:{transport:'usb-serial',port_at_capture:'web-serial',physical_usb_identity:{serial:null,location:null,parent:null,interface:null,device_hint:deviceHint||null,attestation:'browser-port-permission',vendor_id:vendor,product_id:product},node:{public_key:p.publicKey,role:p.role==='companion'?'companion':'common-cli',device_hint:deviceHint||null},capture_api:p.role==='companion'?'companion-api':'meshcore-cli-common-cli'},sections,excluded:{messages:'Not exported: reading consumes unread messages.',logs:'Not exported: runtime logs may contain unrelated private data.',unexposed_preferences:'Not every board-specific setting is exposed.'},completeness:{status:p.role==='companion'&&!missing.length&&!errors.length?'api-snapshot-complete':'partial',safe_for_wipe:false,safe_for_restore:false,missing_required:missing,optional_errors:errors,reasons:[...missing.map(k=>`required section incomplete: ${k}`),...errors.map(k=>`optional query failed: ${k}`),...(p.role==='common-cli'?['CommonCLI exports exposed settings only; unsupported queries are listed individually.']:[]),'Web Serial does not expose a physical USB serial or location; restore requires explicit target selection.','Unread messages and unexposed preferences are not exported.']},restore_plan:{executor_implemented:false,requires_separate_explicit_confirmation:true,requires_target_public_key_or_blank_identity_gate:true,strategy:'role-aware MeshCore APIs and CommonCLI inverse operations',ordered_sections:Object.keys(sections).filter(k=>sections[k].state==='complete'),unavailable_sections:Object.entries(sections).filter(([,v])=>v.state!=='complete').map(([name,v])=>({section:name,state:v.state,reason:v.reason})),post_restore_verification:['re-query public key and role','re-query each restored section','compare canonical nonvolatile values']}};

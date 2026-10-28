@@ -7,6 +7,7 @@ import { createPlannerService } from '../src/planner-runtime.js';
 import { hash,words } from '../src/firmware.js';
 import { sealBackup,parseBackup,verifyBackup,publicFromPrivate } from '../src/meshcore.js';
 import { exportNativeBackup } from '../src/backup-native.js';
+import { parseSettingCapabilities } from '../src/setting-capabilities.js';
 
 const sources={};for(const name of ['meshcore_partition_expansion.py','meshcore_backup.py'])sources[name]=new Uint8Array(await readFile(new URL('../../tools/'+name,import.meta.url)));
 const manifest=JSON.stringify(Object.fromEntries(Object.entries(sources).map(([name,data])=>[name,hash(data)])));
@@ -50,4 +51,13 @@ test('complete typed public regions survive exact Python sealing, native validat
   const native=await exportNativeBackup(common,options);assert.equal(native.payload.sections.regions.state,'complete');assert.deepEqual(native.payload.sections.regions.data.snapshot,regions);assert.equal(native.payload.sections.regions.required,true);
   const imported=await parseBackup(JSON.stringify(native),{validatePython:args=>service.call('validateBackup',args)});assert.deepEqual(verifyBackup(imported).regions,{state:'complete',data:regions});
   const damaged=structuredClone(native);damaged.payload.sections.regions.data.snapshot.default=null;await assert.rejects(()=>parseBackup(JSON.stringify(damaged),{validatePython:args=>service.call('validateBackup',args)}),/digest mismatch/);
+});
+
+test('optional setting capabilities and saved preamble survive exact Python sealing and native import',async()=>{
+  const p=structuredClone(snapshot().payload);p.capabilities={state:'complete',data:parseSettingCapabilities('config.cap v1 get=00000f7d set=00000f7d fixed=00000002 na=00000080')};p.cli['get radio.preamble']='> 32';
+  const native=await exportNativeBackup(sealBackup(p),options),section=native.payload.sections.config_capabilities;
+  assert.equal(section.required,false);assert.equal(section.command,'get config.cap');assert.deepEqual(section.data,p.capabilities.data);assert.equal(native.payload.sections.radio_cad.state,'not_applicable');assert.equal(native.payload.sections.radio_cad.capability_state,'fixed');assert.equal(native.payload.sections.display_rotation.state,'not_applicable');
+  const imported=verifyBackup(await parseBackup(JSON.stringify(native),{validatePython:args=>service.call('validateBackup',args)}));assert.deepEqual(imported.capabilities,p.capabilities);assert.equal(imported.cli['get radio.preamble'],'> 32');assert.ok(!Object.hasOwn(imported.cli,'get radio.cad'));assert.equal(imported.safeForWipe,false);
+  const damaged=structuredClone(native);damaged.payload.sections.config_capabilities.data.settings['display.rotation'].state='unknown';await assert.rejects(()=>parseBackup(JSON.stringify(damaged),{validatePython:args=>service.call('validateBackup',args)}),/digest mismatch/);
+  const malformed=structuredClone(native.payload);malformed.sections.config_capabilities.data.version=2;const resealed=await service.call('sealBackup',{payload:malformed,privateHex:p.privateKey.slice(2),expectedPub:p.publicKey});await assert.rejects(()=>parseBackup(JSON.stringify(resealed.archive),{validatePython:args=>service.call('validateBackup',args)}),/capability/i);
 });

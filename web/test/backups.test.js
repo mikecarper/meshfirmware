@@ -28,6 +28,41 @@ test('Bluetooth names contain no command prompt or default metadata and reject c
   assert.throws(()=>bluetoothName({name:'name\nreboot',default:false}),/Invalid/);
   assert.equal(loggingState('> usb.logging off'),'off');assert.equal(loggingState('unknown command'),null);
 });
+test('Bluetooth names containing firmware error words remain valid captured user data',async()=>{
+  for(const [name,isDefault]of [['Unsupported',false],['Unknown command',false],['Not supported',true],['Error: unsupported',false]]){
+    const p=payload(),core=new MeshCore({});core.self=async()=>Buffer.from(p.self,'hex');core.info=async()=>Buffer.from(p.info,'hex');core.contacts=async()=>[];
+    core.cli=async command=>command==='get bluetooth.name'?`> ${name} (${isDefault?'default from node name':'custom'})`:'Unknown command';
+    core.request=async command=>{
+      if(command[0]===23)return Buffer.from(p.privateKey,'hex');if(command[0]===31)return Buffer.from(p.channels[0],'hex');
+      if(command[0]===59)return Uint8Array.of(25,1);if(command[0]===43)return Uint8Array.from([23,...words(1,2)]);
+      if(command[0]===40)return Uint8Array.of(21);if(command[0]===64)return Uint8Array.of(28);if(command[0]===20)return Uint8Array.of(12,0xa0,0x0f);
+      throw Error('Unexpected capture query');
+    };
+    const archive=await core.backup();assert.deepEqual(verifyBackup(archive).cli['get bluetooth.name'],{name,default:isDefault});
+  }
+});
+test('valid source and target Bluetooth names take precedence over unsupported-keyword classification',async()=>{
+  for(const desired of ['Unsupported','Unknown command','Not supported','Error: unsupported']){
+    const p=payload(),core=new MeshCore({}),commands=[];let name='Unknown command';p.cli['get bluetooth.name']=`> ${desired} (custom)`;
+    core.self=async()=>Buffer.from(p.self,'hex');core.info=async()=>Buffer.from(p.info,'hex');core.contacts=async()=>[];
+    core.request=async command=>command[0]===31?Buffer.from(p.channels[0],'hex'):Uint8Array.of(0);
+    core.cli=async command=>{
+      commands.push(command);if(command==='get usb.logging')return '> usb.logging off';if(command==='get bluetooth')return '> bluetooth off';
+      if(command==='get bluetooth.name')return `> ${name} (custom)`;
+      if(command.startsWith('set bluetooth.name ')){name=command.slice('set bluetooth.name '.length);return 'OK - Bluetooth name saved';}
+      throw Error('Unexpected restore query');
+    };
+    const result=await core.restore(sealBackup(p));assert.equal(result.optional.bluetoothName.state,'restored');assert.equal(name,desired);assert.ok(commands.includes('set bluetooth.name '+desired));assert.equal(commands.filter(command=>command==='get bluetooth.name').length,2);
+  }
+});
+test('explicit unsupported Bluetooth-name replies stay optional but malformed names stop before writes',async()=>{
+  for(const raw of ['Unknown command','Error: unsupported','> Missing status metadata','> name\nreboot (custom)']){
+    const p=payload(),core=new MeshCore({});p.cli['get bluetooth.name']=raw;let accessed=false;
+    core.self=async()=>{accessed=true;throw Error('Device access');};
+    if(raw==='Unknown command'||raw==='Error: unsupported'){assert.doesNotThrow(()=>verifyBackup(sealBackup(p)));}
+    else {await assert.rejects(core.restore(sealBackup(p)),/Bluetooth-name status|Invalid Bluetooth name/);assert.equal(accessed,false);}
+  }
+});
 test('text-to-binary handoff requires explicit acknowledgement when logging is on',async()=>{
   const sent=[],link={command:async c=>{sent.push(c);return c==='get usb.logging'?'> usb.logging on':'OK';}};
   await assert.rejects(()=>enterCompanionBinary(link),/permission/);assert.deepEqual(sent,['+++MESHCORE-TERM-START','get usb.logging']);

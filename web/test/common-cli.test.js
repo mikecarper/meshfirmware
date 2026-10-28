@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {ed25519} from '@noble/curves/ed25519';
 import {bytesToHex} from '@noble/hashes/utils.js';
 import {COMMON_CLI_COMMANDS,COMMON_CLI_OPTIONAL_COMMANDS,commonCliReplyState,commonCliRestorePreview,restoreCommonCli} from '../src/common-cli.js';
+import {CAPABILITY_KEYS,parseSettingCapabilities} from '../src/setting-capabilities.js';
 
 const publicKey=bytesToHex(ed25519.ExtendedPoint.BASE.toRawBytes()),otherKey='22'.repeat(32),privateKey='01'+'00'.repeat(63);
 const reply=(command,value)=>`${command}\r\n  -> > ${value}\r\n`;
@@ -15,7 +16,7 @@ function mockLink(values={},hook=null){
     if(command.startsWith('password ')){state['get password']=command.slice(9);return `${command}\n  -> password now: ${state['get password']}`;}
     if(command.startsWith('powersaving ')){state['get powersaving']=command.slice(12);return `${command}\n  -> OK - powersaving ${state['get powersaving']}`;}
     if(command.startsWith('setperm ')){const [,key,permissions]=command.split(' '),row=`${Number(permissions).toString(16).padStart(2,'0')} ${key}`;state['get acl']=(state['get acl']||'ACL:')+'\n'+row;return command+'\n -> OK';}
-    const match=/^set ([^ ]+) (.*)$/.exec(command);assert.ok(match,'Only reviewed setters may execute');state['get '+match[1]]=match[2];
+    const match=/^set ([^ ]+) (.*)$/.exec(command);assert.ok(match,'Only reviewed setters may execute');state['get '+match[1]]=match[2];if(match[1]==='radio'&&match[2].split(',').length===5){const fields=match[2].split(',');state['get radio']=fields.slice(0,4).join(',');state['get radio.preamble']=fields[4];}
     return command+'\n -> '+(match[1].startsWith('wifi.')?'OK - WiFi setting saved; reboot to apply':'OK');
   }};return api;
 }
@@ -146,4 +147,46 @@ test('transport failures and rejected secret setters never expose archived secre
 
 test('diagnostics-only archives cannot claim a supported-settings restore',async()=>{
   const link=mockLink();await assert.rejects(restoreCommonCli(link,snapshot({ver:'v1.18.0','region':'Regions:'})),/no supported settings/);assert.deepEqual(link.calls,[]);
+});
+
+const capReport=({get=[],set=[],fixed=[],na=[]}={})=>{const mask=keys=>keys.reduce((value,key)=>value+2**CAPABILITY_KEYS.indexOf(key),0).toString(16).padStart(8,'0');return `config.cap v1 get=${mask(get)} set=${mask(set)} fixed=${mask(fixed)} na=${mask(na)}`;};
+
+test('new saved preambles are combined with the validated primary radio tuple, never a guessed standalone setter',()=>{
+  for(const [value,expected]of [['64',64],['auto','auto'],['0','auto']]){
+    const plan=commonCliRestorePreview(snapshot({'get radio':'> 911.3,125,10,5','get radio.preamble':'> '+value})),radio=plan.operations.find(row=>row.id==='radio');assert.equal(radio.preamble,expected);assert.deepEqual(radio.commands,[`set radio 911.3,125,10,5,${expected}`]);assert.ok(!plan.warnings.some(text=>/automatic preamble/.test(text)));assert.ok(!plan.operations.some(row=>row.id==='radio.preamble'));
+  }
+  const orphan=commonCliRestorePreview(snapshot({'get radio.preamble':'> 64'}));assert.equal(orphan.operations.length,0);assert.ok(orphan.skipped.some(row=>row.id==='radio.preamble'));
+  for(const value of ['1','3','4','7','65529','65535','65536','4.5','64\0','32\nreboot','32\nError: read failed'])assert.throws(()=>commonCliRestorePreview(snapshot({'get radio':'> 911.3,125,10,5','get radio.preamble':'> '+value})),/preamble is invalid/);
+});
+
+test('a known failed saved preamble read cannot silently reset the CommonCLI primary radio to auto',async()=>{
+  const link=mockLink({'get name':'Old','get radio':'910,125,10,5'}),result=await restoreCommonCli(link,snapshot({'get name':'> New','get radio':'> 911.3,125,10,5','get radio.preamble':'Error: query failed'}));assert.deepEqual(writes(link),['set name New']);assert.ok(result.skipped.some(row=>row.id==='radio'&&/query failed/.test(row.reason)));
+});
+
+test('saved custom and automatic preambles are restored and read back even when the radio tuple itself was unchanged',async()=>{
+  for(const desired of ['64','auto']){
+    const link=mockLink({'get radio':'911.3,125,10,5','get radio.preamble':'32'}),result=await restoreCommonCli(link,snapshot({'get radio':'> 911.3,125,10,5','get radio.preamble':'> '+desired}));assert.deepEqual(writes(link),[`set radio 911.3,125,10,5,${desired}`]);assert.equal(link.state['get radio.preamble'],desired);assert.ok(result.restored.some(row=>row.id==='radio'));assert.ok(link.calls.filter(command=>command==='get radio.preamble').length>=2);
+  }
+  const unchanged=mockLink({'get radio':'911.3,125,10,5','get radio.preamble':'64'});await restoreCommonCli(unchanged,snapshot({'get radio':'> 911.3,125,10,5','get radio.preamble':'> 64'}));assert.deepEqual(writes(unchanged),[]);
+});
+
+test('old targets retain their radio when a new backup contains a preamble they cannot verify',async()=>{
+  const link=mockLink({'get name':'Before','get radio':'910,250,7,5'}),result=await restoreCommonCli(link,snapshot({'get name':'> After','get radio':'> 911.3,125,10,5','get radio.preamble':'> 64'}));assert.deepEqual(writes(link),['set name After']);assert.equal(link.state['get radio'],'910,250,7,5');assert.ok(result.skipped.some(row=>row.id==='radio'&&/cannot verify the saved preamble/.test(row.reason)));
+});
+
+test('CommonCLI cannot write a saved preamble to a confirmed fixed, unavailable or read-only target',async()=>{
+  for(const report of [capReport({fixed:['radio.preamble'],get:['radio.preamble']}),capReport({na:['radio.preamble']}),capReport({get:['radio.preamble']})]){
+    const link=mockLink({'get name':'Before','get radio':'910,250,7,5','get radio.preamble':'32','get config.cap':report}),result=await restoreCommonCli(link,snapshot({'get name':'> After','get radio':'> 911.3,125,10,5','get radio.preamble':'> 64'}));assert.deepEqual(writes(link),['set name After']);assert.ok(!link.calls.includes('get radio.preamble'));assert.ok(result.skipped.some(row=>row.id==='radio'&&/cannot configure/.test(row.reason)));
+  }
+});
+
+test('a preamble that did not change after a radio acknowledgement cannot be reported as restored',async()=>{
+  const link=mockLink({'get radio':'911.3,125,10,5','get radio.preamble':'32'},command=>command.startsWith('set radio ')?'OK':undefined);await assert.rejects(restoreCommonCli(link,snapshot({'get radio':'> 911.3,125,10,5','get radio.preamble':'> 64'})),/preamble readback did not match/);assert.deepEqual(writes(link),['set radio 911.3,125,10,5,64']);
+});
+
+test('confirmed non-applicable, fixed and read-only settings are not written while legacy targets still use getter probes',async()=>{
+  const report=capReport({fixed:['radio.cad'],na:['radio.fem.txgain'],get:['usb.logging.always']}),source=snapshot({'get name':'> New','get radio.cad':'radio.cad on, scan=auto(12) ms, retry=50 ms, max=500 ms','get radio.fem.txgain':'> on','get usb.logging.always':'> on'}),link=mockLink({'get name':'Old','get config.cap':report});
+  const result=await restoreCommonCli(link,source);assert.deepEqual(writes(link),['set name New']);for(const id of ['radio.cad','radio.fem.txgain','usb.logging.always'])assert.ok(result.skipped.some(row=>row.id===id));assert.ok(!link.calls.includes('get radio.fem.txgain'));
+  const typed=snapshot({'get radio.cad':'unparseable fixed diagnostic'},{capabilities:{state:'complete',data:parseSettingCapabilities(report)}}),preview=commonCliRestorePreview(typed);assert.equal(preview.operations.length,0);assert.ok(preview.skipped.some(row=>row.id==='radio.cad'));
+  const malformed=structuredClone(typed);malformed.capabilities.data.version=99;assert.throws(()=>commonCliRestorePreview(malformed),/Invalid setting capability/);
 });

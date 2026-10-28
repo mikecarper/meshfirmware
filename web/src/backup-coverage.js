@@ -1,6 +1,7 @@
 // Presentation only: callers validate/seal archives before displaying coverage.
 // Never copy archived values, raw replies or arbitrary error text into the UI.
 import { commonCliReplyState } from './common-cli.js';
+import { validateSettingCapabilityRecord, shouldSkipSetting } from './setting-capabilities.js';
 
 const commands={
   'get public.key':['identity_public_key','Public identity'],
@@ -22,6 +23,7 @@ const commands={
   'get radio2.cross':['radio2_cross','Radio crossing'],
   'get cad':['cad','Channel activity detection'],
   'get radio.cad':['radio_cad','Radio CAD timings'],
+  'get radio.preamble':['radio_preamble','Primary radio preamble'],
   'get radio.rxgain':['radio_rxgain','RX gain'],
   'get radio.fem.rxgain':['radio_fem_rxgain','Front-end RX gain'],
   'get radio.fem.txgain':['radio_fem_txgain','Front-end TX gain'],
@@ -72,7 +74,12 @@ export function backupCoverage(archive,nativeArchive=null){
   const payload=archive?.payload?.sections?{}:archive?.payload||{};
   const common=payload.role==='common-cli'||native?.source?.capture_api==='meshcore-cli-common-cli';
   const companion=payload.role==='companion'||native?.source?.capture_api==='companion-api';
-  const records=new Map();let specificSettingsMissing=false;
+  const records=new Map(),readFailures=new Map();let specificSettingsMissing=false,capabilities=null;
+  try{
+    const section=native?.sections?.config_capabilities;
+    const record=payload.capabilities??(section?.state==='complete'?{state:'complete',data:section.data}:null);
+    if(record)capabilities=validateSettingCapabilityRecord(record);
+  }catch{/* An unknown or malformed manifest must not hide individual read results. */}
   const add=(descriptor,state,priority=1,reason=null)=>{
     if(!descriptor||!visibleStates.has(state))return;
     const [id,label]=descriptor,old=records.get(id);if(old&&old.priority>priority)return;
@@ -84,6 +91,7 @@ export function backupCoverage(archive,nativeArchive=null){
     const descriptor=lookup(commands,command);if(!descriptor)return;
     let state=explicitState;
     if(!state){const raw=replyText(value);state=value&&typeof value==='object'&&value.ok===false?'error':raw===null?'error':commonCliReplyState(raw,command).state;}
+    if(state==='error')readFailures.set(descriptor[0],descriptor);
     add(descriptor,state,priority);
   };
   if(payload.publicKey)add(sections.identity_public_key,'complete');
@@ -113,10 +121,13 @@ export function backupCoverage(archive,nativeArchive=null){
       if(!specific&&section.state!=='complete')add(sections.settings,section.state,3);
       continue;
     }
-    const descriptor=lookup(commands,section.command)||lookup(sections,id);add(descriptor,section.state,3);
+    const descriptor=lookup(commands,section.command)||lookup(sections,id);if(descriptor&&section.state==='error')readFailures.set(descriptor[0],descriptor);add(descriptor,section.state,3);
   }
   for(const id of native?.completeness?.missing_required||[]){if(id!=='settings'||!specificSettingsMissing){const descriptor=lookup(sections,id),existing=descriptor&&records.get(descriptor[0]);add(descriptor,existing&&existing.state!=='complete'?existing.state:'unsupported',4);}}
-  for(const id of native?.completeness?.optional_errors||[])add(lookup(sections,id),'error',4);
+  for(const id of native?.completeness?.optional_errors||[]){const descriptor=lookup(sections,id);if(descriptor)readFailures.set(descriptor[0],descriptor);add(descriptor,'error',4);}
+  for(const [command,descriptor]of Object.entries(commands))if(shouldSkipSetting(capabilities,command)&&!readFailures.has(descriptor[0]))add(descriptor,'not_applicable',5);
+  // Metadata describing applicability cannot turn a real failed read into success.
+  for(const descriptor of readFailures.values())add(descriptor,'error',6);
   const regionRecord=native?.sections?.regions||payload.regions,region=records.get('regions');
   if(region&&region.state!=='complete'&&region.state!=='not_applicable'&&region.state!=='disabled'){
     const reason=typeof regionRecord?.reason==='string'?regionRecord.reason:'';
@@ -132,8 +143,7 @@ export function backupCoverage(archive,nativeArchive=null){
     if(value.state==='not_applicable')continue;
     const item={label:value.label,reason:value.reason};notIncluded.push(item);if(value.state==='error')failed.push({...item});
   }
-  if(native?.excluded?.unexposed_preferences)notIncluded.push({label:'Preferences without an export command',reason:'Only values exposed by the connected firmware can be captured.'});
-  const ordinaryExclusions=new Set([...baseline.map(item=>item.label),'Preferences without an export command']);
+  const ordinaryExclusions=new Set(baseline.map(item=>item.label));
   const display=item=>{
     if(ordinaryExclusions.has(item.label))return item.label;
     const reason=item.reason==='The firmware does not expose this value.'?'not supported by firmware':item.reason==='The read failed; no value was saved.'?'read failed; no value saved':item.reason==='Export is disabled by the firmware.'?'export disabled by firmware':item.reason==='Tree, home and default-scope data were not all captured.'?'saved tree/home/default data unavailable':item.reason.replace(/\.$/,'');

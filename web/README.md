@@ -445,6 +445,14 @@ recognized ACL are merged without deleting unrelated target entries. Old raw
 region text and other unstructured snapshots remain available for manual
 comparison; no setting absent from the original backup is invented.
 
+New Keymind firmware provides a small, read-only `get config.cap` report for
+board/role-specific settings. Backup skips settings confirmed not applicable or
+fixed without a readable preference, rather than calling them missing. Readable
+diagnostics are still queried and real read failures remain visible. Older or
+unrecognized firmware keeps the existing getter probes; missing capability
+metadata never implies support or permission to write. The report is preserved
+in the JSON without containing setting values or secrets.
+
 Region capture preserves the firmware export's indentation and terminal newline,
 checks the complete tree is below its 159-byte truncation boundary, and queries
 home/default and individual region records for agreement. Saturated, ambiguous
@@ -478,13 +486,18 @@ private identity replacement, it is staged until a **manual reboot**; the page
 does not reboot the radio or claim the replacement is already active. Reconnect
 after reboot and verify the expected identity before using that radio.
 
-The current primary-radio getter returns its frequency/BW/SF/CR tuple but not a
-saved custom preamble. The preview warns that restoring this tuple selects the
-firmware's **automatic preamble**; it cannot reconstruct an unexported custom
-length. Secondary-radio preamble and other settings are restored only when their
-saved replies can be parsed and the target supports them. Firmware/bootloader
-files, stored messages, runtime logs and preferences without an export command
-are not recreated by a settings restore.
+New Keymind firmware also exports the saved primary-radio preference through
+`get radio.preamble`: `auto` or 8–65528 symbols. Backup preserves it separately
+from the radio tuple, and restore uses the existing fifth `set radio` field with
+readback verification. CommonCLI keeps the target's primary radio unchanged if
+a saved preamble cannot be verified there; unrelated settings can still restore.
+Companion reports an unsupported preamble as skipped while retaining its existing
+binary core-settings restore. For older CommonCLI backups without this getter,
+the preview still warns that the four-field tuple selects **automatic preamble**;
+no custom length is invented. Secondary-radio preamble and other settings are
+restored only when their saved replies can be parsed and the target supports
+them. Firmware/bootloader files, stored messages, runtime logs and values without
+an export command are not recreated by a settings restore.
 
 ### Settings-preserving partition expansion
 

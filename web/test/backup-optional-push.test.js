@@ -23,14 +23,14 @@ test('protocol-13 core restore sends no unsupported CLI commands and reports eac
   const p=withOptionalSettings(payload()),{core,commands,cliCommands}=target(p,{protocol:13,cli:()=>{throw new Error('CLI must not be attempted');}});
   const result=await core.restore(sealBackup(p));
   assert.ok(commands.some(command=>command[0]===8));assert.equal(cliCommands.length,0);assert.equal(result.warnings.length,4);
-  for(const value of Object.values(result.optional))assert.equal(value.state,'unsupported');
+  for(const key of ['usbLogging','bluetooth','bluetoothName','radioCad'])assert.equal(result.optional[key].state,'unsupported');assert.equal(result.optional.radioPreamble.state,'not-in-backup');
   assert.ok(!result.warnings.some(w=>/successfully restored/i.test(w)));
 });
 
 test('explicit unsupported optional commands do not block verified core restore or trigger optional writes',async()=>{
   const p=withOptionalSettings(payload()),{core,commands,cliCommands}=target(p,{cli:()=>'> Unknown command'}),result=await core.restore(sealBackup(p));
   assert.equal(result.warnings.length,4);assert.ok(commands.some(command=>command[0]===11));
-  assert.ok(cliCommands.every(command=>command.startsWith('get ')));for(const value of Object.values(result.optional))assert.equal(value.state,'unsupported');
+  assert.ok(cliCommands.every(command=>command.startsWith('get ')));for(const key of ['usbLogging','bluetooth','bluetoothName','radioCad'])assert.equal(result.optional[key].state,'unsupported');assert.equal(result.optional.radioPreamble.state,'not-in-backup');
 });
 
 test('explicit unsupported CLI protocol result is distinguished from genuine protocol errors',async()=>{
