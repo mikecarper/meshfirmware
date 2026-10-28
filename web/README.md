@@ -4,8 +4,9 @@ https://mikecarper.github.io/meshfirmware/
 
 A static GitHub Pages app: it talks directly to the port you select. It does
 not launch `firmware.cmd`, contact a localhost service, install Python, or
-upload your firmware, identity, settings or backups. Public firmware/catalog
-downloads contact their named hosts. GitHub receives ordinary site requests.
+upload your local firmware, identity, settings or backups. Current public release
+firmware is downloaded automatically from a hash-verified mirror on this site;
+unmirrored public downloads contact their named hosts. GitHub receives ordinary site requests.
 
 This is a **hardware preview**. Automated protocol, safety, simulated serial,
 WebAssembly and simulated IndexedDB persistence tests pass. Browser UI and
@@ -79,15 +80,21 @@ visible. The top navigation opens the corresponding tools without touching USB.
    Published release-ZIP hashes are checked before indexing; the selected inner
    image is validated separately, never compared to the enclosing ZIP's hash.
 
-   A GitHub Release asset can exist and download normally, yet fail the page's
-   automatic fetch because the redirect or final asset host does not grant
-   cross-origin access (CORS). Browser JavaScript cannot bypass that permission;
-   `no-cors` would return unreadable bytes that cannot be verified or flashed.
-   Use **Download firmware** and select that exact local file; published hashes
-   and image validation still apply. A same-origin, digest-verified public
-   firmware mirror or owned download service would be needed to remove this
-   limitation. The page distinguishes failed downloads from image-validation
-   errors and does not label checksum, HTTP or size errors as CORS failures.
+   Current GitHub-hosted builds download directly into the flasher from this
+   site's verified public firmware mirror. No save-and-reselect step is needed.
+   The build verifies each asset against GitHub's uploaded SHA-256 and size;
+   the browser verifies the original image again, plus the compressed hash when
+   the server exposes compressed bytes rather than HTTP-decoded content.
+   Normal container, chip, board, backup and write-confirmation checks still run.
+   A corrupt mirror fails closed instead of silently switching sources.
+
+   The mirror is bounded to 850 MiB to stay below GitHub Pages' published-site
+   limit. Latest application profiles in both installation modes and recommended
+   bootloader/erase/recovery assets take priority; migration archives use remaining
+   space. Older, oversized, non-GitHub or custom URLs may not be mirrored. Those
+   use their original HTTPS host; if that host blocks browser access (CORS),
+   **Download firmware → choose the exact local file** remains the fallback.
+   The page never disables CORS, uses an opaque response or uploads private files.
 3. Use **Backup & prepare update** (or **Backup & prepare install**): download and validate the selected application, then
    back up before bootloader entry by default. Detection distinguishes a binary
    companion from CommonCLI. Reviewed native USB application reads assert DTR
@@ -393,6 +400,7 @@ pnpm install --frozen-lockfile --ignore-scripts
 pnpm test
 node scripts/catalog.mjs
 node scripts/check-catalog.mjs
+node scripts/mirror.mjs
 pnpm build
 node scripts/check-dist.mjs
 pnpm preview
@@ -402,6 +410,11 @@ Only `web/dist` is published. The build copies an explicit runtime/validator
 allowlist; an artifact check refuses backup names, credentials, source maps,
 symlinks or unexpected root files. The workflow never publishes the repository
 root. Runtime dependencies are pinned; third-party licenses ship with the app.
+`public/firmware/` is generated and ignored by Git. The mirror builder accepts
+only verified assets from explicitly public GitHub repositories, checks both
+release metadata and payload bytes, and refuses deployment below 90% current
+GitHub-application coverage. Publication checks every mirrored file and keeps
+the complete site below 950 MB; no local device files are mirror inputs.
 The catalog and its compressed last-known cache contain public release metadata
 only. Browser storage is not a substitute for a downloaded private backup.
 

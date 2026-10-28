@@ -14,6 +14,7 @@ import { chooseFirmware, firmwareVersionWarning, matchesCatalogInstallMode } fro
 import { chooseConnection } from './connection-choice.js';
 import { MigrationApproval } from './migration-approval.js';
 import { assessBootloaderVersion } from './bootloader-version.js';
+import { fetchFirmwareBytes } from './downloads.js';
 
 const $ = id => document.getElementById(id);
 const state = { installMode:'update', port: null, pkg: null, esp: null, plan: null, generation: 0, busy: false, items: [], restore: null, directory: null, archive:null, archiveContext:null, automaticSha:null, automaticShaName:null, recoveryCatalog:null,loadedRecovery:null,planner:null, migration:null, downloaded:new Set(),item:null,device:null,manualSelections:{},detectedHardware:null,connection:null,boardDetected:false,recoveryManual:false,recoveryDetectionRequested:false,backupApproved:null,backup:null,recovery:null,espRecovery:null,verification:null,handoff:false };
@@ -553,19 +554,12 @@ async function offerBootloaderAfterStartup(){
   try{await loadBootloaderFirmware();}catch(error){throw new Error(`Application startup was verified. Separate bootloader preparation failed: ${error.message}`);}
 }
 function updateDownload() { const item = $('artifact').value?state.items[Number($('artifact').value)]:null,board=bootloaderItem(),info=board?.bootloaderInfo,urls=board?.architecture==='nrf52'?(info?[info.url]:[]):board?.bootloader||[];$('bootloader-source').replaceChildren(...urls.map(url=>new Option(`${info?(info.cached?'Last verified ':'')+'OTAFIX '+info.version+' · ':''}${new URL(url).pathname.split('/').pop()}`,url)));$('bootloader-detail').textContent=info?`${info.cached?'Latest release could not be checked; using our last verified stable':'Our stable'} OTAFIX ${info.version} · ${info.profile}. SHA-256 is checked before loading. ${bootloaderReinstallWarning}`:item?.bootloaderUnavailable||'Select exact hardware or a firmware artifact for its board-specific bootloader recommendation; conflicting profiles require an explicit artifact.';if (item) { $('download-firmware').href = item.url; $('download-firmware').removeAttribute('aria-disabled');$('catalog-detail').textContent=[firmwareDowngradeWarning(null,item),item.subtitle,item.notice,item.releaseNotes,item.bootloaderUnavailable].filter(Boolean).join('\n'); } else { $('download-firmware').removeAttribute('href'); $('download-firmware').setAttribute('aria-disabled','true');$('catalog-detail').textContent=''; } }
-async function boundedFetch(url) {
-  const response = await fetch(httpsUrl(url),{signal:AbortSignal.timeout(120000),credentials:'omit'});
-  if(!response.ok)throw Object.assign(new Error(`Download host returned HTTP ${response.status}.`),{downloadKind:'http'});
-  if(Number(response.headers.get('Content-Length'))>(64<<20))throw Object.assign(new Error('Firmware download exceeds 64 MiB.'),{downloadKind:'size'});
-  if(!response.body?.getReader)throw Object.assign(new Error('Download has no readable response body.'),{downloadKind:'body'});
-  const reader = response.body.getReader(), chunks = []; let total = 0;
-  try { while (true) { const {value,done} = await reader.read(); if (done) break; total += value.length; if (total > (64 << 20)) throw Object.assign(new Error('Firmware download exceeds 64 MiB.'),{downloadKind:'size'}); chunks.push(value); } }
-  finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
-  const result = new Uint8Array(total); let offset = 0; for (const c of chunks) { result.set(c,offset); offset += c.length; } return result;
+async function boundedFetch(url,{expectedSha256=''}={}) {
+  return fetchFirmwareBytes(httpsUrl(url),{expectedSha256,fetchImpl:fetch});
 }
-async function downloadFirmwareBytes(url,name){
+async function downloadFirmwareBytes(url,name,expectedSha256=''){
   const source=httpsUrl(url);
-  try{return await boundedFetch(source);}
+  try{return await boundedFetch(source,{expectedSha256});}
   catch(error){
     $('download-firmware').href=source;revealPanel('firmware-choices');revealPanel('image-details');revealPanel('custom-firmware');
     const reason=error.downloadKind?'':' Browser or network restrictions, including CORS, can block access; this page cannot determine which from a failed fetch.';
@@ -611,7 +605,20 @@ $('load-entry').onclick = () => operation(async () => { const entry=$('archive-e
 $('fetch-custom').onclick = () => operation(async () => { clearAutomaticSha();await clearFirmwareSelection();const url=httpsUrl($('custom-url').value),name=new URL(url).pathname.split('/').pop();$('download-firmware').href=url;const bytes=await downloadFirmwareBytes(url,name);await loadFirmware(name,bytes); });
 $('artifact').onchange = () => operation(async()=>{await clearFirmwareSelection();updateDownload();updateFirmwareSelectionSummary();controls();});
 $('bootloader-source').onchange=controls;
-async function loadBootloaderFirmware(){const url=$('bootloader-source').value,item=bootloaderItem(),info=item?.bootloaderInfo;await clearFirmwareSelection();if(!url||!item)fail('Choose exact hardware or an explicit board firmware artifact and its bootloader ZIP.');if(item.architecture==='nrf52'&&(!info||info.url!==url||!item.bootloader?.includes(url)))fail('No verified stable bootloader from our fork is available for this exact hardware. Select a custom ZIP manually if you intend a recovery.');$('download-firmware').href=httpsUrl(url);try{setAutomaticSha(info?.sha256||'',new URL(url).pathname.split('/').pop());const bytes=await boundedFetch(url);if(info&&bytes.length!==info.size)fail('Published bootloader size does not match the downloaded ZIP.');await loadFirmware(new URL(url).pathname.split('/').pop(),bytes,item);if(info)notice(`Our stable OTAFIX ${info.version} loaded and SHA-256 verified. ${bootloaderReinstallWarning}`);}catch(error){revealPanel('image-details');revealPanel('custom-firmware');throw new Error(error.message+' If the host blocks fetching, download this exact bootloader ZIP and choose it locally.');}}
+async function loadBootloaderFirmware(){
+  const url=$('bootloader-source').value,source=bootloaderItem(),item=source?{...source,bootloader:[...(source.bootloader||[])],...(source.bootloaderInfo?{bootloaderInfo:{...source.bootloaderInfo}}:{})}:null,info=item?.bootloaderInfo;
+  await clearFirmwareSelection();
+  if(!url||!item)fail('Choose exact hardware or an explicit board firmware artifact and its bootloader ZIP.');
+  if(item.architecture==='nrf52'&&(!info||info.url!==url||!item.bootloader?.includes(url)))fail('No verified stable bootloader from our fork is available for this exact hardware. Select a custom ZIP manually if you intend a recovery.');
+  $('download-firmware').href=httpsUrl(url);
+  try{
+    setAutomaticSha(info?.sha256||'',new URL(url).pathname.split('/').pop());
+    const bytes=await boundedFetch(url,{expectedSha256:info?.sha256||''});
+    if(info&&bytes.length!==info.size)fail('Published bootloader size does not match the downloaded ZIP.');
+    await loadFirmware(new URL(url).pathname.split('/').pop(),bytes,item);
+    if(info)notice(`Our stable OTAFIX ${info.version} loaded and SHA-256 verified. ${bootloaderReinstallWarning}`);
+  }catch(error){revealPanel('image-details');revealPanel('custom-firmware');throw new Error(error.message+' If this exact build is not hosted and the source blocks fetching, download the bootloader ZIP and choose it locally.');}
+}
 $('load-bootloader').onclick=()=>operation(loadBootloaderFirmware);
 $('prepare-bootloader-update').onclick=()=>operation(async()=>{
   const context=bootloaderUpdateContext();
@@ -624,7 +631,7 @@ $('match-recovery').onclick=()=>operation(async()=>{if(state.migration||state.re
 $('load-recovery').onclick=()=>operation(async()=>{
   const catalog=state.recoveryCatalog,id=$('recovery-profile').value,file=$('recovery-bundle').files[0];await clearFirmwareSelection();
   if(!catalog||!id||!catalog.profiles.some(p=>p.id===id))fail('Choose the exact CURRENTLY INSTALLED bootloader profile. Ambiguous hints require manual selection; the physical target board does not choose its recovery bridge.');
-  let bundle;try{if(file){if(file.size!==catalog.bundle.size)fail('Recovery bundle size does not match the verified release.');bundle=new Uint8Array(await file.arrayBuffer());}else bundle=await boundedFetch(catalog.bundle.url);}catch(error){throw new Error(`${error.message} Use Download recovery bundle, select that exact local bundle here, then load the selected profile again.`);}
+  let bundle;try{if(file){if(file.size!==catalog.bundle.size)fail('Recovery bundle size does not match the verified release.');bundle=new Uint8Array(await file.arrayBuffer());}else bundle=await boundedFetch(catalog.bundle.url,{expectedSha256:catalog.bundle.sha256||''});}catch(error){throw new Error(`${error.message} Use Download recovery bundle, select that exact local bundle here, then load the selected profile again.`);}
   const loaded=recoveryPackage(catalog,id,bundle);setAutomaticSha(loaded.profile.sha256,loaded.name);await loadFirmware(loaded.name,loaded.bytes);state.loadedRecovery={...loaded.profile,version:catalog.version};$('image-warning').textContent=[...state.pkg.warnings,recoveryWarning].join(' ');
   notice(`Verified OTAFIX ${catalog.version} R_${id} ZIP loaded for installed identity ${loaded.profile.installedIdentity}. No device commands were sent. ${recoveryWarning}`);
 });
@@ -635,7 +642,7 @@ async function fetchSelectedFirmware(){
   await clearFirmwareSelection();
   notice('Downloading firmware into browser memory…');
   setAutomaticSha(item.sha256||'',item.name);
-  const bytes=await downloadFirmwareBytes(item.url,item.name);
+  const bytes=await downloadFirmwareBytes(item.url,item.name,item.sha256||'');
   // Validation errors are not network/CORS errors. Keep their exact cause.
   await loadFirmware(item.name,bytes,item);
 }

@@ -11,6 +11,8 @@ import {hash as firmwareHash,md5hex,partitionTable as parsePartitionTable} from 
 import {MigrationApproval} from '../src/migration-approval.js';
 import {cleanCliReply} from '../src/meshcore.js';
 import {assessBootloaderVersion} from '../src/bootloader-version.js';
+import {fetchFirmwareBytes as verifiedDownload} from '../src/downloads.js';
+import {gzipSync} from 'node:zlib';
 const html=await readFile(new URL('../index.html',import.meta.url),'utf8');
 const source=(await readFile(new URL('../src/app.js',import.meta.url),'utf8')).replace(/^import .*;\r?$/gm,'');
 const ids=[...html.matchAll(/\bid="([^"]+)"/g)].map(m=>m[1]);
@@ -25,7 +27,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,catalogPromise=n
   if(recovery)storage.set('meshfirmware.nrfRecovery',JSON.stringify(recovery));
   if(espRecovery)storage.set('meshfirmware.espRecovery',JSON.stringify(espRecovery));
   const context=vm.createContext({document:{getElementById:id=>{assert.ok(elements.has(id),`Missing HTML id ${id}`);return elements.get(id);},querySelectorAll:()=>[...elements.values()]},navigator:{serial:{requestPort:async()=>{calls.push('chooser');return port;},getPorts(){throw new Error('must not enumerate automatically');},addEventListener(type,handler){serialEvents[type]=handler;}}},window:{addEventListener(){}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},Option,URL,Blob,Uint8Array,TextEncoder,TextDecoder,console,setTimeout,clearTimeout,AbortSignal,Date,
-    fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,MigrationApproval,cleanCliReply,assessBootloaderVersion,assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),
+    fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,MigrationApproval,cleanCliReply,assessBootloaderVersion,fetch:async()=>{throw Error('Unexpected network request');},fetchFirmwareBytes:(url,options)=>verifiedDownload(url,{...options,mirrorBase:'https://mirror.example.test/firmware/',pageOrigin:'https://mirror.example.test',fetchImpl:(target,init)=>target==='https://mirror.example.test/firmware/index.json'?Promise.resolve({ok:false,status:404}):options.fetchImpl(target,init)}),assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),
     SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
   });
   vm.runInContext(source,context);
@@ -889,15 +891,34 @@ test('known HTTP, size and response-body failures preserve their cause without s
   for(const failure of ['http','declared-size','stream-size','body']){
     const ui=workbench();await Promise.resolve();collapsedPanels(ui);let cancelled=0,released=0;
     ui.context.item={...v4Item,name:'exact-board.bin',url:'https://firmware.example.test/exact-board.bin'};ui.evaluate('state.items=[item];');ui.elements.get('artifact').value='0';
-    const reader={read:async()=>({value:{length:(64<<20)+1},done:false}),cancel:async()=>{cancelled++;},releaseLock(){released++;}};
+    const reader={read:async()=>({value:new Uint8Array((64<<20)+1),done:false}),cancel:async()=>{cancelled++;},releaseLock(){released++;}};
     ui.context.fetch=async()=>({ok:failure!=='http',status:404,headers:{get:()=>failure==='declared-size'?String((64<<20)+1):null},body:failure==='body'?null:{getReader:()=>reader}});
     await ui.elements.get('fetch-firmware').onclick();
     const message=ui.elements.get('notice').textContent;
-    assert.match(message,failure==='http'?/HTTP 404/:failure==='body'?/no readable response body/:/exceeds 64 MiB/,failure);
+    assert.match(message,failure==='http'?/HTTP 404/:failure==='body'?/no readable response body/:/exceeds.*(?:64 MiB|permitted size)/,failure);
     assert.doesNotMatch(message,/CORS|network restrictions/i,failure);assert.match(message,/firmware\.example\.test/,failure);
     assert.equal(cancelled,failure==='stream-size'?1:0,failure);assert.equal(released,failure==='stream-size'?1:0,failure);
     assert.equal(ui.evaluate('state.pkg'),null,failure);assert.equal(ui.evaluate('state.plan'),null,failure);assert.deepEqual(ui.calls,[],failure);
   }
+});
+
+test('catalog firmware downloads automatically from its verified same-origin mirror without a local file or USB operation',async()=>{
+  const ui=workbench();await Promise.resolve();const payload=new Uint8Array(64).fill(7),compressed=gzipSync(payload),sha256=firmwareHash(payload),mirrorBase='https://mikecarper.github.io/meshfirmware/firmware/',url='https://github.com/mikecarper/MeshCore/releases/download/v1/exact-node.zip',requests=[],loaded=[];
+  const entry={url,sha256,size:payload.length,gzipSha256:firmwareHash(compressed),gzipSize:compressed.length,path:sha256+'.gz'},index={schemaVersion:1,entries:[entry],warnings:[]};
+  ui.context.item={...v4Item,name:'exact-node.zip',url,sha256};ui.evaluate('state.items=[item];state.plan={old:true};');ui.elements.get('artifact').value='0';
+  ui.context.fetchFirmwareBytes=(source,options)=>{assert.equal(options.expectedSha256,sha256);return verifiedDownload(source,{...options,mirrorBase,pageOrigin:'https://mikecarper.github.io',fetchImpl:async target=>{requests.push(target);if(target===mirrorBase+'index.json')return new Response(JSON.stringify(index));if(target===mirrorBase+entry.path)return new Response(compressed);throw Error('Original cross-origin source must not be fetched');}});};
+  ui.context.loadFirmware=async(name,bytes,item)=>{loaded.push({name,bytes,item});ui.context.downloadedPkg=fakePackage({name,sha256});ui.evaluate('state.pkg=downloadedPkg;');};
+  await ui.elements.get('fetch-firmware').onclick();
+  assert.deepEqual(requests,[mirrorBase+'index.json',mirrorBase+entry.path]);assert.equal(loaded.length,1);assert.equal(loaded[0].name,'exact-node.zip');assert.deepEqual(loaded[0].bytes,payload);assert.equal(loaded[0].item,ui.context.item);assert.ok(ui.evaluate('state.pkg'));assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('firmware-file').files.length,0);assert.deepEqual(ui.calls,[]);
+});
+
+test('corrupt hosted firmware cannot load, switch sources or retain an earlier flash plan',async()=>{
+  const ui=workbench();await Promise.resolve();const payload=new Uint8Array(64).fill(7),compressed=gzipSync(payload),sha256=firmwareHash(payload),mirrorBase='https://mikecarper.github.io/meshfirmware/firmware/',url='https://github.com/mikecarper/MeshCore/releases/download/v1/exact-node.zip',requests=[];
+  const entry={url,sha256,size:payload.length,gzipSha256:firmwareHash(compressed),gzipSize:compressed.length,path:sha256+'.gz'},index={schemaVersion:1,entries:[entry],warnings:[]},bad=Buffer.from(compressed);bad[12]^=1;
+  ui.context.item={...v4Item,name:'exact-node.zip',url,sha256};ui.context.old=fakePackage();ui.evaluate('state.items=[item];state.pkg=old;state.plan={written:true};');ui.elements.get('artifact').value='0';
+  ui.context.fetchFirmwareBytes=(source,options)=>verifiedDownload(source,{...options,mirrorBase,pageOrigin:'https://mikecarper.github.io',fetchImpl:async target=>{requests.push(target);if(target===mirrorBase+'index.json')return new Response(JSON.stringify(index));if(target===mirrorBase+entry.path)return new Response(bad);throw Error('No unverified fallback');}});
+  ui.context.loadFirmware=async()=>{throw Error('Corrupt bytes must not reach image parsing');};await ui.elements.get('fetch-firmware').onclick();
+  assert.deepEqual(requests,[mirrorBase+'index.json',mirrorBase+entry.path]);assert.match(ui.elements.get('notice').textContent,/compressed SHA-256/);assert.doesNotMatch(ui.elements.get('notice').textContent,/CORS|network restrictions/);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(ui.calls,[]);
 });
 
 test('a blocked exact-board bootloader download reveals its link and local-file alternative without retaining write proof',async()=>{
@@ -906,7 +927,7 @@ test('a blocked exact-board bootloader download reveals its link and local-file 
   ui.elements.get('hardware').value='Exact board';ui.elements.get('bootloader-source').value=url;ui.evaluate("state.items=[item];state.pkg={name:'previous.zip'};state.plan={written:true};");
   ui.context.boundedFetch=async()=>{throw Error('Fixture bootloader CORS block');};await ui.elements.get('load-bootloader').onclick();
   assert.equal(ui.elements.get('image-details').open,true);assert.equal(ui.elements.get('custom-firmware').open,true);assert.equal(advanced.open,true);assert.equal(ui.elements.get('download-firmware').href,url);
-  assert.match(ui.elements.get('notice').textContent,/download this exact bootloader ZIP/);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(ui.calls,[]);
+  assert.match(ui.elements.get('notice').textContent,/download the bootloader ZIP/);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(ui.calls,[]);
 });
 
 test('a blocked erase ZIP download reveals its exact link and local erase input while retaining the final image',async()=>{
