@@ -118,6 +118,20 @@ test('only bounded pre-sync ROM timeouts are marked eligible for another native 
   assert.equal(loader.sync,originalSync);assert.equal(loader.command,originalCommand);assert.ok(!calls.includes('stub'));
 });
 
+test('ESPError identity still permits ordinary silence when its runtime name has been minified',async()=>{
+  for(const name of ['L','a','$x']){
+    const {session:s,loader}=session({usb:true}),original=new ESPError('Serial data stream stopped: Possible serial noise or corruption.');original.name=name;loader.sync=async()=>{throw original;};
+    await assert.rejects(s.connect('no_reset',{singleReset:true}),error=>error.romHandshakeFailed===true,name);
+  }
+});
+
+test('automatic sync diagnostics preserve and deduplicate the original error instead of only the generic loader failure',async()=>{
+  const {session:s,loader}=session({usb:true}),messages=[];loader.info=message=>messages.push(message);
+  const original=new Error('Unexpected parser failure\nwith detail');loader.sync=async()=>{throw original;};
+  await assert.rejects(s.connect('no_reset',{singleReset:true}),error=>error===original&&!error.romHandshakeFailed);
+  assert.equal(messages.filter(message=>message.includes('Unexpected parser failure')).length,1);assert.ok(messages.some(message=>message.includes('diagnostics v3')));assert.ok(messages.some(message=>message.includes('Unexpected parser failure with detail')));
+});
+
 test('the actual empty Transport.read error advances from the no-reset test to one working USB-JTAG method',async()=>{
   const steps=[],fixtures=[];let active;
   const result=await tryNativeUsbFallback({

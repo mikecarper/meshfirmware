@@ -1,4 +1,4 @@
-import { ESPLoader, Transport } from 'esptool-js';
+import { ESPLoader, Transport, ESPError } from 'esptool-js';
 import { fail, hash, md5hex, partitionTable, activeOta, text, sleep, validateEspImage } from './firmware.js';
 import { assessEspCompatibility } from './esp-compatibility.js';
 
@@ -7,11 +7,14 @@ const RECOVERY_CHUNK=16384;
 const MAX_RECOVERY_ATTEMPTS=3;
 const interruptedTransport=error=>/NetworkError|NotFoundError|TimeoutError|InvalidStateError/.test(error?.name||'')||/disconnect|device (?:lost|removed)|port.*closed|closed.*port|timed? ?out|timeout|serial.*(?:exception|stopped|error)|no more data|stream.*(?:closed|stopped)|packet.*(?:stopped|header)|lost connection/i.test(error?.message||'');
 const quietStreamMessage='Serial data stream stopped: Possible serial noise or corruption.';
-const handshakeReadiness=error=>['Error','ESPError','TimeoutError'].includes(error?.name||'Error')&&!/permission|denied|not.?allowed|security|disconnect|device (?:lost|removed)|port.*closed|not open|invalid state/i.test(error?.message||'')&&(error?.message===quietStreamMessage||/timeout|timed out|no response|no serial data|invalid head of packet|failed to connect with the device/i.test(error?.message||''));
+// ESPError sets name from its constructor, which production minification
+// renames. Class identity survives bundling; the constructor's text does not.
+const handshakeReadiness=error=>(error instanceof ESPError||['Error','TimeoutError'].includes(error?.name||'Error'))&&!/permission|denied|not.?allowed|security|disconnect|device (?:lost|removed)|port.*closed|not open|invalid state/i.test(error?.message||'')&&(error?.message===quietStreamMessage||/timeout|timed out|no response|no serial data|invalid head of packet|failed to connect with the device/i.test(error?.message||''));
 async function detectForConnection(loader,mode,singleReset){
   const originalSync=loader.sync,originalCommand=loader.command;
   const transport=loader.transport,originalReadLoop=transport?.readLoop;
-  let attempted=false,responded=false,blocked=false;
+  let attempted=false,responded=false,blocked=false,blockingSyncError=null;
+  const reportedErrors=new Set();
   let readerStopped=false,readerFailure=null;
   if(singleReset&&typeof originalReadLoop==='function')transport.readLoop=function(...args){
     let running;
@@ -26,7 +29,14 @@ async function detectForConnection(loader,mode,singleReset){
   if(typeof originalSync==='function')loader.sync=async function(...args){
     attempted=true;
     try{const result=await Reflect.apply(originalSync,this,args);responded=true;return result;}
-    catch(error){if(!handshakeReadiness(error))blocked=true;throw error;}
+    catch(error){
+      if(!handshakeReadiness(error)){blocked=true;blockingSyncError||=error;}
+      if(singleReset){
+        const detail=`${error instanceof ESPError?'ESPError':error?.name||'Error'}: ${error?.message||String(error)}`.replace(/[\x00-\x1f\x7f]/g,' ').slice(0,300);
+        if(!reportedErrors.has(detail)){reportedErrors.add(detail);loader.info(`USB ${mode} sync: ${detail}`);}
+      }
+      throw error;
+    }
   };
   if(typeof originalCommand==='function')loader.command=async function(operation,...args){
     const result=await Reflect.apply(originalCommand,this,[operation,...args]);
@@ -45,6 +55,9 @@ async function detectForConnection(loader,mode,singleReset){
     if(singleReset&&attempted&&!responded&&!blocked&&!readerStopped&&handshakeReadiness(error)){
       const failure=new Error(error.message,{cause:error});failure.name=error.name;failure.romHandshakeFailed=true;throw failure;
     }
+    // The loader otherwise hides every underlying sync error behind a generic
+    // failure. Preserve a genuine blocker so logs explain why testing stopped.
+    if(singleReset&&!responded&&blockingSyncError)throw blockingSyncError;
     throw error;
   }finally{
     if(typeof originalSync==='function')loader.sync=originalSync;
@@ -162,6 +175,7 @@ export class EspSession {
     // Never infer TinyUSB versus hardware JTAG from shared VID/PID 303a:1001.
     // attempts=1 alone is insufficient: chip-identification fallback can open
     // and reset again. Share one consumed budget across every reset factory.
+    if(singleReset)this.loader.info(`USB connection diagnostics v3: ${mode} (class-based error checks).`);
     await detectForConnection(this.loader,mode,singleReset);
     if (![0,2,5,9,13].includes(this.loader.chip.IMAGE_CHIP_ID)) fail('This browser build does not support the detected ESP chip family.');
     await assertSecurity(this.loader); // Before RAM stub upload/register changes.

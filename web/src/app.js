@@ -1023,7 +1023,7 @@ async function prepareSelectedFirmware({waitForRom=false}={}) {
     else if(prepared.needed) { $('migration-status').textContent=`Verified USB migration for ${prepared.board}; exact firmware ${prepared.firmware_version}. Keep this tab open until final verification.`; notice(prepared.resume===false&&state.migration?'Original source layout verified. The partial bridge can be rewritten safely before it is started; review and acknowledge the migration again.':'Partition expansion is needed. Review & flash writes the verified USB bridge first. No application or bridge has been written yet.'); }
     else notice(`Read-only plan ready for ${info.mac}. Offsets: ${state.plan.addresses.map(n => '0x' + n.toString(16)).join(', ')}.${prepared.mirroredSlots?' Missing fallback slots will be populated and independently verified.':''}`);
   }
-  catch (error) { try{await closeEsp();}catch(closeError){log(`Serial close: ${closeError.message}`);}if(testingConnection&&state.port===trialPort&&state.generation===trialGeneration){state.connectionTrial={port:trialPort,generation:trialGeneration,failed:true};state.handoff=false;updateConnectionChoice();}throw error; }
+  catch (error) { try{await closeEsp();}catch(closeError){log(`Serial close: ${closeError.message}`);}if(testingConnection){progress(0,`Automatic connection testing stopped: ${error.message||String(error)}`);if(state.port===trialPort&&state.generation===trialGeneration){state.connectionTrial={port:trialPort,generation:trialGeneration,failed:true};state.handoff=false;updateConnectionChoice();}}throw error; }
 }
 $('prepare').onclick = () => operation(prepareSelectedFirmware);
 async function flashPreparedFirmware() {

@@ -1607,7 +1607,7 @@ test('trial handoff on USB re-enumeration guides selection without another touch
 
 test('exhausted or fatal trial errors stop automation and expose the final manual connection choice',async()=>{
   for(const options of [{failures:3},{fail:new Error('Secure boot is enabled')},{fail:Object.assign(new Error('Access denied'),{name:'NotAllowedError'})}]){
-    const ui=await connectionTrialWorkbench(options);await ui.elements.get('prepare').onclick();assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.esp'),null);assert.deepEqual(nextHighlight(ui),['transport-mode']);assert.equal(ui.elements.get('connection-options').open,true);assert.equal(ui.evaluate('canTryConnectionFallback()'),false);
+    const ui=await connectionTrialWorkbench(options);await ui.elements.get('prepare').onclick();assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.esp'),null);assert.deepEqual(nextHighlight(ui),['transport-mode']);assert.equal(ui.elements.get('connection-options').open,true);assert.equal(ui.evaluate('canTryConnectionFallback()'),false);assert.match(ui.elements.get('progress-label').textContent,/Automatic connection testing stopped:/);
     assert.equal(ui.calls.filter(call=>call==='connect:usb_reset').length,options.fail?0:1);assert.equal(ui.calls.filter(call=>call==='tinyusb-handoff').length,options.fail?0:1);assert.ok(!ui.calls.includes('prepare'));
   }
 });
