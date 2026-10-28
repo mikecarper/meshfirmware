@@ -78,11 +78,15 @@ visible. The top navigation opens the corresponding tools without touching USB.
    agree. An explicit live report takes precedence; unknown or conflicting
    historical entries are not guessed.
 
-   If neither report nor history resolves a qualified native ESP32 connection,
-   **Backup & prepare** tests the connection after backup is considered: first
-   ROM synchronization without reset, then one USB-JTAG entry, then one TinyUSB
-   handoff at 115200 and a no-reset synchronization if the same granted endpoint
-   remains available. The first working session is retained. These tests never
+   Without a valid live **get usb.mode** report, every qualified native ESP32
+   connection inferred from the JSON map or older detection is provisional.
+   **Backup & prepare** verifies it after backup is considered: first try ROM
+   synchronization without reset, then test the recommended USB-JTAG or TinyUSB
+   entry method. The other qualified method is tried only after a genuine
+   no-response failure on the same still-available endpoint. TinyUSB uses one
+   handoff at 115200 followed by no-reset synchronization, never a 1200-baud
+   touch. Only a real ROM response verifies the connection; the JSON match alone
+   does not. The first working session is retained. These tests never
    erase or write flash, never try UART/nRF52 reset sequences on native ESP32 USB,
    and never run during recovery, migration or startup verification. Permission,
    security, chip or post-sync failures stop the sequence. A new USB interface

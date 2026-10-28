@@ -74,3 +74,40 @@ test('bad callback contracts and empty successful sessions fail without a fallba
   await assert.rejects(tryNativeUsbFallback(),TypeError);
   const f=fixture();f.options.connect=async()=>({info:f.info});await assert.rejects(tryNativeUsbFallback(f.options),/verified chip session/);assert.deepEqual(steps(f),['close']);
 });
+
+test('TinyUSB preference tests that handoff before hardware reset but only after no-reset fails',async()=>{
+  const f=fixture({results:[noSync()]}),result=await tryNativeUsbFallback({...f.options,preferredMode:'tinyusb'});
+  assert.deepEqual(steps(f),['connect:no_reset','close','touch','connect:no_reset']);assert.equal(result.mode,'no_reset');assert.equal(result.session,f.sessions[0]);
+  const ready=fixture();assert.equal((await tryNativeUsbFallback({...ready.options,preferredMode:'tinyusb'})).mode,'no_reset');assert.deepEqual(steps(ready),['connect:no_reset']);
+  const hardware=fixture({results:[noSync()]});assert.equal((await tryNativeUsbFallback({...hardware.options,preferredMode:'usb_reset'})).mode,'usb_reset');assert.deepEqual(steps(hardware),['connect:no_reset','close','connect:usb_reset']);
+});
+
+test('a wrong TinyUSB recommendation can fall through once to the actual working hardware method',async()=>{
+  const f=fixture({results:[noSync(),noSync()]}),result=await tryNativeUsbFallback({...f.options,preferredMode:'tinyusb'});
+  assert.deepEqual(steps(f),['connect:no_reset','close','touch','connect:no_reset','close','connect:usb_reset']);assert.equal(result.mode,'usb_reset');assert.equal(f.calls.filter(call=>call[0]==='touch').length,1);
+  assert.ok(f.calls.filter(call=>call[0]==='connect').every(call=>call[2].singleReset===true));
+});
+
+test('preferred TinyUSB never tries hardware after an uncertain touch, reconnect, or non-handshake failure',async()=>{
+  for(const stage of ['touch','reconnect','permission','security','responded']){
+    const original=Object.assign(Error(stage==='permission'?'Access denied':stage==='security'?'Secure boot is enabled':'ROM replied but chip identification failed'),stage==='permission'?{name:'NotAllowedError'}:{});
+    let f;f=fixture({results:[noSync(),original],onTouch:()=>{if(stage==='touch')throw original;if(stage==='reconnect')f.setAvailable(false);}});
+    const pending=tryNativeUsbFallback({...f.options,preferredMode:'tinyusb'});
+    if(stage==='reconnect')assert.deepEqual(await pending,{handoff:true});else await assert.rejects(pending,error=>error===original);
+    assert.ok(!steps(f).includes('connect:usb_reset'),stage);assert.equal(f.calls.filter(call=>call[0]==='touch').length,1,stage);
+  }
+});
+
+test('preferred TinyUSB exhaustion is bounded to one handoff and one hardware reset attempt',async()=>{
+  const f=fixture({results:[noSync(),noSync(),noSync()]});await assert.rejects(tryNativeUsbFallback({...f.options,preferredMode:'tinyusb'}),error=>error.connectionFallbackExhausted===true);
+  assert.deepEqual(steps(f),['connect:no_reset','close','touch','connect:no_reset','close','connect:usb_reset','close']);assert.equal(f.calls.filter(call=>call[0]==='touch').length,1);assert.equal(f.calls.filter(call=>call[0]==='connect'&&call[1]==='usb_reset').length,1);
+});
+
+test('unsupported preferred methods fail before any connection, touch, or reset',async()=>{
+  for(const preferredMode of ['no_reset','default_reset','nrf52','auto',true,{},undefined]){
+    // Omission/undefined use the normal default; all supplied other methods
+    // must be rejected instead of broadening eligible reset strategies.
+    if(preferredMode===undefined)continue;
+    const f=fixture();await assert.rejects(tryNativeUsbFallback({...f.options,preferredMode}),TypeError);assert.deepEqual(f.calls,[]);
+  }
+});

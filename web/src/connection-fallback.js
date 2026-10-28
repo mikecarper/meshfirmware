@@ -7,8 +7,9 @@ function mayTryAnotherMethod(error){
 }
 function stale(){return new Error('The selected radio or firmware changed during connection testing. No further reset was sent.');}
 
-export async function tryNativeUsbFallback({connect,close,touch,isCurrent,portAvailable,log=()=>{}}={}){
+export async function tryNativeUsbFallback({connect,close,touch,isCurrent,portAvailable,log=()=>{},preferredMode=null}={}){
   if([connect,close,touch,isCurrent,portAvailable,log].some(callback=>typeof callback!=='function'))throw new TypeError('Native USB connection testing requires bounded connection and selected-port callbacks.');
+  if(![null,'usb_reset','tinyusb'].includes(preferredMode))throw new TypeError('The preferred native USB connection method must be usb_reset, tinyusb or null.');
   const current=()=>{if(isCurrent()!==true)throw stale();};
   const available=()=>portAvailable()===true;
   async function attempt(mode){
@@ -34,22 +35,27 @@ export async function tryNativeUsbFallback({connect,close,touch,isCurrent,portAv
       return null;
     }
   }
-  for(const mode of ['no_reset','usb_reset']){
-    const result=await attempt(mode);
+  async function tinyUsbAttempt(){
+    current();
+    if(!available())return {handoff:true};
+    log('Trying one TinyUSB control-line handoff at 115200 baud. No UART reset or nRF52 baud touch is used.');
+    // Delivery is uncertain if this rejects: never repeat the touch or move on
+    // to another reset sequence. The existing handoff helper owns its close.
+    await touch();
+    current();
+    if(!available())return {handoff:true};
+    // Some CDC endpoints retain their already granted object. Only a no-reset
+    // synchronization may follow the touch; a new endpoint remains manual.
+    return attempt('no_reset');
+  }
+  const waiting=await attempt('no_reset');
+  if(waiting)return waiting;
+  // A reviewed historical mode is only an ordering hint, never proof that the
+  // selected endpoint entered ROM. Every result still needs an actual reply.
+  for(const method of preferredMode==='tinyusb'?['tinyusb','usb_reset']:['usb_reset','tinyusb']){
+    const result=method==='tinyusb'?await tinyUsbAttempt():await attempt('usb_reset');
     if(result)return result;
   }
-  current();
-  if(!available())return {handoff:true};
-  log('Trying one TinyUSB control-line handoff at 115200 baud. No UART reset or nRF52 baud touch is used.');
-  // Delivery is uncertain if this rejects: never repeat the touch or move on
-  // to another reset sequence. The existing handoff helper owns its port close.
-  await touch();
-  current();
-  if(!available())return {handoff:true};
-  // Some CDC endpoints retain their already granted object. Only a no-reset
-  // synchronization may follow the touch; a new endpoint remains manual.
-  const result=await attempt('no_reset');
-  if(result)return result;
   const error=new Error('Automatic native USB connection tests did not reach the ROM bootloader. Choose the bootloader connection manually. No erase or firmware write was sent.');
   error.connectionFallbackExhausted=true;
   throw error;

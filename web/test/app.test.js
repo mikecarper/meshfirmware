@@ -544,9 +544,9 @@ test('unsupported explicit automatic preferences stay refused and do not display
   const ui=workbench({productionDefaults:true});await Promise.resolve();ui.context.inventory=[v4Item];ui.evaluate("state.items=inventory;state.device={catalogRole:'repeater'};filterCatalog();state.manualSelections={provider:'Unavailable'};");ui.elements.get('hardware').value='Heltec v4';ui.evaluate('applyAutomaticSelections();');assert.equal(ui.elements.get('provider').value,'');assert.equal(ui.elements.get('artifact').value,'');assert.equal(ui.evaluate('state.manualSelections.provider'),'Unavailable');assert.match(ui.elements.get('automatic-summary').textContent,/No write-only/);
 });
 
-test('Prepare update loads the automatic artifact and requests guarded TinyUSB handoff, never flashes',async()=>{
+test('Prepare update with a live TinyUSB report loads the automatic artifact and requests guarded handoff, never flashes',async()=>{
   const ui=workbench({productionDefaults:true});await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({architecture:'esp32'});ui.evaluate("state.port=selectedPort;state.device={model:'Heltec V4 OLED',architecture:'esp32'};");ui.port.getInfo=()=>({usbVendorId:0x303a,usbProductId:0x0002});ui.elements.get('artifact').value='0';ui.context.fetchSelectedFirmware=async()=>{ui.calls.push('fetch');ui.evaluate('state.pkg=pkg;');};ui.context.ensureBackup=async()=>ui.calls.push('backup');ui.context.confirm=async(_t,_d,_w,token)=>{ui.calls.push(token);return true;};ui.context.touch1200=async(_port,kind)=>ui.calls.push(kind);
-  await ui.elements.get('prepare').onclick();assert.deepEqual(ui.calls,['fetch','backup','ENTER BOOTLOADER','tinyusb']);assert.equal(ui.evaluate('state.port'),null);assert.equal(ui.elements.get('transport-mode').value,'no_reset');assert.equal(ui.elements.get('already-bootloader').checked,true);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);
+  ui.evaluate("state.device.usbMode='tinyusb';state.device.usbModeStatus='reported';");await ui.elements.get('prepare').onclick();assert.deepEqual(ui.calls,['fetch','backup','ENTER BOOTLOADER','tinyusb']);assert.equal(ui.evaluate('state.port'),null);assert.equal(ui.elements.get('transport-mode').value,'no_reset');assert.equal(ui.elements.get('already-bootloader').checked,true);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);
 });
 
 test('successful application rereads retain exact-model architecture for automatic connection choice',async()=>{
@@ -1526,8 +1526,9 @@ test('companion USB history needs the complete CLI version wrapper, never a trun
   const ui=await usbModeWorkbench({map,version,role:'companion',reply:'Unknown command'});assert.equal(ui.evaluate('state.connection.mode'),'usb_reset');assert.equal(ui.evaluate('state.connection.source'),'firmware-map');
 });
 
-async function connectionTrialWorkbench({failures=0,disconnect=false,fail=null}={}){
-  const ui=await usbModeWorkbench({reply:'Unknown command'});ui.calls.length=0;
+async function connectionTrialWorkbench({failures=0,disconnect=false,fail=null,mapMode=null,legacyTiny=false}={}){
+  const map=mapMode?historicalUsbMap(mapMode):{schemaVersion:1,builds:[]};
+  const ui=await usbModeWorkbench({reply:'Unknown command',map,version:map.builds[0]?.version,...(legacyTiny?{usbInfo:{usbVendorId:0x303a,usbProductId:0x0002}}:{})});ui.calls.length=0;
   ui.context.ensureBackup=async()=>ui.calls.push('backup-considered');let count=0;
   ui.context.EspSession=class{
     constructor(port){assert.equal(port,ui.port);}
@@ -1544,6 +1545,59 @@ test('unknown native ESP connection prepares with bounded actual tests after bac
     const ui=await connectionTrialWorkbench({failures});assert.deepEqual(nextHighlight(ui),['prepare']);assert.equal(ui.elements.get('connection-options').open,undefined);
     await ui.elements.get('prepare').onclick();assert.deepEqual(ui.calls,expected);assert.equal(ui.evaluate('state.plan.transportMode'),mode);assert.equal(ui.evaluate('state.plan.port'),ui.port);assert.equal(ui.elements.get('transport-mode').value,'auto');assert.deepEqual(nextHighlight(ui),['flash']);assert.match(ui.elements.get('connection-summary').textContent,/verified by ROM/);
   }
+});
+
+test('JSON and legacy native-USB hints are provisional and require actual ROM verification before preparation',async()=>{
+  for(const options of [{mapMode:'hardware-cdc-jtag'},{mapMode:'tinyusb'},{legacyTiny:true}]){
+    const ui=await connectionTrialWorkbench(options);assert.equal(ui.evaluate('canTryConnectionFallback()'),true);assert.match(ui.elements.get('connection-summary').textContent,/provisional.*real ROM response/);assert.doesNotMatch(ui.elements.get('connection-summary').textContent,/verified by ROM/);assert.equal(ui.evaluate('state.plan'),null);
+    await ui.elements.get('prepare').onclick();assert.deepEqual(ui.calls,['backup-considered','connect:no_reset','prepare']);assert.equal(ui.evaluate('state.plan.transportMode'),'no_reset');assert.match(ui.elements.get('connection-summary').textContent,/verified by ROM response \(no_reset\)/);assert.ok(!ui.calls.includes('tinyusb-handoff'));
+  }
+});
+
+test('an incorrect mapped USB method can fall through to the other proven working method without changing the manual override',async()=>{
+  for(const [mapMode,expectedMode,expected] of [
+    ['hardware-cdc-jtag','no_reset',['backup-considered','connect:no_reset','close','connect:usb_reset','close','tinyusb-handoff','connect:no_reset','prepare']],
+    ['tinyusb','usb_reset',['backup-considered','connect:no_reset','close','tinyusb-handoff','connect:no_reset','close','connect:usb_reset','prepare']],
+  ]){
+    const ui=await connectionTrialWorkbench({mapMode,failures:2});await ui.elements.get('prepare').onclick();assert.deepEqual(ui.calls,expected);assert.equal(ui.evaluate('state.plan.transportMode'),expectedMode);assert.equal(ui.elements.get('transport-mode').value,'auto');assert.match(ui.elements.get('connection-summary').textContent,/verified by ROM/);assert.deepEqual(nextHighlight(ui),['flash']);
+  }
+});
+
+test('mapped connection verification cannot enable Flash or claim success while the ROM response is pending',async()=>{
+  const ui=await connectionTrialWorkbench({mapMode:'hardware-cdc-jtag'}),Session=ui.context.EspSession;let release;
+  ui.context.EspSession=class extends Session{async connect(){ui.calls.push('await-ROM');return new Promise(resolve=>{release=resolve;});}};
+  const pending=ui.elements.get('prepare').onclick();while(!release)await Promise.resolve();assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('flash').disabled,true);assert.doesNotMatch(ui.elements.get('connection-summary').textContent,/verified by ROM/);assert.ok(!ui.calls.includes('prepare'));
+  release({chip:'ESP32-S3',mac:'aa:bb:cc:dd:ee:ff',flashBytes:16<<20});await pending;assert.ok(ui.evaluate('state.plan'));assert.match(ui.elements.get('connection-summary').textContent,/verified by ROM/);assert.deepEqual(ui.calls,['backup-considered','await-ROM','prepare']);
+});
+
+test('failed mapped connection verification ends with manual picking and cannot silently retry its JSON hint',async()=>{
+  for(const mapMode of ['hardware-cdc-jtag','tinyusb']){
+    const ui=await connectionTrialWorkbench({mapMode,failures:3});await ui.elements.get('prepare').onclick();assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.connection.mode'),null);assert.equal(ui.evaluate('state.connection.source'),'trial-failed');assert.deepEqual(nextHighlight(ui),['transport-mode']);assert.doesNotMatch(ui.elements.get('connection-summary').textContent,/verified by ROM/);const tried=[...ui.calls];
+    await ui.elements.get('prepare').onclick();assert.deepEqual(ui.calls,tried);assert.equal(ui.evaluate('state.plan'),null);assert.match(ui.elements.get('notice').textContent,/manually/);
+  }
+});
+
+test('fresh live USB evidence read during backup supersedes the original JSON hint before any reset',async()=>{
+  for(const usbMode of ['hardware-cdc-jtag','tinyusb']){
+    const ui=await connectionTrialWorkbench({mapMode:usbMode==='tinyusb'?'hardware-cdc-jtag':'tinyusb'}),Session=ui.context.EspSession;
+    ui.context.ensureBackup=async()=>{ui.calls.push('backup-reread');ui.context.liveMode=usbMode;ui.evaluate("state.device.usbMode=liveMode;state.device.usbModeStatus='reported';");};
+    ui.context.EspSession=class extends Session{async connect(mode){ui.calls.push('live-connect:'+mode);return {chip:'ESP32-S3',mac:'aa:bb:cc:dd:ee:ff',flashBytes:16<<20};}};
+    ui.context.confirm=async()=>{ui.calls.push('live-handoff-confirmation');return true;};
+    await ui.elements.get('prepare').onclick();assert.deepEqual(ui.calls,usbMode==='tinyusb'?['backup-reread','live-handoff-confirmation','tinyusb-handoff']:['backup-reread','live-connect:usb_reset','prepare']);
+    if(usbMode==='tinyusb')assert.equal(ui.evaluate('state.plan'),null);else assert.equal(ui.evaluate('state.plan.transportMode'),'usb_reset');
+  }
+});
+
+test('a live USB conflict or newly protected workflow discovered during backup stops before connection testing',async()=>{
+  for(const change of ['conflict','migration']){
+    const ui=await connectionTrialWorkbench({mapMode:'hardware-cdc-jtag'});ui.context.ensureBackup=async()=>{ui.calls.push('backup-reread');if(change==='conflict')ui.evaluate("state.device.usbMode='uart';state.device.usbModeStatus='reported';");else ui.evaluate('state.migration={uart:false};');};
+    await ui.elements.get('prepare').onclick();assert.deepEqual(ui.calls,['backup-reread']);assert.equal(ui.evaluate('state.plan'),null);assert.match(ui.elements.get('notice').textContent,change==='conflict'?/choose.*manually/i:/Pending USB migration/);
+  }
+});
+
+test('backup refreshes the historical hint ordering rather than retaining an older TinyUSB preference',async()=>{
+  const ui=await connectionTrialWorkbench({mapMode:'tinyusb',failures:1});ui.context.ensureBackup=async()=>{ui.calls.push('backup-reread');ui.evaluate("state.device.usbModeFallback.usbMode='hardware-cdc-jtag';");};
+  await ui.elements.get('prepare').onclick();assert.deepEqual(ui.calls,['backup-reread','connect:no_reset','close','connect:usb_reset','prepare']);assert.equal(ui.evaluate('state.plan.transportMode'),'usb_reset');
 });
 
 test('trial handoff on USB re-enumeration guides selection without another touch, erase or write',async()=>{
@@ -1566,11 +1620,10 @@ test('a disconnect or changed image during asynchronous ESP preparation cannot r
   }
 });
 
-test('active method trials do not replace live/history results, explicit overrides or pending protected flows',async()=>{
-  for(const scenario of ['live','history','manual','uart','unknown-usb','nrf','handoff','already-bootloader','migration','migrationApproval','recovery','espRecovery','verification','plan']){
+test('active method trials do not replace live reports, explicit overrides or pending protected flows',async()=>{
+  for(const scenario of ['live','manual','uart','unknown-usb','nrf','handoff','already-bootloader','migration','migrationApproval','recovery','espRecovery','verification','plan']){
     const ui=await connectionTrialWorkbench();
     if(scenario==='live')ui.evaluate("state.device.usbMode='tinyusb';state.device.usbModeStatus='reported';");
-    if(scenario==='history')ui.evaluate("state.device.usbModeFallback={source:'firmware-map',usbMode:'hardware-cdc-jtag'};");
     if(scenario==='manual')ui.elements.get('transport-mode').value='tinyusb';
     if(scenario==='uart')ui.port.getInfo=()=>({usbVendorId:0x1a86,usbProductId:0x7523});
     if(scenario==='unknown-usb')ui.port.getInfo=()=>({usbVendorId:0x1234,usbProductId:0x5678});

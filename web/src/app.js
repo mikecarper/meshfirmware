@@ -454,8 +454,9 @@ function resetAutomaticBoardSelection(message) {
   $('automatic-summary').textContent=message+(manualFile?` Manual file ${manualFile} remains loaded; review it explicitly against this radio.`:'');
 }
 function updateConnectionChoice(){
-  const result=chooseConnection({usbInfo:state.port?.getInfo()||{},device:state.device,alreadyBootloader:$('already-bootloader').checked,handoff:state.handoff,packageArchitecture:state.pkg?.architecture});
-  state.connection=result;$('connection-summary').textContent=$('transport-mode').value==='auto'?canTryConnectionFallback()?'Automatic connection: test the qualified USB methods during preparation, after backup. No firmware is written during these connection checks.':`Automatic connection: ${result.mode||'needs a manual choice'}. ${result.reason}`:'Manual connection override selected.';
+  let result=chooseConnection({usbInfo:state.port?.getInfo()||{},device:state.device,alreadyBootloader:$('already-bootloader').checked,handoff:state.handoff,packageArchitecture:state.pkg?.architecture});
+  if($('transport-mode').value==='auto'&&state.connectionTrial?.failed&&state.connectionTrial.port===state.port&&state.connectionTrial.generation===state.generation&&!state.handoff&&!$('already-bootloader').checked)result={mode:null,alreadyBootloader:false,source:'trial-failed',reason:'Automatic connection verification stopped. Choose the bootloader connection manually; no further reset will be tried automatically.'};
+  state.connection=result;$('connection-summary').textContent=$('transport-mode').value==='auto'?canTryConnectionFallback()?`Automatic connection: ${result.mode?'provisional '+result.mode+' hint; ':''}test the qualified USB methods during preparation, after backup. A real ROM response is required; the map alone is not connection verification. No firmware is written during these connection checks.`:`Automatic connection: ${result.mode||'needs a manual choice'}. ${result.reason}`:'Manual connection override selected.';
   return result;
 }
 function canTryConnectionFallback(){
@@ -463,12 +464,12 @@ function canTryConnectionFallback(){
   if(!state.port||architecture!=='esp32'||$('transport-mode').value!=='auto'||$('already-bootloader').checked||state.handoff||state.esp||state.plan||state.migration||state.migrationApproval||state.recovery||state.espRecovery||state.verification)return false;
   if(!['303a:1001','303a:0002','2886:0059'].includes(portId(state.port))||state.device?.architecture==='nrf52')return false;
   const choice=chooseConnection({usbInfo:state.port.getInfo(),device:state.device});
-  if(choice.mode||choice.source==='conflict')return false;
+  if(choice.source==='application-report'||choice.source==='conflict'||choice.mode&&!['usb_reset','tinyusb'].includes(choice.mode))return false;
   return !(state.connectionTrial?.port===state.port&&state.connectionTrial.generation===state.generation);
 }
 function connectionMode({allowFallback=false}={}){
   if($('transport-mode').value!=='auto')return $('transport-mode').value;
-  const result=updateConnectionChoice();if(!result.mode){if(allowFallback&&canTryConnectionFallback())return 'auto_probe';revealPanel('connection-options');fail(result.reason);}return result.mode;
+  const result=updateConnectionChoice();if(allowFallback&&canTryConnectionFallback())return 'auto_probe';if(!result.mode){revealPanel('connection-options');fail(result.reason);}return result.mode;
 }
 function matchInstalledRecovery(installedIdentity='') {
   state.recoveryDetectionRequested=true;
@@ -945,25 +946,31 @@ async function prepareSelectedFirmware({waitForRom=false}={}) {
     state.plan = { installMode:state.installMode,generation:state.generation,port:state.port,sha256:pkg.sha256,erasePkg };notice(erasePkg?'Both final firmware and destructive erase ZIP validated. Review & flash runs erase first, retains the final image, and requires reselecting the same DFU radio before final write.':'DFU ZIP validated. Board identity and any directional override will be checked immediately before this write.'); return;
   }
   let mode = connectionMode({allowFallback:true});
-  if(mode==='tinyusb'){
-    await ensureBackup();
-    if(!await confirm('Enter the detected USB bootloader?',state.device?.model||'Selected TinyUSB application','Backup was considered first. This resets only the selected radio, without flashing it. Then choose that SAME radio’s ROM port to continue.','ENTER BOOTLOADER'))return;
-    state.handoff=true;try{await touch1200(state.port,'tinyusb');}catch(error){log(`Bootloader entry was interrupted (${error.message}); no second touch was sent.`);}
-    state.port=null;state.generation++;$('transport-mode').value='no_reset';$('already-bootloader').checked=true;$('port-status').textContent='Choose same ROM radio';notice('Bootloader entry requested, not yet verified. Choose the same radio’s ROM port; its connection strategy is already set. Then Prepare update verifies chip and partitions. If the device disappears, pause VMs with USB auto-capture before retrying; do not assume a 30-second return.');return;
-  }
-  if(state.migration && !state.migration.uart && mode!=='no_reset') fail('Pending USB migration: use already in ROM / no reset. A reset could interrupt the bridge.');
-  if(state.migrationApproval&&mode!=='no_reset'&&state.port!==state.approvalResetPort)fail('A newly selected interface cannot use the original port’s automatic reset permission. Select an already waiting ROM port without resetting, or stop automatic continuation and inspect manually.');
-  if(state.espRecovery&&mode!=='no_reset')fail('ESP32 write recovery must use the waiting ROM port without resetting it.');
-  if (!['no_reset','usb_reset','default_reset','auto_probe'].includes(mode)) fail('Enter the ESP32 bootloader first, then explicitly select its ROM port.');
-  if(state.migration?.uart&&!state.migration.settled){
-    const beforeStart=['writing','written'].includes(state.migration.phase);
-    if(!beforeStart||mode!=='no_reset')fail('The UART migration must report settled state before any ROM reset. Use Wait for migration; a pre-start write retry can only inspect an already waiting ROM without resetting it.');
-  }
+  const assertConnectionMode=()=>{
+    if(state.migration && !state.migration.uart && mode!=='no_reset') fail('Pending USB migration: use already in ROM / no reset. A reset could interrupt the bridge.');
+    if(state.migrationApproval&&mode!=='no_reset'&&state.port!==state.approvalResetPort)fail('A newly selected interface cannot use the original port’s automatic reset permission. Select an already waiting ROM port without resetting, or stop automatic continuation and inspect manually.');
+    if(state.espRecovery&&mode!=='no_reset')fail('ESP32 write recovery must use the waiting ROM port without resetting it.');
+    if (!['no_reset','usb_reset','default_reset','auto_probe','tinyusb'].includes(mode)) fail('Enter the ESP32 bootloader first, then explicitly select its ROM port.');
+    if(state.migration?.uart&&!state.migration.settled){
+      const beforeStart=['writing','written'].includes(state.migration.phase);
+      if(!beforeStart||mode!=='no_reset')fail('The UART migration must report settled state before any ROM reset. Use Wait for migration; a pre-start write retry can only inspect an already waiting ROM without resetting it.');
+    }
+  };
+  assertConnectionMode();
   const expertText = $('expert-offset').value.trim();
   const expertOffset = pkg.expert && /^(?:0x[0-9a-f]+|[0-9]+)$/i.test(expertText) ? Number(expertText) : undefined;
   if(pkg.expert && !Number.isSafeInteger(expertOffset)) fail('Enter the explicit flash offset for this component. No offset is guessed.');
   await ensureBackup();
   if(!state.port||state.pkg!==pkg)fail('The selected radio or image changed before bootloader inspection.');
+  // Backup rereads the node. Fresh live evidence may supersede a historical
+  // hint or introduce a conflict; never reset using the pre-backup choice.
+  mode=connectionMode({allowFallback:true});assertConnectionMode();
+  const testingConnection=mode==='auto_probe',preferredMode=testingConnection&&['tinyusb','usb_reset'].includes(state.connection?.mode)?state.connection.mode:null;
+  if(mode==='tinyusb'){
+    if(!await confirm('Enter the detected USB bootloader?',state.device?.model||'Selected TinyUSB application','Backup was considered first. This resets only the selected radio, without flashing it. Then choose that SAME radio’s ROM port to continue.','ENTER BOOTLOADER'))return;
+    state.handoff=true;try{await touch1200(state.port,'tinyusb');}catch(error){log(`Bootloader entry was interrupted (${error.message}); no second touch was sent.`);}
+    state.port=null;state.generation++;$('transport-mode').value='no_reset';$('already-bootloader').checked=true;$('port-status').textContent='Choose same ROM radio';notice('Bootloader entry requested, not yet verified. Choose the same radio’s ROM port; its connection strategy is already set. Then Prepare update verifies chip and partitions. If the device disappears, pause VMs with USB auto-capture before retrying; do not assume a 30-second return.');return;
+  }
   const trialPort=state.port,trialGeneration=state.generation,trialInstallMode=state.installMode;
   state.handoff=true;
   let esp;
@@ -972,6 +979,7 @@ async function prepareSelectedFirmware({waitForRom=false}={}) {
     if(mode==='auto_probe'){
       state.connectionTrial={port:trialPort,generation:trialGeneration};
       const result=await tryNativeUsbFallback({
+        preferredMode,
         connect:async(strategy,options)=>{esp=new EspSession(trialPort,log);state.esp=esp;return {session:esp,info:await esp.connect(strategy,options)};},
         close:async()=>{const active=state.esp;if(active)await active.close({strict:true});if(state.esp===active){state.esp=null;state.plan=null;}},touch:()=>touch1200(trialPort,'tinyusb'),log:message=>{log(message);progress(0,message);notice(message);},
         isCurrent:()=>state.pkg===pkg&&state.installMode===trialInstallMode&&$('transport-mode').value==='auto'&&!state.migration&&!state.migrationApproval&&!state.recovery&&!state.espRecovery&&!state.verification&&(state.generation===trialGeneration||state.port===null&&state.generation===trialGeneration+1),
@@ -1015,7 +1023,7 @@ async function prepareSelectedFirmware({waitForRom=false}={}) {
     else if(prepared.needed) { $('migration-status').textContent=`Verified USB migration for ${prepared.board}; exact firmware ${prepared.firmware_version}. Keep this tab open until final verification.`; notice(prepared.resume===false&&state.migration?'Original source layout verified. The partial bridge can be rewritten safely before it is started; review and acknowledge the migration again.':'Partition expansion is needed. Review & flash writes the verified USB bridge first. No application or bridge has been written yet.'); }
     else notice(`Read-only plan ready for ${info.mac}. Offsets: ${state.plan.addresses.map(n => '0x' + n.toString(16)).join(', ')}.${prepared.mirroredSlots?' Missing fallback slots will be populated and independently verified.':''}`);
   }
-  catch (error) { try{await closeEsp();}catch(closeError){log(`Serial close: ${closeError.message}`);}if(mode==='auto_probe'&&state.port===trialPort&&state.generation===trialGeneration){state.handoff=false;updateConnectionChoice();}throw error; }
+  catch (error) { try{await closeEsp();}catch(closeError){log(`Serial close: ${closeError.message}`);}if(testingConnection&&state.port===trialPort&&state.generation===trialGeneration){state.connectionTrial={port:trialPort,generation:trialGeneration,failed:true};state.handoff=false;updateConnectionChoice();}throw error; }
 }
 $('prepare').onclick = () => operation(prepareSelectedFirmware);
 async function flashPreparedFirmware() {
