@@ -111,6 +111,23 @@ test('operation confirmation keeps warnings and explicit action buttons without 
   assert.match(html.slice(submit.start).split('</button>')[0],/>Confirm operation$/);
 });
 
+test('active firmware writing has a separate initially closed progress dialog without dismissal actions',()=>{
+  const dialog=get('flash-progress-dialog'),title=get('flash-progress-title'),warning=get('flash-progress-warning'),bar=get('flash-progress'),percent=get('flash-progress-percent'),stage=get('flash-progress-stage'),file=get('flash-progress-file');
+  assert.equal(dialog.tag,'dialog');assert.equal(dialog.attrs.closedby,'none','Active write progress must not offer browser dismissal');assert.ok(!has(dialog,'open'),'The large progress window is opened only for an actual write');assert.equal(dialog.attrs['aria-labelledby'],title.attrs.id);assert.equal(dialog.attrs['aria-describedby'],warning.attrs.id);
+  for(const child of [title,warning,bar,percent,stage,file])assert.ok(inside(child,dialog));
+  assert.equal(title.tag,'h2');assert.match(html.slice(title.start).split('</h2>')[0],/>Flashing firmware$/);
+  assert.match(html.slice(percent.start).split('</p>')[0],/>0%$/);assert.equal(bar.tag,'progress');assert.equal(bar.attrs.max,'1');assert.equal(bar.attrs.value,'0');assert.equal(bar.attrs['aria-label'],'Firmware transfer progress');
+  assert.equal(stage.attrs.role,'status');assert.equal(stage.attrs['aria-live'],'polite');assert.equal(file.tag,'p');
+  assert.equal(warning.tag,'strong');assert.match(html.slice(warning.start).split('</strong>')[0],/>Keep this tab open\. Do not unplug the radio or turn off power\.$/);
+  assert.ok(nodes.some(node=>inside(node,dialog)&&node.tag==='p'&&/100% means the transfer finished\. Application startup is verified separately\./.test(html.slice(node.start).split('</p>')[0])),'Transfer completion must not claim verified startup');
+  assert.ok(!nodes.some(node=>inside(node,dialog)&&['form','a','input','select','textarea'].includes(node.tag)),'The write-progress modal must not contain a dismissal form or other inputs');
+  const stop=get('flash-stop-auto'),stopNote=get('flash-stop-auto-note'),buttons=nodes.filter(node=>inside(node,dialog)&&node.tag==='button');
+  assert.deepEqual(buttons,[stop],'Only a conditional stop-after-write action is allowed, never close/cancel');assert.equal(stop.attrs.type,'button');assert.ok(has(stop,'hidden'));assert.ok(!has(stop,'disabled')&&!has(stop,'data-lock'),'Stopping future automatic steps must remain usable during the current write');assert.ok(hasClass(stop,'secondary'));assert.match(html.slice(stop.start).split('</button>')[0],/>Stop after this write$/);
+  assert.ok(inside(stopNote,dialog));assert.ok(has(stopNote,'hidden'));assert.match(html.slice(stopNote.start).split('</p>')[0],/>Stops later automatic steps, not the current write\.$/);
+  assert.ok(!inside(get('progress'),dialog)&&!inside(get('progress-label'),dialog),'The existing small inline progress remains on the main workflow');
+  assert.equal(get('progress').attrs['aria-label'],'Operation progress');assert.equal(closedAncestors(get('progress')).length,0);
+});
+
 test('release notes and catalog metadata stay behind a collapsed Firmware details disclosure',()=>{
   const details=get('firmware-details'),metadata=get('catalog-detail'),workflow=nodes.find(node=>hasClass(node,'workflow'));
   assert.equal(details.tag,'details');assert.ok(!has(details,'open'));assert.ok(inside(details,workflow));assert.ok(inside(metadata,details));
@@ -142,6 +159,40 @@ function assertProperty(selector,property,expected){
   for(const value of values)assert.equal(value,expected,`${selector} ${property} must remain left-aligned, including responsive overrides`);
 }
 
+test('write progress is very large, static and readable while still fitting a phone viewport',()=>{
+  const modal='#flash-progress-dialog';assert.ok(declarationsFor(modal).some(rule=>parseFloat(rule['max-width'])>=900&&rule.width==='calc(100% - 30px)'&&rule['max-height']==='calc(100dvh - 30px)'&&rule.overflow==='auto'),'The large progress modal must fit and scroll on narrow or short screens');
+  assert.ok(declarationsFor('#flash-progress-title').some(rule=>/^clamp\(28px,\s*4vw,\s*40px\)$/.test(rule['font-size']||'')),'The write heading must be prominent');
+  assert.ok(declarationsFor('#flash-progress-percent').some(rule=>/^clamp\(64px,\s*12vw,\s*96px\)$/.test(rule['font-size']||'')&&Number(rule['font-weight'])>=800&&rule['font-variant-numeric']==='tabular-nums'),'Transfer percentage needs a very large steady numeral');
+  assert.ok(declarationsFor('#flash-progress').some(rule=>rule.width==='100%'&&parseFloat(rule.height)>=24),'Active writing needs a much thicker progress bar');
+  assert.ok(declarationsFor('progress').some(rule=>parseFloat(rule.height)===5),'The ordinary main-page progress bar must retain its compact size');
+  assert.ok(declarationsFor('#flash-progress-warning').some(rule=>rule.display==='block'&&/^clamp\(18px,\s*2\.5vw,\s*24px\)$/.test(rule['font-size']||'')&&rule.background&&rule['border-left']),'Do-not-interrupt guidance must be large and visually distinct');
+  for(const selector of ['#flash-progress-title','#flash-progress-file','#flash-progress-warning'])assert.ok(declarationsFor(selector).some(rule=>rule['overflow-wrap']==='anywhere'),'Long write details must wrap instead of overflowing phones');
+  for(const rule of styleRules.filter(rule=>rule.selectors.some(selector=>selector.startsWith('#flash-progress')))){
+    assert.ok(!Object.hasOwn(rule.declarations,'animation')&&!Object.hasOwn(rule.declarations,'transition'),'Write progress must not pulse or animate its warning');
+  }
+});
+
+test('the next required action has a scoped static highlight and a readable button label',()=>{
+  const control='.next-action:not(:disabled)',button='button.next-action:not(:disabled)',badge=`${button}::after`;
+  const highlight=declarationsFor(control);assert.ok(highlight.some(rule=>/^#[0-9a-f]{6}$/i.test(rule['border-color']||'')&&/0 0 0 3px\s+#[0-9a-f]{6}/i.test(rule['box-shadow']||'')),'The next enabled control needs a strong border and ring');
+  assert.ok(highlight.some(rule=>(rule['box-shadow']||'').split(',').length>=2),'A separate static shadow must reinforce the next action');
+  const label=declarationsFor(badge);assert.ok(label.some(rule=>rule.content==='"Next"'),'Buttons must explicitly say Next, not rely on color alone');
+  assert.ok(label.some(rule=>rule.display==='inline-flex'&&rule.background&&rule.color&&parseFloat(rule['font-weight'])>=700),'The badge needs readable contrasting text');
+  for(const rule of styleRules.filter(rule=>rule.selectors.some(selector=>selector.includes('.next-action')))){
+    assert.ok(rule.selectors.every(selector=>selector.includes('.next-action')&&selector.includes(':not(:disabled)')),'Highlighting must stay scoped to enabled next-action controls');
+    for(const property of ['animation','transition','outline','outline-offset','transform'])assert.ok(!Object.hasOwn(rule.declarations,property),`Next-action styling must not add motion or replace keyboard focus (${property})`);
+  }
+  for(const selector of ['button:focus-visible','input:focus-visible','select:focus-visible'])assert.ok(declarationsFor(selector).some(rule=>/^[1-9]\d*(?:\.\d+)?px\s+solid\s+/.test(rule.outline||'')),'Existing keyboard focus must remain independently visible');
+});
+
+test('next-action badges stay in normal wrapping flow on narrow screens without covering labels',()=>{
+  const button='button.next-action:not(:disabled)',badge=`${button}::after`,buttonRules=declarationsFor(button),badgeRules=declarationsFor(badge);
+  assert.ok(buttonRules.some(rule=>rule['flex-wrap']==='wrap'&&rule['min-width']==='0'),'The highlighted button must shrink and wrap on phones');
+  assert.ok(badgeRules.some(rule=>rule['max-width']==='100%'&&rule.flex==='0 0 auto'),'The short badge stays within its button without forcing a wide layout');
+  for(const rule of badgeRules){assert.ok(!Object.hasOwn(rule,'position')&&!Object.hasOwn(rule,'inset')&&!Object.hasOwn(rule,'right'),'The badge must not overlay a button label');assert.ok(!Object.hasOwn(rule,'width')&&!Object.hasOwn(rule,'min-width'),'The badge must not force a fixed wide size');}
+  assert.ok(declarationsFor('.review-actions .step-button').some(rule=>rule.width==='100%'&&rule['min-width']==='0'),'Main workflow buttons retain their narrow-screen full-width layout');
+});
+
 test('radio reselection has an initially hidden urgent callout beside the original USB chooser',()=>{
   const header=get('flasher'),callout=get('reconnect-callout'),title=get('reconnect-title'),detail=get('reconnect-detail'),chooser=get('select-port'),label=get('select-port-label');
   assert.ok(!hasClass(header,'reconnect-needed'),'The large reconnect presentation is conditional, not the ordinary page header');
@@ -152,6 +203,17 @@ test('radio reselection has an initially hidden urgent callout beside the origin
   assert.ok(inside(label,chooser));assert.ok(hasClass(label,'action-label'),'Only the editable label may change; the chooser and its step badge remain intact');
   assert.equal(nodes.filter(node=>node.attrs.id==='select-port').length,1);assert.ok(!nodes.some(node=>inside(node,callout)&&['button','input','select'].includes(node.tag)),'The callout must not duplicate the browser USB chooser');
   assert.ok(!has(callout,'tabindex')&&!has(chooser,'autofocus'),'A reconnect cue must not steal keyboard focus');
+});
+
+test('the shared reconnect callout and chooser label can distinguish startup verification without claiming initial success',()=>{
+  const callout=get('reconnect-callout'),title=get('reconnect-title'),detail=get('reconnect-detail'),label=get('select-port-label'),chooser=get('select-port');
+  assert.ok(has(callout,'hidden'),'No post-flash verification result may be shown on page load');
+  assert.equal(title.tag,'strong');assert.equal(detail.tag,'p');assert.equal(label.tag,'span');
+  assert.ok(inside(title,callout)&&inside(detail,callout)&&inside(label,chooser),'Runtime verification text must reuse the prominent callout and existing chooser, not introduce a second port request');
+  for(const node of [title,detail,label])assert.ok(!node.children.length,'Runtime copy should replace plain text without removing step numbers or controls');
+  assert.match(html.slice(label.start).split('</span>')[0],/>Choose USB port$/,'Before any transfer, the button must not claim a verification step');
+  const initial=html.slice(callout.start).split('</div>')[0];assert.ok(!/Firmware verified|Verification complete|APPLICATION USB port/.test(initial),'Startup success and application-reconnect instructions depend on runtime state');
+  assert.equal(nodes.filter(node=>node.attrs.id==='select-port').length,1,'Verification must not add a duplicate chooser button');
 });
 
 test('required radio reselection uses a very large scoped callout and touch target without flashing animation',()=>{
@@ -167,6 +229,19 @@ test('required radio reselection uses a very large scoped callout and touch targ
     assert.ok(!Object.hasOwn(rule.declarations,'animation'),'Urgency must not depend on flashing or pulsing');
     assert.ok(!/^(?:none|0)(?:\s|$)/.test(rule.declarations.outline||''),'The reconnect treatment must preserve keyboard focus visibility');
   }
+});
+
+test('verified startup has its own prominent green treatment distinct from the amber reconnect request',()=>{
+  const panel='.page-header.verification-complete',header=get('flasher'),success=declarationsFor(panel),reconnect=declarationsFor('.page-header.reconnect-needed');
+  assert.ok(!hasClass(header,'verification-complete'),'Successful startup must be established at runtime, never claimed by the initial page');
+  assert.ok(success.some(rule=>rule.width==='100%'&&parseFloat(rule.padding)>=20&&/^3px\s+solid\s+/.test(rule.border||'')&&rule.background),'Verified startup needs a prominent bounded status panel');
+  assert.ok(success.some(rule=>reconnect.every(other=>rule.background!==other.background&&rule.border!==other.border)),'Success must look different from an outstanding reconnect request');
+  assert.ok(declarationsFor(`${panel} #reconnect-title`).some(rule=>rule.color==='#176044'),'The existing prominent heading must turn green only in the verified state');
+  for(const rule of styleRules.filter(rule=>rule.selectors.some(selector=>selector.includes('verification-complete')))){
+    assert.ok(rule.selectors.every(selector=>selector.startsWith(panel)),'Verified styling must not affect unrelated controls');
+    for(const property of ['animation','transition','outline','outline-offset','transform'])assert.ok(!Object.hasOwn(rule.declarations,property),'Success must remain static and preserve independent keyboard focus');
+  }
+  assert.ok(!declarationsFor(`${panel} #select-port`).some(rule=>Object.hasOwn(rule,'display')||Object.hasOwn(rule,'visibility')),'A verified result must not hide the chooser needed for another radio');
 });
 
 test('the firmware build picker has adjacent accessible selection guidance without stealing focus',()=>{

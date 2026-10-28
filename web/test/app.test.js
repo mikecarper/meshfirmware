@@ -17,26 +17,77 @@ import {gzipSync} from 'node:zlib';
 const html=await readFile(new URL('../index.html',import.meta.url),'utf8');
 const source=(await readFile(new URL('../src/app.js',import.meta.url),'utf8')).replace(/^import .*;\r?$/gm,'');
 const ids=[...html.matchAll(/\bid="([^"]+)"/g)].map(m=>m[1]);
+function uiElement(id=''){
+  const classes=new Set(),attributes=new Map(),listeners=new Map();
+  return {id,value:'',disabled:false,hidden:false,textContent:'',files:[],options:[],checked:false,classList:{toggle(name,force){const enabled=force===undefined?!classes.has(name):force;if(enabled)classes.add(name);else classes.delete(name);return enabled;},contains:name=>classes.has(name)},replaceChildren(...options){this.options=options;this.value=options[0]?.value||'';},removeAttribute:name=>attributes.delete(name),setAttribute:(name,value)=>attributes.set(name,String(value)),getAttribute:name=>attributes.get(name)??null,addEventListener(type,handler){listeners.set(type,handler);},emit(type,event){listeners.get(type)?.(event);},showModal(){this.open=true;},close(){this.open=false;},scrollHeight:0};
+}
 function workbench({pending=null,recovery=null,espRecovery=null,catalogPromise=null,productionDefaults=false}={}) {
-  const calls=[],elements=new Map(),serialEvents={};
+  const calls=[],elements=new Map(),serialEvents={},windowEvents={};
   class Option {constructor(text,value){this.text=text;this.value=value;}}
-  for(const id of ids)elements.set(id,{value:'',disabled:false,hidden:false,textContent:'',files:[],options:[],checked:false,classList:{toggle(){}},replaceChildren(...options){this.options=options;this.value=options[0]?.value||'';},removeAttribute(){},setAttribute(){},addEventListener(){},showModal(){},scrollHeight:0});
+  for(const id of ids)elements.set(id,uiElement(id));
   elements.get('project').value='MeshCore';elements.get('transport-mode').value='no_reset';elements.get('backup-role').value='companion';
   if(productionDefaults){for(const id of ['auto-detect-board','auto-backup','auto-finish'])elements.get(id).checked=true;elements.get('transport-mode').value='auto';elements.get('backup-role').value='auto';}
   const port={getInfo:()=>({usbVendorId:0x303a,usbProductId:0x1001})};
   const storage=new Map(pending?[['meshfirmware.pendingMigration',JSON.stringify(pending)]]:[]);
   if(recovery)storage.set('meshfirmware.nrfRecovery',JSON.stringify(recovery));
   if(espRecovery)storage.set('meshfirmware.espRecovery',JSON.stringify(espRecovery));
-  const context=vm.createContext({document:{getElementById:id=>{assert.ok(elements.has(id),`Missing HTML id ${id}`);return elements.get(id);},querySelectorAll:()=>[...elements.values()]},navigator:{serial:{requestPort:async()=>{calls.push('chooser');return port;},getPorts(){throw new Error('must not enumerate automatically');},addEventListener(type,handler){serialEvents[type]=handler;}}},window:{addEventListener(){}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},Option,URL,Blob,Uint8Array,TextEncoder,TextDecoder,console,setTimeout,clearTimeout,AbortSignal,Date,
+  const context=vm.createContext({document:{getElementById:id=>{assert.ok(elements.has(id),`Missing HTML id ${id}`);return elements.get(id);},querySelectorAll:()=>[...elements.values()]},navigator:{serial:{requestPort:async()=>{calls.push('chooser');return port;},getPorts(){throw new Error('must not enumerate automatically');},addEventListener(type,handler){serialEvents[type]=handler;}}},window:{addEventListener(type,handler){windowEvents[type]=handler;}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},Option,URL,Blob,Uint8Array,TextEncoder,TextDecoder,console,setTimeout,clearTimeout,AbortSignal,Date,
     fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,MigrationApproval,cleanCliReply,assessBootloaderVersion,firmwareFilesLinks,fetch:async()=>{throw Error('Unexpected network request');},fetchFirmwareBytes:(url,options)=>verifiedDownload(url,{...options,mirrorBase:'https://mirror.example.test/firmware/',pageOrigin:'https://mirror.example.test',fetchImpl:(target,init)=>target==='https://mirror.example.test/firmware/index.json'?Promise.resolve({ok:false,status:404}):options.fetchImpl(target,init)}),assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),
     SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
   });
   vm.runInContext(source,context);
-  return {context,elements,calls,port,serialEvents,evaluate:code=>vm.runInContext(code,context)};
+  return {context,elements,calls,port,serialEvents,windowEvents,evaluate:code=>vm.runInContext(code,context)};
 }
 test('every UI id exists once and all wired controls have matching HTML',()=>{
   assert.equal(new Set(ids).size,ids.length);
   for(const match of source.matchAll(/\$\('([^']+)'\)/g))assert.ok(ids.includes(match[1]),match[1]);
+});
+
+test('large flashing progress appears only for the scoped write and waits for final checks before 100%',async()=>{
+  const ui=workbench();await Promise.resolve();const dialog=ui.elements.get('flash-progress-dialog');assert.equal(dialog.open,undefined);
+  ui.evaluate("progress(.4,'Capturing backup');");assert.equal(dialog.open,undefined);assert.equal(ui.evaluate('state.flashProgress'),null);
+  let finish;ui.context.transfer=()=>new Promise(resolve=>{finish=resolve;});const pending=ui.evaluate("withFlashProgress('exact-firmware.zip','Preparing DFU',transfer);");
+  assert.equal(dialog.open,true);assert.equal(ui.elements.get('flash-progress-file').textContent,'exact-firmware.zip');assert.equal(ui.elements.get('flash-progress-percent').textContent,'0%');assert.deepEqual(nextHighlight(ui),[]);
+  ui.evaluate("progress(.25,'Writing DFU');");assert.equal(ui.elements.get('flash-progress').value,.25);assert.equal(ui.elements.get('flash-progress-percent').textContent,'25%');assert.equal(ui.elements.get('flash-progress-stage').textContent,'Writing DFU');
+  ui.evaluate("progress(1,'Writing + verifying application');");assert.equal(ui.elements.get('flash-progress-percent').textContent,'99%');assert.match(ui.elements.get('flash-progress-stage').textContent,/final checks/);assert.equal(dialog.open,true);
+  finish('verified-result');assert.equal(await pending,'verified-result');assert.equal(dialog.open,false);assert.equal(ui.elements.get('flash-progress-percent').textContent,'100%');assert.match(ui.elements.get('flash-progress-stage').textContent,/startup remains unverified/);assert.equal(ui.evaluate('state.flashProgress'),null);assert.deepEqual(ui.calls,[]);
+});
+
+test('progress modal prevents Escape and requests a browser leave warning only while transfer is active',async()=>{
+  const ui=workbench();await Promise.resolve();let finish;ui.context.transfer=()=>new Promise(resolve=>{finish=resolve;});const pending=ui.evaluate("withFlashProgress('app.bin','Writing firmware',transfer);");
+  let prevented=0,stopped=0;const leave={preventDefault(){prevented++;}};ui.elements.get('flash-progress-dialog').emit('cancel',{preventDefault(){prevented++;}});ui.elements.get('flash-progress-dialog').emit('keydown',{key:'Escape',preventDefault(){prevented++;},stopPropagation(){stopped++;}});ui.windowEvents.beforeunload(leave);assert.equal(prevented,3);assert.equal(stopped,1);assert.equal(leave.returnValue,'');assert.equal(ui.elements.get('flash-progress-dialog').open,true);
+  finish();await pending;ui.elements.get('flash-progress-dialog').emit('cancel',{preventDefault(){prevented++;}});ui.elements.get('flash-progress-dialog').emit('keydown',{key:'Escape',preventDefault(){prevented++;},stopPropagation(){stopped++;}});ui.windowEvents.beforeunload({preventDefault(){prevented++;}});assert.equal(prevented,3);assert.equal(stopped,1);assert.deepEqual(ui.calls,[]);
+});
+
+test('failed transfers and modal-open failures clean up without retrying or claiming completion',async()=>{
+  for(const stage of ['write','open']){
+    const ui=workbench();await Promise.resolve();const original=Error('Test '+stage+' failure');ui.context.original=original;const dialog=ui.elements.get('flash-progress-dialog');
+    if(stage==='open')dialog.showModal=()=>{throw original;};
+    ui.context.transfer=async()=>{ui.calls.push('write');ui.evaluate("progress(.3,'Writing firmware');");throw original;};
+    await assert.rejects(ui.evaluate("withFlashProgress('app.bin','Preparing',transfer);"),error=>error===original);assert.equal(ui.evaluate('state.flashProgress'),null);assert.ok(!dialog.open);assert.notEqual(ui.elements.get('flash-progress-percent').textContent,'100%');assert.deepEqual(ui.calls,stage==='write'?['write']:[]);assert.equal(ui.elements.get('flash-stop-auto').hidden,true);
+  }
+});
+
+test('a nested transfer cannot replace or close an active progress window',async()=>{
+  const ui=workbench();await Promise.resolve();let finish;ui.context.transfer=()=>new Promise(resolve=>{finish=resolve;});const pending=ui.evaluate("withFlashProgress('original.zip','Preparing',transfer);");
+  await assert.rejects(ui.evaluate("withFlashProgress('other.zip','Preparing',()=>{throw Error('must not start');});"),/already active/);assert.equal(ui.elements.get('flash-progress-file').textContent,'original.zip');assert.equal(ui.elements.get('flash-progress-dialog').open,true);finish();await pending;assert.equal(ui.elements.get('flash-progress-dialog').open,false);assert.deepEqual(ui.calls,[]);
+});
+
+test('all firmware-write paths show the large dialog after approval and close it before subsequent steps',async()=>{
+  for(const kind of ['nrf52','erase','esp32','uf2']){
+    const ui=workbench();await Promise.resolve();serialMock(ui);ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({name:kind==='uf2'?'firmware.uf2':'firmware.zip',architecture:kind==='esp32'?'esp32':kind==='uf2'?'uf2':'nrf52'});ui.evaluate('state.port=selectedPort;state.pkg=pkg;state.plan={generation:state.generation,port:selectedPort,sha256:pkg.sha256,addresses:[0x10000]};');
+    const dialog=ui.elements.get('flash-progress-dialog');ui.context.confirm=async()=>false;await ui.elements.get('flash').onclick();assert.ok(!dialog.open);assert.equal(ui.evaluate('state.flashProgress'),null);
+    ui.context.confirm=async()=>true;
+    const onWrite=()=>{assert.equal(dialog.open,true,kind);assert.ok(ui.evaluate('state.flashProgress'),kind);ui.calls.push('write');ui.evaluate("progress(.42,'Writing firmware');");assert.equal(ui.elements.get('flash-progress-percent').textContent,'42%',kind);};
+    ui.context.flashNrf=async(_link,actual)=>{onWrite();assert.equal(ui.elements.get('flash-progress-file').textContent,actual.name);};
+    if(kind==='erase'){ui.context.erase=fakePackage({name:'erase.zip',erase:true,destructive:true});ui.evaluate('state.plan.erasePkg=erase;');}
+    if(kind==='esp32')ui.evaluate('state.esp={flash:async()=>onWrite()};');
+    if(kind==='esp32')ui.context.onWrite=onWrite;
+    if(kind==='uf2'){ui.context.hash=()=>ui.context.pkg.payloadHash;ui.context.drive={getFileHandle:async(name)=>name==='INFO_UF2.TXT'?{getFile:async()=>({text:async()=>'UF2 Bootloader Test'})}:{createWritable:async()=>({write:async()=>onWrite(),close:async()=>assert.equal(dialog.open,true),abort:async()=>{}})}};ui.evaluate('state.directory=drive;state.plan.uf2Info="UF2 Bootloader Test";');}
+    await ui.elements.get('flash').onclick();assert.equal(ui.calls.filter(call=>call==='write').length,1,kind);assert.equal(dialog.open,false,kind);assert.equal(ui.evaluate('state.flashProgress'),null,kind);
+    if(kind==='erase')assert.equal(ui.evaluate('state.recovery.phase'),'reselect-dfu');
+    if(kind==='esp32'||kind==='nrf52')assert.ok(ui.evaluate('state.verification'),kind);
+  }
 });
 
 test('same-device and flash confirmations use enabled action buttons without typing',async()=>{
@@ -109,6 +160,130 @@ test('reconnect guidance warns about VM USB capture without promising a timed re
 });
 
 const v4Item={project:'MeshCore',provider:'MeshCore',hardware:'Heltec v4',architecture:'esp32',role:'repeater',version:'v1.18.0',name:'heltec_v4_repeater-v1.18.0.bin',action:'flash-update',url:'https://example.test/v4.bin'};
+const nextHighlight=ui=>[...ui.elements.values()].filter(element=>element.classList.contains('next-action')).map(element=>element.id);
+
+async function automaticStartupWorkbench(){
+  const ui=workbench();await Promise.resolve();const appPort={getInfo:()=>({usbVendorId:0x303a,usbProductId:0x1001})},dfuPort={getInfo:()=>({usbVendorId:0x2886,usbProductId:0x0044})};
+  const device={name:'Known radio',model:'Known application board',role:'common-cli',publicKey:'11'.repeat(32)};
+  Object.assign(ui.context,{appPort,dfuPort,knownDevice:device,pkg:fakePackage({name:'board_repeater.zip'})});ui.context.detectMeshCore=async()=>{ui.calls.push('detect');return {...device};};
+  ui.context.SerialLink=class{constructor(port){assert.equal(port,appPort,'Never probe a same-VID/PID substitute');}async open(){ui.calls.push('application-open');}async close(){ui.calls.push('application-close');}async command(command){ui.calls.push(command);return 'v1.18.0';}};
+  ui.evaluate('state.port=appPort;state.pkg=pkg;');await ui.evaluate('readApplication({});');assert.equal(ui.evaluate('state.knownApplicationPort.port'),appPort);ui.calls.length=0;
+  ui.evaluate('state.handoff=true;');ui.serialEvents.disconnect({port:appPort});ui.evaluate('state.port=dfuPort;state.verification={sha256:pkg.sha256,name:pkg.name,architecture:"nrf52",publicKey:knownDevice.publicKey,model:knownDevice.model,role:knownDevice.role};state.handoff=false;');
+  return {...ui,appPort,dfuPort,device};
+}
+
+test('completion clearly distinguishes transfer, reconnect-to-verify and verified startup',async()=>{
+  const ui=workbench();await Promise.resolve();ui.context.pkg=fakePackage();ui.context.selectedPort={getInfo:()=>({usbVendorId:0x2886,usbProductId:0x0044})};ui.evaluate('state.pkg=pkg;state.port=selectedPort;state.verification={sha256:pkg.sha256};controls();');
+  assert.equal(ui.elements.get('reconnect-title').textContent,'Firmware transferred — verify startup');assert.equal(ui.elements.get('select-port-label').textContent,'Reconnect to verify firmware');assert.equal(ui.elements.get('reconnect-callout').hidden,false);assert.match(ui.elements.get('reconnect-detail').textContent,/application USB port.*not DFU\/ROM/);assert.match(ui.elements.get('reconnect-detail').textContent,/Verification starts automatically/);assert.deepEqual(nextHighlight(ui),['select-port']);
+  ui.evaluate('state.verification=null;state.finishedFirmware={sha256:pkg.sha256,verified:true};controls();');assert.equal(ui.elements.get('reconnect-title').textContent,'Firmware verified');assert.equal(ui.elements.get('select-port-label').textContent,'Choose another radio');assert.equal(ui.elements.get('flasher').classList.contains('verification-complete'),true);assert.equal(ui.elements.get('flasher').classList.contains('reconnect-needed'),false);assert.deepEqual(nextHighlight(ui),[]);assert.deepEqual(ui.calls,[]);
+});
+
+test('exact remembered application port automatically verifies once without a chooser, scan, reset or write',async()=>{
+  const ui=await automaticStartupWorkbench();ui.serialEvents.connect({port:ui.appPort});ui.serialEvents.connect({port:ui.appPort});await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.evaluate('state.finishedFirmware.verified'),true);assert.equal(ui.evaluate('state.port'),ui.appPort);assert.deepEqual(ui.calls,['application-open','detect','ver','application-close']);assert.match(ui.elements.get('notice').textContent,/Previously authorized application port reused/);assert.equal(ui.elements.get('reconnect-title').textContent,'Firmware verified');
+  ui.serialEvents.connect({port:ui.appPort});await new Promise(resolve=>setImmediate(resolve));assert.equal(ui.calls.filter(call=>call==='application-open').length,1);
+});
+
+test('an application reconnect during a write is remembered but only checked after that operation ends',async()=>{
+  const ui=await automaticStartupWorkbench(),expected=ui.evaluate('state.verification');ui.context.expected=expected;ui.evaluate('state.verification=null;');let finish;
+  ui.context.activeWrite=async()=>{ui.serialEvents.connect({port:ui.appPort});ui.serialEvents.connect({port:ui.appPort});await new Promise(resolve=>{finish=resolve;});ui.evaluate('state.verification=expected;');};
+  const pending=ui.evaluate('operation(activeWrite);');assert.deepEqual(ui.calls,[]);finish();await pending;await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.calls.filter(call=>call==='application-open').length,1);
+});
+
+test('a still-connected application port is reused only after the verified ESP write is explicitly started',async()=>{
+  const ui=await automaticStartupWorkbench();ui.context.SerialLink.prototype.command=async command=>{ui.calls.push(command);return command==='get storage.layout'?'int:esp32-8192K':'v1.18.0';};
+  ui.evaluate('state.knownApplicationPort.available=true;state.port=appPort;state.pkg={...pkg,architecture:"esp32"};state.verification.architecture="esp32";state.plan={written:true,transportMode:"default_reset"};');ui.context.session={port:ui.appPort,finish:async()=>ui.calls.push('finish'),close:async()=>ui.calls.push('esp-close')};ui.evaluate('state.esp=session;requestAutomaticVerification();');assert.deepEqual(ui.calls,[]);
+  await ui.elements.get('finish').onclick();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));assert.equal(ui.calls[0],'finish');assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.evaluate('state.finishedFirmware.verified'),true);assert.ok(ui.calls.includes('get storage.layout'));assert.equal(ui.calls.filter(call=>call==='application-open').length,1);assert.ok(!ui.calls.includes('chooser'));
+});
+
+test('optional bootloader preparation failure does not undo a successful automatic startup check',async()=>{
+  const ui=await automaticStartupWorkbench();ui.context.offerBootloaderAfterStartup=async()=>{ui.evaluate('state.finishedFirmware=null;state.pkg=null;');throw Error('Application startup was verified. Separate bootloader preparation failed: download unavailable.');};
+  ui.serialEvents.connect({port:ui.appPort});await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.evaluate('state.finishedFirmware.verified'),true);assert.equal(ui.evaluate('state.port'),ui.appPort);assert.ok(ui.evaluate('state.device'));assert.match(ui.elements.get('notice').textContent,/Separate bootloader preparation failed/);assert.doesNotMatch(ui.elements.get('notice').textContent,/Automatic startup verification did not complete|Reconnect to verify/);assert.equal(ui.elements.get('reconnect-title').textContent,'Firmware verified');
+});
+
+test('ambiguous identity, replacement ports and unfinished or unrelated operations stay on manual verification',async()=>{
+  for(const scenario of ['same-id-other-object','unknown-key','changed-key','changed-image','written-esp','migration','erase','retry','new-selection']){
+    const ui=await automaticStartupWorkbench();let port=ui.appPort;
+    if(scenario==='same-id-other-object')port={getInfo:ui.appPort.getInfo};
+    if(scenario==='unknown-key')ui.evaluate('state.verification.publicKey=null;');
+    if(scenario==='changed-key')ui.evaluate('state.verification.publicKey="22".repeat(32);');
+    if(scenario==='changed-image')ui.evaluate('state.pkg={...pkg,sha256:"b".repeat(64)};');
+    if(scenario==='written-esp')ui.evaluate('state.esp={};state.plan={written:true};');
+    if(scenario==='migration')ui.evaluate('state.migrationApproval={phase:"bridge-writing"};');
+    if(scenario==='erase')ui.evaluate('state.recovery={phase:"final"};');
+    if(scenario==='retry')ui.evaluate('state.espRecovery={};');
+    if(scenario==='new-selection')ui.evaluate('invalidateApplicationEvidence();');
+    ui.serialEvents.connect({port});await new Promise(resolve=>setImmediate(resolve));assert.deepEqual(ui.calls,[],scenario);assert.ok(ui.evaluate('state.verification'),scenario);
+  }
+});
+
+test('automatic permission, timeout and identity failures stop after one attempt and show the reconnect fallback',async()=>{
+  for(const failure of ['permission','timeout','identity']){
+    const ui=await automaticStartupWorkbench();if(failure==='identity')ui.context.detectMeshCore=async()=>({...ui.device,publicKey:'22'.repeat(32)});
+    else ui.context.SerialLink=class{async open(){ui.calls.push('application-open');throw Error(failure==='permission'?'Access denied':'No response from node');}async close(){ui.calls.push('application-close');}};
+    ui.serialEvents.connect({port:ui.appPort});await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));const callCount=ui.calls.length;assert.ok(ui.evaluate('state.verification'));assert.equal(ui.evaluate('state.port'),null);assert.equal(ui.evaluate('state.knownApplicationPort'),null);assert.equal(ui.elements.get('select-port-label').textContent,'Reconnect to verify firmware');assert.match(ui.elements.get('notice').textContent,/did not complete/);assert.equal(ui.elements.get('flasher').classList.contains('verification-complete'),false);
+    ui.serialEvents.connect({port:ui.appPort});await new Promise(resolve=>setImmediate(resolve));assert.equal(ui.calls.length,callCount,failure);
+  }
+});
+
+test('manual verification selection does not show a redundant handoff confirmation',async()=>{
+  const ui=workbench();await Promise.resolve();ui.context.pkg=fakePackage();ui.evaluate('state.pkg=pkg;state.handoff=true;state.verification={sha256:pkg.sha256,publicKey:null,name:pkg.name};');let confirmations=0;
+  ui.context.confirm=async(title)=>{assert.equal(title,'Confirm application interface');confirmations++;return true;};ui.context.verifyApplication=async()=>ui.calls.push('verify');await ui.elements.get('select-port').onclick();assert.equal(confirmations,1);assert.deepEqual(ui.calls,['chooser','verify']);
+});
+
+test('next action moves from USB to prepare or skip-backup flash and clears while working',async()=>{
+  const ui=workbench();await Promise.resolve();assert.deepEqual(nextHighlight(ui),['select-port']);assert.equal(ui.elements.get('select-port').getAttribute('aria-current'),'step');
+  ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage();ui.evaluate("state.port=selectedPort;state.pkg=pkg;controls();");assert.deepEqual(nextHighlight(ui),['prepare']);assert.equal(ui.elements.get('select-port').getAttribute('aria-current'),null);
+  ui.elements.get('skip-backup').checked=true;ui.evaluate('controls();');assert.deepEqual(nextHighlight(ui),['flash']);assert.equal(ui.elements.get('flash').disabled,false);
+  ui.evaluate('state.plan={generation:state.generation,port:state.port,sha256:pkg.sha256};controls();');assert.deepEqual(nextHighlight(ui),['flash']);
+  ui.evaluate('state.busy=true;controls();');assert.deepEqual(nextHighlight(ui),[]);ui.evaluate('state.busy=false;state.port=null;state.plan=null;state.handoff=true;controls();');assert.deepEqual(nextHighlight(ui),['select-port']);
+  ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0044});ui.evaluate('state.port=selectedPort;controls();');assert.deepEqual(nextHighlight(ui),['flash']);assert.deepEqual(ui.calls,[]);
+});
+
+test('next-action guidance respects verification, written ESP and migration states instead of suggesting another flash',async()=>{
+  for(const scenario of ['verify-dfu','verify-application','written','uart-settle','automatic-wait','automatic-busy','verified-done','component-done']){
+    const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage();ui.evaluate('state.port=selectedPort;state.pkg=pkg;');
+    let expected;
+    if(scenario==='verify-dfu'){ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0044});ui.evaluate('state.verification={sha256:pkg.sha256};state.plan={sha256:pkg.sha256};');expected='select-port';}
+    if(scenario==='verify-application'){ui.evaluate('state.verification={sha256:pkg.sha256};state.plan={sha256:pkg.sha256};');expected='verify-app';}
+    if(scenario==='written'){ui.evaluate('state.esp={};state.plan={written:true};state.verification={};');expected='finish';}
+    if(scenario==='uart-settle'){ui.evaluate('state.migration={uart:true,settled:false,phase:"running"};');expected='wait-migration';}
+    if(scenario==='automatic-wait'){ui.evaluate('state.port=null;state.migrationApproval={phase:"waiting-rom"};');expected='select-port';}
+    if(scenario==='automatic-busy'){ui.evaluate('state.migrationApproval={phase:"waiting-rom"};');expected=null;}
+    if(scenario==='verified-done'){ui.evaluate('state.finishedFirmware={sha256:pkg.sha256,verified:true};');expected=null;}
+    if(scenario==='component-done'){ui.context.pkg=fakePackage({kind:'bootloader',destructive:true});ui.evaluate('state.pkg=pkg;completeNrfTransfer(pkg);');expected=null;}
+    ui.evaluate('controls();');assert.deepEqual(nextHighlight(ui),expected?[expected]:[],scenario);assert.deepEqual(ui.calls,[],scenario);
+    if(scenario==='verified-done')assert.match(ui.elements.get('step-guidance').textContent,/No further flashing step/);
+  }
+});
+
+test('temporary recovery and erase completion direct selection of the next image, never a repeat utility write',async()=>{
+  for(const scenario of ['temporary-unknown','temporary-known','erase']){
+    const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({kind:'bootloader',destructive:true,erase:scenario==='erase'});ui.evaluate('state.port=selectedPort;state.pkg=pkg;');
+    if(scenario!=='erase'){ui.context.selectedRecovery=()=>({id:'gat562',installedIdentity:'GAT562_DFU'});if(scenario==='temporary-known'){ui.elements.get('hardware').value='Actual physical board';ui.elements.get('bootloader-source').value='https://example.test/normal.zip';}}
+    ui.evaluate('completeNrfTransfer(pkg);controls();');if(scenario!=='erase'){assert.deepEqual(nextHighlight(ui),['select-port']);ui.evaluate('state.port=selectedPort;controls();');}
+    assert.deepEqual(nextHighlight(ui),[scenario==='erase'?'artifact':scenario==='temporary-known'?'load-bootloader':'hardware']);assert.doesNotMatch(ui.elements.get('step-guidance').textContent,/^Step [34]:/);assert.deepEqual(ui.calls,[]);
+  }
+});
+
+test('manual firmware, archive and connection prerequisites get one next-action cue without changing selections',async()=>{
+  for(const scenario of ['hardware','role','artifact','archive-entry','load-entry','expert-offset','transport-mode']){
+    const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.inventory=[v4Item,{...v4Item,hardware:'Other board',role:'companionFull'}];ui.evaluate('state.items=inventory;state.port=selectedPort;filterCatalog();');
+    if(scenario==='role'){ui.elements.get('hardware').value='Heltec v4';ui.elements.get('role').options=[{value:''},{value:'repeater'},{value:'companionFull'}];}
+    if(scenario==='artifact'){ui.elements.get('hardware').value='Heltec v4';ui.elements.get('role').value='repeater';}
+    if(scenario==='archive-entry'||scenario==='load-entry'){ui.evaluate('state.archive=new Uint8Array(64);');ui.elements.get('archive-entry').value=scenario==='load-entry'?'exact.bin':'';}
+    if(scenario==='expert-offset'||scenario==='transport-mode'){ui.context.pkg=fakePackage({architecture:'esp32',expert:scenario==='expert-offset'});ui.evaluate('state.pkg=pkg;');if(scenario==='transport-mode')ui.elements.get('transport-mode').value='auto';}
+    ui.evaluate('controls();');assert.deepEqual(nextHighlight(ui),[scenario],scenario);assert.deepEqual(ui.calls,[],scenario);assert.equal(ui.evaluate('state.plan'),null,scenario);
+  }
+});
+
+test('confirmation and backup-dialog next buttons take over while busy and release their cue on close',async()=>{
+  const ui=workbench();await Promise.resolve();ui.evaluate('state.busy=true;controls();');let close;
+  ui.elements.get('confirm-dialog').addEventListener=(_type,handler)=>{close=handler;};const confirmation=ui.evaluate("confirm('Flash?','Exact image','Warning','FLASH');");assert.deepEqual(nextHighlight(ui),['confirm-submit']);ui.elements.get('confirm-dialog').returnValue='cancel';close();assert.equal(await confirmation,false);assert.deepEqual(nextHighlight(ui),[]);
+  ui.context.document.createElement=()=>uiElement();ui.elements.get('question-dialog').addEventListener=(_type,handler)=>{close=handler;};
+  const backup=ui.evaluate("choose('Backup','Private JSON',[['stop','Stop'],['continue','Continue with flashing']],{backupJson:'{}'});");const actions=ui.elements.get('question-actions').options,continuation=actions.find(action=>action.value==='continue');assert.equal(continuation.classList.contains('next-action'),true);assert.equal(actions.find(action=>action.value==='stop').classList.contains('next-action'),false);assert.deepEqual(nextHighlight(ui),[]);
+  ui.elements.get('question-dialog').returnValue='stop';close();assert.equal(await backup,'stop');assert.equal(continuation.classList.contains('next-action'),false);assert.equal(ui.evaluate('state.nextActionElement'),null);assert.deepEqual(ui.calls,[]);
+});
 
 test('firmware-files link follows exact hardware and role without needing a USB connection or artifact',async()=>{
   const ui=workbench();await Promise.resolve();ui.context.inventory=[{...v4Item,provider:'Keymind Cascade',hardware:'GAT-IoT GAT562 30s',architecture:'nrf52',role:'companionFull',releaseNotes:'SETUP - https://mikecarper.github.io/MeshCore/firmware_picker/?hardware=GAT562_30S_Mesh_Kit'}];
@@ -591,7 +766,7 @@ test('a new identical backup has a new text generation so a late copy cannot lab
 test('closing and reopening a same-JSON save dialog invalidates an older pending clipboard result',async()=>{
   for(const result of ['resolve','reject']){
     const ui=await backupJsonWorkbench();await ui.elements.get('backup').onclick();ui.context.json=ui.downloads[0].json;let close,complete,focused=0,selected=0;
-    ui.context.document.createElement=()=>({});ui.elements.get('question-dialog').addEventListener=(_event,handler)=>{close=handler;};
+ui.context.document.createElement=()=>uiElement();ui.elements.get('question-dialog').addEventListener=(_event,handler)=>{close=handler;};
     ui.context.navigator.clipboard={writeText:()=>new Promise((resolve,reject)=>{complete=result==='resolve'?resolve:()=>reject(Error('Late clipboard denial'));})};
     ui.elements.get('question-backup-json').focus=()=>focused++;ui.elements.get('question-backup-json').select=()=>selected++;
     const initial=ui.evaluate('state.backupTextGeneration'),oldDialog=ui.evaluate("choose('Save backup','Save privately',[['cancel','Cancel']],{backupJson:json});");
@@ -606,7 +781,7 @@ test('closing and reopening a same-JSON save dialog invalidates an older pending
 
 test('backup prompts hide verbose details and clear their JSON when closed without changing generic questions',async()=>{
   const ui=await backupJsonWorkbench();await ui.elements.get('backup').onclick();const json=ui.downloads[0].json;let close;
-  ui.context.document.createElement=()=>({});ui.elements.get('question-dialog').addEventListener=(event,handler)=>{assert.equal(event,'close');close=handler;};ui.context.json=json;
+  ui.context.document.createElement=()=>uiElement();ui.elements.get('question-dialog').addEventListener=(event,handler)=>{assert.equal(event,'close');close=handler;};ui.context.json=json;
   const pending=ui.evaluate("choose('Confirm your backup download','Save privately',[['saved','I saved the backup']],{backupJson:json});");
   assert.equal(ui.elements.get('question-backup-json').value,json);assert.equal(ui.elements.get('question-backup-json-view').hidden,false);assert.equal(ui.elements.get('backup-json').value,json);
   assert.equal(ui.elements.get('question-backup-title').hidden,false);assert.equal(ui.elements.get('question-title').hidden,true);
@@ -688,7 +863,7 @@ test('explicit nRF52 Enter USB bootloader uses the considered backup without a r
 
 test('partial backup warning belongs to its active popup only and never leaks into a generic question',async()=>{
   const ui=await backupJsonWorkbench();await ui.elements.get('backup').onclick();ui.context.json=ui.downloads[0].json;let close;
-  ui.context.document.createElement=()=>({});ui.elements.get('question-dialog').addEventListener=(_event,handler)=>{close=handler;};
+  ui.context.document.createElement=()=>uiElement();ui.elements.get('question-dialog').addEventListener=(_event,handler)=>{close=handler;};
   const pending=ui.evaluate("choose('Backup JSON','',[['stop','Stop'],['continue','Continue with flashing']],{backupJson:json,backupWarning:'Partial backup: cannot restore automatically.'});");
   assert.equal(ui.elements.get('question-backup-summary').hidden,false);assert.match(ui.elements.get('question-backup-summary').textContent,/Partial backup/);
   const actions=ui.elements.get('question-actions').options;assert.deepEqual(actions.map(button=>[button.value,button.textContent,button.className]),[['stop','Stop','secondary'],['continue','Continue with flashing','primary']]);
@@ -1547,7 +1722,7 @@ test('reselecting a radio shows a prominent existing USB action without opening 
     if(pending==='migration')ui.evaluate('state.migration={};');
     if(pending.startsWith('waiting-')){ui.context.phase=pending;ui.evaluate('state.migrationApproval={phase};');}
     ui.evaluate('controls();');
-    assert.deepEqual(styles.at(-1),['reconnect-needed',true],pending);assert.equal(ui.elements.get('reconnect-callout').hidden,false,pending);assert.equal(ui.elements.get('select-port-label').textContent,'Select the same radio again',pending);
+    assert.deepEqual(styles.filter(([name])=>name==='reconnect-needed').at(-1),['reconnect-needed',true],pending);assert.equal(ui.elements.get('reconnect-callout').hidden,false,pending);assert.equal(ui.elements.get('select-port-label').textContent,['verification','waiting-application'].includes(pending)?'Reconnect to verify firmware':'Select the same radio again',pending);
     assert.ok(aria.some(([name,value])=>name==='aria-describedby'&&value==='reconnect-detail'),pending);
     const detail=ui.elements.get('reconnect-detail').textContent;assert.match(detail,/same radio/i,pending);
     if(['handoff','recovery'].includes(pending))assert.match(detail,/DFU/,pending);
@@ -1562,7 +1737,7 @@ test('initial pages, active operations and a selected returning port keep the co
     ui.elements.get('flasher').classList.toggle=(name,value)=>styles.push([name,value]);ui.elements.get('select-port').removeAttribute=name=>removed.push(name);
     if(scenario==='busy')ui.evaluate('state.handoff=true;state.busy=true;');
     if(scenario==='connected')ui.evaluate('state.handoff=true;state.port=selectedPort;');
-    ui.evaluate('controls();');assert.deepEqual(styles.at(-1),['reconnect-needed',false],scenario);assert.equal(ui.elements.get('reconnect-callout').hidden,true,scenario);assert.equal(ui.elements.get('select-port-label').textContent,'Choose USB port',scenario);assert.ok(removed.includes('aria-describedby'),scenario);assert.deepEqual(ui.calls,[],scenario);
+    ui.evaluate('controls();');assert.deepEqual(styles.filter(([name])=>name==='reconnect-needed').at(-1),['reconnect-needed',false],scenario);assert.equal(ui.elements.get('reconnect-callout').hidden,true,scenario);assert.equal(ui.elements.get('select-port-label').textContent,'Choose USB port',scenario);assert.ok(removed.includes('aria-describedby'),scenario);assert.deepEqual(ui.calls,[],scenario);
   }
 });
 
@@ -1571,7 +1746,7 @@ test('a required firmware-build choice is highlighted and revealed without choos
   const highlights=[],aria=[];ui.elements.get('artifact-field').classList.toggle=(name,value)=>highlights.push([name,value]);ui.elements.get('artifact').setAttribute=(name,value)=>aria.push([name,value]);
   ui.elements.get('artifact').focus=()=>{throw Error('A required choice must not steal keyboard focus');};
   ui.evaluate('state.items=inventory;state.port=selectedPort;filterCatalog();');ui.elements.get('firmware-choices').open=false;ui.evaluate('controls();');
-  assert.deepEqual(highlights.at(-1),['choice-required',true]);assert.deepEqual(aria.at(-1),['aria-required','true']);assert.equal(ui.elements.get('artifact-required').hidden,false);assert.equal(ui.elements.get('artifact-choice-hint').hidden,false);assert.equal(ui.elements.get('firmware-choices').open,true);
+  assert.deepEqual(highlights.at(-1),['choice-required',true]);assert.ok(aria.some(([name,value])=>name==='aria-required'&&value==='true'));assert.equal(ui.elements.get('artifact-required').hidden,false);assert.equal(ui.elements.get('artifact-choice-hint').hidden,false);assert.equal(ui.elements.get('firmware-choices').open,true);
   assert.ok(aria.some(([name,value])=>name==='aria-label'&&value==='Step 2.5: Firmware build'));assert.match(ui.elements.get('step-guidance').textContent,/^Step 2\.5:/);
   assert.equal(ui.elements.get('artifact').value,'');assert.equal(ui.elements.get('prepare').disabled,true);assert.deepEqual(ui.calls,[]);
 });
@@ -1720,8 +1895,15 @@ test('automatic final writes stop on changed chip, image, restoration or migrati
 
 test('stopping during a physical bridge write finishes that write without sending the next reset',async()=>{
   const ui=await migrationWorkbench();await ui.elements.get('prepare').onclick();let approval;
-  ui.faults.duringWrite=async stage=>{assert.equal(stage,'bridge');approval=ui.evaluate('state.migrationApproval');assert.equal(approval.phase,'bridge-writing');assert.equal(ui.elements.get('stop-migration-auto').disabled,false);ui.elements.get('stop-migration-auto').onclick();};
+  ui.faults.duringWrite=async stage=>{assert.equal(stage,'bridge');approval=ui.evaluate('state.migrationApproval');assert.equal(approval.phase,'bridge-writing');assert.equal(ui.elements.get('flash-progress-dialog').open,true);assert.equal(ui.elements.get('flash-stop-auto').hidden,false);assert.equal(ui.elements.get('flash-stop-auto').disabled,false);ui.elements.get('flash-stop-auto').onclick();assert.equal(ui.elements.get('flash-progress-dialog').open,true);assert.ok(ui.evaluate('state.flashProgress'));assert.equal(ui.elements.get('flash-stop-auto').hidden,true);};
   await ui.elements.get('flash').onclick();assert.equal(approval.phase,'revoked');assert.equal(ui.evaluate('state.migrationApproval'),null);assert.equal(ui.evaluate('state.migration.phase'),'written');assert.equal(ui.evaluate('state.plan.written'),true);assert.deepEqual(ui.calls.filter(call=>/^(write|finish):/.test(call)),['write:bridge']);assert.match(ui.elements.get('notice').textContent,/stopped|no next reset/i);
+});
+
+test('automatic bridge and final writes use separate progress windows that end before each reset',async()=>{
+  const ui=await migrationWorkbench();await ui.elements.get('prepare').onclick();const dialog=ui.elements.get('flash-progress-dialog');let opened=0,closed=0;
+  dialog.showModal=()=>{assert.ok(!dialog.open,'The previous write window must already be closed');dialog.open=true;opened++;};dialog.close=()=>{assert.equal(dialog.open,true);assert.equal(ui.elements.get('flash-progress-percent').textContent,'100%');dialog.open=false;closed++;};
+  ui.faults.duringWrite=async()=>{assert.equal(dialog.open,true);ui.evaluate("progress(.5,'Writing + verifying bridge or application');");assert.equal(ui.elements.get('flash-progress-percent').textContent,'50%');};ui.faults.duringFinish=async()=>assert.equal(dialog.open,false,'Reset is outside the active-write modal');
+  await ui.elements.get('flash').onclick();assert.equal(opened,2);assert.equal(closed,2);assert.equal(dialog.open,false);assert.equal(ui.evaluate('state.flashProgress'),null);assert.equal(ui.evaluate('state.migrationApproval'),null);assert.equal(ui.evaluate('state.verification'),null);
 });
 
 test('migration errors retain recovery markers and never retry a write or reset automatically',async()=>{

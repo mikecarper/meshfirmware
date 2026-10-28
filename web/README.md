@@ -23,7 +23,9 @@ Large numbers mark the main actions: **1 Choose USB port**, **2 Update or Erase 
 new install**, **3 Backup & prepare**, **4 Review & flash**. Backup & prepare is
 a dark primary button, matching USB selection and Flash. The installation
 choices share one numbered, accessible radio group—not another action button.
-The next-step hint follows the current stage.
+The next-step hint follows the current stage. The next required control has an
+amber outline, and the next button also shows **Next**, including USB selection
+after a DFU reconnect. This is guidance only; highlighting never runs an action.
 If an ordinary bootloader handoff reconnects USB, repeat 1 then 3 for the same
 radio. Supported partition expansion instead uses one scoped confirmation for
 the bridge and final firmware and continues automatically; only a newly
@@ -130,11 +132,33 @@ visible. The top navigation opens the corresponding tools without touching USB.
    chip, board, partition, erase or readback checks. If a USB handoff is needed,
    select the same radio's returning port and use step 4 again. Skipping is off
    by default and is not remembered for an unrelated radio or firmware choice.
+   During an active firmware write, a large progress window shows the percentage,
+   current stage and file, with a reminder to keep the tab open and power connected.
+   It closes when the write succeeds or fails. The browser's leave-page warning
+   is best-effort, not a guarantee against closing the tab or interrupting power.
+   During automatic migration, **Stop after this write** stops later steps;
+   it does not interrupt the current transfer.
 5. ESP32 writes require target MD5 readback before the one-time reset action.
    **Start firmware automatically** is on by default for complete application,
    merged or verified bridge writes, never expert components or failed writes.
    It retains the actual session transport instead of re-guessing USB vs UART.
-   Re-select the application port to run startup verification automatically.
+   After transfer, **Firmware transferred — verify startup** means the write
+   is finished, but application startup has not yet been checked. When asked,
+   use **Reconnect to verify firmware** and select the same radio's **APPLICATION**
+   USB port, not its DFU/ROM port. Verification then starts automatically; it
+   does not flash or reset the radio. **Firmware verified** marks a successful
+   startup check, not merely a completed transfer.
+   Opening the browser's USB chooser requires a fresh click: the first USB
+   selection cannot authorize an automatic chooser popup after a long write.
+   When this page previously read the application successfully and knows its
+   expected public identity, it remembers that exact application-port object
+   and tracks its availability through connection events. After the write or
+   **Finish**, it tries startup verification once if that same port is available;
+   the identity must match. This read-only attempt never opens a chooser, resets
+   or writes. It does not scan or guess from shared USB IDs. An unknown identity,
+   different interface or failed attempt leaves **Reconnect to verify firmware**
+   as the one-click fallback. The successful green **Firmware verified** status
+   leaves **Choose USB port** available for the next radio.
    The page checks retained node identity/model when applicable, protected
    nRF52 board family, payload version when verified metadata is available,
    and an ESP32 `get storage.layout` response. **Verify running application**
@@ -146,7 +170,8 @@ install drivers or expose device interfaces the browser/OS does not permit.
 TinyUSB application handoff and hardware USB-Serial/JTAG remain distinct;
 the shared `303a:1001` ID is not used to guess their board or reset mechanism.
 Ambiguous IDs, missing models or unknown roles open the manual choices. A missing
-application response never proves ROM mode. Reconnects still require permission.
+application response never proves ROM mode. A newly selected USB interface still
+requires browser permission.
 Reported firmware models can be wrong if the wrong firmware was installed;
 auto-selection is a convenience, not independent physical-board proof. Review
 the selected hardware. Existing payload, chip and board checks remain in force.

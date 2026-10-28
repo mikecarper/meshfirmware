@@ -112,6 +112,17 @@ No hardware operations have been performed.</pre><div class="console-input"><lab
       <p id="question-backup-json-status" class="hint" role="status" aria-live="polite"></p>
     </div>
     <div id="question-actions" class="inline-actions"></div></form></dialog>
+  <dialog id="flash-progress-dialog" closedby="none" aria-labelledby="flash-progress-title" aria-describedby="flash-progress-warning">
+    <h2 id="flash-progress-title">Flashing firmware</h2>
+    <p id="flash-progress-percent" aria-hidden="true">0%</p>
+    <progress id="flash-progress" max="1" value="0" aria-label="Firmware transfer progress"></progress>
+    <p id="flash-progress-stage" role="status" aria-live="polite">Starting firmware transfer…</p>
+    <p id="flash-progress-file"></p>
+    <strong id="flash-progress-warning">Keep this tab open. Do not unplug the radio or turn off power.</strong>
+    <button id="flash-stop-auto" type="button" class="secondary" hidden>Stop after this write</button>
+    <p id="flash-stop-auto-note" class="hint" hidden>Stops later automatic steps, not the current write.</p>
+    <p class="hint">100% means the transfer finished. Application startup is verified separately.</p>
+  </dialog>
   <script type="module" src="/src/app.js"></script>
 </body>
 </html>
