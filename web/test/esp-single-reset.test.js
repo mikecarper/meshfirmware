@@ -109,3 +109,45 @@ test('missing loader reset hooks and malformed options fail before automatic det
   await assert.rejects(s.connect('default_reset',{singleReset:'yes'}),/boolean/);
   assert.deepEqual(calls,[]);assert.deepEqual(signals,[]);
 });
+
+test('only bounded pre-sync ROM timeouts are marked eligible for another native connection method',async()=>{
+  const {session:s,loader,calls}=session({usb:true}),originalSync=async()=>{throw new ESPError('Read timeout');},originalCommand=loader.command;
+  loader.sync=originalSync;
+  await assert.rejects(s.connect('no_reset',{singleReset:true}),error=>error.romHandshakeFailed===true&&/Failed to connect/.test(error.message));
+  assert.equal(loader.sync,originalSync);assert.equal(loader.command,originalCommand);assert.ok(!calls.includes('stub'));
+});
+
+test('permission and disconnect errors swallowed by the loader sync loop cannot acquire fallback authority',async()=>{
+  for(const original of [Object.assign(new Error('Access denied'),{name:'NotAllowedError'}),Object.assign(new Error('Device disconnected'),{name:'NetworkError'}),new Error('Unexpected parser failure')]){
+    const {session:s,loader}=session({usb:true});loader.sync=async()=>{throw original;};
+    await assert.rejects(s.connect('no_reset',{singleReset:true}),error=>!error.romHandshakeFailed);
+  }
+});
+
+test('successful sync and every later identification security MAC stub or flash failure remain fatal',async()=>{
+  for(const stage of ['identify','security','mac','stub','flash']){
+    const {session:s,loader,chip}=session({usb:true});
+    if(stage==='identify'){loader.identifyChip=async()=>{throw new ESPError('Read timeout during chip identification');};loader.identifyChipByMagic=async()=>{throw new ESPError('Read timeout during chip magic');};}
+    if(stage==='security')loader.getSecurityInfo=async()=>{throw new ESPError('Read timeout during security query');};
+    if(stage==='mac')chip.readMac=async()=>{throw new ESPError('Read timeout during MAC query');};
+    if(stage==='stub')loader.runStub=async()=>{throw new ESPError('Read timeout during stub upload');};
+    if(stage==='flash')loader.readFlashId=async()=>{throw new ESPError('Read timeout during flash ID query');};
+    await assert.rejects(s.connect('no_reset',{singleReset:true}),error=>!error.romHandshakeFailed,stage);
+  }
+});
+
+test('even a first valid SYNC reply followed by lost trailing acknowledgements forbids fallback resets',async()=>{
+  const {session:s,loader}=session({usb:true}),originalCommand=async()=>[1,new Uint8Array()];loader.command=originalCommand;
+  loader.sync=async function(){await this.command(0x08);throw new ESPError('Read timeout waiting for remaining sync replies');};
+  await assert.rejects(s.connect('no_reset',{singleReset:true}),error=>!error.romHandshakeFailed);assert.equal(loader.command,originalCommand);
+});
+
+test('connection trials can require a confirmed close while existing cleanup remains best-effort',async()=>{
+  const {session:s}=session(),original=Error('Serial close delivery uncertain');let count=0;
+  s.transport.disconnect=async()=>{count++;throw original;};
+  await s.close();assert.equal(count,1);
+  await s.close({strict:false});assert.equal(count,2);
+  await assert.rejects(s.close({strict:true}),error=>error===original);assert.equal(count,3);
+  await assert.rejects(s.close({strict:'yes'}),/boolean/);assert.equal(count,3);
+  s.transport.disconnect=async()=>{count++;};await s.close({strict:true});assert.equal(count,4);
+});

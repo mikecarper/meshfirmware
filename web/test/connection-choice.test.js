@@ -1,7 +1,49 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {chooseConnection} from '../src/connection-choice.js';
+import {chooseConnection,parseUsbMode} from '../src/connection-choice.js';
 const usb=(usbVendorId,usbProductId)=>({usbVendorId,usbProductId});
+
+test('USB mode parser accepts only a complete canonical bounded reply',()=>{
+  for(const mode of ['hardware-cdc-jtag','tinyusb','uart','unknown'])assert.equal(parseUsbMode('usb.mode '+mode),mode);
+  for(const reply of [null,{},'', 'tinyusb','> usb.mode tinyusb','get usb.mode','USB.MODE tinyusb','usb.mode TinyUSB','usb.mode tinyusb extra','usb.mode tinyusb\n','usb.mode tinyusb\nusb.mode hardware-cdc-jtag','Unknown command','x'.repeat(129),'usb.mode __proto__'])assert.equal(parseUsbMode(reply),null,String(reply));
+});
+
+test('the current responding application can resolve shared native USB through its exact reported mode',()=>{
+  const usbInfo=usb(0x303a,0x1001);
+  for(const [usbMode,mode] of [['hardware-cdc-jtag','usb_reset'],['tinyusb','tinyusb']]){
+    const chosen=chooseConnection({usbInfo,device:{model:'Heltec V4.2 none detected',architecture:'esp32',usbMode}});assert.equal(chosen.mode,mode);assert.equal(chosen.source,'application-report');assert.equal(chosen.alreadyBootloader,false);
+  }
+  for(const usbMode of [null,undefined,'unknown','usb.mode tinyusb','TinyUSB','unsupported'])assert.equal(chooseConnection({usbInfo,device:{model:'Heltec v4',architecture:'esp32',usbMode}}).mode,null);
+});
+
+test('report conflicts and unqualified interfaces never become an automatic reset',()=>{
+  const device={model:'Heltec v4',architecture:'esp32'};
+  for(const [usbMode,usbDescription] of [['tinyusb','USB Serial/JTAG'],['hardware-cdc-jtag','TinyUSB CDC'],['uart','']])assert.equal(chooseConnection({usbInfo:usb(0x303a,0x1001),device:{...device,usbMode},usbDescription}).mode,null);
+  for(const usbInfo of [usb(0x303a,0x0002),usb(0x2886,0x0059)])assert.equal(chooseConnection({usbInfo,device:{...device,usbMode:'hardware-cdc-jtag'}}).mode,null);
+  for(const usbInfo of [usb(0x303a,0x1002),usb(0x2886,0x8059),usb(0x1234,0x5678),{}])for(const usbMode of ['tinyusb','hardware-cdc-jtag'])assert.equal(chooseConnection({usbInfo,device:{...device,usbMode}}).mode,null);
+  for(const device of [{usbMode:'hardware-cdc-jtag'},{model:'Heltec v4',usbMode:'hardware-cdc-jtag'}])assert.equal(chooseConnection({usbInfo:usb(0x303a,0x1001),device,packageArchitecture:'esp32'}).mode,null);
+});
+
+test('known DFU, explicit handoff, nRF runtime and UART bridges keep precedence over USB reports',()=>{
+  const device={model:'Heltec v4',architecture:'esp32',usbMode:'tinyusb'};
+  assert.equal(chooseConnection({usbInfo:usb(0x2886,0x0044),device}).mode,'nrf52');
+  assert.equal(chooseConnection({usbInfo:usb(0x303a,0x1001),device,handoff:true}).mode,'no_reset');
+  assert.equal(chooseConnection({usbInfo:usb(0x303a,0x1001),device,alreadyBootloader:true}).mode,'no_reset');
+  assert.equal(chooseConnection({usbInfo:usb(0x2886,0x8044),device:{model:'XIAO nRF52',architecture:'nrf52',usbMode:'tinyusb'}}).mode,'nrf52');
+  assert.equal(chooseConnection({usbInfo:usb(0x1a86,0x7523),device}).mode,'default_reset');
+});
+
+test('reviewed running-firmware history is secondary to live reports and cannot override conflicting USB evidence',()=>{
+  const usbInfo=usb(0x303a,0x1001),device={model:'Heltec v4',architecture:'esp32',usbModeStatus:'unsupported',usbModeFallback:{source:'firmware-map',usbMode:'hardware-cdc-jtag',reason:'Exact running build mapped.'}};
+  assert.equal(chooseConnection({usbInfo,device}).mode,'usb_reset');assert.equal(chooseConnection({usbInfo,device}).source,'firmware-map');
+  assert.equal(chooseConnection({usbInfo,device:{...device,usbMode:'tinyusb'}}).mode,'tinyusb');
+  assert.equal(chooseConnection({usbInfo,device,usbDescription:'TinyUSB CDC'}).mode,null);
+  assert.equal(chooseConnection({usbInfo:usb(0x303a,0x0002),device}).source,'conflict');
+  for(const usbModeStatus of ['unknown','malformed','reported',undefined])assert.equal(chooseConnection({usbInfo,device:{...device,usbModeStatus}}).mode,null);
+  assert.equal(chooseConnection({usbInfo,device:{...device,usbModeFallback:{source:'guessed-image',usbMode:'hardware-cdc-jtag'}}}).mode,null);
+  const tiny={...device,usbModeFallback:{...device.usbModeFallback,usbMode:'tinyusb'}};
+  assert.equal(chooseConnection({usbInfo,device:tiny}).mode,'tinyusb');assert.equal(chooseConnection({usbInfo,device:tiny,usbDescription:'USB Serial/JTAG'}).source,'conflict');
+});
 
 test('known exact nRF52 DFU selects serial DFU without another touch',()=>{
   for(const [vid,pid] of [[0x2886,0x0057],[0x2886,0x0044],[0x239a,0x0029]]){

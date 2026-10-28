@@ -10,6 +10,12 @@ const uartIds=new Set([
 const usbId=info=>[info?.usbVendorId,info?.usbProductId].every(n=>Number.isInteger(n)&&n>=0&&n<=65535)?[info.usbVendorId,info.usbProductId].map(n=>n.toString(16).padStart(4,'0')).join(':'):'';
 const result=(mode,alreadyBootloader,source,reason)=>({mode,alreadyBootloader,source,reason});
 
+export function parseUsbMode(reply){
+  if(typeof reply!=='string'||reply.length>128)return null;
+  const match=/^usb\.mode (hardware-cdc-jtag|tinyusb|uart|unknown)$/.exec(reply);
+  return match?.[0]===reply?match[1]:null;
+}
+
 // device.architecture must come from the exact matched running-firmware model,
 // not a proposed image filename. usbDescription, when supplied, must describe
 // this selected port (e.g. a separately granted matching USB descriptor).
@@ -26,6 +32,28 @@ export function chooseConnection({usbInfo={},device=null,usbDescription='',alrea
   const description=typeof usbDescription==='string'&&usbDescription.length<=512?usbDescription:'';
   const tiny=/\bTinyUSB\b/i.test(description),jtag=/\b(?:USB[ -]JTAG[/ -](?:serial|debug)|USB\s+Serial[/ -]JTAG)\b/i.test(description);
   if(tiny&&jtag)return result(null,false,'conflict','Conflicting TinyUSB and USB-Serial/JTAG descriptor evidence; choose the connection method manually.');
+  const reported=architecture==='esp32'&&device?.model?device.usbMode:null;
+  if(['303a:1001','303a:0002','2886:0059'].includes(id)){
+    if(reported==='hardware-cdc-jtag'){
+      if(tiny||id!=='303a:1001')return result(null,false,'conflict','The running firmware reports hardware USB-Serial/JTAG, but the selected USB interface disagrees; choose the connection method manually.');
+      return result('usb_reset',false,'application-report','The selected running firmware reports hardware USB-Serial/JTAG; use its qualified reset after backup.');
+    }
+    if(reported==='tinyusb'){
+      if(jtag)return result(null,false,'conflict','The running firmware reports TinyUSB, but the selected descriptor reports hardware USB-Serial/JTAG; choose the connection method manually.');
+      return result('tinyusb',false,'application-report','The selected running firmware reports TinyUSB; use its qualified control-line handoff at 115200 after backup.');
+    }
+    if(reported==='uart')return result(null,false,'conflict','The running firmware reports a UART primary console on a native USB interface; choose the connection method manually.');
+    const fallback=architecture==='esp32'&&device?.model&&['unavailable','unsupported'].includes(device.usbModeStatus)&&device.usbModeFallback?.source==='firmware-map'?device.usbModeFallback:null;
+    if(fallback?.usbMode==='hardware-cdc-jtag'){
+      if(tiny||id!=='303a:1001')return result(null,false,'conflict','The reviewed running-firmware map and selected USB interface disagree; choose the connection method manually.');
+      return result('usb_reset',false,'firmware-map',`${fallback.reason} Hardware USB-Serial/JTAG reset is selected from reviewed historical build data; backup and inspection still apply.`);
+    }
+    if(fallback?.usbMode==='tinyusb'){
+      if(jtag)return result(null,false,'conflict','The reviewed running-firmware map and selected USB descriptor disagree; choose the connection method manually.');
+      return result('tinyusb',false,'firmware-map',`${fallback.reason} TinyUSB handoff at 115200 is selected from reviewed historical build data; backup and inspection still apply.`);
+    }
+    if(fallback?.usbMode==='uart')return result(null,false,'conflict','The reviewed running-firmware map expects a UART console on this native USB interface; choose the connection method manually.');
+  }
   if(id.startsWith('303a:')&&jtag)return result('usb_reset',false,'usb-descriptor','The selected port descriptor identifies hardware USB-Serial/JTAG; use its qualified reset after backup.');
   if((id.startsWith('303a:')||id==='2886:0059')&&tiny)return result('tinyusb',false,'usb-descriptor','The selected port descriptor identifies TinyUSB; offer its guarded control-line handoff at 115200 after backup.');
   // 303a:0002 can also be an ESP32-S2 ROM endpoint. Require a successful

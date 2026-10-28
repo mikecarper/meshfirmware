@@ -5,7 +5,10 @@ import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import {detectBoard,detectRecoveryProfile} from '../src/board-detection.js';
 import {chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode} from '../src/automatic.js';
-import {chooseConnection} from '../src/connection-choice.js';
+import {chooseConnection,parseUsbMode} from '../src/connection-choice.js';
+import {lookupUsbConnectionMap} from '../src/usb-connection-map.js';
+import {createNextStepScroller} from '../src/next-step-scroll.js';
+import {tryNativeUsbFallback} from '../src/connection-fallback.js';
 import {catalogProvider,catalogItemKey} from '../src/catalog.js';
 import {hash as firmwareHash,md5hex,partitionTable as parsePartitionTable} from '../src/firmware.js';
 import {MigrationApproval} from '../src/migration-approval.js';
@@ -31,9 +34,9 @@ function workbench({pending=null,recovery=null,espRecovery=null,catalogPromise=n
   const storage=new Map(pending?[['meshfirmware.pendingMigration',JSON.stringify(pending)]]:[]);
   if(recovery)storage.set('meshfirmware.nrfRecovery',JSON.stringify(recovery));
   if(espRecovery)storage.set('meshfirmware.espRecovery',JSON.stringify(espRecovery));
-  const context=vm.createContext({document:{getElementById:id=>{assert.ok(elements.has(id),`Missing HTML id ${id}`);return elements.get(id);},querySelectorAll:()=>[...elements.values()]},navigator:{serial:{requestPort:async()=>{calls.push('chooser');return port;},getPorts(){throw new Error('must not enumerate automatically');},addEventListener(type,handler){serialEvents[type]=handler;}}},window:{addEventListener(type,handler){windowEvents[type]=handler;}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},Option,URL,Blob,Uint8Array,TextEncoder,TextDecoder,console,setTimeout,clearTimeout,AbortSignal,Date,
-    fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,MigrationApproval,cleanCliReply,assessBootloaderVersion,firmwareFilesLinks,fetch:async()=>{throw Error('Unexpected network request');},fetchFirmwareBytes:(url,options)=>verifiedDownload(url,{...options,mirrorBase:'https://mirror.example.test/firmware/',pageOrigin:'https://mirror.example.test',fetchImpl:(target,init)=>target==='https://mirror.example.test/firmware/index.json'?Promise.resolve({ok:false,status:404}):options.fetchImpl(target,init)}),assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),
-    SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
+  const context=vm.createContext({lookupUsbConnectionMap,usbConnectionMap:{schemaVersion:1,builds:[]},document:{getElementById:id=>{assert.ok(elements.has(id),`Missing HTML id ${id}`);return elements.get(id);},querySelectorAll:()=>[...elements.values()]},navigator:{serial:{requestPort:async()=>{calls.push('chooser');return port;},getPorts(){throw new Error('must not enumerate automatically');},addEventListener(type,handler){serialEvents[type]=handler;}}},window:{addEventListener(type,handler){windowEvents[type]=handler;}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},Option,URL,Blob,Uint8Array,TextEncoder,TextDecoder,console,setTimeout,clearTimeout,AbortSignal,Date,
+    fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,parseUsbMode,MigrationApproval,cleanCliReply,assessBootloaderVersion,firmwareFilesLinks,fetch:async()=>{throw Error('Unexpected network request');},fetchFirmwareBytes:(url,options)=>verifiedDownload(url,{...options,mirrorBase:'https://mirror.example.test/firmware/',pageOrigin:'https://mirror.example.test',fetchImpl:(target,init)=>target==='https://mirror.example.test/firmware/index.json'?Promise.resolve({ok:false,status:404}):options.fetchImpl(target,init)}),assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),
+    createNextStepScroller,tryNativeUsbFallback,SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
   });
   vm.runInContext(source,context);
   return {context,elements,calls,port,serialEvents,windowEvents,evaluate:code=>vm.runInContext(code,context)};
@@ -272,9 +275,18 @@ test('manual firmware, archive and connection prerequisites get one next-action 
     if(scenario==='role'){ui.elements.get('hardware').value='Heltec v4';ui.elements.get('role').options=[{value:''},{value:'repeater'},{value:'companionFull'}];}
     if(scenario==='artifact'){ui.elements.get('hardware').value='Heltec v4';ui.elements.get('role').value='repeater';}
     if(scenario==='archive-entry'||scenario==='load-entry'){ui.evaluate('state.archive=new Uint8Array(64);');ui.elements.get('archive-entry').value=scenario==='load-entry'?'exact.bin':'';}
-    if(scenario==='expert-offset'||scenario==='transport-mode'){ui.context.pkg=fakePackage({architecture:'esp32',expert:scenario==='expert-offset'});ui.evaluate('state.pkg=pkg;');if(scenario==='transport-mode')ui.elements.get('transport-mode').value='auto';}
+    if(scenario==='expert-offset'||scenario==='transport-mode'){ui.context.pkg=fakePackage({architecture:'esp32',expert:scenario==='expert-offset'});ui.evaluate('state.pkg=pkg;');if(scenario==='transport-mode'){ui.elements.get('transport-mode').value='auto';ui.port.getInfo=()=>({usbVendorId:0x1234,usbProductId:0x5678});}}
     ui.evaluate('controls();');assert.deepEqual(nextHighlight(ui),[scenario],scenario);assert.deepEqual(ui.calls,[],scenario);assert.equal(ui.evaluate('state.plan'),null,scenario);
   }
+});
+
+test('a newly required low-page connection control is revealed and scrolled into view once without focus or clicks',async()=>{
+  const ui=workbench();await Promise.resolve();let frame;const scroll=[];
+  ui.context.window.innerHeight=800;ui.context.window.innerWidth=1200;ui.context.window.requestAnimationFrame=callback=>{frame=callback;return 1;};ui.context.window.cancelAnimationFrame=()=>{frame=null;};ui.context.window.matchMedia=()=>({matches:true});
+  const target=ui.elements.get('transport-mode');target.getBoundingClientRect=()=>({top:1400,bottom:1450,left:50,right:650});target.scrollIntoView=options=>scroll.push(options);target.focus=()=>assert.fail('Guidance must not steal focus');
+  ui.context.selectedPort=ui.port;ui.port.getInfo=()=>({usbVendorId:0x1234,usbProductId:0x5678});ui.context.pkg=fakePackage({architecture:'esp32'});target.value='auto';ui.evaluate('state.port=selectedPort;state.pkg=pkg;controls();');
+  assert.equal(ui.elements.get('connection-options').open,true);assert.deepEqual(nextHighlight(ui),['transport-mode']);assert.equal(scroll.length,0);frame();assert.deepEqual(scroll,[{block:'center',behavior:'auto'}]);
+  frame=null;ui.evaluate('controls();');assert.equal(frame,null);assert.equal(scroll.length,1);assert.deepEqual(ui.calls,[]);
 });
 
 test('confirmation and backup-dialog next buttons take over while busy and release their cue on close',async()=>{
@@ -343,7 +355,7 @@ test('production defaults select connected old V4 role, latest update and TinyUS
 
 const headlessV4Item=(more={})=>({...v4Item,provider:'Keymind Cascade',version:'v1.18.0.2-halo-keymind-cascade-dev-eab29a12',name:'heltec_v4_repeater-full-usb-wifi-ota-v1.18.0.2-halo-keymind-cascade-dev-eab29a12.bin',releaseNotes:'EXACT TARGET - heltec_v4_repeater. Match exact hardware.\nSETUP - https://mikecarper.github.io/MeshCore/firmware_picker/?hardware=heltec_v4',...more});
 
-test('connecting a reviewed screenless V4 automatically selects exact hardware and matching safe firmware, not USB reset mode',async()=>{
+test('connecting a reviewed screenless V4 selects exact hardware and firmware without resetting; unknown connection is tested only during preparation',async()=>{
   for(const model of ['Heltec V4.2 none detected','Heltec V4.3 none detected']){
     const ui=workbench({productionDefaults:true});await Promise.resolve();serialMock(ui);
     const matching=headlessV4Item();ui.context.inventory=[matching,
@@ -355,9 +367,16 @@ test('connecting a reviewed screenless V4 automatically selects exact hardware a
     assert.deepEqual(ui.calls,[]);await ui.elements.get('select-port').onclick();
     assert.equal(ui.elements.get('hardware').value,'Heltec v4',model);assert.equal(ui.elements.get('provider').value,'Keymind Cascade');assert.equal(ui.elements.get('role').value,'repeater');assert.equal(ui.elements.get('version').value,matching.version);assert.equal(ui.elements.get('artifact').value,'0');
     assert.equal(ui.evaluate('state.device.architecture'),'esp32');assert.match(ui.elements.get('board-detection').textContent,/Selected Heltec v4/);assert.match(ui.elements.get('automatic-summary').textContent,/Write-only update selected/);
-    assert.deepEqual(ui.calls,['chooser','open','detect','close']);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('flash').disabled,true);
-    assert.equal(ui.evaluate('state.connection.mode'),null);assert.match(ui.elements.get('connection-summary').textContent,/needs a manual choice/); // Shared 303a:1001 is not a reset-protocol proof.
+    assert.deepEqual(ui.calls,['chooser','open','detect','get usb.mode','close']);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('flash').disabled,true);
+    assert.equal(ui.evaluate('state.connection.mode'),null);assert.match(ui.elements.get('connection-summary').textContent,/test the qualified USB methods.*after backup/); // Shared 303a:1001 alone still is not reset-protocol proof.
   }
+});
+
+test('connecting an updated V4 automatically selects its firmware-reported hardware USB reset method',async()=>{
+  const ui=workbench({productionDefaults:true});await Promise.resolve();serialMock(ui);ui.context.inventory=[headlessV4Item()];ui.evaluate('state.items=inventory;filterCatalog();');
+  ui.context.detectMeshCore=async()=>({model:'Heltec V4.2 none detected',name:'Test V4',role:'common-cli',catalogRole:'repeater',version:'v1.18.0.2',publicKey:'11'.repeat(32)});
+  ui.context.SerialLink.prototype.command=async command=>{ui.calls.push(command);assert.equal(command,'get usb.mode');return '> usb.mode hardware-cdc-jtag\r\n';};
+  await ui.elements.get('select-port').onclick();assert.equal(ui.elements.get('hardware').value,'Heltec v4');assert.equal(ui.elements.get('artifact').value,'0');assert.equal(ui.elements.get('transport-mode').value,'auto');assert.equal(ui.evaluate('state.connection.mode'),'usb_reset');assert.equal(ui.evaluate('state.device.usbMode'),'hardware-cdc-jtag');assert.deepEqual(nextHighlight(ui),['prepare']);assert.deepEqual(ui.calls,['chooser','open','get usb.mode','close']);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.pkg'),null);
 });
 
 test('a newer screenless V4 auto-selects the available older catalog build with a downgrade warning',async()=>{
@@ -1427,6 +1446,139 @@ test('companion bootloader version reads use only the supported read-only CLI an
     const ui=await bootloaderOfferWorkbench({role:'companion',protocol});
     assert.deepEqual(ui.calls,protocol>=14?['binary-query:get bootloader.ver']:[]);assert.equal(ui.evaluate('state.device.publicKey'),'11'.repeat(32));assert.equal(ui.elements.get('prepare-bootloader-update').hidden,protocol<14);
     if(protocol<14){assert.equal(ui.evaluate('state.device.bootloaderVersion'),null);assert.match(ui.elements.get('nrf-bootloader-status').textContent,/could not be verified|unknown/i);}
+  }
+});
+
+async function usbModeWorkbench({reply='usb.mode hardware-cdc-jtag',role='common-cli',protocol=14,usbInfo={usbVendorId:0x303a,usbProductId:0x1001},model='Heltec V4.2 none detected',map={schemaVersion:1,builds:[]},version}={}){
+  const ui=workbench({productionDefaults:true});await Promise.resolve();ui.context.selectedPort=ui.port;ui.port.getInfo=()=>usbInfo;ui.context.inventory=[headlessV4Item()];ui.context.pkg=fakePackage({architecture:'esp32'});ui.evaluate('state.items=inventory;state.port=selectedPort;state.pkg=pkg;');
+  ui.context.usbConnectionMap=map;ui.context.detectMeshCore=async()=>({model,role,protocol,version,publicKey:'11'.repeat(32)});
+  ui.context.reply=reply;const response=()=>{if(ui.context.reply instanceof Error)throw ui.context.reply;return ui.context.reply;};
+  const link={command:async(command,timeout)=>{ui.calls.push('query:'+command);assert.equal(command,'get usb.mode');assert.equal(timeout,350);return response();}};ui.context.testLink=link;
+  ui.context.MeshCore=class{constructor(selected,options){assert.equal(selected,link);assert.equal(options.timeoutMs,700);}async cli(command){ui.calls.push('binary-query:'+command);assert.equal(command,'get usb.mode');return response();}};
+  await ui.evaluate('readApplication(testLink);');ui.evaluate('controls();');return ui;
+}
+
+test('a V4 firmware USB-mode report selects automatic connection without requesting a manual override',async()=>{
+  for(const [reply,usbMode,mode] of [['> get usb.mode\r\n> usb.mode hardware-cdc-jtag\r\n','hardware-cdc-jtag','usb_reset'],['usb.mode tinyusb','tinyusb','tinyusb']]){
+    const ui=await usbModeWorkbench({reply});assert.equal(ui.evaluate('state.device.usbMode'),usbMode);assert.equal(ui.evaluate('state.connection.mode'),mode);assert.equal(ui.evaluate('state.connection.source'),'application-report');assert.equal(ui.elements.get('transport-mode').value,'auto');assert.deepEqual(nextHighlight(ui),['prepare']);assert.match(ui.elements.get('connection-summary').textContent,/reports/);assert.deepEqual(ui.calls,['query:get usb.mode']);
+  }
+});
+
+test('USB-mode reads use only read-only supported companion CLI and gracefully tolerate older firmware',async()=>{
+  for(const protocol of [13,14,15]){
+    const ui=await usbModeWorkbench({role:'companion',protocol});assert.deepEqual(ui.calls,protocol>=14?['binary-query:get usb.mode']:[]);assert.equal(ui.evaluate('state.device.usbMode'),protocol>=14?'hardware-cdc-jtag':null);assert.equal(ui.evaluate('state.device.publicKey'),'11'.repeat(32));
+  }
+  for(const reply of ['Unknown command','ERROR: not supported','get usb.mode','usb.mode unknown','usb.mode uart','usb.mode tinyusb extra','usb.mode tinyusb\nusb.mode hardware-cdc-jtag','log line\nusb.mode hardware-cdc-jtag',new Error('Optional CLI timed out')]){
+    const ui=await usbModeWorkbench({reply});assert.equal(ui.evaluate('state.connection.mode'),null,String(reply));assert.equal(ui.evaluate('state.device.publicKey'),'11'.repeat(32));assert.deepEqual(ui.calls,['query:get usb.mode']);
+  }
+});
+
+test('USB-mode queries skip unqualified USB identities and unknown models',async()=>{
+  for(const values of [{usbInfo:{usbVendorId:0x1a86,usbProductId:0x7523}},{usbInfo:{usbVendorId:0x303a,usbProductId:0x1002}},{usbInfo:{usbVendorId:0x2886,usbProductId:0x0044}},{model:'Unreviewed board'}]){
+    const ui=await usbModeWorkbench(values);assert.deepEqual(ui.calls,[]);assert.equal(ui.evaluate('state.device.usbMode'),null);
+  }
+});
+
+test('USB-mode reporting cannot retain a previous valid report or stale read evidence',async()=>{
+  const ui=await usbModeWorkbench();ui.calls.length=0;ui.context.reply='Unknown command';await ui.evaluate('readApplication(testLink);');assert.equal(ui.evaluate('state.device.usbMode'),null);assert.equal(ui.evaluate('state.connection.mode'),null);assert.deepEqual(ui.calls,['query:get usb.mode']);
+  for(const change of ['disconnect','generation']){
+    const stale=workbench({productionDefaults:true});await Promise.resolve();stale.context.selectedPort=stale.port;stale.context.inventory=[headlessV4Item()];stale.evaluate('state.items=inventory;state.port=selectedPort;');stale.context.detectMeshCore=async()=>({model:'Heltec V4.2 none detected',role:'common-cli',publicKey:'11'.repeat(32)});
+    stale.context.testLink={command:async()=>{if(change==='disconnect')stale.serialEvents.disconnect({port:stale.port});else stale.evaluate('state.generation++;');return 'usb.mode hardware-cdc-jtag';}};
+    await assert.rejects(stale.evaluate('readApplication(testLink);'),/changed or disconnected.*USB mode/);assert.equal(stale.evaluate('state.device'),null,change);
+  }
+});
+
+test('an explicit user connection override remains selected after reading the firmware USB mode',async()=>{
+  const ui=await usbModeWorkbench();ui.elements.get('transport-mode').value='tinyusb';await ui.evaluate('readApplication(testLink);');assert.equal(ui.elements.get('transport-mode').value,'tinyusb');assert.equal(ui.evaluate('connectionMode()'),'tinyusb');assert.deepEqual(ui.calls,['query:get usb.mode','query:get usb.mode']);
+});
+
+function historicalUsbMap(usbMode='hardware-cdc-jtag'){
+  return {schemaVersion:1,builds:[{version:'v1.18.0.1-halo-keymind-cascade-dev-03214a16',source:{repository:'https://github.com/mikecarper/MeshCore',revision:'03214a16df2bd09d3272dfb001d2d322c6740f60'},profiles:[{hardware:'Heltec v4',architecture:'esp32',role:'repeater',usbMode,usbIds:['303a:1001'],targets:['heltec_v4_repeater'],evidence:['variants/heltec_v4/platformio.ini']}]}]};
+}
+
+test('reviewed USB history handles unsupported older firmware using the exact running version, not the replacement',async()=>{
+  const map=historicalUsbMap(),version=map.builds[0].version+' (Build: 27-Oct-2026)';
+  for(const reply of ['Unknown command','ERROR: not supported',new Error('Optional CLI timed out')]){
+    const ui=await usbModeWorkbench({map,version,reply});assert.equal(ui.evaluate('state.connection.mode'),'usb_reset');assert.equal(ui.evaluate('state.connection.source'),'firmware-map');assert.deepEqual(nextHighlight(ui),['prepare']);assert.deepEqual(ui.calls,['query:get usb.mode']);
+    ui.elements.get('hardware').value='A different selected replacement board';ui.elements.get('provider').value='MeshCore';ui.evaluate('updateConnectionChoice();');assert.equal(ui.evaluate('state.connection.mode'),'usb_reset');
+  }
+  for(const version of ['v1.18.0.1-halo-keymind-cascade-dev-99999999','v1.18.0.1-halo-keymind-cascade-dev-observer-03214a16','v1.18.0.1-halo-keym',undefined]){
+    const ui=await usbModeWorkbench({map,version,reply:'Unknown command'});assert.equal(ui.evaluate('state.connection.mode'),null,String(version));
+  }
+});
+
+test('live USB reports win history while explicit unknown or malformed reports never silently use history',async()=>{
+  const map=historicalUsbMap(),version=map.builds[0].version;
+  const live=await usbModeWorkbench({map,version,reply:'usb.mode tinyusb'});assert.equal(live.evaluate('state.connection.mode'),'tinyusb');assert.equal(live.evaluate('state.connection.source'),'application-report');
+  for(const reply of ['usb.mode unknown','usb.mode uart','usb.mode tinyusb extra','log line\nusb.mode hardware-cdc-jtag']){
+    const ui=await usbModeWorkbench({map,version,reply});assert.equal(ui.evaluate('state.connection.mode'),null,reply);assert.equal(ui.evaluate('state.device.usbModeFallback'),null,reply);
+  }
+  const invalid=await usbModeWorkbench({map:{schemaVersion:999},version,reply:'Unknown command'});assert.equal(invalid.evaluate('state.connection.mode'),null);
+  const noModel=await usbModeWorkbench({map,version,model:'Unreviewed board',reply:'Unknown command'});assert.equal(noModel.evaluate('state.device.usbModeFallback'),null);assert.equal(noModel.evaluate('state.connection.mode'),null);
+});
+
+test('companion USB history needs the complete CLI version wrapper, never a truncated DEVICE_INFO field',async()=>{
+  const map=historicalUsbMap();map.builds[0].profiles[0].role='companionFull';
+  for(const version of ['v1.18.0.1-halo-keym',map.builds[0].version]){
+    const ui=await usbModeWorkbench({map,version,role:'companion',protocol:13,reply:'Unknown command'});assert.equal(ui.evaluate('state.connection.mode'),null);assert.deepEqual(ui.calls,[]);
+  }
+  const version=`Companion ${map.builds[0].version} (protocol 14, build 27-Oct-2026)`;
+  const ui=await usbModeWorkbench({map,version,role:'companion',reply:'Unknown command'});assert.equal(ui.evaluate('state.connection.mode'),'usb_reset');assert.equal(ui.evaluate('state.connection.source'),'firmware-map');
+});
+
+async function connectionTrialWorkbench({failures=0,disconnect=false,fail=null}={}){
+  const ui=await usbModeWorkbench({reply:'Unknown command'});ui.calls.length=0;
+  ui.context.ensureBackup=async()=>ui.calls.push('backup-considered');let count=0;
+  ui.context.EspSession=class{
+    constructor(port){assert.equal(port,ui.port);}
+    async connect(mode,options){ui.calls.push('connect:'+mode);assert.equal(options.singleReset,true);if(fail)throw fail;if(count++<failures)throw Object.assign(Error('No ROM response'),{romHandshakeFailed:true});return {chip:'ESP32-S3',mac:'aa:bb:cc:dd:ee:ff',flashBytes:16<<20};}
+    async prepare(){ui.calls.push('prepare');return {sha256:ui.context.pkg.sha256,addresses:[0x10000],mac:'aa:bb:cc:dd:ee:ff'};}
+    async close(){ui.calls.push('close');}
+  };
+  ui.context.touch1200=async(port,kind)=>{assert.equal(port,ui.port);assert.equal(kind,'tinyusb');ui.calls.push('tinyusb-handoff');if(disconnect)ui.serialEvents.disconnect({port:ui.port});};
+  return ui;
+}
+
+test('unknown native ESP connection prepares with bounded actual tests after backup, retaining the first working method',async()=>{
+  for(const [failures,mode,expected] of [[0,'no_reset',['backup-considered','connect:no_reset','prepare']],[1,'usb_reset',['backup-considered','connect:no_reset','close','connect:usb_reset','prepare']],[2,'no_reset',['backup-considered','connect:no_reset','close','connect:usb_reset','close','tinyusb-handoff','connect:no_reset','prepare']]]){
+    const ui=await connectionTrialWorkbench({failures});assert.deepEqual(nextHighlight(ui),['prepare']);assert.equal(ui.elements.get('connection-options').open,undefined);
+    await ui.elements.get('prepare').onclick();assert.deepEqual(ui.calls,expected);assert.equal(ui.evaluate('state.plan.transportMode'),mode);assert.equal(ui.evaluate('state.plan.port'),ui.port);assert.equal(ui.elements.get('transport-mode').value,'auto');assert.deepEqual(nextHighlight(ui),['flash']);assert.match(ui.elements.get('connection-summary').textContent,/verified by ROM/);
+  }
+});
+
+test('trial handoff on USB re-enumeration guides selection without another touch, erase or write',async()=>{
+  const ui=await connectionTrialWorkbench({failures:2,disconnect:true});await ui.elements.get('prepare').onclick();
+  assert.deepEqual(ui.calls,['backup-considered','connect:no_reset','close','connect:usb_reset','close','tinyusb-handoff']);assert.equal(ui.evaluate('state.port'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('transport-mode').value,'no_reset');assert.equal(ui.elements.get('already-bootloader').checked,true);assert.deepEqual(nextHighlight(ui),['select-port']);assert.match(ui.elements.get('notice').textContent,/Nothing has been erased or written/);
+});
+
+test('exhausted or fatal trial errors stop automation and expose the final manual connection choice',async()=>{
+  for(const options of [{failures:3},{fail:new Error('Secure boot is enabled')},{fail:Object.assign(new Error('Access denied'),{name:'NotAllowedError'})}]){
+    const ui=await connectionTrialWorkbench(options);await ui.elements.get('prepare').onclick();assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.esp'),null);assert.deepEqual(nextHighlight(ui),['transport-mode']);assert.equal(ui.elements.get('connection-options').open,true);assert.equal(ui.evaluate('canTryConnectionFallback()'),false);
+    assert.equal(ui.calls.filter(call=>call==='connect:usb_reset').length,options.fail?0:1);assert.equal(ui.calls.filter(call=>call==='tinyusb-handoff').length,options.fail?0:1);assert.ok(!ui.calls.includes('prepare'));
+  }
+});
+
+test('a disconnect or changed image during asynchronous ESP preparation cannot rebind a stale trial plan',async()=>{
+  for(const change of ['disconnect','generation','image','installation','session']){
+    const ui=await connectionTrialWorkbench();const Session=ui.context.EspSession;
+    ui.context.EspSession=class extends Session{async prepare(){const plan=await super.prepare();if(change==='disconnect')ui.serialEvents.disconnect({port:ui.port});if(change==='generation')ui.evaluate('state.generation++;');if(change==='image')ui.evaluate('state.pkg={...pkg};');if(change==='installation')ui.evaluate("state.installMode='install';");if(change==='session')ui.evaluate('state.esp=null;');return plan;}};
+    await ui.elements.get('prepare').onclick();assert.equal(ui.evaluate('state.plan'),null,change);assert.match(ui.elements.get('notice').textContent,/stale plan|changed during preparation/,change);assert.equal(ui.calls.filter(call=>call.startsWith('connect:')).length,1,change);
+  }
+});
+
+test('active method trials do not replace live/history results, explicit overrides or pending protected flows',async()=>{
+  for(const scenario of ['live','history','manual','uart','unknown-usb','nrf','handoff','already-bootloader','migration','migrationApproval','recovery','espRecovery','verification','plan']){
+    const ui=await connectionTrialWorkbench();
+    if(scenario==='live')ui.evaluate("state.device.usbMode='tinyusb';state.device.usbModeStatus='reported';");
+    if(scenario==='history')ui.evaluate("state.device.usbModeFallback={source:'firmware-map',usbMode:'hardware-cdc-jtag'};");
+    if(scenario==='manual')ui.elements.get('transport-mode').value='tinyusb';
+    if(scenario==='uart')ui.port.getInfo=()=>({usbVendorId:0x1a86,usbProductId:0x7523});
+    if(scenario==='unknown-usb')ui.port.getInfo=()=>({usbVendorId:0x1234,usbProductId:0x5678});
+    if(scenario==='nrf')ui.evaluate("state.device.architecture='nrf52';");
+    if(scenario==='already-bootloader')ui.elements.get('already-bootloader').checked=true;
+    if(scenario==='handoff')ui.evaluate('state.handoff=true;');
+    if(['migration','migrationApproval','recovery','espRecovery','verification','plan'].includes(scenario))ui.evaluate(`state.${scenario}={};`);
+    assert.equal(ui.evaluate('canTryConnectionFallback()'),false,scenario);assert.deepEqual(ui.calls,[],scenario);
   }
 });
 

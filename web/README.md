@@ -25,7 +25,10 @@ a dark primary button, matching USB selection and Flash. The installation
 choices share one numbered, accessible radio group—not another action button.
 The next-step hint follows the current stage. The next required control has an
 amber outline, and the next button also shows **Next**, including USB selection
-after a DFU reconnect. This is guidance only; highlighting never runs an action.
+after a DFU reconnect. Newly required controls are revealed and scrolled into
+view when needed, including connection controls lower on the page. Repeated
+updates do not keep moving the page; reduced-motion preferences are respected.
+This is guidance only; highlighting never focuses, clicks or runs an action.
 If an ordinary bootloader handoff reconnects USB, repeat 1 then 3 for the same
 radio. Supported partition expansion instead uses one scoped confirmation for
 the bridge and final firmware and continues automatically; only a newly
@@ -66,7 +69,28 @@ visible. The top navigation opens the corresponding tools without touching USB.
    Both links are beside the build selector and work without a USB connection.
    **Advanced options & troubleshooting → Connection & automatic setup** retains
    connection overrides. Explicit choices are not
-   silently substituted. Choose **Keymind Cascade** or **MeshCore (stock)**;
+   silently substituted. Updated firmware exposes read-only **get usb.mode**;
+   the page uses a valid report from the selected responding ESP32 application
+   to distinguish hardware USB-Serial/JTAG from TinyUSB, including shared
+   `303a:1001` interfaces. When that getter is unavailable, the bundled reviewed
+   JSON map matches the **running** hardware, complete version, role and USB ID,
+   not the firmware selected for installation. All applicable profiles must
+   agree. An explicit live report takes precedence; unknown or conflicting
+   historical entries are not guessed.
+
+   If neither report nor history resolves a qualified native ESP32 connection,
+   **Backup & prepare** tests the connection after backup is considered: first
+   ROM synchronization without reset, then one USB-JTAG entry, then one TinyUSB
+   handoff at 115200 and a no-reset synchronization if the same granted endpoint
+   remains available. The first working session is retained. These tests never
+   erase or write flash, never try UART/nRF52 reset sequences on native ESP32 USB,
+   and never run during recovery, migration or startup verification. Permission,
+   security, chip or post-sync failures stop the sequence. A new USB interface
+   still needs browser permission; no different port is silently substituted.
+   Manual connection selection is the final fallback and is scrolled into view.
+   Explicit manual overrides remain unchanged. No connection inference bypasses
+   backup, chip, board or write confirmation checks.
+   Choose **Keymind Cascade** or **MeshCore (stock)**;
    the old separate Logging provider is folded into Keymind Cascade because
    current releases use the same binaries, with runtime logging where supported.
    Duplicate files are removed, distinct historical application builds remain available,
@@ -460,6 +484,30 @@ GitHub-application coverage. Publication checks every mirrored file and keeps
 the complete site below 950 MB; no local device files are mirror inputs.
 The catalog and its compressed last-known cache contain public release metadata
 only. Browser storage is not a substitute for a downloaded private backup.
+
+### Reviewed USB history
+
+`src/data/usb-connection-map.json` is bundled at build time, without an extra
+startup download. The checked-in public inventory records exact release
+manifests, source revisions, environments and sampled embedded-version evidence.
+The generator resolves pinned source build flags and in-repository board
+definitions. Missing external board definitions, uncertain primary-console
+aliases and unresolved profiles stay explicitly unknown; a missing entry never
+authorizes a guessed reset. The initial snapshot retains 2,081 profiles across
+14 exact version/source builds, including unknown rows that prevent false
+consensus. Existing exact nRF52/UART detection remains independent of this map.
+
+To review and regenerate it, use a MeshCore checkout containing the pinned
+source objects (these commands do not build or touch devices):
+
+```sh
+node scripts/collect-usb-connection-inventory.mjs --checkout=/path/to/MeshCore --output=scripts/usb-connection-inventory.json
+node scripts/build-usb-connection-map.mjs --source-checkout /path/to/MeshCore
+node --test test/usb-connection-*.test.js
+```
+
+Review changed provenance and unresolved coverage before committing. The normal
+site build does not fetch source or regenerate trusted mappings automatically.
 
 References: [official MeshCore flasher](https://github.com/meshcore-dev/flasher.meshcore.io),
 [Espressif esptool-js](https://github.com/espressif/esptool-js),

@@ -6,6 +6,37 @@ const RECOVERY_FORMAT='meshfirmware-esp-write-recovery-v1';
 const RECOVERY_CHUNK=16384;
 const MAX_RECOVERY_ATTEMPTS=3;
 const interruptedTransport=error=>/NetworkError|NotFoundError|TimeoutError|InvalidStateError/.test(error?.name||'')||/disconnect|device (?:lost|removed)|port.*closed|closed.*port|timed? ?out|timeout|serial.*(?:exception|stopped|error)|no more data|stream.*(?:closed|stopped)|packet.*(?:stopped|header)|lost connection/i.test(error?.message||'');
+const handshakeReadiness=error=>['Error','ESPError','TimeoutError'].includes(error?.name||'Error')&&!/permission|denied|not.?allowed|security|disconnect|device (?:lost|removed)|port.*closed|not open|invalid state/i.test(error?.message||'')&&/timeout|timed out|no response|no serial data|invalid head of packet|failed to connect with the device/i.test(error?.message||'');
+async function detectForConnection(loader,mode,singleReset){
+  const originalSync=loader.sync,originalCommand=loader.command;
+  let attempted=false,responded=false,blocked=false;
+  if(typeof originalSync==='function')loader.sync=async function(...args){
+    attempted=true;
+    try{const result=await Reflect.apply(originalSync,this,args);responded=true;return result;}
+    catch(error){if(!handshakeReadiness(error))blocked=true;throw error;}
+  };
+  if(typeof originalCommand==='function')loader.command=async function(operation,...args){
+    const result=await Reflect.apply(originalCommand,this,[operation,...args]);
+    // A valid first SYNC response is enough proof that this method reached a
+    // ROM/stub. Losing later ACKs must not authorize another reset method.
+    if(operation===0x08)responded=true;
+    return result;
+  };
+  try{
+    if(singleReset)await detectWithSingleReset(loader,mode);
+    else await loader.detectChip(mode);
+  }catch(error){
+    // The loader collapses exhausted pre-sync timeouts to a generic ESPError.
+    // Never mark permission failures or failures after even one valid reply.
+    if(singleReset&&attempted&&!responded&&!blocked&&handshakeReadiness(error)){
+      const failure=new Error(error.message,{cause:error});failure.name=error.name;failure.romHandshakeFailed=true;throw failure;
+    }
+    throw error;
+  }finally{
+    if(typeof originalSync==='function')loader.sync=originalSync;
+    if(typeof originalCommand==='function')loader.command=originalCommand;
+  }
+}
 async function detectWithSingleReset(loader,mode) {
   const original=loader.resetConstructors;
   if(!original||typeof original!=='object')fail('The ESP loader does not expose guarded reset constructors. No automatic ROM entry is permitted.');
@@ -116,8 +147,7 @@ export class EspSession {
     // Never infer TinyUSB versus hardware JTAG from shared VID/PID 303a:1001.
     // attempts=1 alone is insufficient: chip-identification fallback can open
     // and reset again. Share one consumed budget across every reset factory.
-    if(singleReset)await detectWithSingleReset(this.loader,mode);
-    else await this.loader.detectChip(mode);
+    await detectForConnection(this.loader,mode,singleReset);
     if (![0,2,5,9,13].includes(this.loader.chip.IMAGE_CHIP_ID)) fail('This browser build does not support the detected ESP chip family.');
     await assertSecurity(this.loader); // Before RAM stub upload/register changes.
     this.mac = (await this.loader.chip.readMac(this.loader)).toLowerCase();
@@ -301,5 +331,8 @@ export class EspSession {
       await this.port.setSignals({dataTerminalReady:false,requestToSend:false});
     }
   }
-  async close() { await this.transport.disconnect().catch(() => {}); }
+  async close({strict=false}={}) {
+    if(typeof strict!=='boolean')fail('The strict-close option must be a boolean.');
+    try{await this.transport.disconnect();}catch(error){if(strict)throw error;}
+  }
 }
