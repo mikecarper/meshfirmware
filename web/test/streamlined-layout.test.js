@@ -108,10 +108,26 @@ test('the firmware build picker has adjacent accessible selection guidance witho
   assert.ok((picker.attrs['aria-describedby']||'').split(/\s+/).includes(hint.attrs.id),'Screen readers must receive the same selection prompt');
   assert.equal(hint.parent,field);assert.ok(hint.start>picker.start,'Selection guidance must follow its own picker');
   assert.equal(hint.tag,'p');assert.ok(hasClass(hint,'hint'));assert.equal(hint.attrs.role,'status');assert.equal(hint.attrs['aria-live'],'polite');assert.ok(has(hint,'hidden'),'Guidance starts hidden until a choice is needed');
-  assert.match(html.slice(hint.start).split('</p>')[0],/Choose a firmware build to continue/);
-  assert.equal(badge.tag,'span');assert.ok(has(badge,'hidden'));assert.equal(badge.parent.tag,'label');assert.equal(badge.parent.attrs.for,picker.attrs.id);assert.match(html.slice(badge.start).split('</span>')[0],/>Selection needed$/);
+  assert.match(html.slice(hint.start).split('</p>')[0],/Step 2\.5: Choose a firmware build to continue/);
+  assert.equal(badge.tag,'span');assert.ok(has(badge,'hidden'));assert.equal(badge.parent.tag,'label');assert.equal(badge.parent.attrs.for,picker.attrs.id);assert.match(html.slice(badge.start).split('</span>')[0],/>2\.5$/);
   assert.equal(closedAncestors(picker).length,0);assert.equal(closedAncestors(hint).length,0);
   assert.ok(!has(picker,'autofocus')&&!has(field,'tabindex'),'Highlighting a missing build must not move focus or add a fake control');
+});
+
+test('firmware build has a conditional non-action step 2.5 badge without renumbering primary steps',()=>{
+  const badge=get('artifact-required'),picker=get('artifact'),field=get('artifact-field');
+  assert.ok(hasClass(badge,'artifact-step-number'));assert.equal(badge.attrs['aria-hidden'],'true');assert.ok(has(badge,'hidden'),'Step 2.5 is shown only when its manual choice is needed');
+  assert.ok(!hasClass(badge,'action-number'),'Conditional step 2.5 must not change the primary step sequence');assert.ok(!has(badge,'role')&&!has(badge,'tabindex'),'The badge is a label, not another control');
+  assert.ok(inside(badge,field));assert.equal(badge.parent,picker.parent.children.find(node=>node.tag==='label'));
+  assert.match(html.slice(badge.start).split('</label>')[0],/^<[^>]+>2\.5<\/span>\s*Firmware build/,'The optional number must appear before Firmware build');
+  assert.ok(!/Step 2\.5/.test(picker.attrs['aria-label']||''),'The initial picker must not announce an inactive conditional step');
+  const numbers=nodes.filter(node=>hasClass(node,'action-number')).map(node=>/^<[^>]+>([^<]*)</.exec(html.slice(node.start))?.[1].trim());
+  assert.deepEqual(numbers,['1','2','3','4'],'The original main steps must keep their numbering');
+  const rules=declarationsFor('.artifact-step-number');
+  assert.ok(rules.some(rule=>parseFloat(rule['min-width']||'0')>=52),'The decimal step badge needs enough room for 2.5');
+  assert.ok(rules.some(rule=>parseFloat(rule.height||'0')>=40),'Step 2.5 should match the main badge height');
+  assert.ok(rules.some(rule=>parseFloat(rule['font-size']||'0')>=24),'Step 2.5 must remain visually prominent');
+  assert.ok(rules.some(rule=>rule.background==='var(--navy)'),'The optional number should use the same dark badge color as the installation step');
 });
 
 test('missing-build highlighting is scoped to the required field and preserves keyboard focus',()=>{

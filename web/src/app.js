@@ -91,7 +91,7 @@ function assertInstallModePackage(pkg){
   }
   if(pkg.architecture==='uf2'&&state.installMode==='install')fail('Erase & new install is not supported by the UF2 drive-copy path. No erase is implied; use the board-specific recovery procedure.');
 }
-function updateStepGuidance(){
+function updateStepGuidance(buildChoiceNeeded=false){
   let message;
   if(state.migrationApproval)message=state.busy?'Automatically completing the approved expansion and final firmware. Keep USB and power connected.':'Automatic completion is waiting for the same radio. Its granted USB port resumes automatically; if it does not return, use step 1 to select it. No Prepare/Flash presses are needed.';
   else if(state.busy)message='Follow the current prompt. Keep the radio connected and power stable.';
@@ -100,6 +100,7 @@ function updateStepGuidance(){
   else if(state.recovery?.phase==='reselect-dfu'||(state.handoff&&!state.port))message='Step 1 again: choose the same radio’s requested USB port. Then repeat step 3: Backup & prepare before step 4: Flash.';
   else if(!state.port)message='Step 1: Choose your radio’s USB port. Then step 2: choose Update or Erase & new install and check the firmware.';
   else if(state.plan)message='Step 4: Review & flash. Check the warning and confirm the exact operation; nothing is written before confirmation.';
+  else if(buildChoiceNeeded)message='Step 2.5: Choose a firmware build. Then step 3: Backup & prepare.';
   else if(!state.pkg&&!$('artifact').value)message='Step 2: Choose Update or Erase & new install and check the firmware build. Then step 3: Backup & prepare.';
   else message='Step 3: Backup & prepare. Follow the backup prompts and USB-port instructions; step 4 flashes only after confirmation.';
   $('step-guidance').textContent=message;
@@ -109,8 +110,10 @@ function updateArtifactChoiceHighlight(){
   const needed=!!state.port&&!state.busy&&!state.pkg&&!picker.value&&hasChoices&&!continuingDeviceFlow();
   $('artifact-field').classList.toggle('choice-required',needed);
   $('artifact-required').hidden=!needed;$('artifact-choice-hint').hidden=!needed;
+  if(needed)picker.setAttribute('aria-label','Step 2.5: Firmware build');else picker.removeAttribute('aria-label');
   picker.setAttribute('aria-required',String(needed));
   if(needed)$('firmware-choices').open=true;
+  return needed;
 }
 function controls() {
   document.querySelectorAll('[data-lock]').forEach(el => { el.disabled = state.busy; });
@@ -129,8 +132,7 @@ function controls() {
   $('load-recovery').disabled ||= !state.recoveryCatalog||!$('recovery-profile').value;
   $('retry').disabled ||= !state.port||!state.pkg;
   syncInstallMode();
-  updateStepGuidance();
-  updateArtifactChoiceHighlight();
+  updateStepGuidance(updateArtifactChoiceHighlight());
   updateBootloaderOffer();
   // Extras stay collapsed for ordinary updates, but never conceal a required
   // recovery/migration step or a deliberately selected destructive action.

@@ -1349,15 +1349,17 @@ test('a required firmware-build choice is highlighted and revealed without choos
   ui.elements.get('artifact').focus=()=>{throw Error('A required choice must not steal keyboard focus');};
   ui.evaluate('state.items=inventory;state.port=selectedPort;filterCatalog();');ui.elements.get('firmware-choices').open=false;ui.evaluate('controls();');
   assert.deepEqual(highlights.at(-1),['choice-required',true]);assert.deepEqual(aria.at(-1),['aria-required','true']);assert.equal(ui.elements.get('artifact-required').hidden,false);assert.equal(ui.elements.get('artifact-choice-hint').hidden,false);assert.equal(ui.elements.get('firmware-choices').open,true);
+  assert.ok(aria.some(([name,value])=>name==='aria-label'&&value==='Step 2.5: Firmware build'));assert.match(ui.elements.get('step-guidance').textContent,/^Step 2\.5:/);
   assert.equal(ui.elements.get('artifact').value,'');assert.equal(ui.elements.get('prepare').disabled,true);assert.deepEqual(ui.calls,[]);
 });
 
 test('selecting a firmware build clears the highlight immediately and clearing the choice restores it',async()=>{
   const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.inventory=[v4Item];ui.evaluate('state.items=inventory;state.port=selectedPort;filterCatalog();');
-  const highlights=[],aria=[];ui.elements.get('artifact-field').classList.toggle=(name,value)=>highlights.push([name,value]);ui.elements.get('artifact').setAttribute=(name,value)=>aria.push([name,value]);
+  const highlights=[],aria=[],removed=[];ui.elements.get('artifact-field').classList.toggle=(name,value)=>highlights.push([name,value]);ui.elements.get('artifact').setAttribute=(name,value)=>aria.push([name,value]);ui.elements.get('artifact').removeAttribute=name=>removed.push(name);
   ui.elements.get('artifact').value='0';await ui.elements.get('artifact').onchange();
   assert.deepEqual(highlights.at(-1),['choice-required',false]);assert.deepEqual(aria.at(-1),['aria-required','false']);assert.equal(ui.elements.get('artifact-choice-hint').hidden,true);assert.equal(ui.elements.get('artifact-required').hidden,true);assert.equal(ui.elements.get('prepare').disabled,false);
-  ui.elements.get('artifact').value='';await ui.elements.get('artifact').onchange();assert.deepEqual(highlights.at(-1),['choice-required',true]);assert.equal(ui.elements.get('prepare').disabled,true);assert.deepEqual(ui.calls,[]);
+  assert.ok(removed.includes('aria-label'));assert.match(ui.elements.get('step-guidance').textContent,/^Step 3:/);assert.doesNotMatch(ui.elements.get('step-guidance').textContent,/Step 2\.5/);
+  ui.elements.get('artifact').value='';await ui.elements.get('artifact').onchange();assert.deepEqual(highlights.at(-1),['choice-required',true]);assert.match(ui.elements.get('step-guidance').textContent,/^Step 2\.5:/);assert.equal(ui.elements.get('prepare').disabled,true);assert.deepEqual(ui.calls,[]);
 });
 
 test('build highlights do not claim a choice is needed for custom images, idle pages or pending device flows',async()=>{
