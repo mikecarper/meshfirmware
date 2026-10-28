@@ -95,7 +95,20 @@ test('status, warnings, progress and required expert offsets cannot be trapped i
   assert.equal(get('progress-label').attrs['aria-live'],'polite');assert.ok(inside(get('expert-offset'),get('expert-fields')));
   assert.ok(inside(get('archive-picker'),get('custom-firmware')));assert.ok(inside(get('download-migration'),get('migration-options')));
   for(const id of ['confirm-dialog','question-dialog']){assert.equal(get(id).tag,'dialog');assert.equal(closedAncestors(get(id)).length,0);}
-  assert.ok(has(get('confirm-submit'),'disabled'),'Typed flash authorization must remain required');
+  assert.ok(!has(get('confirm-submit'),'disabled'),'Confirmation uses an enabled action button, not a typing gate');
+});
+
+test('operation confirmation keeps warnings and explicit action buttons without text entry',()=>{
+  const dialog=get('confirm-dialog'),form=dialog.children.find(node=>node.tag==='form'),submit=get('confirm-submit');
+  assert.ok(form);assert.equal(form.attrs.method,'dialog');
+  for(const id of ['confirm-title','confirm-detail','confirm-warning'])assert.ok(inside(get(id),form),`#${id} remains visible in the confirmation form`);
+  assert.ok(hasClass(get('confirm-warning'),'notice'),'Warnings must remain prominent');
+  assert.ok(!nodes.some(node=>inside(node,form)&&['input','textarea','select'].includes(node.tag)),'No confirmation may require typing or another field');
+  for(const id of ['confirm-token-fields','token-label','confirm-token'])assert.ok(!byId.has(id),`Obsolete #${id} must not remain in the document`);
+  const buttons=nodes.filter(node=>inside(node,form)&&node.tag==='button');assert.equal(buttons.length,2);
+  const cancel=buttons.find(node=>node.attrs.value==='cancel');assert.ok(cancel);assert.match(html.slice(cancel.start).split('</button>')[0],/>Cancel$/);
+  assert.equal(submit.attrs.value,'confirm');assert.ok(inside(submit,form));assert.ok(!has(submit,'disabled'));
+  assert.match(html.slice(submit.start).split('</button>')[0],/>Confirm operation$/);
 });
 
 test('release notes and catalog metadata stay behind a collapsed Firmware details disclosure',()=>{

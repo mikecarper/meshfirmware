@@ -109,17 +109,18 @@ visible. The top navigation opens the corresponding tools without touching USB.
    same radio's ROM port and prepare again without choosing a reset strategy.
    The backup window shows validated JSON with **Copy text**, **Stop** and
    **Continue with flashing**. A partial-backup warning appears in this same
-   window, without another typed prompt. Continue resumes preparation for the
+   window, without another confirmation prompt. Continue resumes preparation for the
    normal flash review; it does not write firmware or claim the file was saved.
    The JSON download still starts automatically. Keep the download or copied
    text privately. Failed backups still need separate acknowledgement.
    nRF52 continues directly into serial DFU after backup continuation, without
-   another typed bootloader-entry prompt. Re-select the same radio's DFU port
+   another bootloader-entry prompt. Re-select the same radio's DFU port
    when asked; the final flash/wipe and board checks still apply.
    A copy and backup-only button remain available under Backup & restore.
    Lengthy release notes stay in the collapsed **Firmware details** section.
-4. Review the exact file, operation, target evidence and hash, then type the
-   confirmation token. An already-running ROM/DFU interface cannot export
+4. Review the exact file, operation, target evidence and hash, then select the
+   action-specific confirmation button. No confirmation text needs to be typed.
+   An already-running ROM/DFU interface cannot export
    application settings: select **Already in ROM/DFU** and explicitly accept
    continuing without a backup, or return to the application first.
 
@@ -177,7 +178,7 @@ writing; no blind retry or 1200-baud fallback follows an uncertain handoff.
 | MeshCore / Keymind catalog | Rebuilt daily/on deployment; repository-aware URLs, newest Keymind manifests, primary/proxy/validated-cache fallback, exact-board official utility fallback and newest-first versions; every raw publication route checked in CI |
 | ESP32/S2/C3/S3/C6 | Validated application updates and merged installs; chip/security/MAC/capacity and silicon-revision checks; factory-only/non-OTA updates and larger OTA metadata partitions supported |
 | Merged ESP32 installs | Populate missing secondary OTA slots from the exact embedded app, with independent readback; refuse ambiguous source boundaries rather than guessing |
-| ESP components | Checksum-valid bootloader/component image, explicit address, typed acknowledgement; never guess an offset |
+| ESP components | Checksum-valid bootloader/component image, explicit address and action-specific button confirmation; never guess an offset |
 | nRF52 | Serial DFU like `adafruit-nrfutil`: application, bootloader, SoftDevice or combined SD/bootloader ZIP; guided erase/reconnect/final-write; no mounted-drive workflow or generic Nordic secure-DFU substitution |
 | Other UF2 boards | Validated blocks; explicitly chosen bootloader directory and identity recheck; nRF52 UF2 is refused in favor of serial DFU ZIP |
 | MeshCore companion backup | Private identity when exposed, channels, contacts, settings, battery/storage and optional CLI snapshots; bounded asynchronous pushes tolerated during contact enumeration; completeness shown separately from integrity |
@@ -196,8 +197,8 @@ transport failures and genuine command errors still stop the restore.
 Unstructured optional CLI settings remain available for manual comparison.
 
 Revision-constrained ESP images are checked before erasing or writing. A
-mismatch or unavailable required revision needs a separate **FORCE CHIP
-REVISION** acknowledgement; this never bypasses chip-family, security or flash
+mismatch or unavailable required revision needs a separate **Flash despite
+revision mismatch** acknowledgement; this never bypasses chip-family, security or flash
 bounds checks. Forced transfers still do not prove that the image will boot.
 
 ### nRF52 erase and recovery
@@ -281,7 +282,7 @@ used as the guided erase step. Official v6/v7 erase utilities and the five
 published QSPI formatters (ThinkNode M1, T-Echo, Wio Tracker L1, XIAO nRF52 and
 Nano G2 Ultra) are recognized by their payload hashes even after renaming or
 repacking. A name-marked custom eraser requires an
-additional **CUSTOM ERASE** acknowledgement, not an automatic trust decision.
+additional **Use custom erase utility** acknowledgement, not an automatic trust decision.
 Erase packages require destructive acknowledgement even when
 their DFU manifest calls them an `application`.
 
@@ -351,8 +352,8 @@ physical chip MAC and final firmware SHA-256. The public plan and bridge are
 persisted in this browser's IndexedDB **before** bridge writes. Raw NVS/OTA
 snapshots and private backups are memory-only, not stored in that cache.
 
-For a fresh supported update, **Review & flash** asks once with **EXPAND AND
-FLASH**. This memory-only approval covers the exact chip MAC, bridge, expanded
+For a fresh supported update, **Review & flash** asks once with **Expand & flash
+firmware**. This memory-only approval covers the exact chip MAC, bridge, expanded
 table, final firmware hashes, required restarts and read-only startup checks.
 It automatically writes/verifies the bridge, waits for expansion, verifies the
 new table/restoration flags/OTA state, then writes/verifies/restarts the original
@@ -397,7 +398,7 @@ verification. An interrupted transfer never clears the pending migration.
 After a transport failure, reselect **the same physical device** already in ROM
 using **no reset**, then inspect the original image again. The recovery
 descriptor binds the chip MAC, image, layout and write ranges. A separate
-**RETRY IN CHUNKS** acknowledgement permits 16 KiB writes with independent MD5
+**Retry write in chunks** acknowledgement permits 16 KiB writes with independent MD5
 readback, for at most three explicitly reselected recovery attempts. It does
 not silently choose a port, reset the device or repeat a whole-chip erase.
 An uncertain erase completion requires a separately authorized fresh install.

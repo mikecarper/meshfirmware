@@ -39,16 +39,14 @@ test('every UI id exists once and all wired controls have matching HTML',()=>{
   for(const match of source.matchAll(/\$\('([^']+)'\)/g))assert.ok(ids.includes(match[1]),match[1]);
 });
 
-test('same-device confirmation uses a button and a following flash still requires its exact typed token',async()=>{
+test('same-device and flash confirmations use enabled action buttons without typing',async()=>{
   const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.evaluate('state.port=selectedPort;');let close;
   ui.elements.get('confirm-dialog').addEventListener=(type,handler)=>{assert.equal(type,'close');close=handler;};
-  const same=ui.evaluate("confirm('Confirm bootloader handoff','XIAO','Confirm the same radio.','SAME DEVICE',{buttonOnly:true});");
-  assert.equal(ui.elements.get('confirm-token-fields').hidden,true);assert.equal(ui.elements.get('confirm-token').value,'');assert.equal(ui.elements.get('confirm-submit').disabled,false);assert.equal(ui.elements.get('confirm-submit').textContent,'Yes, this is the same radio');assert.equal(ui.elements.get('token-label').textContent,'');
+  const same=ui.evaluate("confirm('Confirm bootloader handoff','XIAO','Confirm the same radio.','SAME DEVICE');");
+  assert.equal(ui.elements.has('confirm-token'),false);assert.equal(ui.elements.get('confirm-submit').disabled,false);assert.equal(ui.elements.get('confirm-submit').textContent,'Yes, this is the same radio');
   ui.elements.get('confirm-dialog').returnValue='confirm';close();assert.equal(await same,true);assert.deepEqual(ui.calls,[]);
   const flash=ui.evaluate("confirm('Write this firmware?','Exact image','Flash warning','FLASH');");
-  assert.equal(ui.elements.get('confirm-token-fields').hidden,false);assert.equal(ui.elements.get('confirm-submit').disabled,true);assert.equal(ui.elements.get('confirm-submit').textContent,'Confirm operation');assert.equal(ui.elements.get('token-label').textContent,'FLASH');
-  ui.elements.get('confirm-token').value='flash';ui.elements.get('confirm-token').oninput();assert.equal(ui.elements.get('confirm-submit').disabled,true);
-  ui.elements.get('confirm-token').value='FLASH';ui.elements.get('confirm-token').oninput();assert.equal(ui.elements.get('confirm-submit').disabled,false);
+  assert.equal(ui.elements.get('confirm-submit').disabled,false);assert.equal(ui.elements.get('confirm-submit').textContent,'Flash firmware');assert.equal(ui.elements.get('confirm-warning').textContent,'Flash warning');
   ui.elements.get('confirm-dialog').returnValue='confirm';close();assert.equal(await flash,true);assert.deepEqual(ui.calls,[]);
 });
 
@@ -56,7 +54,7 @@ test('same-radio button confirmation rejects cancel, Escape and a disconnected o
   for(const action of ['cancel','escape','disconnect','replace','generation']){
     const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.evaluate('state.port=selectedPort;');let close;
     ui.elements.get('confirm-dialog').addEventListener=(_type,handler)=>{close=handler;};
-    const pending=ui.evaluate("confirm('Confirm bootloader handoff','XIAO','Same radio','SAME DEVICE',{buttonOnly:true});");
+    const pending=ui.evaluate("confirm('Confirm bootloader handoff','XIAO','Same radio','SAME DEVICE');");
     ui.elements.get('confirm-dialog').returnValue=action==='cancel'?'cancel':action==='escape'?'':'confirm';
     if(action==='disconnect')ui.serialEvents.disconnect({port:ui.port});
     if(action==='replace')ui.evaluate('state.port={getInfo:()=>({})};');
@@ -65,9 +63,45 @@ test('same-radio button confirmation rejects cancel, Escape and a disconnected o
   }
 });
 
-test('only same-device port confirmations opt out of typed authorization',()=>{
-  const buttonCalls=source.split('\n').filter(line=>/await confirm\(/.test(line)&&line.includes('{buttonOnly:true}'));
-  assert.equal(buttonCalls.length,4);for(const call of buttonCalls)assert.ok(call.includes("'SAME DEVICE',{buttonOnly:true}"));
+test('all confirmation kinds have clear buttons without exposing internal action codes as commands',async()=>{
+  const cases=[['FLASH','Flash firmware'],['WIPE WITHOUT BACKUP','Erase & flash without backup'],['CONTINUE WITHOUT BACKUP','Continue without backup'],['CUSTOM ERASE','Use custom erase utility'],['ENTER BOOTLOADER','Enter USB bootloader'],['BINARY MODE','Enable binary USB mode'],['FORCE CHIP REVISION','Flash despite revision mismatch'],['RETRY IN CHUNKS','Retry write in chunks'],['EXPAND AND FLASH','Expand & flash firmware'],['EXPAND PARTITIONS','Expand partitions'],['DISCARD RETRY STATE','Discard retry record'],['WRITE 0x1000','Write at 0x1000'],['RECOVERY gat562','Install recovery bridge'],['RESTORE abcdef12','Restore settings'],['unknown-to-rak4631','Override board mismatch'],['constructor','Confirm operation']];
+  for(const [action,label] of cases){
+    const ui=workbench();await Promise.resolve();let close;ui.elements.get('confirm-dialog').addEventListener=(_type,handler)=>{close=handler;};ui.context.action=action;
+    const pending=ui.evaluate("confirm('Review operation','Exact target','Keep this warning',action);");
+    assert.equal(ui.elements.get('confirm-submit').disabled,false,action);assert.equal(ui.elements.get('confirm-submit').textContent,label,action);assert.equal(ui.elements.get('confirm-warning').textContent,'Keep this warning');
+    ui.elements.get('confirm-dialog').returnValue='cancel';close();assert.equal(await pending,false,action);assert.deepEqual(ui.calls,[]);
+  }
+  assert.doesNotMatch(source,/confirm-token|token-label|buttonOnly/);
+});
+
+test('action-button confirmation rejects cancel, Escape and changed port image plan mode or generation',async()=>{
+  for(const action of ['cancel','escape','disconnect','replace','image','plan','mode','generation']){
+    const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.evaluate('state.port=selectedPort;');let close;ui.elements.get('confirm-dialog').addEventListener=(_type,handler)=>{close=handler;};
+    const pending=ui.evaluate("confirm('Write firmware?','Exact image','Warning','FLASH');");
+    ui.elements.get('confirm-dialog').returnValue=action==='cancel'?'cancel':action==='escape'?'':'confirm';
+    if(action==='disconnect')ui.serialEvents.disconnect({port:ui.port});
+    if(action==='replace')ui.evaluate('state.port={getInfo:()=>({})};');
+    if(action==='image')ui.evaluate('state.pkg={sha256:"other"};');
+    if(action==='plan')ui.evaluate('state.plan={sha256:"other"};');
+    if(action==='mode')ui.evaluate('state.installMode="install";');
+    if(action==='generation')ui.evaluate('state.generation++;');
+    close();assert.equal(await pending,false,action);assert.deepEqual(ui.calls,[],action);
+  }
+});
+
+test('component replacement buttons name the actual nRF52 component instead of promising an application erase',async()=>{
+  for(const [kind,label] of [['bootloader','Replace bootloader'],['softdevice','Replace SoftDevice'],['softdevice_bootloader','Replace bootloader & SoftDevice']]){
+    const ui=workbench();await Promise.resolve();ui.context.pkg=fakePackage({kind,destructive:true});ui.evaluate('state.pkg=pkg;');let close;ui.elements.get('confirm-dialog').addEventListener=(_type,handler)=>{close=handler;};
+    const pending=ui.evaluate("confirm('Write this firmware?','Exact component','Component warning','WIPE WITHOUT BACKUP');");assert.equal(ui.elements.get('confirm-submit').textContent,label);ui.elements.get('confirm-dialog').returnValue='cancel';close();assert.equal(await pending,false);assert.deepEqual(ui.calls,[]);
+    ui.evaluate('state.plan={erasePkg:{}};');const erase=ui.evaluate("confirm('Write this firmware?','Erase then component','Erase warning','WIPE WITHOUT BACKUP');");assert.equal(ui.elements.get('confirm-submit').textContent,'Erase & flash without backup');ui.elements.get('confirm-dialog').returnValue='cancel';close();assert.equal(await erase,false);
+  }
+});
+
+test('button confirmations allow explicit portless operations but never approve same-radio without a port',async()=>{
+  for(const action of ['FLASH','DISCARD RETRY STATE','SAME DEVICE']){
+    const ui=workbench();await Promise.resolve();let close;ui.elements.get('confirm-dialog').addEventListener=(_type,handler)=>{close=handler;};ui.context.action=action;
+    const pending=ui.evaluate("confirm('Review operation','Exact target','Warning',action);");ui.elements.get('confirm-dialog').returnValue='confirm';close();assert.equal(await pending,action!=='SAME DEVICE');assert.deepEqual(ui.calls,[]);
+  }
 });
 
 test('reconnect guidance warns about VM USB capture without promising a timed return or an administrator CLI',()=>{
@@ -297,7 +331,7 @@ test('handoff recovery migration and verification re-selection retain the exact 
   for(const mode of ['handoff','recovery','migration','espRecovery','verification']){
     const ui=workbench({productionDefaults:true});await Promise.resolve();
     ui.context.pkg=fakePackage({name:'in-progress.bin',architecture:mode==='recovery'?'nrf52':'esp32'});ui.context.selectedPort=ui.port;ui.evaluate('state.pkg=pkg;state.port=selectedPort;');
-    ui.context.confirm=async(_title,_detail,_warning,token,options)=>{assert.equal(token,'SAME DEVICE');assert.equal(options?.buttonOnly,true);ui.calls.push('same-device');return true;};
+ui.context.confirm=async(_title,_detail,_warning,token,options)=>{assert.equal(token,'SAME DEVICE');ui.calls.push('same-device');return true;};
     if(mode==='handoff')ui.evaluate('state.handoff=true;');
     else if(mode==='recovery'){ui.evaluate('state.recovery={sha256:pkg.sha256,name:pkg.name,phase:"reselect-dfu",eraseComplete:true};');ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0044});}
     else if(mode==='migration')ui.evaluate('state.migration={mac:"aa:bb:cc:dd:ee:ff",sha256:pkg.sha256,phase:"running"};');
@@ -1409,7 +1443,7 @@ async function skipBackupWorkbench({catalogOnly=false,runtime=false,architecture
   ui.elements.get('transport-mode').value=architecture==='esp32'?'no_reset':'nrf52';ui.elements.get('auto-backup').checked=true;ui.elements.get('skip-backup').checked=true;
   if(!runtime&&architecture==='nrf52'){ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0044});ui.elements.get('already-bootloader').checked=true;}
   ui.context.captureBackup=async()=>{throw Error('Explicit skip must not capture a backup');};
-  ui.context.confirm=async(_title,_detail,warning,token,options)=>{if(token==='SAME DEVICE')assert.equal(options?.buttonOnly,true);else assert.match(warning,/chose to skip backup/i);ui.calls.push('confirm:'+token);return true;};
+  ui.context.confirm=async(_title,_detail,warning,token,options)=>{if(token!=='SAME DEVICE')assert.match(warning,/chose to skip backup/i);ui.calls.push('confirm:'+token);return true;};
   ui.context.flashNrf=async(_link,pkg)=>ui.calls.push(pkg.erase?'write-erase':'write-final');
   ui.context.touch1200=async(port,mode)=>{assert.equal(port,ui.port);assert.equal(mode,'nrf52');ui.calls.push('enter-dfu');};
   if(architecture==='esp32')ui.context.EspSession=class{async connect(mode){assert.equal(mode,'no_reset');ui.calls.push('inspect-chip');return {chip:'ESP32-S3',mac:'aa:bb:cc:dd:ee:ff',flashBytes:4<<20};}async prepare(pkg){ui.calls.push('validate-plan');return {sha256:pkg.sha256,addresses:[0x10000],mac:'aa:bb:cc:dd:ee:ff'};}async flash(){ui.calls.push('write-final');}async close(){ui.calls.push('close-rom');}};
