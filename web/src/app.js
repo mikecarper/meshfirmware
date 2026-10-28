@@ -115,6 +115,19 @@ function updateArtifactChoiceHighlight(){
   if(needed)$('firmware-choices').open=true;
   return needed;
 }
+function updateReconnectCallout(){
+  const waitingApproval=state.migrationApproval&&['waiting-rom','waiting-application'].includes(state.migrationApproval.phase);
+  const needed=!state.port&&!state.busy&&!!(state.handoff||state.recovery||state.espRecovery||state.verification||state.migration||waitingApproval);
+  $('flasher').classList.toggle('reconnect-needed',needed);$('reconnect-callout').hidden=!needed;
+  $('select-port-label').textContent=needed?'Select the same radio again':'Choose USB port';
+  $('select-port').setAttribute('aria-label',needed?'Step 1 again: Select the same radio’s USB port':'Step 1: Choose USB port');
+  if(needed){
+    const application=state.verification||state.migrationApproval?.phase==='waiting-application';
+    const nrf=state.recovery||state.pkg?.architecture==='nrf52'||$('transport-mode').value==='nrf52';
+    $('reconnect-detail').textContent=application?'Choose the same radio’s application USB port to check that the new firmware started.':nrf?'The radio restarted into DFU mode. Click below and select the same radio’s DFU USB port to continue.':'Click below and select the same radio’s returning USB bootloader port to continue. Keep USB and power connected.';
+    $('select-port').setAttribute('aria-describedby','reconnect-detail');
+  }else $('select-port').removeAttribute('aria-describedby');
+}
 function controls() {
   document.querySelectorAll('[data-lock]').forEach(el => { el.disabled = state.busy; });
   $('select-port').disabled ||= !('serial' in navigator);
@@ -147,6 +160,7 @@ function controls() {
   $('stop-migration-auto').hidden=!state.migrationApproval;
   $('stop-migration-auto').disabled=!state.migrationApproval;
   $('stop-migration-auto').textContent=state.busy?'Stop after the current step':'Stop automatic continuation';
+  updateReconnectCallout();
 }
 async function closeEsp() { const esp=state.esp;state.esp=null;state.plan=null;if(esp)await esp.close(); }
 async function operation(callback) {

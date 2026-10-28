@@ -15,7 +15,8 @@
   <main>
     <header class="page-header" id="flasher">
       <div class="page-heading"><h1>Flash firmware</h1><p id="step-guidance" role="status" aria-live="polite">Step 1: Choose your radio’s USB port. Then choose Update or Erase &amp; new install in step 2.</p></div>
-      <div class="connect-controls"><button id="select-port" class="primary step-button" aria-label="Step 1: Choose USB port" data-lock><span class="action-number" aria-hidden="true">1</span><span class="action-label">Choose USB port</span><span class="action-icon" aria-hidden="true">↗</span></button><span id="browser-status" class="tag">Checking Web Serial…</span></div>
+      <div id="reconnect-callout" class="reconnect-callout" role="alert" aria-live="assertive" hidden><strong id="reconnect-title">Select the same radio again</strong><p id="reconnect-detail">The radio’s USB port changed. Click below and choose the same physical radio.</p></div>
+      <div class="connect-controls"><button id="select-port" class="primary step-button" aria-label="Step 1: Choose USB port" data-lock><span class="action-number" aria-hidden="true">1</span><span id="select-port-label" class="action-label">Choose USB port</span><span class="action-icon" aria-hidden="true">↗</span></button><span id="browser-status" class="tag">Checking Web Serial…</span></div>
     </header>
     <div id="notice" class="notice" role="status" aria-live="polite">Choose a USB port to detect your board. Nothing is flashed automatically.</div>
 

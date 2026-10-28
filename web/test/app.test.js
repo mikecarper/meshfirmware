@@ -1343,6 +1343,36 @@ test('four-step guidance keeps mode selection at 2, backup at 3 and final confir
   assert.deepEqual(ui.calls,[]);
 });
 
+test('reselecting a radio shows a prominent existing USB action without opening a chooser or resetting',async()=>{
+  for(const pending of ['handoff','recovery','esp-recovery','verification','migration','waiting-rom','waiting-application']){
+    const ui=workbench();await Promise.resolve();ui.context.pkg=fakePackage({architecture:'nrf52'});const styles=[],aria=[];
+    ui.elements.get('flasher').classList.toggle=(name,value)=>styles.push([name,value]);ui.elements.get('select-port').setAttribute=(name,value)=>aria.push([name,value]);
+    if(pending==='handoff')ui.evaluate('state.handoff=true;state.pkg=pkg;');
+    if(pending==='recovery')ui.evaluate("state.recovery={phase:'reselect-dfu'};");
+    if(pending==='esp-recovery')ui.evaluate('state.espRecovery={};');
+    if(pending==='verification')ui.evaluate('state.verification={};');
+    if(pending==='migration')ui.evaluate('state.migration={};');
+    if(pending.startsWith('waiting-')){ui.context.phase=pending;ui.evaluate('state.migrationApproval={phase};');}
+    ui.evaluate('controls();');
+    assert.deepEqual(styles.at(-1),['reconnect-needed',true],pending);assert.equal(ui.elements.get('reconnect-callout').hidden,false,pending);assert.equal(ui.elements.get('select-port-label').textContent,'Select the same radio again',pending);
+    assert.ok(aria.some(([name,value])=>name==='aria-describedby'&&value==='reconnect-detail'),pending);
+    const detail=ui.elements.get('reconnect-detail').textContent;assert.match(detail,/same radio/i,pending);
+    if(['handoff','recovery'].includes(pending))assert.match(detail,/DFU/,pending);
+    if(['verification','waiting-application'].includes(pending))assert.match(detail,/application USB port/,pending);
+    assert.deepEqual(ui.calls,[],pending);assert.equal(ui.evaluate('state.port'),null,pending);
+  }
+});
+
+test('initial pages, active operations and a selected returning port keep the compact USB action',async()=>{
+  for(const scenario of ['initial','busy','connected']){
+    const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;const styles=[],removed=[];
+    ui.elements.get('flasher').classList.toggle=(name,value)=>styles.push([name,value]);ui.elements.get('select-port').removeAttribute=name=>removed.push(name);
+    if(scenario==='busy')ui.evaluate('state.handoff=true;state.busy=true;');
+    if(scenario==='connected')ui.evaluate('state.handoff=true;state.port=selectedPort;');
+    ui.evaluate('controls();');assert.deepEqual(styles.at(-1),['reconnect-needed',false],scenario);assert.equal(ui.elements.get('reconnect-callout').hidden,true,scenario);assert.equal(ui.elements.get('select-port-label').textContent,'Choose USB port',scenario);assert.ok(removed.includes('aria-describedby'),scenario);assert.deepEqual(ui.calls,[],scenario);
+  }
+});
+
 test('a required firmware-build choice is highlighted and revealed without choosing, focusing or opening USB',async()=>{
   const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.inventory=[v4Item];
   const highlights=[],aria=[];ui.elements.get('artifact-field').classList.toggle=(name,value)=>highlights.push([name,value]);ui.elements.get('artifact').setAttribute=(name,value)=>aria.push([name,value]);

@@ -99,6 +99,33 @@ function assertProperty(selector,property,expected){
   for(const value of values)assert.equal(value,expected,`${selector} ${property} must remain left-aligned, including responsive overrides`);
 }
 
+test('radio reselection has an initially hidden urgent callout beside the original USB chooser',()=>{
+  const header=get('flasher'),callout=get('reconnect-callout'),title=get('reconnect-title'),detail=get('reconnect-detail'),chooser=get('select-port'),label=get('select-port-label');
+  assert.ok(!hasClass(header,'reconnect-needed'),'The large reconnect presentation is conditional, not the ordinary page header');
+  assert.equal(callout.tag,'div');assert.ok(has(callout,'hidden'));assert.equal(callout.attrs.role,'alert');assert.equal(callout.attrs['aria-live'],'assertive');assert.ok(inside(callout,header));
+  assert.ok(inside(title,callout));assert.match(html.slice(title.start).split('</strong>')[0],/Select the same radio again/i);
+  assert.ok(inside(detail,callout));assert.equal(detail.tag,'p');assert.ok(callout.start<chooser.start,'The urgent instruction must appear before the action it describes');
+  assert.equal(closedAncestors(callout).length,0);assert.equal(closedAncestors(chooser).length,0,'Reconnection cannot require an advanced panel');
+  assert.ok(inside(label,chooser));assert.ok(hasClass(label,'action-label'),'Only the editable label may change; the chooser and its step badge remain intact');
+  assert.equal(nodes.filter(node=>node.attrs.id==='select-port').length,1);assert.ok(!nodes.some(node=>inside(node,callout)&&['button','input','select'].includes(node.tag)),'The callout must not duplicate the browser USB chooser');
+  assert.ok(!has(callout,'tabindex')&&!has(chooser,'autofocus'),'A reconnect cue must not steal keyboard focus');
+});
+
+test('required radio reselection uses a very large scoped callout and touch target without flashing animation',()=>{
+  const panel='.page-header.reconnect-needed',button=`${panel} #select-port`,badge=`${button} .action-number`;
+  assert.ok(declarationsFor(panel).some(rule=>/^3px\s+solid\s+/.test(rule.border||'')&&Object.hasOwn(rule,'background')),'The reconnect header needs a strong visible boundary and background');
+  const titleRules=[...declarationsFor('#reconnect-title'),...declarationsFor('.reconnect-callout strong'),...declarationsFor(`${panel} #reconnect-title`)];
+  assert.ok(titleRules.some(rule=>{const match=/^clamp\((\d+)px,\s*[^,]+,\s*(\d+)px\)$/.exec(rule['font-size']||'');return match&&Number(match[1])>=28&&Number(match[2])>=40&&Number(rule['font-weight'])>=800;}),'The urgent headline must be markedly larger than ordinary explanatory copy');
+  const buttonRules=declarationsFor(button);assert.ok(buttonRules.some(rule=>parseFloat(rule['min-height']||'0')>=90&&parseFloat(rule['font-size']||'0')>=22),'The reselect button needs a very large text and touch target');
+  assert.ok(buttonRules.some(rule=>rule.width==='100%'&&rule['min-width']==='0'),'The large reconnect button must shrink to fit narrow screens');
+  assert.ok(declarationsFor(badge).some(rule=>parseFloat(rule.height||'0')>=56&&parseFloat(rule['font-size']||'0')>=40),'The persistent step 1 badge should grow with the urgent action');
+  for(const rule of styleRules.filter(rule=>rule.selectors.some(selector=>selector.includes('reconnect-needed')))){
+    assert.ok(rule.selectors.every(selector=>selector.includes('reconnect-needed')),'Large reconnect styles must not change the ordinary compact controls');
+    assert.ok(!Object.hasOwn(rule.declarations,'animation'),'Urgency must not depend on flashing or pulsing');
+    assert.ok(!/^(?:none|0)(?:\s|$)/.test(rule.declarations.outline||''),'The reconnect treatment must preserve keyboard focus visibility');
+  }
+});
+
 test('the firmware build picker has adjacent accessible selection guidance without stealing focus',()=>{
   const field=get('artifact-field'),picker=get('artifact'),hint=get('artifact-choice-hint'),badge=get('artifact-required'),choices=get('firmware-choices');
   assert.equal(field.tag,'div');assert.ok(hasClass(field,'artifact-field'));assert.ok(inside(field,choices));
