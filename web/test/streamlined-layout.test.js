@@ -483,12 +483,14 @@ test('the backup popup has one Copy text action beside dynamic Stop and Continue
   assert.ok(declarationsFor('#question-backup-json').some(rule=>/^min\(\d+(?:\.\d+)?dvh,\s*\d+px\)$/.test(rule.height||'')),'Backup text stays bounded by the viewport and an explicit pixel ceiling');
 });
 
-test('a partial-backup warning has a brief readable place in the same copy popup',()=>{
+test('actual uncaptured values have a neutral readable place in the same copy popup',()=>{
   const summary=get('question-backup-summary'),view=get('question-backup-json-view');
-  assert.equal(summary.tag,'p');assert.ok(inside(summary,view));assert.ok(has(summary,'hidden'),'No partial-backup warning is shown before a capture is classified');
-  assert.ok(summary.start<get('question-backup-json').start,'The concise partial warning must precede its backup text');
+  assert.equal(summary.tag,'p');assert.ok(inside(summary,view));assert.ok(has(summary,'hidden'),'No values are classified before capture');
+  assert.ok(summary.start<get('question-backup-json').start,'The uncaptured-values summary must precede its backup text');
   assert.equal(closedAncestors(summary).length,0,'The warning cannot depend on opening optional details');
-  assert.ok(declarationsFor('#question-backup-summary').some(rule=>rule['flex-basis']==='100%'),'The partial warning needs its own full-width row');
+  assert.ok(declarationsFor('#question-backup-summary').some(rule=>rule['flex-basis']==='100%'),'Coverage details need their own full-width row');
+  assert.ok(declarationsFor('#question-backup-summary').some(rule=>rule.color==='#425769'&&rule['white-space']==='pre-line'),'Normal exclusions use readable neutral styling, not warning red');
+  assert.ok(!declarationsFor('#question-backup-summary').some(rule=>rule.color==='#9e3c2e'),'Coverage details must not imply a failed backup');
   assert.equal(html.slice(summary.start).split('>')[1].split('</p')[0],'','Static HTML cannot pre-classify the backup or expose captured data');
 });
 

@@ -16,6 +16,7 @@ import {cleanCliReply} from '../src/meshcore.js';
 import {assessBootloaderVersion} from '../src/bootloader-version.js';
 import {fetchFirmwareBytes as verifiedDownload} from '../src/downloads.js';
 import {firmwareFilesLinks} from '../src/firmware-links.js';
+import {backupCoverage} from '../src/backup-coverage.js';
 import {gzipSync} from 'node:zlib';
 const html=await readFile(new URL('../index.html',import.meta.url),'utf8');
 const source=(await readFile(new URL('../src/app.js',import.meta.url),'utf8')).replace(/^import .*;\r?$/gm,'');
@@ -37,7 +38,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
   if(verification)storage.set('meshfirmware.verifyApplication',JSON.stringify(verification));
   const context=vm.createContext({lookupUsbConnectionMap,usbConnectionMap:{schemaVersion:1,builds:[]},document:{getElementById:id=>{assert.ok(elements.has(id),`Missing HTML id ${id}`);return elements.get(id);},querySelectorAll:()=>[...elements.values()]},navigator:{serial:{requestPort:async()=>{calls.push('chooser');return port;},getPorts(){throw new Error('must not enumerate automatically');},addEventListener(type,handler){serialEvents[type]=handler;}}},window:{addEventListener(type,handler){windowEvents[type]=handler;}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},Option,URL,Blob,Uint8Array,TextEncoder,TextDecoder,console,setTimeout,clearTimeout,AbortSignal,Date,
     fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,parseUsbMode,MigrationApproval,cleanCliReply,assessBootloaderVersion,firmwareFilesLinks,fetch:async()=>{throw Error('Unexpected network request');},fetchFirmwareBytes:(url,options)=>verifiedDownload(url,{...options,mirrorBase:'https://mirror.example.test/firmware/',pageOrigin:'https://mirror.example.test',fetchImpl:(target,init)=>target==='https://mirror.example.test/firmware/index.json'?Promise.resolve({ok:false,status:404}):options.fetchImpl(target,init)}),assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),commonCliRestorePreview:()=>({operations:[],skipped:[],warnings:[]}),restoreCommonCli:async()=>{throw Error('Unexpected CommonCLI restore');},
-    createNextStepScroller,tryNativeUsbFallback,SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
+    backupCoverage,createNextStepScroller,tryNativeUsbFallback,SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
   });
   vm.runInContext(source,context);
   return {context,elements,calls,port,serialEvents,windowEvents,evaluate:code=>vm.runInContext(code,context)};
@@ -973,7 +974,7 @@ test('the backup window offers Stop and Continue, without a save claim or automa
   const ui=await backupJsonWorkbench();ui.context.pkg=fakePackage({architecture:'esp32'});ui.evaluate('state.pkg=pkg;');ui.elements.get('auto-backup').checked=true;
   let copied=0;ui.context.navigator.clipboard={writeText:async()=>copied++};
   ui.context.choose=async(title,detail,buttons,options)=>{
-    assert.equal(title,'Backup JSON');assert.equal(detail,'');assert.deepEqual(Array.from(buttons,pair=>Array.from(pair)),[['stop','Stop'],['continue','Continue with flashing']]);assert.equal(options.backupJson,ui.downloads[0].json);assert.equal(options.backupWarning,'');return 'continue';
+    assert.equal(title,'Backup JSON');assert.equal(detail,'');assert.deepEqual(Array.from(buttons,pair=>Array.from(pair)),[['stop','Stop'],['continue','Continue with flashing']]);assert.equal(options.backupJson,ui.downloads[0].json);assert.match(options.backupDetails,/Not backed up:/);assert.match(options.backupDetails,/Firmware and bootloader files/);assert.match(options.backupDetails,/Stored messages/);assert.match(options.backupDetails,/Runtime logs/);assert.doesNotMatch(options.backupDetails,/partial backup|incomplete backup|not protected/i);return 'continue';
   };
   await ui.evaluate('ensureBackup();');
   assert.equal(copied,0);assert.equal(ui.evaluate('state.backupApproved.port'),ui.port);assert.equal(ui.evaluate('state.backupApproved.sha256'),ui.context.pkg.sha256);assert.equal(ui.evaluate('state.plan'),null);
@@ -989,11 +990,27 @@ test('a device disconnect or firmware change during the backup window cannot app
   }
 });
 
-test('Continue acknowledges a partial backup in the same popup without another typed prompt or a flash',async()=>{
+test('Continue displays exact uncaptured values and failed reads without a blanket partial warning or another prompt',async()=>{
   const ui=await backupJsonWorkbench();ui.context.pkg=fakePackage({architecture:'esp32'});ui.evaluate('state.pkg=pkg;');ui.elements.get('auto-backup').checked=true;
-  ui.context.backupSummary=()=>({complete:false,privateIdentity:false,reasons:['Unsupported query']});ui.context.choose=async(_title,_detail,_buttons,options)=>{assert.match(options.backupWarning,/Partial backup/i);assert.match(options.backupWarning,/automatic restore is unavailable/i);assert.match(options.backupWarning,/erase is not protected/i);return 'continue';};
-  ui.context.confirm=async()=>{throw Error('Partial backup must not require another typed prompt');};
+  ui.native.payload.sections={usb_logging:{state:'error',command:'get usb.logging'},radio_rxgain:{state:'unsupported',command:'get radio.rxgain'}};
+  ui.context.backupSummary=()=>({complete:false,privateIdentity:false,reasons:['Unsupported query']});ui.context.choose=async(_title,_detail,_buttons,options)=>{assert.match(options.backupDetails,/USB logging preference/);assert.match(options.backupDetails,/RX gain/);assert.match(options.backupDetails,/read failed/i);assert.doesNotMatch(options.backupDetails,/partial backup|incomplete backup|automatic restore is unavailable|not protected/i);return 'continue';};
+  ui.context.confirm=async()=>{throw Error('Coverage details must not require another typed prompt');};
   await ui.evaluate('ensureBackup();');assert.equal(ui.evaluate('state.backupApproved.port'),ui.port);assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls,['open','capture-backup','close']);
+  assert.match(ui.elements.get('backup-summary').textContent,/Backup verified/);assert.match(ui.elements.get('backup-summary').textContent,/USB logging preference/);assert.doesNotMatch(ui.elements.get('backup-summary').textContent,/Partial backup/);assert.ok(!ui.elements.get('backup-summary').textContent.includes(ui.sentinel));
+});
+
+test('friendly coverage copy does not alter conservative archive metadata or grant flash permission',async()=>{
+  const ui=await backupJsonWorkbench();ui.native.payload.completeness={status:'partial',safe_for_wipe:false,safe_for_restore:false,missing_required:[],optional_errors:[],reasons:[]};const metadata=JSON.stringify(ui.native.payload.completeness);await ui.elements.get('backup').onclick();
+  assert.equal(JSON.stringify(ui.native.payload.completeness),metadata);assert.equal(ui.evaluate('state.backup.summary.complete'),false);assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.evaluate('state.plan'),null);assert.match(ui.elements.get('backup-summary').textContent,/Backup verified/);assert.doesNotMatch(ui.elements.get('backup-summary').textContent,/partial backup|incomplete backup|erase is not protected/i);assert.deepEqual(ui.calls,['open','capture-backup','close']);
+});
+
+test('a real capture or checksum failure still requires explicit no-backup approval and never claims a verified backup',async()=>{
+  for(const accepted of [false,true]){
+    const ui=await backupJsonWorkbench();ui.context.pkg=fakePackage();ui.evaluate('state.pkg=pkg;');ui.elements.get('auto-backup').checked=true;ui.context.captureBackup=async()=>{throw Error('Archive checksum validation failed');};
+    ui.context.confirm=async(title,detail,warning,action)=>{assert.equal(title,'Backup could not be created');assert.match(detail,/checksum validation failed/);assert.match(warning,/without a newly verified backup/);assert.equal(action,'CONTINUE WITHOUT BACKUP');return accepted;};
+    if(accepted){await ui.evaluate('ensureBackup();');assert.equal(ui.evaluate('state.backupApproved.port'),ui.port);}else{await assert.rejects(ui.evaluate('ensureBackup();'),/checksum validation failed/);assert.equal(ui.evaluate('state.backupApproved'),null);}
+    assert.equal(ui.evaluate('state.backup'),null);assert.equal(ui.downloads.length,0);assert.doesNotMatch(ui.elements.get('notice').textContent,/Backup verified/);assert.deepEqual(ui.calls,[]);
+  }
 });
 
 test('Stop or Escape on either complete or partial backup prevents preparation and device reset',async()=>{
@@ -1008,7 +1025,7 @@ test('nRF52 backup Continue enters DFU once without another typed prompt and Sto
   for(const answer of ['continue','stop','cancel']){
     const ui=await backupJsonWorkbench();ui.context.pkg=fakePackage({architecture:'nrf52',kind:'application'});ui.evaluate('state.pkg=pkg;');ui.elements.get('auto-backup').checked=true;ui.elements.get('transport-mode').value='nrf52';
     ui.context.backupSummary=()=>({complete:false,privateIdentity:true,reasons:[]});
-    ui.context.choose=async(title,_detail,buttons,options)=>{assert.equal(title,'Backup JSON');assert.deepEqual(Array.from(buttons,pair=>Array.from(pair)),[['stop','Stop'],['continue','Continue with flashing']]);assert.match(options.backupWarning,/partial backup/i);return answer;};
+    ui.context.choose=async(title,_detail,buttons,options)=>{assert.equal(title,'Backup JSON');assert.deepEqual(Array.from(buttons,pair=>Array.from(pair)),[['stop','Stop'],['continue','Continue with flashing']]);assert.match(options.backupDetails,/Not backed up:/);assert.doesNotMatch(options.backupDetails,/partial backup/i);return answer;};
     ui.context.confirm=async()=>{throw Error('nRF52 DFU entry must not ask for another typed confirmation');};
     ui.context.touch1200=async(port,mode)=>{assert.equal(port,ui.port);assert.equal(mode,'nrf52');ui.calls.push('enter-dfu');};ui.context.flashNrf=async()=>{throw Error('DFU entry is not permission to write firmware');};
     await ui.elements.get('prepare').onclick();
@@ -1026,11 +1043,11 @@ test('explicit nRF52 Enter USB bootloader uses the considered backup without a r
   await ui.elements.get('touch').onclick();assert.deepEqual(ui.calls,['backup-considered','enter-dfu']);assert.equal(ui.evaluate('state.port'),null);assert.equal(ui.evaluate('state.handoff'),true);assert.equal(ui.evaluate('state.plan'),null);
 });
 
-test('partial backup warning belongs to its active popup only and never leaks into a generic question',async()=>{
+test('uncaptured-values summary belongs to its active popup only and never leaks into a generic question',async()=>{
   const ui=await backupJsonWorkbench();await ui.elements.get('backup').onclick();ui.context.json=ui.downloads[0].json;let close;
   ui.context.document.createElement=()=>uiElement();ui.elements.get('question-dialog').addEventListener=(_event,handler)=>{close=handler;};
-  const pending=ui.evaluate("choose('Backup JSON','',[['stop','Stop'],['continue','Continue with flashing']],{backupJson:json,backupWarning:'Partial backup: cannot restore automatically.'});");
-  assert.equal(ui.elements.get('question-backup-summary').hidden,false);assert.match(ui.elements.get('question-backup-summary').textContent,/Partial backup/);
+  const pending=ui.evaluate("choose('Backup JSON','',[['stop','Stop'],['continue','Continue with flashing']],{backupJson:json,backupDetails:'Not backed up: Stored messages; runtime logs.'});");
+  assert.equal(ui.elements.get('question-backup-summary').hidden,false);assert.match(ui.elements.get('question-backup-summary').textContent,/Not backed up: Stored messages/);
   const actions=ui.elements.get('question-actions').options;assert.deepEqual(actions.map(button=>[button.value,button.textContent,button.className]),[['stop','Stop','secondary'],['continue','Continue with flashing','primary']]);
   ui.elements.get('question-dialog').returnValue='continue';close();assert.equal(await pending,'continue');assert.equal(ui.elements.get('question-backup-summary').textContent,'');assert.equal(ui.elements.get('question-backup-summary').hidden,true);
   const other=ui.evaluate("choose('Other question','Details',[['cancel','Cancel']]);");assert.equal(ui.elements.get('question-backup-summary').hidden,true);close();await other;

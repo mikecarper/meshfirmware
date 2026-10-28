@@ -154,8 +154,10 @@ visible. The top navigation opens the corresponding tools without touching USB.
    nRF52 retains its 1200-baud touch. TinyUSB entry is offered after backup; re-select the
    same radio's ROM port and prepare again without choosing a reset strategy.
    The backup window shows validated JSON with **Copy text**, **Stop** and
-   **Continue with flashing**. A partial-backup warning appears in this same
-   window, without another confirmation prompt. Continue resumes preparation for the
+   **Continue with flashing**. A neutral **Not backed up** list identifies the
+   specific excluded or unavailable values in this same window, without a blanket
+   partial/incomplete warning or another confirmation prompt. Failed setting reads
+   remain identified as failed reads. Continue resumes preparation for the
    normal flash review; it does not write firmware or claim the file was saved.
    The JSON download still starts automatically. Keep the download or copied
    text privately. Failed backups still need separate acknowledgement.
@@ -261,8 +263,13 @@ writing; no blind retry or 1200-baud fallback follows an uncertain handoff.
 | CommonCLI repeater/room | Expanded exposed-settings snapshot, including complete public region trees and policies; Import JSON previews supported settings, then explicitly restores them over the serial console with target checks and readback |
 | OS/tool management | Not a browser operation: no pip/driver installs, Raspberry Pi USB-speed changes or shell execution |
 
-Every web backup is deliberately marked **not wipe-safe**. Unexposed secrets,
-messages, files, logs and firmware may be absent. Imported MeshCore archives
+Saved settings are verified before the backup is offered. The **Not backed up**
+list names firmware/bootloader files, stored messages, runtime logs and any
+specific values the firmware did not expose or whose reads failed. It does not
+expose secret values or treat companion-only inventories as missing on a repeater.
+Archive compatibility/safety flags and flash authorizations are unchanged;
+the friendly status describes the verified file, not a promise about uncaptured data.
+Imported MeshCore archives
 are validated from their original JSON text to preserve Python's canonical
 floating-point integrity. Diagnostic firmware versions are never restored.
 Known optional CLI settings unsupported by the target produce visible restore
@@ -401,7 +408,7 @@ Valid negative TX powers use signed comparisons against the target maximum.
 Legacy browser archives receive contact type, coordinate and path validation
 before any restore write, in addition to checksum and identity checks.
 
-CommonCLI captures remain partial, but supported settings can be restored through
+CommonCLI settings are captured through exposed USB queries and restored through
 this page's **Import JSON** flow below. This does not add CommonCLI restore to
 `restore.cmd`: the native Python archive's executor flag remains false, and the
 browser performs its own reviewed, explicitly confirmed serial operations.
@@ -475,8 +482,9 @@ The current primary-radio getter returns its frequency/BW/SF/CR tuple but not a
 saved custom preamble. The preview warns that restoring this tuple selects the
 firmware's **automatic preamble**; it cannot reconstruct an unexported custom
 length. Secondary-radio preamble and other settings are restored only when their
-saved replies can be parsed and the target supports them. Backups remain logical
-and **not wipe-safe**, even when every supported restore operation succeeds.
+saved replies can be parsed and the target supports them. Firmware/bootloader
+files, stored messages, runtime logs and preferences without an export command
+are not recreated by a settings restore.
 
 ### Settings-preserving partition expansion
 

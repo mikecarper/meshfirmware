@@ -367,7 +367,7 @@ export async function backupCommonCli(link, progress = () => {}) {
   if(final!==key)fail('CommonCLI identity changed during backup.');
   const privateHex=/(?<![a-f0-9])[a-f0-9]{128}(?![a-f0-9])/i.exec(replies['get prv.key'])?.[0];
   if(privateHex&&publicFromPrivate(unhex(privateHex))!==key)fail('CommonCLI private/public identity mismatch.');
-  progress(1,'CommonCLI exposed settings captured; unsupported settings are reported separately. This is not a wipe-safe image.');
+  progress(1,'Settings captured and checked. Any values not captured are listed in the backup.');
   return sealBackup({role:'common-cli',publicKey:key,safeForWipe:false,replies,regions,excluded:['Private identity may not be exposed','Not an atomic/bulk export','Unread messages, logs and unexposed preferences are not exported']});
 }
 

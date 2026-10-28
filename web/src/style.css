@@ -216,7 +216,7 @@ dialog p { font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
 #question-backup-json-view:not([hidden]) { display: contents; }
 #question-backup-json-view > label, #question-backup-download-hint, #question-backup-json-warning, #question-backup-summary, #question-backup-json, #question-backup-json-status { flex-basis: 100%; }
 #question-backup-json-view > label { margin-top: 0; }
-#question-backup-summary { color: #9e3c2e; }
+#question-backup-summary { color: #425769; white-space: pre-line; }
 #question-backup-json { min-height: 160px; height: min(45dvh, 360px); font-size: 16px; line-height: 1.6; }
 #question-backup-json-status { order: 1; }
 #question-backup-json-status:empty { display: none; }

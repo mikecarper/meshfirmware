@@ -5,6 +5,7 @@ import { EspSession, validateEspWriteRecovery } from './esp.js';
 import { getCatalog, catalogProvider, catalogItemKey, httpsUrl, compareVersions } from './catalog.js';
 import { MeshCore, backupCommonCli, verifyBackup, parseBackup, enterCompanionBinary, detectMeshCore, backupSummary, cleanCliReply } from './meshcore.js';
 import { exportNativeBackup } from './backup-native.js';
+import { backupCoverage } from './backup-coverage.js';
 import { commonCliRestorePreview, restoreCommonCli } from './common-cli.js';
 import { assessBoard, rakFamily, endfIdentity } from './board-safety.js';
 import { BrowserPlanner } from './planner.js';
@@ -392,12 +393,12 @@ function confirm(title, detail, warning, action) {
   return new Promise(resolve => dialog.addEventListener('close',() => {state.nextDialogAction=null;updateNextAction();resolve(dialog.returnValue==='confirm'&&state.port===port&&state.generation===generation&&state.pkg===pkg&&state.plan===plan&&state.installMode===installMode&&(action!=='SAME DEVICE'||!!port));},{once:true}));
 }
 function download(name, bytes, type = 'application/octet-stream') { const url = URL.createObjectURL(new Blob([bytes],{type})); const a = document.createElement('a'); a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url),30000); }
-function choose(title,detail,buttons,{backupJson=null,backupWarning=''}={}) {
+function choose(title,detail,buttons,{backupJson=null,backupDetails=''}={}) {
   $('question-title').textContent=title;$('question-detail').textContent=backupJson?'':detail;$('question-detail').hidden=!!backupJson;
   $('question-backup-title').hidden=!backupJson;$('question-title').hidden=!!backupJson;
   state.backupTextGeneration++;
   $('question-backup-json-view').hidden=!backupJson;$('question-backup-json').value=backupJson||'';$('question-backup-json-status').textContent='';
-  $('question-backup-summary').textContent=backupJson?backupWarning:'';$('question-backup-summary').hidden=!backupJson||!backupWarning;
+  $('question-backup-summary').textContent=backupJson?backupDetails:'';$('question-backup-summary').hidden=!backupJson||!backupDetails;
   const form=$('question-actions'),actions=buttons.map(([value,label])=>{const button=document.createElement('button');button.value=value;button.textContent=label;button.className=['backup','continue'].includes(value)?'primary':'secondary';return button;});form.replaceChildren(...actions);
   const dialog=$('question-dialog');dialog.returnValue='cancel';dialog.showModal();state.nextDialogAction=['continue','backup','skip','later','prepare'].map(value=>actions.find(button=>button.value===value)).find(Boolean)||null;updateNextAction();return new Promise(resolve=>dialog.addEventListener('close',()=>{state.nextDialogAction=null;state.backupTextGeneration++;$('question-backup-json').value='';$('question-backup-json-view').hidden=true;$('question-backup-summary').textContent='';$('question-backup-summary').hidden=true;$('question-backup-title').hidden=true;$('question-title').hidden=false;updateNextAction();resolve(dialog.returnValue);},{once:true}));
 }
@@ -405,7 +406,6 @@ function persistFlow(field,key) { if(state[field])localStorage.setItem(key,JSON.
 function persistEspRecovery(){try{persistFlow('espRecovery','meshfirmware.espRecovery');}catch{log(state.espRecovery?'ESP retry state could not be saved in browser storage. It remains in memory only; keep this page open until recovery finishes.':'The old ESP retry record could not be removed from browser storage and may reappear after reload. Keep this page open and review any stale retry record before another operation.');}}
 function invalidateApplicationEvidence(){clearBackupJson();state.backupApproved=null;state.backup=null;state.device=null;state.boardDetected=false;state.handoff=false;state.knownApplicationPort=null;state.autoVerifyAttempt=null;$('skip-backup').checked=false;}
 function clearVerification(){state.verification=null;persistFlow('verification','meshfirmware.verifyApplication');}
-const summaryText=s=>`${s.complete?'Complete exposed-API snapshot':'Partial backup'}; ${s.privateIdentity?'private identity included':'private identity unavailable'}. ${(s.reasons||[]).join(' ')}`;
 async function readApplication(link) {
   const port=state.port,generation=state.generation,device=await detectMeshCore(link);
   if(state.port!==port||state.generation!==generation)fail('Selected port changed or disconnected while reading the node. Re-select and detect again.');
@@ -582,11 +582,11 @@ async function captureBackup() {
   if(state.port!==port||state.generation!==generation)fail('Selected port changed during backup. No saved-backup approval was retained; select and back up the intended radio again.');
   const summary=backupSummary(archive),completeness=native.payload?.completeness;if(completeness){summary.complete=completeness.status==='api-snapshot-complete';summary.reasons=[...new Set([...summary.reasons,...(completeness.missing_required||[]).map(n=>'Missing '+n),...(completeness.optional_errors||[]).map(n=>'Query failed: '+n)])];}
   const filename=`mc.config_backup.web.${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
-  const json=JSON.stringify(native,null,2);state.backup={archive,summary,filename,port,json};
+  const coverage=backupCoverage(archive,native),json=JSON.stringify(native,null,2);state.backup={archive,summary,coverage,filename,port,json};
   $('backup-json').value=json;$('backup-json-view').hidden=false;
   download(filename,json,'application/json');
-  $('backup-summary').textContent=`Download requested: ${filename}. ${summary.complete?'Complete exposed-API snapshot.':summary.role==='common-cli'?'Partial backup; import JSON to restore supported serial settings.':'Partial backup; automatic restore is unavailable.'} Keep it private.`;
-  notice('Backup ready. Keep it private.');return state.backup;
+  $('backup-summary').textContent=`Backup verified. Download requested: ${filename}. ${coverage.summaryText} ${coverage.notIncludedText} Keep it private.`;
+  notice('Backup verified and ready. Keep the JSON private.');return state.backup;
 }
 async function ensureBackup() {
   if(state.migration||state.recovery||state.espRecovery||(state.backupApproved?.sha256===state.pkg?.sha256&&state.backupApproved?.port===state.port))return;
@@ -600,13 +600,13 @@ async function ensureBackup() {
     const answer=await choose('Backup cannot be done in ROM/DFU','The application is not running on this interface. Return to application firmware for a logical backup, or explicitly continue without one.',[['cancel','Cancel'],['skip','Continue without backup']]);
     if(answer!=='skip')fail('Cancelled before bootloader commands.');
   } else {
-    const answer=$('auto-backup').checked?'backup':await choose('Back up before entering the bootloader?','Recommended: export and validate the running MeshCore node before any reset, ROM entry or flash. Logical backups contain secrets and are not whole-flash images.',[['backup','Back up first'],['skip','Continue without backup'],['cancel','Cancel']]);
+    const answer=$('auto-backup').checked?'backup':await choose('Back up before entering the bootloader?','Save and verify the running node’s settings before reset or flash. The JSON can contain private identity and passwords. Firmware/bootloader images, stored messages and runtime logs are not included.',[['backup','Back up first'],['skip','Continue without backup'],['cancel','Cancel']]);
     if(answer==='cancel')fail('Cancelled before reset or flash.');
     if(answer==='backup') {
-      let result;try{result=await captureBackup();}catch(error){if(!await confirm('Backup did not complete',error.message,'No reset or write has occurred. Continue only if you accept having no complete backup.','CONTINUE WITHOUT BACKUP'))throw error;}
+      let result;try{result=await captureBackup();}catch(error){if(!await confirm('Backup could not be created',error.message,'No reset or write has occurred. Continuing will flash without a newly verified backup.','CONTINUE WITHOUT BACKUP'))throw error;}
       if(result){
         const port=state.port,generation=state.generation,pkg=state.pkg;
-        const answer=await choose('Backup JSON','',[['stop','Stop'],['continue','Continue with flashing']],{backupJson:result.json,backupWarning:result.summary.complete===false?(result.summary.role==='common-cli'?'Partial backup: import JSON to restore supported serial settings. An erase is not protected by this backup.':'Partial backup: automatic restore is unavailable. An erase is not protected by this backup.'):''});
+        const answer=await choose('Backup JSON','',[['stop','Stop'],['continue','Continue with flashing']],{backupJson:result.json,backupDetails:result.coverage?.notIncludedText||backupCoverage(result.archive).notIncludedText});
         if(answer!=='continue')fail('Backup stopped. Preparation cancelled before reset or flash.');
         if(state.backup!==result||result.port!==state.port||state.port!==port||state.generation!==generation||state.pkg!==pkg)fail('Selected device or firmware changed while the backup window was open. Prepare again.');
       }
@@ -1110,7 +1110,7 @@ async function flashPreparedFirmware() {
     state.migrationApproval=approval=candidate;state.approvalPort=state.port;state.approvalResetPort=state.port;controls();
   }else if(!approval){
     if(bridge&&!await confirm('Run USB partition expansion first?',`${plan.board} · ${plan.firmware_version} · ${plan.mac}`,'The verified middle firmware preserves supported identity/settings, not all logs or optional files. Power loss during partition-table replacement can require physical recovery. Keep this tab open and re-select the same chip when asked.','EXPAND PARTITIONS'))return;
-    if(!await confirm('Write this firmware?',detail,backupWarning+[firmwareDowngradeWarning(pkg),...pkg.warnings,...(plan.compatibilityWarnings||[])].filter(Boolean).join(' ')+' Logical backups are not complete flash images. Keep power connected. Wrong bootloader firmware may require SWD recovery.',token))return;
+    if(!await confirm('Write this firmware?',detail,backupWarning+[firmwareDowngradeWarning(pkg),...pkg.warnings,...(plan.compatibilityWarnings||[])].filter(Boolean).join(' ')+' Settings backups exclude firmware/bootloader images, stored messages and runtime logs. Keep power connected. Wrong bootloader firmware may require SWD recovery.',token))return;
   }
   if (plan.generation !== state.generation || plan.port !== state.port) fail('Device disconnected or selection changed during confirmation.');
   if(approval){if(approval!==state.migrationApproval)fail('Automatic migration approval was stopped.');if(bridge)approval.beginBridge(pkg,plan);else approval.beginFinal(pkg,plan);}
