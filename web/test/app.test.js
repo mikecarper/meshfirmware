@@ -522,10 +522,13 @@ test('backup prompts hide verbose details and clear their JSON when closed witho
   ui.context.document.createElement=()=>({});ui.elements.get('question-dialog').addEventListener=(event,handler)=>{assert.equal(event,'close');close=handler;};ui.context.json=json;
   const pending=ui.evaluate("choose('Confirm your backup download','Save privately',[['saved','I saved the backup']],{backupJson:json});");
   assert.equal(ui.elements.get('question-backup-json').value,json);assert.equal(ui.elements.get('question-backup-json-view').hidden,false);assert.equal(ui.elements.get('backup-json').value,json);
+  assert.equal(ui.elements.get('question-backup-title').hidden,false);assert.equal(ui.elements.get('question-title').hidden,true);
   assert.equal(ui.elements.get('question-detail').textContent,'');assert.equal(ui.elements.get('question-detail').hidden,true);
   ui.elements.get('question-dialog').returnValue='saved';close();assert.equal(await pending,'saved');
   assert.equal(ui.elements.get('question-backup-json').value,'');assert.equal(ui.elements.get('question-backup-json-view').hidden,true);assert.equal(ui.elements.get('backup-json').value,json);
+  assert.equal(ui.elements.get('question-backup-title').hidden,true);assert.equal(ui.elements.get('question-title').hidden,false);
   const other=ui.evaluate("choose('Unrelated question','No secrets here',[['cancel','Cancel']]);");
+  assert.equal(ui.elements.get('question-backup-title').hidden,true);assert.equal(ui.elements.get('question-title').hidden,false);
   assert.equal(ui.elements.get('question-detail').hidden,false);assert.equal(ui.elements.get('question-detail').textContent,'No secrets here');
   assert.equal(ui.elements.get('question-backup-json').value,'');assert.equal(ui.elements.get('question-backup-json-view').hidden,true);close();await other;
   assert.ok(!ui.elements.get('question-detail').textContent.includes(ui.sentinel));assert.ok(!ui.elements.get('log').textContent.includes(ui.sentinel));

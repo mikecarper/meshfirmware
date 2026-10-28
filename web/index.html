@@ -100,8 +100,9 @@ No hardware operations have been performed.</pre><div class="console-input"><lab
     <footer><span>Hardware preview · Use a recoverable bench radio.</span><a href="https://github.com/mikecarper/meshfirmware" target="_blank" rel="noopener noreferrer">Source &amp; documentation ↗</a></footer>
   </main>
   <dialog id="confirm-dialog"><form method="dialog"><div class="eyebrow">EXPLICIT AUTHORIZATION</div><h2 id="confirm-title">Confirm operation</h2><p id="confirm-detail"></p><p id="confirm-warning" class="notice"></p><label for="confirm-token">Type <strong id="token-label"></strong> to continue</label><input id="confirm-token" autocomplete="off" spellcheck="false"><div class="inline-actions"><button value="cancel" class="secondary">Cancel</button><button id="confirm-submit" value="confirm" class="danger" disabled>Confirm operation</button></div></form></dialog>
-  <dialog id="question-dialog"><form method="dialog"><h2 id="question-title"></h2><p id="question-detail"></p>
+  <dialog id="question-dialog"><form method="dialog"><h1 id="question-backup-title" hidden>JSON backup has been downloaded</h1><h2 id="question-title"></h2><p id="question-detail"></p>
     <div id="question-backup-json-view" class="backup-json-view" hidden>
+      <p id="question-backup-download-hint" class="hint">Check your browser’s Downloads for the JSON file.</p>
       <label for="question-backup-json">Backup JSON</label>
       <p id="question-backup-json-warning" class="hint">Contains private identity and channel secrets. Keep it private.</p>
       <p id="question-backup-summary" class="hint" role="status" aria-live="polite" hidden></p>

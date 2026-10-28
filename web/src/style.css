@@ -184,10 +184,10 @@ dialog h2 { font-size: 21px; }
 dialog p { font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
 #question-dialog:has(#question-backup-json-view:not([hidden])) { max-width: 900px; padding: 22px; }
 #question-dialog:has(#question-backup-json-view:not([hidden])) form { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 0 9px; }
-#question-dialog:has(#question-backup-json-view:not([hidden])) h2 { flex-basis: 100%; margin: 0 0 8px; font-size: 26px; }
+#question-backup-title { flex-basis: 100%; margin: 0 0 8px; font-size: clamp(28px, 3.2vw, 36px); line-height: 1.2; letter-spacing: -.4px; overflow-wrap: anywhere; }
 #question-dialog:has(#question-backup-json-view:not([hidden])) p, #question-dialog:has(#question-backup-json-view:not([hidden])) label, #question-dialog:has(#question-backup-json-view:not([hidden])) button { font-size: 16px; line-height: 1.5; }
 #question-backup-json-view:not([hidden]) { display: contents; }
-#question-backup-json-view > label, #question-backup-json-warning, #question-backup-summary, #question-backup-json, #question-backup-json-status { flex-basis: 100%; }
+#question-backup-json-view > label, #question-backup-download-hint, #question-backup-json-warning, #question-backup-summary, #question-backup-json, #question-backup-json-status { flex-basis: 100%; }
 #question-backup-json-view > label { margin-top: 0; }
 #question-backup-summary { color: #9e3c2e; }
 #question-backup-json { min-height: 160px; height: min(45dvh, 360px); font-size: 16px; line-height: 1.6; }

@@ -202,11 +202,12 @@ function confirm(title, detail, warning, token) {
 function download(name, bytes, type = 'application/octet-stream') { const url = URL.createObjectURL(new Blob([bytes],{type})); const a = document.createElement('a'); a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url),30000); }
 function choose(title,detail,buttons,{backupJson=null,backupWarning=''}={}) {
   $('question-title').textContent=title;$('question-detail').textContent=backupJson?'':detail;$('question-detail').hidden=!!backupJson;
+  $('question-backup-title').hidden=!backupJson;$('question-title').hidden=!!backupJson;
   state.backupTextGeneration++;
   $('question-backup-json-view').hidden=!backupJson;$('question-backup-json').value=backupJson||'';$('question-backup-json-status').textContent='';
   $('question-backup-summary').textContent=backupJson?backupWarning:'';$('question-backup-summary').hidden=!backupJson||!backupWarning;
   const form=$('question-actions');form.replaceChildren(...buttons.map(([value,label])=>{const button=document.createElement('button');button.value=value;button.textContent=label;button.className=['backup','continue'].includes(value)?'primary':'secondary';return button;}));
-  const dialog=$('question-dialog');dialog.returnValue='cancel';dialog.showModal();return new Promise(resolve=>dialog.addEventListener('close',()=>{state.backupTextGeneration++;$('question-backup-json').value='';$('question-backup-json-view').hidden=true;$('question-backup-summary').textContent='';$('question-backup-summary').hidden=true;resolve(dialog.returnValue);},{once:true}));
+  const dialog=$('question-dialog');dialog.returnValue='cancel';dialog.showModal();return new Promise(resolve=>dialog.addEventListener('close',()=>{state.backupTextGeneration++;$('question-backup-json').value='';$('question-backup-json-view').hidden=true;$('question-backup-summary').textContent='';$('question-backup-summary').hidden=true;$('question-backup-title').hidden=true;$('question-title').hidden=false;resolve(dialog.returnValue);},{once:true}));
 }
 function persistFlow(field,key) { if(state[field])localStorage.setItem(key,JSON.stringify(state[field]));else localStorage.removeItem(key); }
 function persistEspRecovery(){try{persistFlow('espRecovery','meshfirmware.espRecovery');}catch{log(state.espRecovery?'ESP retry state could not be saved in browser storage. It remains in memory only; keep this page open until recovery finishes.':'The old ESP retry record could not be removed from browser storage and may reappear after reload. Keep this page open and review any stale retry record before another operation.');}}

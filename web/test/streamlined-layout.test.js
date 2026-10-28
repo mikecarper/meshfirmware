@@ -265,6 +265,19 @@ test('captured backup JSON has hidden-by-default read-only private text views in
   assert.ok(inside(get('question-backup-json-view'),get('question-dialog')));assert.ok(get('question-backup-json-view').start<get('question-actions').start);
 });
 
+test('backup download status is a conditional H1 before the JSON while ordinary questions keep their H2',()=>{
+  const title=get('question-backup-title'),generic=get('question-title'),dialog=get('question-dialog'),view=get('question-backup-json-view'),hint=get('question-backup-download-hint');
+  assert.equal(title.tag,'h1');assert.ok(has(title,'hidden'),'No downloaded-backup claim may be visible before a successful capture');assert.ok(inside(title,dialog));
+  assert.match(html.slice(title.start).split('</h1>')[0],/>JSON backup has been downloaded$/);
+  assert.equal(generic.tag,'h2');assert.ok(inside(generic,dialog));assert.ok(title.start<generic.start&&generic.start<view.start,'The backup-specific heading precedes ordinary question content');
+  assert.ok(title.start<get('question-backup-json').start);assert.equal(hint.tag,'p');assert.ok(inside(hint,view));assert.ok(hint.start<get('question-backup-json').start);
+  assert.match(html.slice(hint.start).split('</p>')[0],/Check your browser[’']s Downloads for the JSON file\./);
+  assert.ok(declarationsFor('#question-backup-download-hint').some(rule=>rule['flex-basis']==='100%'),'The download location hint needs a readable full-width row');
+  const rules=declarationsFor('#question-backup-title');
+  assert.ok(rules.some(rule=>rule['flex-basis']==='100%'&&rule['overflow-wrap']==='anywhere'),'The longer H1 must wrap within the popup on phones');
+  assert.ok(rules.some(rule=>/^clamp\(28px,\s*3\.2vw,\s*36px\)$/.test(rule['font-size']||'')),'The downloaded heading must be prominent without overflowing small screens');
+});
+
 test('backup JSON copy and tools-only clear remain usable without submitting the popup',()=>{
   for(const [prefix,ids]of [['',['copy-backup-json','clear-backup-json']],['question-',['copy-question-backup-json']]])for(const id of ids){
     const button=get(id);assert.equal(button.tag,'button');assert.equal(button.attrs.type,'button');assert.ok(inside(button,get(prefix+'backup-json-view')));
@@ -300,7 +313,7 @@ test('backup popup JSON and controls use larger text without overflowing phones'
     const sizes=declarationsFor(selector).filter(rule=>Object.hasOwn(rule,'font-size')).map(rule=>rule['font-size']);
     assert.ok(sizes.length,`Missing enlarged text for ${selector}`);assert.ok(sizes.every(size=>/^\d+(?:\.\d+)?px$/.test(size)&&parseFloat(size)>=16),`${selector} needs at least 16px readable text, including responsive overrides`);
   }
-  const headings=declarationsFor(`${popup} h2`).filter(rule=>rule['font-size']);assert.ok(headings.some(rule=>parseFloat(rule['font-size'])>=26),'The popup heading should scale with its larger content');
+  const headings=declarationsFor('#question-backup-title').filter(rule=>rule['font-size']);assert.ok(headings.some(rule=>/^clamp\(28px,\s*3\.2vw,\s*36px\)$/.test(rule['font-size'])),'The backup H1 should scale with its larger content');
   assert.ok(declarationsFor(popup).some(rule=>parseFloat(rule['max-width'])>=900),'The enlarged text needs a wider desktop popup');
   assert.ok(declarationsFor('dialog').some(rule=>rule.width==='calc(100% - 30px)'&&rule['max-height']==='calc(100dvh - 30px)'&&rule.overflow==='auto'),'The dialog must still fit and scroll on phones');
   assert.ok(declarationsFor('.backup-json').some(rule=>rule.width==='100%'&&rule['max-width']==='100%'&&rule['min-width']==='0'&&rule.overflow==='auto'),'Large JSON remains within its scrollable text box');
