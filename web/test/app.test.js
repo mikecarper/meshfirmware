@@ -443,6 +443,7 @@ test('ordinary nRF52 completion and completed ESP32 reset lead to another device
   const esp=workbench({verification:previousVerification()});await Promise.resolve();esp.context.selectedPort=esp.port;esp.context.session={port:esp.port,finish:async()=>esp.calls.push('finish'),close:async()=>esp.calls.push('close')};esp.evaluate('state.port=selectedPort;state.plan={written:true,transportMode:"usb_reset"};state.esp=session;controls();');
   assert.deepEqual(nextHighlight(esp),['finish']);assert.equal(esp.elements.get('start-new-radio').disabled,true);await esp.elements.get('finish').onclick();
   assert.deepEqual(esp.calls,['finish','close']);assert.ok(esp.evaluate('state.verification'));assert.deepEqual(nextHighlight(esp),['start-new-radio']);assert.match(esp.elements.get('notice').textContent,/Flash a new device.*optionally/);assert.equal(esp.elements.get('flasher').classList.contains('next-device'),true);
+  assert.match(esp.elements.get('progress-label').textContent,/Reset requested; application startup has not been checked/);assert.doesNotMatch(esp.elements.get('progress-label').textContent,/Reset pending|startup verified/);
 });
 
 test('verification remains an explicit alternate path and never chooses or resets another device',async()=>{
@@ -478,7 +479,7 @@ test('a still-connected application port is reused only after the verified ESP w
 async function storageVerificationWorkbench(role,layout){
   const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.expected={sha256:'a'.repeat(64),architecture:'esp32',role,model:'Heltec V4.3 OLED',publicKey:'11'.repeat(32),version:'v1.18.0.1'};
   const reply=command=>{ui.calls.push(command);if(command==='get storage.layout')return layout;if(command==='ver'||command==='version')return 'MeshCore v1.18.0.1';throw Error('Unexpected command '+command);};
-  ui.context.detectMeshCore=async()=>({role,model:ui.context.expected.model,publicKey:ui.context.expected.publicKey,protocol:14});ui.context.SerialLink=class{async open(){ui.calls.push('application-open');}async close(){ui.calls.push('application-close');}async command(command){return reply(command);}};ui.context.MeshCore=class{async cli(command){return reply(command);}};
+  ui.context.detectMeshCore=async()=>({role,model:ui.context.expected.model,publicKey:ui.context.expected.publicKey,protocol:14,version:'v1.18.0.1'});ui.context.SerialLink=class{async open(){ui.calls.push('application-open');}async close(){ui.calls.push('application-close');}async command(command){return reply(command);}};ui.context.MeshCore=class{async cli(command){return reply(command);}};
   ui.evaluate('state.port=selectedPort;state.verification=expected;');return ui;
 }
 
@@ -489,9 +490,62 @@ test('startup verification accepts the real firmware equals-sign storage layout 
   }
 });
 
+test('successful startup replaces pre-flash Meshtastic, downgrade and reset-pending messages without changing the selected image',async()=>{
+  for(const approvedMigration of [false,true]){
+    const ui=await storageVerificationWorkbench('companion','> int:esp32=16384K ext:none; app0*@0x10000+6400K,app1@0x650000+6400K');
+    ui.context.pkg=fakePackage({architecture:'esp32',name:'heltec_v4_companion-v1.18.0.1.bin',warnings:['Physical partitions and chip MAC must be checked before writes.']});ui.context.inventory=[{...v4Item,role:'companionFull',version:'v1.18.0.1',name:ui.context.pkg.name}];
+    ui.evaluate('state.items=inventory;filterCatalog();state.pkg=pkg;state.item=inventory[0];state.device={firmwareFamily:"meshtastic",version:"2.7.15"};$("artifact").value="0";$("skip-backup").checked=true;updateFirmwareSelectionSummary();refreshFirmwareWarnings();progress(1,"Flash verified. Reset pending; application startup remains unverified.");');
+    assert.match(ui.elements.get('automatic-summary').textContent,/Meshtastic is running/);assert.match(ui.elements.get('image-warning').textContent,/before writes/);
+    if(approvedMigration)ui.evaluate('state.migrationApproval={phase:"waiting-application"};');
+    const generation=ui.evaluate('state.generation');await ui.evaluate('verifyApplication();');
+    if(approvedMigration)ui.evaluate('state.migrationApproval=null;');
+    ui.evaluate('controls();');
+    assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);assert.equal(ui.evaluate('state.generation'),generation);assert.equal(ui.elements.get('artifact').value,'0');
+    assert.match(ui.elements.get('progress-label').textContent,/Application startup verified.*Storage layout confirmed/);assert.equal(ui.elements.get('progress').value,1);
+    assert.match(ui.elements.get('automatic-summary').textContent,/Installed firmware startup verified/);assert.match(ui.elements.get('automatic-summary').textContent,/v1\.18\.0\.1/);assert.match(ui.elements.get('automatic-summary').textContent,/No further flashing is required/);
+    assert.doesNotMatch(ui.elements.get('automatic-summary').textContent,/Meshtastic is running|Nothing is flashed|Prepare update|downgrade/i);assert.equal(ui.elements.get('image-warning').textContent,'');
+    for(const id of ['prepare','flash','retry','skip-backup','verify-app'])assert.equal(ui.elements.get(id).disabled,true,id);
+    assert.deepEqual(nextHighlight(ui),['select-port']);assert.equal(ui.calls.filter(call=>call==='application-open').length,1);
+  }
+});
+
+test('completed firmware cannot be prepared or flashed again through stale controls or direct handlers',async()=>{
+  for(const scenario of ['verified','component','erase','no-loaded-image']){
+    const ui=workbench();await Promise.resolve();ui.context.pkg=fakePackage();ui.context.selectedPort=ui.port;
+    ui.evaluate(`state.pkg=pkg;state.port=selectedPort;state.plan={generation:state.generation,port:selectedPort,sha256:pkg.sha256};state.finishedFirmware={sha256:pkg.sha256,verified:${scenario==='verified'||scenario==='no-loaded-image'}};$("skip-backup").checked=true;`);
+    if(scenario==='no-loaded-image')ui.evaluate('state.pkg=null;state.plan=null;');
+    ui.evaluate('controls();');
+    for(const id of ['prepare','flash','retry'])assert.equal(ui.elements.get(id).disabled,true,scenario+': '+id);
+    for(const handler of ['prepareSelectedFirmware','flashPreparedFirmware','reviewAndFlashSelectedFirmware'])await assert.rejects(ui.evaluate(handler+'();'),/already (?:verified|been transferred)/,scenario+': '+handler);
+    assert.deepEqual(ui.calls,[],scenario);
+  }
+});
+
+test('a written ESP plan cannot be repeated by bypassing the review handler before its reset',async()=>{
+  const ui=workbench();await Promise.resolve();ui.context.pkg=fakePackage({architecture:'esp32'});ui.context.selectedPort=ui.port;
+  ui.evaluate('state.pkg=pkg;state.port=selectedPort;state.plan={generation:state.generation,port:state.port,sha256:pkg.sha256,written:true};controls();');
+  for(const handler of ['prepareSelectedFirmware','flashPreparedFirmware','reviewAndFlashSelectedFirmware'])await assert.rejects(ui.evaluate(handler+'();'),/already been transferred.*pending reset/);
+  assert.equal(ui.elements.get('prepare').disabled,true);assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(ui.calls,[]);
+});
+
+test('explicitly loading a new image or selecting another radio clears completion and restores preparation',async()=>{
+  for(const next of ['image','port']){
+    const ui=workbench();await Promise.resolve();ui.context.pkg=fakePackage({architecture:'esp32',name:'previous.bin'});ui.context.selectedPort=ui.port;
+    ui.evaluate('state.pkg=pkg;state.port=selectedPort;state.finishedFirmware={sha256:pkg.sha256,verified:true};progress(1,"Application startup verified.");updateFirmwareSelectionSummary();controls();');
+    if(next==='image'){
+      ui.context.nextPkg=fakePackage({architecture:'esp32',name:'next.bin',sha256:'c'.repeat(64),warnings:['Review this new image.']});ui.context.inspectFirmware=()=>ui.context.nextPkg;
+      await ui.evaluate('loadFirmware(nextPkg.name,new Uint8Array(64));');ui.evaluate('controls();');
+      assert.match(ui.elements.get('image-warning').textContent,/Review this new image/);assert.match(ui.elements.get('automatic-summary').textContent,/next\.bin/);assert.match(ui.elements.get('progress-label').textContent,/Image validated locally/);assert.deepEqual(ui.calls,[]);
+    }else{
+      await ui.elements.get('select-port').onclick();assert.match(ui.elements.get('progress-label').textContent,/New USB port selected/);assert.deepEqual(ui.calls,['chooser']);
+    }
+    assert.equal(ui.evaluate('state.finishedFirmware'),null);assert.equal(ui.elements.get('prepare').disabled,false);assert.doesNotMatch(ui.elements.get('automatic-summary').textContent,/startup verified|No further flashing is required/i);
+  }
+});
+
 test('unsupported and malformed storage replies still retain pending startup verification instead of claiming success',async()=>{
   for(const role of ['common-cli','companion'])for(const layout of ['', 'Unknown command', 'int:esp32-16384K', 'int:esp32=unknown']){
-    const ui=await storageVerificationWorkbench(role,layout);await assert.rejects(ui.evaluate('verifyApplication();'),/storage-layout verification is unavailable or invalid/);assert.equal(ui.evaluate('state.verification'),ui.context.expected);assert.equal(ui.evaluate('state.finishedFirmware'),null);assert.equal(ui.calls.at(-1),'application-close');
+    const ui=await storageVerificationWorkbench(role,layout);await assert.rejects(ui.evaluate('verifyApplication();'),/storage-layout verification is unavailable or invalid/);ui.evaluate('controls();');assert.equal(ui.evaluate('state.verification'),ui.context.expected);assert.equal(ui.evaluate('state.finishedFirmware'),null);assert.equal(ui.calls.at(-1),'application-close');assert.notEqual(ui.elements.get('reconnect-title').textContent,'Firmware verified');assert.doesNotMatch(ui.elements.get('progress-label').textContent,/startup verified/);
   }
 });
 
@@ -2200,6 +2254,28 @@ test('the post-startup bootloader prompt only prepares after an explicit choice 
     const ui=await bootloaderOfferWorkbench();prepareNrfStartup(ui);ui.context.choose=async()=>{ui.calls.push('accepted-prepare');return 'prepare';};ui.context.loadBootloaderFirmware=async()=>{ui.calls.push('load-component-only');if(failure)throw Error('Fixture download failure');};
     if(failure)await assert.rejects(ui.evaluate('verifyApplication();'),/Application startup was verified.*bootloader preparation failed.*Fixture download failure/i);else await ui.evaluate('verifyApplication();');
     assert.deepEqual(ui.calls,['application-open','application-query:get bootloader.ver','application-query:ver','application-close','accepted-prepare','load-component-only']);assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.port'),ui.port);assert.equal(ui.elements.get('artifact').value,'0');
+  }
+});
+
+test('manual startup verification preserves proven application completion on failed component download but never overwrites a newly loaded bootloader',async()=>{
+  for(const failure of [false,true]){
+    const ui=await bootloaderOfferWorkbench();prepareNrfStartup(ui);ui.context.choose=async()=> 'prepare';
+    ui.context.bootPkg=fakePackage({name:'new-bootloader.zip',kind:'softdevice_bootloader',destructive:true,sha256:'c'.repeat(64),warnings:['Separate bootloader compatibility must be checked.']});
+    ui.context.checkedZip=()=>[{name:'manifest.json'},{name:'bootloader.bin'},{name:'bootloader.dat'}];ui.context.inspectFirmware=()=>ui.context.bootPkg;
+    ui.context.loadBootloaderFirmware=async()=>{
+      if(failure){ui.evaluate('invalidateFirmwareSelection();');throw Error('Fixture component download unavailable');}
+      await ui.evaluate('loadFirmware(bootPkg.name,new Uint8Array(64));');
+    };
+    await ui.elements.get('verify-app').onclick();
+    assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.port'),ui.port);
+    if(failure){
+      assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.finishedFirmware.verified'),true);assert.match(ui.elements.get('notice').textContent,/startup was verified.*Separate bootloader preparation failed/i);
+      assert.match(ui.elements.get('progress-label').textContent,/Application startup verified/);assert.match(ui.elements.get('automatic-summary').textContent,/Installed firmware startup verified/);assert.equal(ui.elements.get('reconnect-title').textContent,'Firmware verified');assert.equal(ui.elements.get('prepare').disabled,true);
+    }else{
+      assert.equal(ui.evaluate('state.pkg'),ui.context.bootPkg);assert.equal(ui.evaluate('state.finishedFirmware'),null);assert.match(ui.elements.get('image-warning').textContent,/Separate bootloader compatibility|requires reinstalling/);
+      assert.match(ui.elements.get('progress-label').textContent,/Image validated locally/);assert.match(ui.elements.get('automatic-summary').textContent,/new-bootloader\.zip/);assert.doesNotMatch(ui.elements.get('automatic-summary').textContent,/No further flashing is required/);assert.equal(ui.elements.get('prepare').disabled,false);assert.notEqual(ui.elements.get('reconnect-title').textContent,'Firmware verified');
+    }
+    assert.deepEqual(ui.calls,['application-open','application-query:get bootloader.ver','application-query:ver','application-close']);
   }
 });
 

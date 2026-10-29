@@ -5,6 +5,7 @@ import {readFile} from 'node:fs/promises';
 
 const html=await readFile(new URL('../index.html',import.meta.url),'utf8');
 const css=await readFile(new URL('../src/style.css',import.meta.url),'utf8');
+const readme=await readFile(new URL('../README.md',import.meta.url),'utf8');
 // A small tag stack is enough for this static document and avoids adding a
 // browser/DOM dependency. Quoted > characters do not terminate opening tags.
 function parseDocument(source){
@@ -32,6 +33,21 @@ const ancestors=node=>{const result=[];for(let parent=node.parent;parent;parent=
 const inside=(node,parent)=>ancestors(node).includes(parent);
 const closedAncestors=node=>ancestors(node).filter(parent=>parent.tag==='details'&&!has(parent,'open'));
 const hasClass=(node,name)=>(node.attrs.class||'').split(/\s+/).includes(name);
+
+test('hardware preview records the one verified Chrome V4 update without qualifying other operations',()=>{
+  const copy=html.slice(get('capabilities').start).split('</p>')[0];
+  assert.match(copy,/One Heltec V4\.3 OLED bench radio completed a Chrome application update/);
+  assert.match(copy,/TinyUSB handoff, MD5 readback and application startup verification/);
+  assert.match(copy,/Other boards, nRF52 flashing, erase\/new installs, partition migration and browser crash\/reload recovery remain unverified/);
+  assert.doesNotMatch(copy,/live-device flashing.*not yet been verified/);
+  const qualification=readme.split('## Use')[0];
+  assert.match(qualification,/one Heltec V4\.3 OLED bench radio completed an end-to-end application update/);
+  assert.match(qualification,/Meshtastic 2\.7\.15 detection/);
+  assert.match(qualification,/Companion v1\.18\.0\.1, protocol 14/);
+  assert.match(qualification,/skip-backup option was explicitly selected/);
+  assert.match(qualification,/did not qualify browser\s+configuration backup or restore/);
+  assert.match(qualification,/nRF52\s+flashing, erase\/new installs, partition migration and browser crash\/reload\s+recovery persistence remain unverified/);
+});
 
 test('USB selection is the first initially visible main-page control in the compact header',()=>{
   const header=get('flasher'),button=get('select-port'),main=nodes.find(node=>node.tag==='main');

@@ -9,10 +9,24 @@ firmware is downloaded automatically from a hash-verified mirror on this site;
 unmirrored public downloads contact their named hosts. GitHub receives ordinary site requests.
 
 This is a **hardware preview**. Automated protocol, safety, simulated serial,
-WebAssembly and simulated IndexedDB persistence tests pass. Browser UI and
-read-only automatic detection were checked against a connected Heltec V4 OLED
-repeater. End-to-end browser flashing and real-browser persistence are not yet verified.
-Start with a recoverable bench radio, not a remote USB-only node.
+WebAssembly and simulated IndexedDB persistence tests pass. On 2026-10-29,
+one Heltec V4.3 OLED bench radio completed an end-to-end application update
+through the published site in desktop Chrome: Meshtastic 2.7.15 detection,
+TinyUSB handoff despite a final control-transfer disconnect, explicit same-radio
+ROM reselection, MAC/security/partition checks, two-slot writes with matching
+target MD5 readback, browser reset, and fresh application-port selection.
+Startup verification confirmed Companion v1.18.0.1, protocol 14, the
+`Heltec V4.3 OLED` model and `storage.layout` after installing the selected
+Keymind Cascade Full Companion OLED application. No partition expansion was
+needed. An existing private 16 MiB raw backup was retained, and the browser's
+skip-backup option was explicitly selected; this run did not qualify browser
+configuration backup or restore.
+
+That result qualifies this one Chrome/V4 application-update path, not all
+hardware or operations. Browser end-to-end flashing on other boards, nRF52
+flashing, erase/new installs, partition migration and browser crash/reload
+recovery persistence remain unverified. Start with a recoverable bench radio,
+not a remote USB-only node.
 
 ## Use
 

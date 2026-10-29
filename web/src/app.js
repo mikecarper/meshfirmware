@@ -214,7 +214,16 @@ function updateReconnectCallout(){
 }
 function canPrepareWithoutBackup(){
   const selected=$('artifact').value,hasImage=!!state.pkg||!!(selected&&state.items[Number(selected)]);
-  return $('skip-backup').checked&&hasImage&&!!(state.port||state.pkg?.architecture==='uf2')&&!state.verification&&!state.plan?.written&&!state.migrationApproval&&state.recovery?.phase!=='reselect-dfu';
+  return !completedFirmwareSelection()&&$('skip-backup').checked&&hasImage&&!!(state.port||state.pkg?.architecture==='uf2')&&!state.verification&&!state.plan?.written&&!state.migrationApproval&&state.recovery?.phase!=='reselect-dfu';
+}
+function completedFirmwareSelection(){
+  const finished=state.finishedFirmware;
+  return finished&&(!state.pkg||finished.sha256===state.pkg.sha256)?finished:null;
+}
+function assertFirmwareNotCompleted(){
+  if(state.plan?.written)fail('Firmware has already been transferred. Finish the pending reset before starting another update.');
+  const finished=completedFirmwareSelection();
+  if(finished)fail((finished.verified?'Application startup is already verified.':'This firmware has already been transferred; activation may still need verification.')+' Choose a new device or explicitly select a firmware build before preparing another write. No reset or write was sent.');
 }
 function canStartNewRadio(){
   return !!state.verification&&!state.flashProgress&&!state.autoVerificationRunning&&!state.migrationApproval&&!state.migration&&!state.recovery&&!state.espRecovery&&!state.esp&&!state.plan?.written;
@@ -309,9 +318,9 @@ function controls() {
   syncSelectionLink();
   updateBootloaderInfoPanel();
   $('select-port').disabled ||= !('serial' in navigator);
-  $('prepare').disabled ||= $('skip-backup').checked || (!state.pkg&&!$('artifact').value) || (!state.port && state.pkg?.architecture !== 'uf2');
-  $('flash').disabled ||= (!state.plan&&!canPrepareWithoutBackup()) || state.recovery?.phase==='reselect-dfu'||!!state.plan?.written;
-  $('skip-backup').disabled ||= !!state.verification||!!state.plan?.written||!!state.migrationApproval;
+  $('prepare').disabled ||= !!completedFirmwareSelection() || !!state.plan?.written || $('skip-backup').checked || (!state.pkg&&!$('artifact').value) || (!state.port && state.pkg?.architecture !== 'uf2');
+  $('flash').disabled ||= !!completedFirmwareSelection() || (!state.plan&&!canPrepareWithoutBackup()) || state.recovery?.phase==='reselect-dfu'||!!state.plan?.written;
+  $('skip-backup').disabled ||= !!completedFirmwareSelection()||!!state.verification||!!state.plan?.written||!!state.migrationApproval;
   $('skip-backup-warning').hidden=!$('skip-backup').checked;$('skip-backup-option').classList.toggle('enabled',$('skip-backup').checked);
   $('finish').disabled ||= !state.esp || !state.plan?.written;
   $('wait-migration').disabled ||= !state.port || !state.migration?.uart || state.migration?.settled;
@@ -325,7 +334,7 @@ function controls() {
   $('fetch-firmware').disabled ||= !$('artifact').value;
   $('load-bootloader').disabled ||= !$('bootloader-source').value;
   $('load-recovery').disabled ||= !state.recoveryCatalog||!$('recovery-profile').value;
-  $('retry').disabled ||= !state.port||!state.pkg;
+  $('retry').disabled ||= !!completedFirmwareSelection()||!state.port||!state.pkg;
   syncInstallMode();
   updateStepGuidance(updateArtifactChoiceHighlight());
   updateBootloaderOffer();
@@ -552,11 +561,17 @@ function applyAutomaticSelections(){
   updateDownload();controls();return result;
 }
 function updateFirmwareSelectionSummary({item,automatic=false,reason=''}={}) {
+  const finished=completedFirmwareSelection();
+  if(finished?.verified&&!state.verification&&!state.handoff&&!state.recovery&&!state.espRecovery&&!state.migration){
+    $('automatic-summary').textContent=[`Installed firmware startup verified: ${state.device?.name||state.device?.model||'MeshCore'}.`,state.device?.version,finished.name||state.pkg?.name,'No further flashing is required. Choose a new device or explicitly select another firmware build to start a new update.'].filter(Boolean).join('\n');
+    return;
+  }
   if(item===undefined)item=$('artifact').value?state.items[Number($('artifact').value)]:null;
   const hardware=$('hardware').value,fields=['hardware','provider','role','version'].map(id=>$(id).value).filter(Boolean);
   const mismatch=state.port&&state.device&&state.detectedHardware&&hardware&&hardware!==state.detectedHardware
     ?`The connected node reports ${state.detectedHardware}; the selected firmware target is ${hardware}. Changing Hardware does not change the USB port. Choose the other radio's USB port to switch connected devices.`:'';
-  const detail=item?`${item.hardware} · ${item.provider} · ${item.title||item.role} · ${item.version}\n${item.name}\n${state.installMode==='install'?'Erase & new install selected.':automatic?'Write-only update selected.':'Manual firmware selection.'} Prepare ${state.installMode==='install'?'install':'update'} downloads, validates and offers backup before bootloader entry. Nothing is flashed until you confirm.`
+  const detail=item?.role?`${item.hardware} · ${item.provider} · ${item.title||item.role} · ${item.version}\n${item.name}\n${state.installMode==='install'?'Erase & new install selected.':automatic?'Write-only update selected.':'Manual firmware selection.'} Prepare ${state.installMode==='install'?'install':'update'} downloads, validates and offers backup before bootloader entry. Nothing is flashed until you confirm.`
+    :state.pkg?`${state.pkg.name}\nValidated image loaded. Manually review it against the connected radio before preparing and flashing. Nothing is written until you confirm.`
     :[fields.length?`Firmware target: ${fields.join(' · ')}.`:'',reason||'Choose hardware, role and a firmware artifact. No image has been loaded or written.'].filter(Boolean).join('\n');
   $('automatic-summary').textContent=[isBootloaderInfo()?bootloaderInfoWarning:isMeshtastic()?meshtasticMigrationWarning:'',item&&!state.pkg?firmwareDowngradeWarning(null,item):'',mismatch,detail].filter(Boolean).join('\n');
 }
@@ -727,7 +742,7 @@ function firmwareDowngradeWarning(pkg=state.pkg,item=state.item) {
 }
 function refreshFirmwareWarnings() {
   const pkg=state.pkg;
-  $('image-warning').textContent=pkg?[...pkg.warnings,firmwareDowngradeWarning(pkg),...(selectedBootloader(pkg)?[bootloaderReinstallWarning]:[]),...(selectedRecovery(pkg)?[recoveryWarning]:[])].filter(Boolean).join(' '):'';
+  $('image-warning').textContent=pkg&&!completedFirmwareSelection()?.verified?[...pkg.warnings,firmwareDowngradeWarning(pkg),...(selectedBootloader(pkg)?[bootloaderReinstallWarning]:[]),...(selectedRecovery(pkg)?[recoveryWarning]:[])].filter(Boolean).join(' '):'';
 }
 function verificationRecord(pkg) {
   const identity=payloadFirmwareIdentity(pkg);
@@ -772,7 +787,7 @@ function requestAutomaticVerification(){
       if(state.verification!==expected){
         // Startup may already be proven; an optional bootloader preparation
         // that follows it is a separate operation, not a failed startup check.
-        if(error.startupVerifiedSha256===expected.sha256&&!state.verification&&!state.finishedFirmware)state.finishedFirmware={sha256:expected.sha256,verified:true};
+        if(error.startupVerifiedSha256===expected.sha256&&!state.verification&&!state.finishedFirmware&&!continuingDeviceFlow()&&(!state.pkg||state.pkg.sha256===expected.sha256))state.finishedFirmware={sha256:expected.sha256,verified:true};
         notice(error.message,true);log(`Post-verification operation stopped: ${error.message}`);return;
       }
       state.knownApplicationPort=null;state.port=null;state.generation++;state.device=null;state.boardDetected=false;
@@ -808,9 +823,19 @@ async function verifyApplication({automaticApproval=null,automaticReconnect=fals
   }finally{await link.close();}
   if(automaticApproval&&state.migrationApproval!==automaticApproval)fail('Automatic continuation was stopped; startup verification remains available manually.');
   state.verification=null;state.handoff=false;state.backupApproved=null;persistFlow('verification','meshfirmware.verifyApplication');$('already-bootloader').checked=false;
-  state.finishedFirmware={sha256:expected.sha256,verified:true};
+  const finished=state.finishedFirmware={sha256:expected.sha256,name:expected.name||state.pkg?.name,verified:true};
+  progress(1,`Application startup verified.${layout?' Storage layout confirmed.':''} No further flashing is required.`);
+  refreshFirmwareWarnings();updateFirmwareSelectionSummary();
   notice(`Application startup verified: ${device.name||device.model||device.role}. ${layout?'Storage layout answered. ':''}${automaticApproval?(expected.publicKey?'Pre-flash public identity matches.':'No pre-flash public identity was available; physical device identity could not be independently verified.'):automaticReconnect?'Previously authorized application port reused; the expected public identity matches.':'Physical USB serial is not exposed by Web Serial; the port was explicitly reselected.'}`);log(version);
-  if(expected.architecture==='nrf52')try{await offerBootloaderAfterStartup();}catch(error){throw Object.assign(new Error(error.message||String(error)),{startupVerifiedSha256:expected.sha256});}
+  if(expected.architecture==='nrf52')try{await offerBootloaderAfterStartup();}catch(error){
+    // A separate component download can invalidate its selection before it
+    // fails. Preserve the already proven application, but never repaint a
+    // newly loaded bootloader or another pending recovery as app completion.
+    if(!state.finishedFirmware&&!state.verification&&!continuingDeviceFlow()&&(!state.pkg||state.pkg.sha256===expected.sha256)){
+      state.finishedFirmware=finished;refreshFirmwareWarnings();updateFirmwareSelectionSummary();
+    }
+    throw Object.assign(new Error(error.message||String(error)),{startupVerifiedSha256:expected.sha256});
+  }
 }
 function invalidateFirmwareSelection() {
   // Invalidate before fetch, file I/O or validation can fail. A failed attempt
@@ -852,6 +877,7 @@ async function loadFirmware(name, bytes, item = null) {
   $('nrf-actions').hidden=pkg.architecture!=='nrf52';$('erase-source').replaceChildren(...(item?.erase||state.recovery?.eraseUrls||[]).map(url=>new Option(new URL(url).pathname.split('/').pop(),url)));
   if(pkg.architecture==='nrf52'&&$('transport-mode').value!=='auto')$('transport-mode').value='nrf52';
   $('expert-fields').hidden = !pkg.expert;
+  updateFirmwareSelectionSummary({item});
   progress(0,'Image validated locally. Inspect the device before confirmation.'); notice('Firmware loaded. No device data has been written.');
 }
 function options(id, values, placeholder) {
@@ -1014,6 +1040,7 @@ $('select-port').onclick = () => operation(async () => {
     clearBackupJson();state.device=null;state.detectedHardware=null;state.manualSelections=provider?{provider}:{};state.backup=null;$('backup-summary').textContent='';
     if($('auto-detect-board').checked&&!manualDfuSelection)resetAutomaticBoardSelection('Reading the selected USB device. Previous automatic firmware choices were cleared; no image is ready to flash.');
     else updateFirmwareSelectionSummary({reason:'New USB port selected. Review the manual firmware target against this radio.'});
+    refreshFirmwareWarnings();progress(0,'New USB port selected. Prepare its firmware before flashing.');
   }
   state.port = port; state.generation++;clearBootloaderInfoEvidence();state.applicationProbeFailed=false;
   $('device-name').textContent = `Selected USB ${portId(port)}`; $('device-meta').textContent = 'Port permission granted. Firmware and board identity are not yet verified.'; $('port-status').textContent = dfuIds.has(portId(port)) ? 'DFU port' : 'Port selected';
@@ -1109,6 +1136,7 @@ $('binary-mode').onclick=()=>operation(async()=>{
   notice('Binary mode confirmed. USB logging is off; it will not be re-enabled automatically. Read the running node or create a backup.');
 });
 async function prepareSelectedFirmware({waitForRom=false}={}) {
+  assertFirmwareNotCompleted();
   if(!state.pkg&&$('artifact').value)await fetchSelectedFirmware();
   const pkg = state.pkg; if (!pkg) fail('Select an exact firmware build first.'); await closeEsp();
   if(state.recovery&&state.recovery.sha256!==pkg.sha256)fail('nRF52 recovery is pending. Select its original final firmware; another image will not be substituted.');
@@ -1217,8 +1245,9 @@ async function prepareSelectedFirmware({waitForRom=false}={}) {
 }
 $('prepare').onclick = () => operation(prepareSelectedFirmware);
 async function flashPreparedFirmware() {
+  assertFirmwareNotCompleted();
   const plan = state.plan, pkg = state.pkg;
-  if (!plan || plan.generation !== state.generation || plan.port !== state.port || plan.sha256 !== pkg.sha256) fail('Selection changed; inspect again.');
+  if (!pkg || !plan || plan.generation !== state.generation || plan.port !== state.port || plan.sha256 !== pkg.sha256) fail('Selection changed; inspect again.');
   if(plan.installMode!==undefined&&plan.installMode!==state.installMode)fail('Installation mode changed; prepare the selected build again before writing.');
   assertInstallModePackage(pkg);
   const temporary=selectedRecovery(pkg);
@@ -1279,6 +1308,7 @@ async function reviewAndFlashSelectedFirmware(){
   if(state.plan?.written)fail('Firmware has already been transferred. Finish the pending reset before starting another update.');
   if(state.plan)return flashPreparedFirmware();
   if(state.verification)fail('Firmware has already been transferred. Use Flash a new device to begin another update, or optionally verify the previous device.');
+  assertFirmwareNotCompleted();
   if(state.migrationApproval)fail('An approved automatic update is already in progress.');
   if(!$('skip-backup').checked)return flashPreparedFirmware();
   if(!canPrepareWithoutBackup())fail('Select an exact firmware build and the intended radio’s USB port first.');
@@ -1341,7 +1371,9 @@ async function finishVerifiedEsp(){
   }
   else if(bridge) {state.port=null;state.generation++;$('transport-mode').value='no_reset';$('port-status').textContent='Wait for ROM return';notice(approval?'Expansion bridge started. Waiting for the same granted ROM port; if the browser requires a new permission, choose the same radio with step 1. The final write continues automatically after chip, layout and restoration checks.':'Migration bridge started. Keep power connected, wait for its automatic ROM return, then choose the same USB device and inspect again without resetting it.');}
   else {
-    state.port=null;state.generation++;$('already-bootloader').checked=false;notice(approval?'Reset requested after verified writes. Choose the application port; startup and storage layout will be verified automatically.':'Reset requested after verified writes. Flash a new device, or optionally reconnect this radio’s application port to verify startup.');
+    state.port=null;state.generation++;$('already-bootloader').checked=false;
+    progress(1,'Firmware transfer verified. Reset requested; application startup has not been checked.');
+    notice(approval?'Reset requested after verified writes. Choose the application port; startup and storage layout will be verified automatically.':'Reset requested after verified writes. Flash a new device, or optionally reconnect this radio’s application port to verify startup.');
     if(approval&&state.migrationApproval===approval&&(transport==='default_reset'||physical.mode==='default_reset')){state.port=previousPort;await continueApprovedMigration();}
   }
 }
