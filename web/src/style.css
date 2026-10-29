@@ -83,6 +83,11 @@ h1 { font-size: 28px; line-height: 1.15; letter-spacing: -.9px; font-weight: 700
 .device-display > .tag { margin-left: auto; }
 .device-display strong { display: block; font-size: 12px; overflow-wrap: anywhere; }
 .device-display small { display: block; font-size: 11px; color: var(--muted); margin-top: 3px; line-height: 1.5; overflow-wrap: anywhere; }
+.bootloader-info-fallback { margin: 0 0 16px; padding: 18px; border: 2px solid #b37a16; border-radius: 8px; background: #fff7e8; }
+.bootloader-info-fallback h2 { margin: 0 0 8px; font-size: clamp(20px, 3vw, 28px); line-height: 1.25; color: #784908; }
+.bootloader-info-fallback p { margin: 0 0 14px; font-size: 15px; line-height: 1.55; overflow-wrap: anywhere; }
+.bootloader-info-fallback button { min-height: 68px; font-size: 17px; }
+.bootloader-info-fallback .action-number { font-size: 22px; }
 .bootloader-offer { display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-start; gap: 7px; padding: 11px 13px; margin: 0 0 12px; border: 1px solid #cce0df; border-radius: 7px; background: #f3f9f7; min-width: 0; }
 .bootloader-offer > p { margin: 0; font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
 .bootloader-offer > .hint { font-size: 11px; }

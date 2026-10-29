@@ -27,7 +27,8 @@ export function chooseConnection({usbInfo={},device=null,usbDescription='',alrea
     if(architecture==='nrf52'||packageArchitecture==='nrf52')return result('nrf52',true,'explicit-bootloader','Explicit nRF52 bootloader handoff; use the selected serial DFU interface without another reset.');
     return result('no_reset',true,'explicit-bootloader','Explicit ROM/bootloader handoff; inspect this selected interface without another reset.');
   }
-  if(architecture==='nrf52')return result('nrf52',false,'application-model','Running MeshCore model identifies an nRF52 target; offer its guarded 1200-baud serial-DFU handoff after backup.');
+  if(device?.firmwareFamily==='bootloader'||device?.role==='bootloader')return result(null,false,'bootloader-file','The selected INFO_UF2.TXT suggests installed bootloader hardware, but does not identify this USB port or prove its mode. Select the same radio’s DFU serial port, or explicitly mark an unlisted port Already in ROM/DFU. No reset is inferred from a file.');
+  if(architecture==='nrf52')return result('nrf52',false,'application-model','Running application identifies an nRF52 target; offer its guarded 1200-baud serial-DFU handoff after backup consideration.');
   if(uartIds.has(id))return result('default_reset',false,'uart-usb',`USB ${id} identifies a supported UART bridge; use its qualified DTR/RTS ESP32 bootloader entry after backup.`);
   const description=typeof usbDescription==='string'&&usbDescription.length<=512?usbDescription:'';
   const tiny=/\bTinyUSB\b/i.test(description),jtag=/\b(?:USB[ -]JTAG[/ -](?:serial|debug)|USB\s+Serial[/ -]JTAG)\b/i.test(description);

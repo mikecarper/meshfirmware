@@ -11,18 +11,18 @@ function serialPort(usbVendorId,usbProductId){
 }
 
 test('reviewed native application opens assert DTR at 115200 without toggling RTS or baud',async()=>{
-  for(const [vid,pid] of [[0x303a,0x0002],[0x303a,0x1001],[0x2886,0x0059],[0x2886,0x8044],[0x2886,0x8045]]){
+  for(const [vid,pid] of [[0x303a,0x0002],[0x303a,0x1001],[0x2886,0x0059],[0x2886,0x8044],[0x2886,0x8045],[0x239a,0x4405],[0x239a,0x8029],[0x239a,0x802a]]){
     const port=serialPort(vid,pid),link=new SerialLink(port);await link.open(115200,{application:true});
     assert.deepEqual(port.calls,[['open',{baudRate:115200,flowControl:'none',bufferSize:65536}],['signals',{dataTerminalReady:true,requestToSend:false}]]);await link.close();
   }
 });
 test('default and DFU opens retain deasserted DTR, including native interfaces',async()=>{
-  for(const [vid,pid] of [[0x303a,0x0002],[0x2886,0x0057],[0x239a,0x0029]]){
+  for(const [vid,pid] of [[0x303a,0x0002],[0x2886,0x0057],[0x239a,0x0029],[0x239a,0x0071],[0x239a,0x4405],[0x239a,0x8029],[0x239a,0x802a]]){
     const port=serialPort(vid,pid),link=new SerialLink(port);await link.open();assert.equal(port.calls[1][1].dataTerminalReady,false);await link.close();
   }
 });
 test('application probing never asserts DTR on UART bridges, unknown IDs, neighbors or 1200 baud',async()=>{
-  for(const [vid,pid,baud] of [[0x10c4,0xea60,115200],[0x1a86,0x7523,115200],[0x0403,0x6001,115200],[0x303a,0x0003,115200],[0x303a,0x0002,1200],[undefined,undefined,115200]]){
+  for(const [vid,pid,baud] of [[0x10c4,0xea60,115200],[0x1a86,0x7523,115200],[0x0403,0x6001,115200],[0x303a,0x0003,115200],[0x303a,0x0002,1200],[0x239a,0x4404,115200],[0x239a,0x0071,115200],[0x239a,0x4405,1200],[undefined,undefined,115200]]){
     const port=serialPort(vid,pid),link=new SerialLink(port);await link.open(baud,{application:true});assert.equal(port.calls[1][1].dataTerminalReady,false);assert.equal(port.calls[1][1].requestToSend,false);await link.close();
   }
 });

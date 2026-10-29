@@ -4,7 +4,10 @@ import { fail, sleep, words, crc16, hash, nrfMetadataHash } from './firmware.js'
 // are reviewed native USB interfaces, not UART bridges whose DTR may drive EN.
 // A shared native ID is sufficient to assert host presence at 115200, never to
 // infer a board or choose a reset mechanism. DFU/default opens remain unchanged.
-const applicationDtrIds=new Set(['303a:0002','303a:1001','2886:0059','2886:8044','2886:8045']);
+// Meshtastic's T114 board declares 239a:4405; older Adafruit application IDs
+// are 8029/802a. These are CDC host-presence signals only, never board hints.
+// https://github.com/meshtastic/firmware/blob/master/boards/heltec_mesh_node_t114.json
+const applicationDtrIds=new Set(['303a:0002','303a:1001','2886:0059','2886:8044','2886:8045','239a:4405','239a:8029','239a:802a']);
 function applicationDtr(port,baudRate,application){
   const info=port?.getInfo?.()||{};
   if(!application||baudRate!==115200||![info.usbVendorId,info.usbProductId].every(n=>Number.isInteger(n)&&n>=0&&n<=65535))return false;

@@ -23,6 +23,11 @@
 
     <section class="card workflow" aria-label="Firmware update">
       <div class="device-display"><svg viewBox="0 0 64 64" aria-hidden="true"><rect x="18" y="9" width="28" height="46" rx="5"/><path d="M26 9V4m12 5V4M26 55v5m12-5v5M18 22H9m9 12H9m37-12h9M46 34h9"/><rect x="25" y="23" width="14" height="14" rx="2"/></svg><div><strong id="device-name">No USB port selected</strong><small id="device-meta">Use a data-capable USB cable. Board and role are detected after connecting.</small></div><span class="tag" id="port-status">Not connected</span></div>
+      <div id="bootloader-info-fallback" class="bootloader-info-fallback" hidden>
+        <h2>Identify the radio from its bootloader info</h2>
+        <p id="bootloader-info-status" role="status" aria-live="polite">Choose INFO_UF2.TXT from this radio’s USB bootloader drive. Only the file is read; firmware still flashes over USB serial.</p>
+        <button id="read-bootloader-info" class="primary step-button" type="button" aria-label="Optional step 1.5: Read bootloader information" data-lock><span class="action-number" aria-hidden="true">1.5</span><span class="action-label">Read bootloader info</span></button>
+      </div>
       <div id="nrf-bootloader-offer" class="bootloader-offer" hidden>
         <p id="nrf-bootloader-status" role="status" aria-live="polite">Installed bootloader version has not been checked.</p>
         <button id="prepare-bootloader-update" class="secondary" type="button" aria-describedby="nrf-bootloader-warning" hidden data-lock>Prepare bootloader update</button>

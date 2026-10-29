@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import {detectBoard,detectRecoveryProfile} from '../src/board-detection.js';
+import {detectMeshtasticBoard} from '../src/meshtastic-boards.js';
+import {parseBootloaderInfo,detectBootloaderBoard} from '../src/bootloader-info.js';
 import {chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode} from '../src/automatic.js';
 import {chooseConnection,parseUsbMode} from '../src/connection-choice.js';
 import {lookupUsbConnectionMap} from '../src/usb-connection-map.js';
@@ -40,9 +42,118 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
     fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,parseUsbMode,MigrationApproval,cleanCliReply,assessBootloaderVersion,firmwareFilesLinks,fetch:async()=>{throw Error('Unexpected network request');},fetchFirmwareBytes:(url,options)=>verifiedDownload(url,{...options,mirrorBase:'https://mirror.example.test/firmware/',pageOrigin:'https://mirror.example.test',fetchImpl:(target,init)=>target==='https://mirror.example.test/firmware/index.json'?Promise.resolve({ok:false,status:404}):options.fetchImpl(target,init)}),assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),commonCliRestorePreview:()=>({operations:[],skipped:[],warnings:[]}),restoreCommonCli:async()=>{throw Error('Unexpected CommonCLI restore');},
     backupCoverage,createNextStepScroller,tryNativeUsbFallback,SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
   });
+  context.detectApplication=(...args)=>context.detectMeshCore(...args);context.detectMeshtasticBoard=detectMeshtasticBoard;
+  context.parseBootloaderInfo=parseBootloaderInfo;context.detectBootloaderBoard=detectBootloaderBoard;context.chooseBootloaderInfoFile=async()=>{calls.push('file-picker');throw Error('Unexpected file chooser');};
   vm.runInContext(source,context);
   return {context,elements,calls,port,serialEvents,windowEvents,evaluate:code=>vm.runInContext(code,context)};
 }
+
+const t114MeshtasticItem=(more={})=>({project:'MeshCore',provider:'Keymind Cascade',hardware:'Heltec T114',architecture:'nrf52',role:'companionFull',version:'v1.18.0.1',name:'Heltec_t114_companion_radio_full-v1.18.0.1.zip',action:'flash',url:'https://example.test/t114.zip',...more});
+const meshtasticDevice=(more={})=>({firmwareFamily:'meshtastic',role:'meshtastic',meshtasticHardware:69,model:'Meshtastic hardware 69',nodeNum:1234,name:'H2T test',version:'2.7.4',catalogRole:null,publicKey:null,...more});
+async function meshtasticWorkbench({device=meshtasticDevice()}={}){
+  const ui=workbench({productionDefaults:true});await Promise.resolve();serialMock(ui);ui.context.selectedPort=ui.port;ui.port.getInfo=()=>({usbVendorId:0x239a,usbProductId:0x4405});
+  ui.context.inventory=[t114MeshtasticItem(),t114MeshtasticItem({hardware:'Heltec v2',architecture:'esp32',name:'Heltec_v2_companion_radio_full.bin',action:'flash-update'})];ui.evaluate('state.items=inventory;filterCatalog();');
+  ui.context.detectApplication=async()=>({...device});return ui;
+}
+
+test('Meshtastic H2T/T114 read selects the nRF52 MeshCore target and Companion Full without MeshCore commands or writes',async()=>{
+  const ui=await meshtasticWorkbench();await ui.elements.get('select-port').onclick();
+  assert.equal(ui.elements.get('hardware').value,'Heltec T114');assert.equal(ui.elements.get('role').value,'companionFull');assert.equal(ui.elements.get('provider').value,'Keymind Cascade');assert.equal(ui.elements.get('artifact').value,'0');
+  assert.equal(ui.evaluate('state.device.architecture'),'nrf52');assert.equal(ui.evaluate('state.device.publicKey'),null);assert.equal(ui.evaluate('state.knownApplicationPort'),null);assert.equal(ui.evaluate('state.device.bootloaderVersion'),null);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.installMode'),'update');
+  assert.match(ui.elements.get('device-meta').textContent,/Meshtastic.*Heltec Mesh Node T114/);assert.match(ui.elements.get('automatic-summary').textContent,/not converted into a MeshCore backup/);assert.doesNotMatch(ui.elements.get('automatic-summary').textContent,/downgrade/i);assert.equal(ui.elements.get('nrf-bootloader-offer').hidden,true);assert.deepEqual(ui.calls,['chooser','open','close']);
+});
+
+test('unknown Meshtastic hardware does not inherit an old MeshCore board or use the shared USB ID to guess',async()=>{
+  const ui=await meshtasticWorkbench({device:meshtasticDevice({meshtasticHardware:99999,model:'Heltec v2'})});ui.context.pkg=fakePackage();ui.evaluate('state.pkg=pkg;state.item=inventory[0];state.detectedHardware="Heltec T114";state.device={model:"Heltec T114",catalogRole:"companionFull"};');
+  await ui.elements.get('select-port').onclick();assert.equal(ui.elements.get('hardware').value,'');assert.equal(ui.elements.get('artifact').value,'');assert.equal(ui.evaluate('state.detectedHardware'),null);assert.equal(ui.evaluate('state.pkg'),null);assert.match(ui.elements.get('board-detection').textContent,/manual|unknown|reviewed/i);assert.deepEqual(ui.calls,['chooser','open','close']);
+});
+
+test('moving from Meshtastic requires explicit continue and never claims a MeshCore backup or selects erase',async()=>{
+  for(const answer of ['cancel','skip']){
+    const ui=await meshtasticWorkbench();await ui.elements.get('select-port').onclick();ui.context.pkg=fakePackage({architecture:'nrf52'});ui.evaluate('state.pkg=pkg;');ui.calls.length=0;
+    ui.context.choose=async(title,detail,buttons)=>{ui.calls.push('question');assert.match(title,/Meshtastic.*MeshCore/);assert.match(detail,/does not create or restore Meshtastic/);assert.ok(buttons.some(([,label])=>label==='Continue to MeshCore without backup'));return answer;};
+    if(answer==='cancel'){await assert.rejects(ui.evaluate('ensureBackup();'),/Cancelled/);assert.equal(ui.evaluate('state.backupApproved'),null);}
+    else {await ui.evaluate('ensureBackup();');assert.equal(ui.evaluate('state.backupApproved.skipped'),true);assert.equal(ui.evaluate('state.backupApproved.publicKey'),null);assert.equal(ui.evaluate('state.backupApproved.sourceFirmware'),'meshtastic');}
+    assert.equal(ui.evaluate('state.backup'),null);assert.equal(ui.evaluate('state.installMode'),'update');assert.deepEqual(ui.calls,['question']);
+  }
+});
+
+test('known Meshtastic nodes cannot enter MeshCore backup, restore, binary or serial-console operations',async()=>{
+  const ui=await meshtasticWorkbench();await ui.elements.get('select-port').onclick();ui.calls.length=0;
+  await assert.rejects(ui.evaluate('captureBackup();'),/Meshtastic is running/);
+  ui.elements.get('command').value='set name Test';for(const id of ['backup','restore','send-command','binary-mode']){assert.equal(ui.elements.get(id).disabled,true);await ui.elements.get(id).onclick();assert.match(ui.elements.get('notice').textContent,/Meshtastic is running/);}
+  assert.equal(ui.evaluate('state.backup'),null);assert.equal(ui.evaluate('state.device.role'),'meshtastic');assert.deepEqual(ui.calls,[]);
+});
+
+test('a responding Meshtastic node cannot satisfy pending MeshCore startup verification',async()=>{
+  const ui=await meshtasticWorkbench();ui.evaluate('state.port=selectedPort;state.verification={sha256:"a".repeat(64),architecture:"nrf52",publicKey:null,role:null,model:null};');
+  await ui.elements.get('verify-app').onclick();assert.ok(ui.evaluate('state.verification'));assert.match(ui.elements.get('notice').textContent,/Meshtastic is still running.*not verified/);assert.equal(ui.evaluate('state.finishedFirmware'),null);assert.equal(ui.evaluate('state.knownApplicationPort'),null);assert.deepEqual(ui.calls,['open','close']);
+});
+
+test('a changed port during Meshtastic detection cannot select its board or grant backup approval',async()=>{
+  const ui=await meshtasticWorkbench();ui.context.detectApplication=async()=>{ui.serialEvents.disconnect({port:ui.port});return meshtasticDevice();};
+  await ui.elements.get('select-port').onclick();assert.equal(ui.evaluate('state.device'),null);assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.evaluate('state.detectedHardware'),null);assert.equal(ui.elements.get('artifact').value,'');assert.match(ui.elements.get('notice').textContent,/changed or disconnected/);assert.deepEqual(ui.calls,['chooser','open','close']);
+});
+
+const bootloaderInfoText=(version='0.11.0-OTAFIX2.4.12')=>`UF2 Bootloader ${version}\r\nModel: HT-n5262\r\nBoard-ID: HT-n5262\r\nSoftDevice: S140 6.1.1\r\n`;
+async function bootloaderInfoWorkbench({dfu=false,code='APPLICATION_UNIDENTIFIED'}={}){
+  const ui=await meshtasticWorkbench();ui.port.getInfo=()=>dfu?{usbVendorId:0x239a,usbProductId:0x0071}:{};
+  ui.context.detectApplication=async()=>{throw Object.assign(Error('Application was not identified'),{code});};await ui.elements.get('select-port').onclick();return ui;
+}
+
+test('an unrecognized application or initial DFU port exposes a prominent read-info action but never opens a file picker automatically',async()=>{
+  for(const dfu of [false,true]){
+    const ui=await bootloaderInfoWorkbench({dfu});assert.equal(ui.elements.get('bootloader-info-fallback').hidden,false);assert.equal(ui.elements.get('read-bootloader-info').disabled,false);assert.deepEqual(nextHighlight(ui),['read-bootloader-info']);assert.match(ui.elements.get('step-guidance').textContent,/INFO_UF2.TXT/);assert.ok(!ui.calls.includes('file-picker'));assert.equal(ui.evaluate('state.bootloaderInfo'),null);
+  }
+  const normal=await meshtasticWorkbench();await normal.elements.get('select-port').onclick();assert.equal(normal.elements.get('bootloader-info-fallback').hidden,true);assert.ok(!normal.calls.includes('file-picker'));
+});
+
+test('one explicit bootloader-info choice parses and selects the exact firmware without any drive write or flash',async()=>{
+  const ui=await bootloaderInfoWorkbench({dfu:true});ui.calls.length=0;ui.context.chooseBootloaderInfoFile=async options=>{ui.calls.push('file-picker');assert.equal(options.maxBytes,8192);return {name:'INFO_UF2.TXT',text:bootloaderInfoText()};};
+  await ui.elements.get('read-bootloader-info').onclick();assert.deepEqual(ui.calls,['file-picker']);assert.equal(ui.elements.get('hardware').value,'Heltec T114');assert.equal(ui.elements.get('role').value,'companionFull');assert.equal(ui.elements.get('provider').value,'Keymind Cascade');assert.equal(ui.elements.get('artifact').value,'0');assert.equal(ui.evaluate('state.device.role'),'bootloader');assert.equal(ui.evaluate('state.device.publicKey'),null);assert.equal(ui.evaluate('state.device.bootloaderVersion'),null);assert.equal(ui.evaluate('state.knownApplicationPort'),null);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.installMode'),'update');assert.equal(ui.elements.get('nrf-bootloader-offer').hidden,true);assert.match(ui.elements.get('bootloader-info-status').textContent,/not proof/);assert.equal(ui.elements.get('already-bootloader').checked,true);
+});
+
+test('permission and access failures do not offer or open an alternate file-based detection path',async()=>{
+  for(const code of ['NotAllowedError','SecurityError','AccessDenied']){
+    const ui=await bootloaderInfoWorkbench({code});assert.equal(ui.elements.get('bootloader-info-fallback').hidden,true);assert.equal(ui.elements.get('read-bootloader-info').disabled,true);await ui.elements.get('read-bootloader-info').onclick();assert.ok(!ui.calls.includes('file-picker'));assert.equal(ui.evaluate('state.bootloaderInfo'),null);
+  }
+});
+
+test('ambiguous legacy bootloader information shows candidates and highlights Hardware rather than looping back to the file',async()=>{
+  const ui=await bootloaderInfoWorkbench({dfu:true});ui.context.inventory.push(t114MeshtasticItem({hardware:'Heltec MeshTower V2',name:'meshtower_full.zip'}));ui.evaluate('filterCatalog();');ui.context.chooseBootloaderInfoFile=async()=>({name:'INFO_UF2.TXT',text:bootloaderInfoText('0.9.2')});
+  await ui.elements.get('read-bootloader-info').onclick();assert.equal(ui.elements.get('hardware').value,'');assert.equal(ui.elements.get('artifact').value,'');assert.deepEqual(nextHighlight(ui),['hardware']);assert.match(ui.elements.get('bootloader-info-status').textContent,/shared/);assert.match(ui.elements.get('bootloader-info-status').textContent,/Candidates:.*Heltec MeshTower V2.*Heltec T114/);assert.equal(ui.evaluate('state.pkg'),null);
+});
+
+test('cancelled, invalid and stale info-file reads do not retain board evidence or create a backup approval',async()=>{
+  for(const mode of ['cancel','invalid','port','generation','workflow']){
+    const ui=await bootloaderInfoWorkbench({dfu:true});ui.context.chooseBootloaderInfoFile=async()=>{
+      if(mode==='cancel')return null;if(mode==='invalid')return {name:'INFO_UF2.TXT',text:'not a valid bootloader info file'};
+      if(mode==='port')ui.evaluate('state.port={getInfo:()=>({})};');if(mode==='generation')ui.evaluate('state.generation++;');if(mode==='workflow')ui.evaluate('state.plan={};');return {name:'INFO_UF2.TXT',text:bootloaderInfoText()};
+    };
+    await ui.elements.get('read-bootloader-info').onclick();assert.equal(ui.evaluate('state.bootloaderInfo'),null,mode);assert.equal(ui.evaluate('state.device'),null,mode);assert.equal(ui.evaluate('state.backupApproved'),null,mode);assert.equal(ui.elements.get('artifact').value,'',mode);assert.ok(!ui.calls.some(call=>/write|reset|touch/.test(call)),mode);
+  }
+  const replacement=await bootloaderInfoWorkbench({dfu:true});replacement.context.chooseBootloaderInfoFile=async()=>({name:'INFO_UF2.TXT',text:bootloaderInfoText()});await replacement.elements.get('read-bootloader-info').onclick();assert.equal(replacement.elements.get('hardware').value,'Heltec T114');replacement.context.chooseBootloaderInfoFile=async()=>({name:'INFO_UF2.TXT',text:'invalid replacement'});await replacement.elements.get('read-bootloader-info').onclick();assert.equal(replacement.evaluate('state.bootloaderInfo'),null);assert.equal(replacement.elements.get('hardware').value,'');assert.equal(replacement.elements.get('artifact').value,'');
+});
+
+test('file hints expire on operation changes, disconnect and selection of another port',async()=>{
+  for(const action of ['generation','disconnect','port']){
+    const ui=await bootloaderInfoWorkbench({dfu:true});ui.context.chooseBootloaderInfoFile=async()=>({name:'INFO_UF2.TXT',text:bootloaderInfoText()});await ui.elements.get('read-bootloader-info').onclick();assert.ok(ui.evaluate('state.bootloaderInfo'));
+    if(action==='generation')ui.evaluate('state.generation++;controls();');if(action==='disconnect')ui.serialEvents.disconnect({port:ui.port});if(action==='port')await ui.elements.get('select-port').onclick();
+    assert.equal(ui.evaluate('state.bootloaderInfo'),null,action);assert.equal(ui.evaluate('state.device'),null,action);assert.equal(ui.evaluate('state.backupApproved'),null,action);assert.equal(ui.evaluate('state.knownApplicationPort'),null,action);
+  }
+});
+
+test('an info file does not assert DFU mode on an unknown port or grant protected-board identity evidence',async()=>{
+  const ui=await bootloaderInfoWorkbench();ui.context.chooseBootloaderInfoFile=async()=>({name:'INFO_UF2.TXT',text:bootloaderInfoText()});await ui.elements.get('read-bootloader-info').onclick();assert.equal(ui.elements.get('already-bootloader').checked,false);assert.equal(ui.elements.get('transport-mode').value,'auto');assert.equal(ui.evaluate('state.connection.mode'),null);assert.equal(ui.evaluate('state.backupApproved'),null);assert.deepEqual(nextHighlight(ui),['select-port']);assert.match(ui.elements.get('step-guidance').textContent,/same radio’s DFU serial port/);
+  let assessment;ui.context.assessBoard=(_pkg,input)=>{assessment=input;return {requiresOverride:true,payloadFamily:'unknown'};};ui.context.pkg=fakePackage({architecture:'nrf52'});ui.evaluate('boardAssessment(pkg);');assert.equal(assessment.deviceModel,'');assert.equal(ui.evaluate('verificationRecord(pkg).model'),null);
+  await assert.rejects(ui.evaluate('captureBackup();'),/Only bootloader information/);assert.equal(ui.evaluate('state.backup'),null);assert.equal(ui.elements.get('restore').disabled,true);assert.equal(ui.elements.get('binary-mode').disabled,true);
+  ui.calls.length=0;ui.elements.get('command').value='set name Test';for(const id of ['backup','restore','send-command','binary-mode']){await ui.elements.get(id).onclick();assert.match(ui.elements.get('notice').textContent,/Only bootloader information/);}assert.deepEqual(ui.calls,[]);
+});
+
+test('bootloader-file source cannot count as running MeshCore during post-flash verification',async()=>{
+  const ui=await bootloaderInfoWorkbench();ui.context.chooseBootloaderInfoFile=async()=>({name:'INFO_UF2.TXT',text:bootloaderInfoText()});await ui.elements.get('read-bootloader-info').onclick();ui.context.detectApplication=async()=>({firmwareFamily:'bootloader',role:'bootloader',model:'HT-n5262',publicKey:null});ui.evaluate('state.verification={sha256:"a".repeat(64),architecture:"nrf52",publicKey:null,role:null,model:null};');ui.calls.length=0;
+  await ui.elements.get('verify-app').onclick();assert.ok(ui.evaluate('state.verification'));assert.equal(ui.evaluate('state.finishedFirmware'),null);assert.match(ui.elements.get('notice').textContent,/Only bootloader information.*startup is not verified/);assert.deepEqual(ui.calls,['open','close']);
+});
 test('every UI id exists once and all wired controls have matching HTML',()=>{
   assert.equal(new Set(ids).size,ids.length);
   for(const match of source.matchAll(/\$\('([^']+)'\)/g))assert.ok(ids.includes(match[1]),match[1]);

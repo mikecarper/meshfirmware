@@ -295,7 +295,7 @@ test('firmware build has a conditional non-action step 2.5 badge without renumbe
   assert.ok(inside(badge,field));assert.equal(badge.parent,picker.parent.children.find(node=>node.tag==='label'));
   assert.match(html.slice(badge.start).split('</label>')[0],/^<[^>]+>2\.5<\/span>\s*Firmware build/,'The optional number must appear before Firmware build');
   assert.ok(!/Step 2\.5/.test(picker.attrs['aria-label']||''),'The initial picker must not announce an inactive conditional step');
-  const numbers=nodes.filter(node=>hasClass(node,'action-number')).map(node=>/^<[^>]+>([^<]*)</.exec(html.slice(node.start))?.[1].trim());
+  const numbers=nodes.filter(node=>hasClass(node,'action-number')&&!inside(node,get('bootloader-info-fallback'))).map(node=>/^<[^>]+>([^<]*)</.exec(html.slice(node.start))?.[1].trim());
   assert.deepEqual(numbers,['1','2','3','4','5'],'The main steps follow numeric order with verification after flash');
   const rules=declarationsFor('.artifact-step-number');
   assert.ok(rules.some(rule=>parseFloat(rule['min-width']||'0')>=52),'The decimal step badge needs enough room for 2.5');
@@ -383,7 +383,7 @@ test('USB, backup and flash are primary actions while optional verification keep
     assert.match(button.attrs['aria-label']||'',new RegExp(`step ${number}\\b`,'i'),`#${id} must announce its step`);
   }
   assert.ok(inside(get('prepare-label'),get('prepare')));assert.match(html.slice(get('prepare-label').start).split('</span>')[0],/Backup\s*(?:&amp;|&)\s*prepare/i);
-  assert.ok(!nodes.filter(node=>node.tag==='button'&&!['select-port','prepare','flash','verify-app'].includes(node.attrs.id)).some(node=>hasClass(node,'step-button')),'Optional tools must not suggest extra mandatory workflow steps');
+  assert.ok(!nodes.filter(node=>node.tag==='button'&&!['select-port','prepare','flash','verify-app','read-bootloader-info'].includes(node.attrs.id)).some(node=>hasClass(node,'step-button')),'Optional tools must not suggest extra mandatory workflow steps');
   const verify=get('verify-app'),row=get('flash').parent;assert.equal(verify.parent,row);assert.deepEqual(row.children.map(node=>node.attrs.id),['prepare','flash','verify-app'],'The main action row must follow steps 3, 4, 5');assert.equal(closedAncestors(verify).length,0);assert.ok(!inside(verify,get('verification-options')));assert.ok(has(verify,'disabled')&&has(verify,'data-lock'));
 });
 
@@ -394,9 +394,13 @@ test('step 2 numbers the installation choices once without creating a fake actio
   const badge=row.children.find(node=>hasClass(node,'action-number'));assert.ok(badge);assert.equal(badge.attrs['aria-hidden'],'true');
   assert.ok(!has(row,'role')&&!has(row,'tabindex'),'The shared step badge is not another input or button');
   for(const id of ['install-mode-update','install-mode-install'])assert.ok(inside(get(id),row));
-  const numbers=nodes.filter(node=>hasClass(node,'action-number')).map(node=>/^<[^>]+>([^<]*)</.exec(html.slice(node.start))?.[1].trim());
+  const numbers=nodes.filter(node=>hasClass(node,'action-number')&&!inside(node,get('bootloader-info-fallback'))).map(node=>/^<[^>]+>([^<]*)</.exec(html.slice(node.start))?.[1].trim());
   assert.deepEqual(numbers,['1','2','3','4','5'],'Each numbered step must appear once, with verification after flash');
   const backgrounds=declarationsFor('.mode-step > .action-number').filter(rule=>Object.hasOwn(rule,'background'));assert.equal(backgrounds.at(-1)?.background,'var(--navy)','The installation badge must finish with the dark primary color');
+});
+
+test('optional bootloader identification is a hidden conditional step near the device, not a mandatory main action',()=>{
+  const panel=get('bootloader-info-fallback'),button=get('read-bootloader-info');assert.ok(has(panel,'hidden'));assert.ok(inside(button,panel));assert.equal(panel.parent,get('firmware-choices').parent);assert.ok(panel.start<get('firmware-choices').start);assert.ok(hasClass(button,'primary')&&hasClass(button,'step-button'));assert.ok(has(button,'data-lock'));assert.match(button.attrs['aria-label'],/Optional step 1\.5/);assert.ok(!get('flash').parent.children.includes(button));
 });
 
 test('next-step instructions stay visible and numbered actions remain legible on phones',()=>{

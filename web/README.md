@@ -106,6 +106,44 @@ selections. The usual backup, device checks and flash confirmation still apply.
    still checks exact board/role/profile compatibility; ambiguous screen/storage
    variants are not guessed. No USB enumeration, reset or flash occurs on page load. Only the
    selected port is queried after permission. Turn off Automatic setup for manual use.
+   Meshtastic radios can also be identified through a read-only local device
+   report. A reviewed hardware-enum mapping selects the matching MeshCore board;
+   for example, a T114 revision 2 selects **Heltec T114**, never **Heltec v2**
+   (the unrelated ESP32 board). Unknown or ambiguous hardware remains a manual
+   choice. This identifies the installed firmware's hardware report, not an
+   independent attestation of the physical board. Detection does not reset the
+   device, change settings or send a LoRa message. The standard Meshtastic
+   configuration response may contain additional records; these are ignored,
+   not logged or saved as a backup.
+
+   When moving from Meshtastic, the page chooses a suitable Keymind Companion
+   build where available; if that exact board has no Keymind builds, it can
+   choose a stock Companion instead. Explicit provider/role choices are kept. MeshCore and
+   Meshtastic version numbers are not compared as upgrades/downgrades. The page
+   does not back up or convert Meshtastic settings, channels or identity: export
+   those separately with a Meshtastic client if needed. A clear **Continue to
+   MeshCore without backup** choice precedes bootloader entry; no backup is
+   claimed and no erase is selected or authorized automatically. Startup
+   verification only succeeds when the expected MeshCore application answers.
+
+   If neither application protocol can identify the selected radio, or an
+   initially unidentified DFU port is selected, **Read bootloader info** appears
+   beside the device summary and is highlighted as the next step. Click it and
+   choose that radio's `INFO_UF2.TXT`; the browser requires this fresh file-picker
+   permission. A reviewed exact model/Board-ID pair selects matching nRF52
+   hardware and a suitable Companion firmware automatically. An ambiguous pair
+   shows candidates and leaves the Hardware choice to you. No drive enumeration
+   runs in the background, and permission/access failures do not trigger this
+   alternate detection path.
+
+   Reading this file never copies firmware to a drive. The file is a board hint,
+   not proof that it belongs to the selected USB port or that the port is in DFU.
+   Flashing still uses serial DFU, normal compatibility checks and explicit write
+   confirmation. Select the same physical radio's DFU serial port; an unlisted
+   bootloader may require the explicit **Already in ROM/DFU** choice. File hints
+   do not authorize an identity override, recovery or bootloader replacement,
+   and they expire when the selected port or operation generation changes. They
+   never stand in for an application backup or a startup-verification response.
    Exact `Heltec V4.2 none detected` and `Heltec V4.3 none detected` models are
    recognized as the base V4 running without an attached display. R8, unknown
    revisions and truncated model strings are not guessed. Hardware/provider/role

@@ -20,6 +20,8 @@ export function firmwareVersionWarning(runningVersion,selectedVersion){
   return `Downgrade warning: selected firmware ${text(selectedVersion)} is older than the running ${text(runningVersion)}. Older firmware may not understand current settings or partition layouts. Keep a backup and review compatibility before flashing. Downgrading is allowed after the normal checks and confirmation.`;
 }
 function inferredRole(device){
+  // Meshtastic CLIENT/ROUTER roles and version numbers are not MeshCore roles.
+  if(['meshtastic','bootloader'].includes(device?.firmwareFamily)||['meshtastic','bootloader'].includes(device?.role))return '';
   if(applicationRoles.has(device?.catalogRole))return device.catalogRole;
   const version=text(device?.version);
   const patterns=[['roomServer',/\broom[\s_-]*server\b/i],['repeater',/\brepeater\b/i],['sensor',/\bsensor\b/i],['companionFull',/\b(?:full[\s_-]*companion|companion[\s_-]*(?:radio[\s_-]*)?full)\b/i],['companionBle',/\bcompanion[\s_-]*(?:radio[\s_-]*)?ble\b/i],['companionUsb',/\bcompanion[\s_-]*(?:radio[\s_-]*)?usb\b/i]];
@@ -91,16 +93,27 @@ function reviewedModelHardware(device,selections){
 }
 
 export function chooseFirmware({items=[],device={},hardware='',provider='',role='',version='',installMode='update'}={}){
+  const meshtastic=device?.firmwareFamily==='meshtastic'||device?.role==='meshtastic';
+  const bootloader=device?.firmwareFamily==='bootloader'||device?.role==='bootloader';
+  const migrating=meshtastic||bootloader;
   const selections={provider:catalogProvider(text(provider))||'Keymind Cascade',hardware:text(hardware),role:text(role)||inferredRole(device),version:text(version)};
   const result=(reason,candidates=[],artifactIndex=null)=>{
-    const warning=artifactIndex===null?'':firmwareVersionWarning(device?.version,items[artifactIndex]?.version);
+    const warning=migrating||artifactIndex===null?'':firmwareVersionWarning(device?.version,items[artifactIndex]?.version);
     return {selections,artifactIndex,candidates,reason,warning,downgrade:!!warning};
   };
   if(!['update','install'].includes(installMode))return result('Choose Update or Erase / new install explicitly. An unsupported install mode cannot select firmware.');
   if(!selections.hardware)return result(installMode==='install'?'Detect or choose exact hardware before selecting an erase/new install.':'Detect or choose exact hardware before selecting an application update.');
   let candidates=items.map((item,index)=>({item,index})).filter(({item})=>matchesInstallMode(item,installMode)&&item.hardware===selections.hardware&&catalogProvider(item.provider)===selections.provider);
+  if(migrating&&!text(provider)&&!candidates.length){
+    const stock=items.map((item,index)=>({item,index})).filter(({item})=>matchesInstallMode(item,installMode)&&item.hardware===selections.hardware&&catalogProvider(item.provider)==='MeshCore');
+    if(stock.length){selections.provider='MeshCore';candidates=stock;}
+  }
   if(!candidates.length)return result(installMode==='install'?'No erase/new install matches this exact hardware/provider. Choose a matching merged ESP32 install or nRF52 application ZIP; no update, component or other board was substituted.':'No write-only application update matches this exact hardware/provider. Choose another provider or an explicit firmware file; no wipe or bootloader was substituted.');
   if(!selections.role){
+    if(migrating)selections.role=['companionFull','companionBle','companionUsb'].find(role=>candidates.some(({item})=>item.role===role))||'';
+  }
+  if(!selections.role){
+    if(migrating)return result(`${meshtastic?'Meshtastic hardware':'Bootloader identity'} detected, but no compatible Companion build is available from this provider. Choose a MeshCore role explicitly; no previous application role was assumed.`,candidates.map(({index})=>index));
     const allowed=device?.role==='companion'?companionRoles:device?.role==='common-cli'?commonRoles:null;
     const roles=distinct(candidates.filter(({item})=>!allowed||allowed.has(item.role)).map(({item})=>item.role));
     if(roles.length===1)selections.role=roles[0];
@@ -127,5 +140,6 @@ export function chooseFirmware({items=[],device={},hardware='',provider='',role=
   for(const candidate of candidates){const key=catalogItemKey(candidate.item);if(!equivalents.has(key))equivalents.set(key,candidate);}
   candidates=[...equivalents.values()];
   if(candidates.length!==1)return result('Multiple exact-board builds remain (for example a different display, storage or Full profile). Choose the exact artifact or supply its exact running build target; no first-match guess was made.',candidates.map(({index})=>index));
-  return result(installMode==='install'?'Newest matching erase/new install selected. Erasing removes application settings and identity; nRF52 requires a separately validated erase ZIP. Firmware bytes, chip identity and partition compatibility still require inspection; nothing has been loaded or written.':'Newest matching write-only application selected. Firmware bytes, chip identity and partition compatibility still require inspection; nothing has been loaded or written.',[candidates[0].index],candidates[0].index);
+  const migrationNote=meshtastic?'Meshtastic detected. The selected MeshCore role is a new installation choice, not a conversion of Meshtastic settings or identity. ':bootloader?'Bootloader-file identity matched. The selected Companion is a new application choice; the file does not prove physical hardware, the previous role or a configuration backup. ':'';
+  return result(migrationNote+(installMode==='install'?'Newest matching erase/new install selected. Erasing removes application settings and identity; nRF52 requires a separately validated erase ZIP. Firmware bytes, chip identity and partition compatibility still require inspection; nothing has been loaded or written.':'Newest matching write-only application selected. Firmware bytes, chip identity and partition compatibility still require inspection; nothing has been loaded or written.'),[candidates[0].index],candidates[0].index);
 }
