@@ -65,6 +65,15 @@ visible. The top navigation opens the corresponding tools without touching USB.
 
 ### Shared selection links
 
+Choose any board and use **Copy selection link** beside the firmware-file links.
+It works without USB access, including on a phone. The link follows the current
+provider, hardware, role and installation mode. With no build selected, empty
+version/build filters stay unpinned; selecting a public build pins its exact
+provider, board, role, version and filename. Local firmware files are never
+included. If clipboard access is unavailable or denied, a read-only text box
+shows the link for manual copying. Sharing does not include device identity,
+settings, backup data, USB permission or write approval.
+
 URL query parameters can preselect the catalog after it loads:
 
 ```text

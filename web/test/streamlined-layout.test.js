@@ -73,6 +73,13 @@ test('firmware file browsing and the selected build download sit beside the main
   assert.ok(inside(get('download-firmware'),get('image-details')),'The existing fallback download must remain in image details');
 });
 
+test('selection sharing is an accessible left-aligned local action with a phone-sized manual copy fallback',()=>{
+  const button=get('copy-selection-link'),row=get('firmware-files').parent,field=get('artifact-field'),fallback=get('selection-link-fallback'),text=get('selection-link-text'),status=get('selection-link-status');
+  assert.equal(button.parent,row);assert.equal(button.tag,'button');assert.equal(button.attrs.type,'button');assert.ok(has(button,'disabled'));assert.ok(!has(button,'hidden'));assert.equal(closedAncestors(button).length,0);assert.equal(button.attrs['aria-describedby'],'selection-link-status');assert.match(html.slice(button.start).split('</button>')[0],/>Copy selection link$/);assert.ok(button.start<get('prepare').start);
+  assert.ok(inside(fallback,field));assert.ok(has(fallback,'hidden'));assert.equal(text.tag,'textarea');assert.ok(has(text,'readonly'));assert.equal(text.attrs['aria-describedby'],'selection-link-status');assert.equal(status.attrs.role,'status');assert.equal(status.attrs['aria-live'],'polite');assert.ok(nodes.some(node=>node.tag==='label'&&node.attrs.for==='selection-link-text'));
+  assert.ok(declarationsFor('.firmware-file-links').some(rule=>rule['justify-content']==='flex-start'&&rule['flex-wrap']==='wrap'));assert.ok(declarationsFor('#selection-link-text').some(rule=>rule.width==='100%'&&rule['max-width']==='100%'&&rule['min-width']==='0'&&rule['font-size']==='16px'&&rule['overflow-wrap']==='anywhere'));
+});
+
 test('advanced, backup, console and capability controls are collapsed by default',()=>{
   for(const id of ['advanced-options','backups','console','capabilities']){const node=get(id);assert.equal(node.tag,'details',id);assert.ok(!has(node,'open'),`#${id} must start collapsed`);}
   for(const id of ['connection-options','custom-firmware','bootloader-options','nrf-actions','migration-options','verification-options','esp-retry-options','image-details']){

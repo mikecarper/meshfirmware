@@ -26,6 +26,7 @@ import { MigrationApproval } from './migration-approval.js';
 import { assessBootloaderVersion } from './bootloader-version.js';
 import { fetchFirmwareBytes } from './downloads.js';
 import { firmwareFilesLinks } from './firmware-links.js';
+import { selectionLink } from './selection-link.js';
 
 const $ = id => document.getElementById(id);
 const state = { installMode:'update', port: null, pkg: null, esp: null, plan: null, generation: 0, busy: false, items: [], restore: null, directory: null, archive:null, archiveContext:null, automaticSha:null, automaticShaName:null, recoveryCatalog:null,loadedRecovery:null,planner:null, migration:null, downloaded:new Set(),item:null,device:null,manualSelections:{},detectedHardware:null,connection:null,boardDetected:false,recoveryManual:false,recoveryDetectionRequested:false,backupApproved:null,backup:null,recovery:null,espRecovery:null,verification:null,handoff:false };
@@ -39,6 +40,7 @@ state.knownApplicationPort=null;state.autoVerifyAttempt=null;state.autoVerificat
 state.connectionTrial=null;
 state.restorePreview=null;
 state.bootloaderInfo=null;state.applicationProbeFailed=false;
+state.selectionLink=null;state.selectionCopyGeneration=0;state.selectionCopyPending=null;state.selectionCopyTimer=null;
 const nextStepScroller=createNextStepScroller({window,document});
 $('skip-backup').checked=false;
 const bootloaderOffersShown=new Set();
@@ -298,6 +300,7 @@ function updateNextAction(){
 function controls() {
   discardStaleBootloaderInfo();
   document.querySelectorAll('[data-lock]').forEach(el => { el.disabled = state.busy; });
+  syncSelectionLink();
   updateBootloaderInfoPanel();
   $('select-port').disabled ||= !('serial' in navigator);
   $('prepare').disabled ||= $('skip-backup').checked || (!state.pkg&&!$('artifact').value) || (!state.port && state.pkg?.architecture !== 'uf2');
@@ -856,6 +859,40 @@ function linkedCatalogSelections() {
   }
   return selections;
 }
+function currentSelectionLink(){
+  const filters=Object.fromEntries(['provider','hardware','role','version'].map(id=>[id,$(id).value||''])),mode=state.installMode,raw=$('artifact').value;
+  const filtersOnly=()=>selectionLink({...filters,mode});
+  if(state.pkg&&!state.item?.role)return filtersOnly();
+  if(raw==='')return filtersOnly();
+  if(!/^(?:0|[1-9][0-9]*)$/.test(raw)||!Number.isSafeInteger(Number(raw)))return null;
+  const item=state.items[Number(raw)];
+  if(!item||item.project!=='MeshCore'||![...$('artifact').options].some(option=>option.value===raw)||!matchesCatalogInstallMode(item,mode)||Object.entries(filters).some(([key,value])=>value&&item[key]!==value))return null;
+  if(state.pkg&&(state.item?.name!==item.name||state.item?.url!==item.url))return filtersOnly();
+  return selectionLink({provider:item.provider,hardware:item.hardware,role:item.role,version:item.version,mode,build:item.name});
+}
+function syncSelectionLink(){
+  const link=currentSelectionLink();
+  if(link!==state.selectionLink){
+    state.selectionLink=link;state.selectionCopyGeneration++;state.selectionCopyPending=null;clearTimeout(state.selectionCopyTimer);state.selectionCopyTimer=null;
+    $('copy-selection-link').textContent='Copy selection link';$('selection-link-status').textContent='';$('selection-link-fallback').hidden=true;$('selection-link-text').value=link||'';
+  }
+  $('copy-selection-link').disabled=state.busy||!link||state.selectionCopyPending!==null;
+}
+async function copySelectionLink(){
+  syncSelectionLink();const link=state.selectionLink;if(!link||state.busy)return;
+  clearTimeout(state.selectionCopyTimer);state.selectionCopyTimer=null;
+  const generation=++state.selectionCopyGeneration;state.selectionCopyPending=generation;syncSelectionLink();
+  const current=()=>state.selectionCopyGeneration===generation&&state.selectionLink===link&&currentSelectionLink()===link;
+  const manual=()=>{if(!current())return;$('selection-link-text').value=link;$('selection-link-fallback').hidden=false;$('selection-link-status').textContent='Clipboard unavailable. Copy the link below.';$('selection-link-text').focus?.();$('selection-link-text').select?.();};
+  try{
+    if(!navigator.clipboard?.writeText){manual();return;}
+    await navigator.clipboard.writeText(link);if(!current())return;
+    $('selection-link-fallback').hidden=true;$('copy-selection-link').textContent='Link copied';$('selection-link-status').textContent='Link copied. This shares catalog choices only, not device settings or a flash approval.'+(state.pkg&&!state.item?.role?' Local firmware is not included.':'');
+    state.selectionCopyTimer=setTimeout(()=>{if(current()){$('copy-selection-link').textContent='Copy selection link';$('selection-link-status').textContent='';}state.selectionCopyTimer=null;},2500);
+  }catch{manual();}
+  finally{if(state.selectionCopyPending===generation)state.selectionCopyPending=null;syncSelectionLink();}
+}
+$('copy-selection-link').onclick=copySelectionLink;
 const bootloaderReinstallWarning='This combined SoftDevice/bootloader DFU ZIP requires reinstalling the exact compatible application afterward. Application-owned data is not guaranteed; make a backup before entering DFU.';
 const recoveryWarning='Temporary allow-all recovery bridge: choose the CURRENTLY INSTALLED bootloader profile, not the physical target board. It retains that installed identity and relaxes board/version checks. Install the normal bootloader for the actual physical board next, then its compatible application. Plan for application/settings loss; do not leave this bridge installed.';
 function selectedBootloader(pkg){const info=state.item?.bootloaderInfo;return info&&pkg.kind!=='application'&&pkg.sha256===info.sha256&&pkg.name===new URL(info.url).pathname.split('/').pop()?info:null;}
@@ -924,6 +961,7 @@ function updateDownload() {
   $('download-selected-build').hidden=!links.downloadUrl;
   if(links.downloadUrl){$('download-selected-build').href=links.downloadUrl;$('download-selected-build').removeAttribute('aria-disabled');}
   else{$('download-selected-build').removeAttribute('href');$('download-selected-build').setAttribute('aria-disabled','true');}
+  syncSelectionLink();
 }
 async function boundedFetch(url,{expectedSha256=''}={}) {
   return fetchFirmwareBytes(httpsUrl(url),{expectedSha256,fetchImpl:fetch});

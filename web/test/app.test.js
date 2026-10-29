@@ -18,6 +18,7 @@ import {cleanCliReply} from '../src/meshcore.js';
 import {assessBootloaderVersion} from '../src/bootloader-version.js';
 import {fetchFirmwareBytes as verifiedDownload} from '../src/downloads.js';
 import {firmwareFilesLinks} from '../src/firmware-links.js';
+import {selectionLink} from '../src/selection-link.js';
 import {backupCoverage} from '../src/backup-coverage.js';
 import {gzipSync} from 'node:zlib';
 const html=await readFile(new URL('../index.html',import.meta.url),'utf8');
@@ -44,6 +45,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
   });
   context.detectApplication=(...args)=>context.detectMeshCore(...args);context.detectMeshtasticBoard=detectMeshtasticBoard;
   context.parseBootloaderInfo=parseBootloaderInfo;context.detectBootloaderBoard=detectBootloaderBoard;context.chooseBootloaderInfoFile=async()=>{calls.push('file-picker');throw Error('Unexpected file chooser');};
+  context.selectionLink=selectionLink;
   vm.runInContext(source,context);
   return {context,elements,calls,port,serialEvents,windowEvents,evaluate:code=>vm.runInContext(code,context)};
 }
@@ -637,6 +639,42 @@ test('URL selections preserve pending recovery migration and startup verificatio
     await new Promise(resolve=>setImmediate(resolve));
     assert.equal(ui.elements.get('hardware').value,'');assert.equal(ui.elements.get('artifact').value,'');assert.equal(ui.evaluate('state.installMode'),pending.recovery||pending.espRecovery?'install':'update');assert.deepEqual(ui.calls,[]);
   }
+});
+
+test('Copy selection link works for any catalog hardware without USB and keeps unselected build/version filters unpinned',async()=>{
+  const rows=[linkedT114Item,v4Item,{...linkedT114Item,hardware:'RAK WisBlock / WisMesh (RAK 4631)',name:'RAK_companion.zip'}],ui=workbench({catalogPromise:Promise.resolve(linkedCatalog(rows))});await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(ui.elements.get('copy-selection-link').disabled,true);delete ui.context.navigator.serial;
+  for(const item of rows){
+    ui.elements.get('provider').value=item.provider;ui.evaluate("filterCatalog('provider');");ui.elements.get('hardware').value=item.hardware;ui.evaluate("filterCatalog('hardware');");ui.elements.get('role').value=item.role;ui.elements.get('version').value='';ui.elements.get('artifact').value='';ui.evaluate('updateDownload();controls();');
+    assert.equal(ui.elements.get('copy-selection-link').disabled,false,item.hardware);await ui.elements.get('copy-selection-link').onclick();const url=new URL(ui.elements.get('selection-link-text').value);assert.equal(url.origin,'https://mikecarper.github.io');assert.equal(url.pathname,'/meshfirmware/');assert.equal(url.searchParams.get('hardware'),item.hardware);assert.equal(url.searchParams.get('role'),item.role);assert.equal(url.searchParams.has('version'),false);assert.equal(url.searchParams.has('build'),false);assert.equal(url.hash,'#firmware-choices');assert.equal(ui.elements.get('selection-link-fallback').hidden,false);
+  }
+  assert.deepEqual(ui.calls,[]);assert.equal(ui.evaluate('state.port'),null);
+});
+
+test('copying a selected catalog build pins its exact public item and follows installation-mode changes',async()=>{
+  const item={...linkedT114Item,provider:'MeshCore'},ui=workbench({catalogPromise:Promise.resolve(linkedCatalog([item]))});await new Promise(resolve=>setImmediate(resolve));const copied=[];ui.context.navigator.clipboard={writeText:async value=>copied.push(value)};
+  ui.elements.get('provider').value='';ui.elements.get('hardware').value='';ui.elements.get('role').value='';ui.elements.get('version').value='';ui.elements.get('artifact').value='0';ui.evaluate('updateDownload();');
+  await ui.elements.get('copy-selection-link').onclick();let url=new URL(copied[0]);for(const key of ['provider','hardware','role','version'])assert.equal(url.searchParams.get(key),item[key],key);assert.equal(url.searchParams.get('build'),item.name);assert.equal(url.searchParams.get('mode'),'update');assert.equal(ui.elements.get('copy-selection-link').textContent,'Link copied');assert.match(ui.elements.get('selection-link-status').textContent,/Link copied/);
+  await ui.evaluate("setInstallMode('install');");assert.equal(ui.elements.get('selection-link-status').textContent,'');assert.equal(ui.elements.get('copy-selection-link').textContent,'Copy selection link');ui.elements.get('artifact').value='0';ui.evaluate('updateDownload();');await ui.elements.get('copy-selection-link').onclick();url=new URL(copied[1]);assert.equal(url.searchParams.get('mode'),'install');assert.equal(url.searchParams.get('build'),item.name);ui.evaluate('clearTimeout(state.selectionCopyTimer);');assert.deepEqual(ui.calls,[]);
+});
+
+test('denied clipboard access shows a selectable public URL without exposing errors or altering flash approval',async()=>{
+  const ui=workbench({catalogPromise:Promise.resolve(linkedCatalog([linkedT114Item]))});await new Promise(resolve=>setImmediate(resolve));ui.elements.get('hardware').value=linkedT114Item.hardware;ui.evaluate('updateDownload();');
+  ui.context.navigator.clipboard={writeText:async()=>{throw Error('PRIVATE_CLIPBOARD_DETAILS');}};let selected=0;ui.elements.get('selection-link-text').focus=()=>selected++;ui.elements.get('selection-link-text').select=()=>selected++;
+  ui.evaluate('state.backupApproved={sha256:"private-approval"};state.plan={sha256:"ready-plan"};state.migrationApproval={phase:"ready",privateKey:"PRIVATE"};');const before=ui.evaluate('JSON.stringify([state.backupApproved,state.plan,state.migrationApproval])');
+  await ui.elements.get('copy-selection-link').onclick();assert.equal(ui.elements.get('selection-link-fallback').hidden,false);assert.equal(selected,2);assert.match(ui.elements.get('selection-link-status').textContent,/Copy the link below/);assert.doesNotMatch(ui.elements.get('selection-link-status').textContent,/PRIVATE/);assert.equal(ui.evaluate('JSON.stringify([state.backupApproved,state.plan,state.migrationApproval])'),before);assert.deepEqual(ui.calls,[]);
+});
+
+test('selection changes while clipboard permission is pending cannot claim the newer link was copied',async()=>{
+  for(const reject of [false,true]){
+    const ui=workbench({catalogPromise:Promise.resolve(linkedCatalog([linkedT114Item,v4Item]))});await new Promise(resolve=>setImmediate(resolve));ui.elements.get('hardware').value=linkedT114Item.hardware;ui.elements.get('provider').value='';ui.evaluate('updateDownload();');let finish;const written=[];ui.context.navigator.clipboard={writeText:value=>{written.push(value);return new Promise((resolve,fail)=>{finish=reject?()=>fail(Error('denied')):resolve;});}};
+    const pending=ui.elements.get('copy-selection-link').onclick();ui.elements.get('hardware').value=v4Item.hardware;ui.evaluate('updateDownload();');finish();await pending;assert.equal(new URL(written[0]).searchParams.get('hardware'),linkedT114Item.hardware);assert.equal(ui.elements.get('copy-selection-link').textContent,'Copy selection link');assert.equal(ui.elements.get('selection-link-status').textContent,'');assert.equal(ui.elements.get('selection-link-fallback').hidden,true);assert.equal(new URL(ui.elements.get('selection-link-text').value).searchParams.get('hardware'),v4Item.hardware);assert.deepEqual(ui.calls,[]);
+  }
+});
+
+test('local firmware and private page/device state never become share-link fields and inconsistent artifacts stay disabled',async()=>{
+  const ui=workbench({search:'?private=PRIVATE_QUERY',catalogPromise:Promise.resolve(linkedCatalog([linkedT114Item,v4Item]))});await new Promise(resolve=>setImmediate(resolve));ui.elements.get('hardware').value=linkedT114Item.hardware;ui.elements.get('artifact').value='1';ui.evaluate('updateDownload();');assert.equal(ui.elements.get('copy-selection-link').disabled,true);
+  ui.evaluate('state.pkg={name:"C:/private/PRIVATE_LOCAL.zip",url:"https://private.test/secret"};state.item={hardware:"Heltec T114"};state.device={publicKey:"PRIVATE_IDENTITY"};state.backup={json:"PRIVATE_BACKUP"};');ui.elements.get('version').value='';ui.evaluate('updateDownload();');await ui.elements.get('copy-selection-link').onclick();const url=ui.elements.get('selection-link-text').value;assert.ok(url);assert.doesNotMatch(url,/PRIVATE|private\.test|private=|skip|backup|port/);assert.equal(new URL(url).searchParams.has('build'),false);assert.deepEqual(ui.calls,[]);
 });
 
 test('a saved or pre-connect explicit stock provider survives connection without keeping the previous board or version',async()=>{
