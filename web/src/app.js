@@ -41,6 +41,7 @@ state.connectionTrial=null;
 state.restorePreview=null;
 state.bootloaderInfo=null;state.applicationProbeFailed=false;
 state.selectionLink=null;state.selectionCopyGeneration=0;state.selectionCopyPending=null;state.selectionCopyTimer=null;
+state.applicationDetection=null;
 const nextStepScroller=createNextStepScroller({window,document});
 $('skip-backup').checked=false;
 const bootloaderOffersShown=new Set();
@@ -64,6 +65,10 @@ function syncFlashConsole({follow=false}={}){
 }
 function log(message) { $('log').textContent = ($('log').textContent + '\n' + String(message).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'')).slice(-100000); $('log').scrollTop = $('log').scrollHeight; syncFlashConsole(); }
 function notice(message, error = false) { $('notice').textContent = message; $('notice').classList.toggle('error',error); }
+function clearApplicationDetection(detection=state.applicationDetection){
+  if(state.applicationDetection!==detection)return;
+  state.applicationDetection=null;$('detection-status').hidden=true;$('detection-stage').textContent='';$('detection-timer').hidden=true;$('detection-timer').textContent='';$('detection-timer').removeAttribute('aria-label');
+}
 function progress(value, message) {
   $('progress').value = value; $('progress-label').textContent = message;
   if(state.flashProgress)renderFlashProgress(value,message);
@@ -298,6 +303,7 @@ function updateNextAction(){
   if(id==='select-port'&&state.verification)$('step-guidance').textContent='Step 1 again: choose the same radio’s application USB port, not its ROM/DFU port, to check startup.';
 }
 function controls() {
+  if(state.applicationDetection&&(state.applicationDetection.port!==state.port||state.applicationDetection.generation!==state.generation))clearApplicationDetection();
   discardStaleBootloaderInfo();
   document.querySelectorAll('[data-lock]').forEach(el => { el.disabled = state.busy; });
   syncSelectionLink();
@@ -448,7 +454,22 @@ async function readSelectedBootloaderInfo(){
   selectDetectedBoard();notice(result.hardware?`Read INFO_UF2.TXT and selected ${result.hardware}. ${bootloaderInfoWarning}`:result.reason+' '+bootloaderInfoWarning);
 }
 async function readApplication(link) {
-  const port=state.port,generation=state.generation,assertCurrent=()=>{if(state.port!==port||state.generation!==generation)fail('Selected port changed or disconnected while reading the node. Re-select and detect again.');},device=await detectApplication(link,{assertCurrent});
+  const port=state.port,generation=state.generation,assertCurrent=()=>{if(state.port!==port||state.generation!==generation)fail('Selected port changed or disconnected while reading the node. Re-select and detect again.');};
+  const detection={port,generation};state.applicationDetection=detection;
+  const onProgress=({stage,elapsedSeconds=0,timeoutSeconds=25})=>{
+    if(state.applicationDetection!==detection)return;assertCurrent();
+    $('detection-status').hidden=false;
+    const meshtastic=stage==='meshtastic';
+    const label=meshtastic?'Checking Meshtastic…':'Checking MeshCore…';
+    if($('detection-stage').textContent!==label)$('detection-stage').textContent=label;
+    $('detection-timer').hidden=!meshtastic;
+    $('detection-timer').textContent=meshtastic?`${elapsedSeconds}s / ${timeoutSeconds}s`:'';
+    if(meshtastic)$('detection-timer').setAttribute('aria-label',`${elapsedSeconds} seconds elapsed; ${timeoutSeconds} second limit`);
+    else $('detection-timer').removeAttribute('aria-label');
+  };
+  let device;
+  try{onProgress({stage:'meshcore'});device=await detectApplication(link,{assertCurrent,onProgress});}
+  finally{clearApplicationDetection(detection);}
   if(state.port!==port||state.generation!==generation)fail('Selected port changed or disconnected while reading the node. Re-select and detect again.');
   const board=applicationBoard(device);
   if(isMeshtastic(device)&&board.model)device.model=board.model;
@@ -586,7 +607,7 @@ async function detectSelectedBoard() {
     notice('Bootloader hints checked without sending DFU or application commands. Review any recovery match; the physical board is not identified by its DFU USB ID.');return;
   }
   const port=state.port,generation=state.generation;clearBootloaderInfoEvidence();state.applicationProbeFailed=false;state.device=null;state.boardDetected=false;state.backupApproved=null;
-  notice('Reading the node’s USB identity. Meshtastic may take up to 25 seconds to answer; keep the radio connected. No reset or firmware write is sent.');
+  notice('Reading the node’s USB identity. Keep the radio connected. No reset or firmware write is sent.');
   try { await linkOperation(readApplication); }
   catch(error){
     if(state.port===port&&state.generation===generation){

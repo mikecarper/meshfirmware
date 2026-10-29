@@ -41,6 +41,15 @@ test('USB selection is the first initially visible main-page control in the comp
   assert.ok(!nodes.some(node=>hasClass(node,'hero')),'Large introductory hero must not precede the controls');
 });
 
+test('detection seconds counter is visible near the top while reading and not announced every second',()=>{
+  const status=get('detection-status'),stage=get('detection-stage'),timer=get('detection-timer');
+  assert.ok(has(status,'hidden'));assert.ok(has(timer,'hidden'));assert.equal(stage.parent,status);assert.equal(timer.parent,status);
+  assert.ok(status.start>get('notice').start&&status.start<get('device-name').start);assert.equal(closedAncestors(status).length,0);
+  assert.equal(stage.attrs.role,'status');assert.equal(stage.attrs['aria-live'],'polite');assert.equal(timer.attrs.role,'timer');assert.equal(timer.attrs['aria-live'],'off');
+  assert.ok(declarationsFor('.detection-status').some(rule=>rule['justify-content']==='flex-start'&&rule['flex-wrap']==='wrap'));
+  assert.ok(declarationsFor('#detection-timer').some(rule=>rule['font-size']==='24px'&&rule['font-variant-numeric']==='tabular-nums'));
+});
+
 test('flashing another device is the primary action before optional reconnect, hidden until startup verification is pending',()=>{
   const button=get('start-new-radio'),select=get('select-port'),hint=get('new-radio-hint');
   assert.equal(button.tag,'button');assert.equal(button.attrs.type,'button');assert.equal(button.parent,select.parent);

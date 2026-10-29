@@ -127,7 +127,11 @@ selections. The usual backup, device checks and flash confirmation still apply.
    The probe uses the official serial wake/resynchronization sequence, then
    waits up to 25 seconds for local identity, returning as soon as it arrives.
    Some Meshtastic 2.7.15 native-USB builds can take a full 20-second console
-   polling interval to respond; the page shows that it is still reading.
+   polling interval to respond. The page shows **Checking MeshCore…** first,
+   then **Checking Meshtastic…** with a live seconds counter such as **8s / 25s**.
+   The counter uses the actual detection deadline and disappears on success,
+   timeout, a disconnected/changed radio or any other detection error. It does
+   not add a wait when the node answers quickly.
    Meshtastic's own firmware may temporarily pause Bluetooth while its serial
    API is connected. If USB serial access was disabled in the node's security
    settings, detection cannot override that restriction.

@@ -72,6 +72,38 @@ test('normal Meshtastic replies still return immediately without waiting for the
   const result=await detectMeshtastic(link,{delay:noDelay,now:()=>elapsed});assert.equal(result?.nodeNum,9);assert.equal(link.reads,1);assert.equal(elapsed,0);
 });
 
+test('progress reports elapsed seconds from the actual query window and clamps a late read to the deadline',async()=>{
+  const events=[],times=[1000,2000,27000];let elapsed=0,reads=0;
+  const link=fixture([]);link.read=async()=>{reads++;elapsed=times.shift();return new Uint8Array();};
+  assert.equal(await detectMeshtastic(link,{now:()=>elapsed,delay:noDelay,onProgress:event=>events.push(event)}),null);
+  assert.deepEqual(events,[0,1,2,25].map(elapsedSeconds=>({stage:'meshtastic',elapsedSeconds,timeoutSeconds:25})));assert.equal(reads,3);assert.deepEqual(link.writes,[wake,request]);
+  await new Promise(resolve=>setImmediate(resolve));assert.equal(events.length,4,'no background timer can emit after completion');
+});
+
+test('progress emits at most once per second, including the final timeout tick without extra reads',async()=>{
+  const events=[];let elapsed=0,reads=0;
+  const link=fixture([]);link.read=async ms=>{reads++;elapsed+=ms;return new Uint8Array();};
+  assert.equal(await detectMeshtastic(link,{now:()=>elapsed,delay:noDelay,onProgress:event=>events.push(event)}),null);
+  assert.deepEqual(events.map(event=>event.elapsedSeconds),Array.from({length:26},(_,index)=>index));assert.ok(events.every(event=>event.timeoutSeconds===25));assert.equal(reads,250);assert.equal(elapsed,25000);
+});
+
+test('a fast identity only reports zero seconds and never waits for a progress tick',async()=>{
+  const events=[],link=fixture([concat(local(9),meta())]);let elapsed=0;
+  const result=await detectMeshtastic(link,{delay:async ms=>{assert.equal(ms,100);assert.equal(events.length,0);assert.deepEqual(link.writes,[wake]);},now:()=>elapsed,onProgress:event=>{assert.deepEqual(link.writes,[wake,request]);events.push(event);}});
+  assert.equal(result.nodeNum,9);assert.deepEqual(events,[{stage:'meshtastic',elapsedSeconds:0,timeoutSeconds:25}]);assert.equal(link.reads,1);
+});
+
+test('progress callback failures and stale context cannot emit later ticks or trigger retries',async()=>{
+  const failed=fixture([]),events=[];
+  await assert.rejects(detect(failed,{onProgress:event=>{events.push(event);throw Error('Progress stopped');}}),/Progress stopped/);assert.equal(failed.reads,0);assert.deepEqual(failed.writes,[wake,request]);assert.equal(events.length,1);
+  const later=fixture([]),laterEvents=[];let elapsed=0;later.read=async()=>{elapsed=1000;return new Uint8Array();};
+  await assert.rejects(detectMeshtastic(later,{delay:noDelay,now:()=>elapsed,onProgress:event=>{laterEvents.push(event);if(event.elapsedSeconds)throw Error('Progress stopped');}}),/Progress stopped/);assert.deepEqual(laterEvents.map(event=>event.elapsedSeconds),[0,1]);assert.deepEqual(later.writes,[wake,request]);
+  const stale=fixture([concat(local(9),meta())]);let current=true;
+  await assert.rejects(detect(stale,{assertCurrent:()=>{if(!current)throw Error('Selection changed');},onProgress:()=>{current=false;}}),/Selection changed/);assert.equal(stale.reads,0);
+  const lost=fixture([new Error('Port disconnected')]),lostEvents=[];
+  await assert.rejects(detect(lost,{onProgress:event=>lostEvents.push(event)}),/Port disconnected/);assert.equal(lostEvents.length,1);await new Promise(resolve=>setImmediate(resolve));assert.equal(lostEvents.length,1);
+});
+
 test('serial frames survive fragmentation at every byte boundary, leading logs and concatenation',async()=>{
   const stream=concat(utf8('DEBUG start\r\n'),local(0x12345678),nodeInfo(0x12345678),meta());
   for(let split=1;split<stream.length;split++){
@@ -151,11 +183,12 @@ test('transport and context failures propagate before any later serial request',
   const afterWrite=fixture([]);let checks=0;await assert.rejects(detect(afterWrite,{assertCurrent:()=>{if(++checks===2)throw Error('Selection changed');}}),/Selection changed/);assert.equal(afterWrite.reads,0);
   const duringWake=fixture([]);let current=true;await assert.rejects(detect(duringWake,{delay:async ms=>{assert.equal(ms,100);current=false;},assertCurrent:()=>{if(!current)throw Error('Selection changed');}}),/Selection changed/);assert.deepEqual(duringWake.writes,[wake]);assert.equal(duringWake.reads,0);
   const configFailure=fixture([]);configFailure.write=async value=>{configFailure.writes.push([...value]);if(value[0]===0x94)throw Error('Port gone before query');};await assert.rejects(detect(configFailure),/Port gone before query/);assert.deepEqual(configFailure.writes,[wake,request]);assert.equal(configFailure.reads,0);
-  const afterRead=fixture([concat(local(9),meta())]);checks=0;await assert.rejects(detect(afterRead,{assertCurrent:()=>{if(++checks===6)throw Error('Selection changed');}}),/Selection changed/);assert.equal(afterRead.reads,1);
+  const afterRead=fixture([concat(local(9),meta())]),read=afterRead.read;let stillCurrent=true;afterRead.read=async(...args)=>{const value=await read(...args);stillCurrent=false;return value;};await assert.rejects(detect(afterRead,{assertCurrent:()=>{if(!stillCurrent)throw Error('Selection changed');}}),/Selection changed/);assert.equal(afterRead.reads,1);
 });
 
 test('invalid API arguments are rejected before any serial write',async()=>{
   const link=fixture([]);for(const timeoutMs of [0,-1,NaN,Infinity,30001])await assert.rejects(detect(link,{timeoutMs}),/timeout/);
   for(const options of [{delay:null},{now:null},{now:()=>NaN},{now:()=>Infinity}])await assert.rejects(detect(link,options),/clock/);
+  for(const onProgress of [null,{},false])await assert.rejects(detect(link,{onProgress}),/progress callback/);
   await assert.rejects(detectMeshtastic({}),/serial connection/);assert.equal(link.writes.length,0);
 });

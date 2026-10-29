@@ -66,14 +66,39 @@ test('Meshtastic H2T/T114 read selects the nRF52 MeshCore target and Companion F
 });
 
 test('slow Meshtastic detection shows the waiting period without claiming a connection failure',async()=>{
-  const ui=await meshtasticWorkbench();let release;
-  ui.context.detectApplication=()=>new Promise(resolve=>{release=resolve;});
+  const ui=await meshtasticWorkbench();let release,report;
+  ui.context.detectApplication=(link,{onProgress})=>new Promise(resolve=>{release=resolve;report=onProgress;});
   const connecting=ui.elements.get('select-port').onclick();
   for(let tick=0;!release&&tick<20;tick++)await Promise.resolve();
-  assert.equal(typeof release,'function');assert.match(ui.elements.get('notice').textContent,/Reading.*USB identity.*25 seconds/);assert.match(ui.elements.get('notice').textContent,/No reset or firmware write/);
+  assert.equal(typeof release,'function');assert.match(ui.elements.get('notice').textContent,/Reading.*USB identity/);assert.match(ui.elements.get('notice').textContent,/No reset or firmware write/);
   assert.equal(ui.evaluate('state.busy'),true);assert.equal(ui.evaluate('state.device'),null);assert.deepEqual(ui.calls,['chooser','open']);
+  assert.equal(ui.elements.get('detection-status').hidden,false);assert.equal(ui.elements.get('detection-stage').textContent,'Checking MeshCore…');assert.equal(ui.elements.get('detection-timer').hidden,true);
+  report({stage:'meshtastic',elapsedSeconds:0,timeoutSeconds:25});assert.equal(ui.elements.get('detection-stage').textContent,'Checking Meshtastic…');assert.equal(ui.elements.get('detection-timer').hidden,false);assert.equal(ui.elements.get('detection-timer').textContent,'0s / 25s');
+  report({stage:'meshtastic',elapsedSeconds:8,timeoutSeconds:25});assert.equal(ui.elements.get('detection-timer').textContent,'8s / 25s');assert.equal(ui.elements.get('detection-timer').getAttribute('aria-label'),'8 seconds elapsed; 25 second limit');
   release(meshtasticDevice());await connecting;
   assert.match(ui.elements.get('notice').textContent,/Meshtastic detected/);assert.doesNotMatch(ui.elements.get('notice').textContent,/25 seconds/);assert.deepEqual(ui.calls,['chooser','open','close']);
+  assert.equal(ui.elements.get('detection-status').hidden,true);assert.equal(ui.elements.get('detection-timer').textContent,'');
+  report({stage:'meshtastic',elapsedSeconds:9,timeoutSeconds:25});assert.equal(ui.elements.get('detection-status').hidden,true);
+});
+
+test('detection timer is cleared on timeout, transport failure and a disconnected or changed port',async()=>{
+  for(const failure of ['timeout','transport','disconnect','changed-port']){
+    const ui=await meshtasticWorkbench();let reject,report;
+    ui.context.detectApplication=(link,{onProgress})=>new Promise((resolve,fail)=>{reject=fail;report=onProgress;onProgress({stage:'meshtastic',elapsedSeconds:0,timeoutSeconds:25});});
+    const connecting=ui.elements.get('select-port').onclick();for(let tick=0;!reject&&tick<20;tick++)await Promise.resolve();
+    assert.equal(typeof reject,'function');assert.equal(ui.elements.get('detection-status').hidden,false);
+    if(failure==='disconnect')ui.serialEvents.disconnect({port:ui.port});
+    if(failure==='changed-port'){ui.evaluate('state.generation++;controls();');}
+    if(['disconnect','changed-port'].includes(failure))assert.equal(ui.elements.get('detection-status').hidden,true,'stale detection should disappear immediately');
+    reject(Object.assign(Error(failure==='timeout'?'No supported application answered':'Port unavailable'),{code:failure==='timeout'?'APPLICATION_UNIDENTIFIED':undefined}));await connecting;
+    assert.equal(ui.elements.get('detection-status').hidden,true);assert.equal(ui.elements.get('detection-timer').textContent,'');assert.equal(ui.evaluate('state.applicationDetection'),null);
+    report({stage:'meshtastic',elapsedSeconds:25,timeoutSeconds:25});assert.equal(ui.elements.get('detection-status').hidden,true);
+  }
+});
+
+test('a detected MeshCore node never shows the Meshtastic seconds counter',async()=>{
+  const ui=await meshtasticWorkbench();ui.context.detectApplication=async(link,{onProgress})=>{assert.equal(ui.elements.get('detection-stage').textContent,'Checking MeshCore…');assert.equal(ui.elements.get('detection-timer').hidden,true);onProgress({stage:'meshcore'});return {firmwareFamily:'meshcore',role:'common-cli',model:'Heltec T114',publicKey:'11'.repeat(32),version:'v1.18.0.2'};};
+  await ui.elements.get('select-port').onclick();assert.equal(ui.elements.get('detection-status').hidden,true);assert.equal(ui.elements.get('detection-timer').textContent,'');assert.equal(ui.evaluate('state.applicationDetection'),null);
 });
 
 test('unknown Meshtastic hardware does not inherit an old MeshCore board or use the shared USB ID to guess',async()=>{

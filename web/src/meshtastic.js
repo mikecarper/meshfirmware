@@ -94,10 +94,11 @@ function message(bytes,localNode){
   return null;
 }
 
-export async function detectMeshtastic(link,{timeoutMs=25000,assertCurrent=()=>{},delay=wait,now=Date.now}={}){
+export async function detectMeshtastic(link,{timeoutMs=25000,assertCurrent=()=>{},delay=wait,now=Date.now,onProgress=()=>{}}={}){
   if(!link||typeof link.write!=='function'||typeof link.read!=='function')throw Error('Meshtastic detection needs a serial connection.');
   if(!Number.isFinite(timeoutMs)||timeoutMs<1||timeoutMs>30000)throw Error('Invalid Meshtastic detection timeout.');
   if(typeof delay!=='function'||typeof now!=='function')throw Error('Invalid Meshtastic detection clock.');
+  if(typeof onProgress!=='function')throw Error('Invalid Meshtastic detection progress callback.');
   const clock=()=>{const value=now();if(!Number.isFinite(value)||Math.abs(value)>Number.MAX_SAFE_INTEGER)throw Error('Invalid Meshtastic detection clock.');return value;};
   clock();
   assertCurrent();if(Array.isArray(link.buffer))link.buffer.length=0;
@@ -108,9 +109,18 @@ export async function detectMeshtastic(link,{timeoutMs=25000,assertCurrent=()=>{
   // Meshtastic 2.7.15's ESP32 native-USB console may poll only once per 20 s
   // while HWCDC::isPlugged() is false. A short probe misses a healthy TinyUSB
   // application; allow one bounded poll interval and return early on identity.
-  const until=clock()+timeoutMs;let buffer=[],received=0,processed=0,local=null,metadata=null,name='';
+  const started=clock(),until=started+timeoutMs,timeoutSeconds=Math.ceil(timeoutMs/1000);
+  let elapsedSeconds=-1,buffer=[],received=0,processed=0,local=null,metadata=null,name='';
+  const report=value=>{
+    const seconds=Math.min(timeoutSeconds,Math.max(elapsedSeconds,0,Math.floor((value-started)/1000)));
+    if(seconds===elapsedSeconds)return;
+    assertCurrent();onProgress({stage:'meshtastic',elapsedSeconds:seconds,timeoutSeconds});assertCurrent();elapsedSeconds=seconds;
+  };
+  // Reporting is tied to this bounded read loop, never a background interval.
+  report(started);
   while(clock()<until){
     assertCurrent();const chunk=await link.read(Math.max(1,Math.min(100,until-clock())));assertCurrent();
+    report(clock());
     if(!(chunk instanceof Uint8Array))throw Error('Invalid Meshtastic serial data.');
     received+=chunk.length;
     if(received>maxReceived)return null;
@@ -140,5 +150,6 @@ export async function detectMeshtastic(link,{timeoutMs=25000,assertCurrent=()=>{
     }
     if(overflow)return null;
   }
+  report(clock());
   return null;
 }

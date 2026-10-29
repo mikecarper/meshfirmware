@@ -69,6 +69,8 @@ h1 { font-size: 28px; line-height: 1.15; letter-spacing: -.9px; font-weight: 700
 
 .notice { padding: 10px 14px; border: 1px solid #cce0df; background: #eaf4f2; color: #276b64; font-size: 12px; border-radius: 7px; line-height: 1.55; margin: 0 0 12px; overflow-wrap: anywhere; }
 .notice.error { background: #fff0ed; border-color: #efcdc4; color: #9e3c2e; }
+.detection-status { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-start; gap: 8px 16px; padding: 12px 14px; margin: 0 0 12px; border: 1px solid #cce0df; border-radius: 7px; background: #eaf4f2; color: #276b64; font-size: 16px; overflow-wrap: anywhere; }
+#detection-timer { font-size: 24px; font-variant-numeric: tabular-nums; line-height: 1.2; white-space: nowrap; }
 .card { background: white; border: 1px solid var(--line); border-radius: 10px; padding: 20px; margin-bottom: 14px; box-shadow: 0 3px 8px #1d304503; min-width: 0; }
 .workflow { padding-top: 16px; padding-bottom: 16px; }
 .workflow .device-display { margin-bottom: 10px; }

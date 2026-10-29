@@ -13,11 +13,23 @@ function radio(){
 
 test('existing MeshCore identity takes precedence without sending a Meshtastic query',async()=>{
   const link=radio();link.command=async command=>command==='get public.key'?'> '+'11'.repeat(32):command==='get name'?'> My MeshCore':command==='board'?'> Heltec T114':command==='get role'?'> repeater':'> v1.18.0';
-  const result=await detectApplication(link,options);assert.equal(result.firmwareFamily,'meshcore');assert.equal(result.model,'Heltec T114');assert.equal(result.role,'common-cli');assert.equal(link.writes.length,0);
+  const events=[],result=await detectApplication(link,{...options,onProgress:event=>events.push(event)});assert.equal(result.firmwareFamily,'meshcore');assert.equal(result.model,'Heltec T114');assert.equal(result.role,'common-cli');assert.equal(link.writes.length,0);assert.deepEqual(events,[{stage:'meshcore'}]);
 });
 
 test('Meshtastic fallback uses the same selected serial connection and returns only its local identity',async()=>{
-  const link=radio(),result=await detectApplication(link,options);assert.equal(result.firmwareFamily,'meshtastic');assert.equal(result.meshtasticHardware,69);assert.equal(result.publicKey,null);assert.equal(result.nodeNum,9);assert.deepEqual(link.writes.slice(-2),[wake,request]);assert.ok(!link.commands.some(command=>/^set |reboot/.test(command)));
+  const link=radio(),events=[],result=await detectApplication(link,{...options,onProgress:event=>events.push(event)});assert.equal(result.firmwareFamily,'meshtastic');assert.equal(result.meshtasticHardware,69);assert.equal(result.publicKey,null);assert.equal(result.nodeNum,9);assert.deepEqual(link.writes.slice(-2),[wake,request]);assert.ok(!link.commands.some(command=>/^set |reboot/.test(command)));assert.deepEqual(events,[{stage:'meshcore'},{stage:'meshtastic',elapsedSeconds:0,timeoutSeconds:1}]);
+});
+
+test('progress errors are not protocol failures and never start a fallback or retry',async()=>{
+  const first=radio();let calls=0;await assert.rejects(detectApplication(first,{...options,onProgress:()=>{calls++;throw Error('UI stopped');}}),/UI stopped/);assert.equal(calls,1);assert.equal(first.commands.length,0);assert.equal(first.writes.length,0);
+  const later=radio(),events=[];await assert.rejects(detectApplication(later,{...options,onProgress:event=>{events.push(event);if(event.stage==='meshtastic')throw Error('UI stopped');}}),/UI stopped/);assert.deepEqual(events.map(event=>event.stage),['meshcore','meshtastic']);assert.deepEqual(later.writes.slice(-2),[wake,request]);
+  const invalid=radio();await assert.rejects(detectApplication(invalid,{...options,onProgress:null}),/progress callback/);assert.equal(invalid.commands.length,0);assert.equal(invalid.writes.length,0);
+});
+
+test('a stale progress callback cannot revive a changed selection or launch any probe',async()=>{
+  const link=radio(),events=[];let current=true;
+  await assert.rejects(detectApplication(link,{...options,assertCurrent:()=>{if(!current)throw Error('Selection changed');},onProgress:event=>{events.push(event);current=false;}}),/Selection changed/);assert.deepEqual(events,[{stage:'meshcore'}]);assert.equal(link.commands.length,0);assert.equal(link.writes.length,0);
+  const lost=radio(),lostEvents=[];lost.command=async()=>{throw Error('Port disconnected');};await assert.rejects(detectApplication(lost,{...options,onProgress:event=>lostEvents.push(event)}),/Port disconnected/);assert.deepEqual(lostEvents,[{stage:'meshcore'}]);
 });
 
 test('a Meshtastic startup log containing a public key is not mistaken for MeshCore CommonCLI',async()=>{
