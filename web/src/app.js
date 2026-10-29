@@ -41,7 +41,7 @@ try { const pending=JSON.parse(localStorage.getItem('meshfirmware.pendingMigrati
 for(const [key,field] of [['meshfirmware.nrfRecovery','recovery'],['meshfirmware.verifyApplication','verification']])try{const saved=JSON.parse(localStorage.getItem(key)||'null');if(saved&&/^[a-f0-9]{64}$/.test(saved.sha256))state[field]=field==='recovery'?{...saved,phase:'reselect-dfu',eraseComplete:saved.eraseComplete===true}:saved;}catch{}
 try{const saved=JSON.parse(localStorage.getItem('meshfirmware.espRecovery')||'null');if(saved)state.espRecovery=validateEspWriteRecovery(saved);}catch{/* Invalid retry state never authorizes a write. */}
 // Restore only an already pending, hash-bound recovery's display mode, never a
-// general erase preference. Every new page otherwise starts in Update.
+// general erase preference. New pages default to Update unless linked explicitly.
 if(state.recovery||state.espRecovery?.merged)state.installMode='install';
 // Exact bootloader IDs shared with the native classifier. Never match a broad
 // vendor/product range: nearby application IDs must still be probed normally.
@@ -104,7 +104,7 @@ function revealPanel(id) {
 function openLinkedPanel() {
   const id=window.location?.hash?.slice(1);
   // Only known tool links are expanded; arbitrary fragments are not selectors.
-  if(['backups','console','capabilities','advanced-options'].includes(id))revealPanel(id);
+  if(['firmware-choices','backups','console','capabilities','advanced-options'].includes(id))revealPanel(id);
 }
 function installModeLocked(){
   return !!(state.migrationApproval||state.migration||state.recovery||state.espRecovery||state.verification||state.plan?.written||(state.handoff&&!state.esp));
@@ -787,6 +787,16 @@ function filterCatalog(changed = 'project') {
   try{localStorage.setItem('meshfirmware.selections',JSON.stringify(Object.fromEntries(['provider','hardware','role','version'].map(id=>[id,$(id).value]))));}catch{}
   updateDownload(); controls();
 }
+function linkedCatalogSelections() {
+  const params=new URLSearchParams(window.location?.search||''),selections={};
+  for(const key of ['provider','hardware','role','version','mode','build']){
+    const values=params.getAll(key),value=values[0]?.trim();
+    if(values.length!==1||!value||value.length>512||/[\x00-\x1f\x7f]/.test(value))continue;
+    if(key==='mode'&&!['update','install'].includes(value))continue;
+    selections[key]=key==='provider'?catalogProvider(value):value;
+  }
+  return selections;
+}
 const bootloaderReinstallWarning='This combined SoftDevice/bootloader DFU ZIP requires reinstalling the exact compatible application afterward. Application-owned data is not guaranteed; make a backup before entering DFU.';
 const recoveryWarning='Temporary allow-all recovery bridge: choose the CURRENTLY INSTALLED bootloader profile, not the physical target board. It retains that installed identity and relaxes board/version checks. Install the normal bootloader for the actual physical board next, then its compatible application. Plan for application/settings loss; do not leave this bridge installed.';
 function selectedBootloader(pkg){const info=state.item?.bootloaderInfo;return info&&pkg.kind!=='application'&&pkg.sha256===info.sha256&&pkg.name===new URL(info.url).pathname.split('/').pop()?info:null;}
@@ -1347,7 +1357,7 @@ window.addEventListener('click',event=>{
   // A same-fragment link does not emit hashchange; reopen a tool even if the
   // user collapsed it after the previous visit.
   const link=event.target?.closest?.('nav a[href^="#"]'),id=link?.getAttribute('href')?.slice(1);
-  if(['backups','console','capabilities','advanced-options'].includes(id))revealPanel(id);
+  if(['firmware-choices','backups','console','capabilities','advanced-options'].includes(id))revealPanel(id);
 });
 if(state.migration) notice('A partition migration is pending in this browser. Keep power connected, select its original firmware and the same device. Application commands are blocked until final verification.');
 if(state.recovery)notice('An nRF52 erase/recovery is pending. Select its original final ZIP and explicitly choose the same radio’s DFU port.');
@@ -1371,7 +1381,23 @@ getCatalog().then(catalog => {
   $('catalog-status').textContent=`${state.items.length.toLocaleString()} artifacts · snapshot ${new Date(catalog.generatedAt).toLocaleString()} · ${catalog.warnings.length} provider warnings${catalog.cached?' · cached':''}`;
   let saved={};try{const value=JSON.parse(localStorage.getItem('meshfirmware.selections')||'{}');if(value&&typeof value==='object'&&!Array.isArray(value))saved=value;}catch{}
   saved.provider=catalogProvider(saved.provider)||'Keymind Cascade';
-  filterCatalog();for(const id of ['provider','hardware','role','version'])if([...$(id).options].some(o=>o.value===saved[id])){$(id).value=saved[id];if(id==='provider')state.manualSelections.provider=saved[id];filterCatalog(id);}
+  const linked=installModeLocked()?{}:linkedCatalogSelections(),hasLinked=Object.keys(linked).length>0;
+  const selections=hasLinked?{provider:'Keymind Cascade',...linked}:saved;
+  if(linked.mode){state.installMode=linked.mode;syncInstallMode();}
+  let filtersMatched=true;
+  filterCatalog();
+  for(const id of ['provider','hardware','role','version']){
+    if([...$(id).options].some(o=>o.value===selections[id])){
+      $(id).value=selections[id];
+      if(id==='provider'||Object.hasOwn(linked,id))state.manualSelections[id]=selections[id];
+      filterCatalog(id);
+    }else if(Object.hasOwn(linked,id))filtersMatched=false;
+  }
+  if(linked.build&&filtersMatched){
+    const matches=[...$('artifact').options].filter(o=>o.value&&state.items[Number(o.value)].name===linked.build);
+    if(matches.length===1)$('artifact').value=matches[0].value;
+  }
+  if(hasLinked){revealPanel('firmware-choices');updateDownload();updateFirmwareSelectionSummary();controls();}
   if(state.boardDetected&&state.device)selectDetectedBoard();
   else if(state.recoveryDetectionRequested&&!state.recoveryManual&&!state.migration&&!state.recovery&&!state.espRecovery&&(state.port||$('installed-identity').value.trim()))matchInstalledRecovery($('installed-identity').value.trim());
 }).catch(error=>{$('artifact').replaceChildren(new Option('Catalog unavailable · choose local firmware',''));$('catalog-status').textContent=error.message;controls();});

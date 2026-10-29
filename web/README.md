@@ -50,7 +50,8 @@ still unverified. No radio is reset or written, and downloaded backups are kept.
 An unfinished write, reset, migration or recovery must be resolved first; this
 action cannot discard those records.
 
-The **Installation** switch defaults to **Update** and filters the build list.
+The **Installation** switch defaults to **Update** (unless explicitly selected
+by a shared link) and filters the build list.
 **Erase & new install** selects merged ESP32 installations, or validates a
 separate erase ZIP before an nRF52 application install. It warns about identity
 and settings loss; selecting the mode never resets, downloads or flashes a node.
@@ -61,6 +62,40 @@ Advanced options, backup/restore, the console and help
 start collapsed. Required recovery, migration, connection or archive controls
 open automatically when needed; warnings, progress and final confirmations stay
 visible. The top navigation opens the corresponding tools without touching USB.
+
+### Shared selection links
+
+URL query parameters can preselect the catalog after it loads:
+
+```text
+https://mikecarper.github.io/meshfirmware/?provider=Keymind%20Cascade&hardware=Heltec%20T114&role=companionFull&mode=update#firmware-choices
+```
+
+Supported parameters:
+
+| Parameter | Value |
+| --- | --- |
+| `provider` | Exact firmware provider, such as `Keymind Cascade` or `MeshCore` |
+| `hardware` | Exact hardware label, such as `Heltec T114` |
+| `role` | Exact role, such as `companionFull` or `repeater` |
+| `version` | Exact catalog version; omit to show all available versions |
+| `mode` | `update` or `install` (Erase & new install) |
+| `build` | Exact firmware filename; selected only when one matching build is visible |
+
+Encode spaces and other special characters in parameter values. Linked
+selections take precedence over saved browser choices; omitted filters start
+empty, with Keymind Cascade as the default provider. Unsupported, repeated,
+empty or unavailable values are ignored. An unavailable filter prevents an
+exact build selection. Omit `version` for a link that remains useful as releases
+change, or include both `version` and `build` to identify a particular artifact.
+The `#firmware-choices` fragment opens the selection section.
+
+These links select catalog options only. They do not download firmware,
+request a USB port, reset a radio or authorize a write. Existing pending
+recovery, migration or startup verification takes precedence over URL
+selections. The usual backup, device checks and flash confirmation still apply.
+
+### Flashing
 
 1. Open the page in desktop Chrome/Edge and choose a USB port. **Automatic setup**
    is on by default: read the running model/role, select matching hardware,

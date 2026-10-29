@@ -25,7 +25,7 @@ function uiElement(id=''){
   const classes=new Set(),attributes=new Map(),listeners=new Map();
   return {id,value:'',disabled:false,hidden:false,textContent:'',files:[],options:[],checked:false,classList:{toggle(name,force){const enabled=force===undefined?!classes.has(name):force;if(enabled)classes.add(name);else classes.delete(name);return enabled;},contains:name=>classes.has(name)},replaceChildren(...options){this.options=options;this.value=options[0]?.value||'';},removeAttribute:name=>attributes.delete(name),setAttribute:(name,value)=>attributes.set(name,String(value)),getAttribute:name=>attributes.get(name)??null,addEventListener(type,handler){listeners.set(type,handler);},emit(type,event){listeners.get(type)?.(event);},showModal(){this.open=true;},close(){this.open=false;},scrollHeight:0};
 }
-function workbench({pending=null,recovery=null,espRecovery=null,verification=null,catalogPromise=null,productionDefaults=false}={}) {
+function workbench({pending=null,recovery=null,espRecovery=null,verification=null,catalogPromise=null,productionDefaults=false,search=''}={}) {
   const calls=[],elements=new Map(),serialEvents={},windowEvents={};
   class Option {constructor(text,value){this.text=text;this.value=value;}}
   for(const id of ids)elements.set(id,uiElement(id));
@@ -36,7 +36,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
   if(recovery)storage.set('meshfirmware.nrfRecovery',JSON.stringify(recovery));
   if(espRecovery)storage.set('meshfirmware.espRecovery',JSON.stringify(espRecovery));
   if(verification)storage.set('meshfirmware.verifyApplication',JSON.stringify(verification));
-  const context=vm.createContext({lookupUsbConnectionMap,usbConnectionMap:{schemaVersion:1,builds:[]},document:{getElementById:id=>{assert.ok(elements.has(id),`Missing HTML id ${id}`);return elements.get(id);},querySelectorAll:()=>[...elements.values()]},navigator:{serial:{requestPort:async()=>{calls.push('chooser');return port;},getPorts(){throw new Error('must not enumerate automatically');},addEventListener(type,handler){serialEvents[type]=handler;}}},window:{addEventListener(type,handler){windowEvents[type]=handler;}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},Option,URL,Blob,Uint8Array,TextEncoder,TextDecoder,console,setTimeout,clearTimeout,AbortSignal,Date,
+  const context=vm.createContext({lookupUsbConnectionMap,usbConnectionMap:{schemaVersion:1,builds:[]},document:{getElementById:id=>{assert.ok(elements.has(id),`Missing HTML id ${id}`);return elements.get(id);},querySelectorAll:()=>[...elements.values()]},navigator:{serial:{requestPort:async()=>{calls.push('chooser');return port;},getPorts(){throw new Error('must not enumerate automatically');},addEventListener(type,handler){serialEvents[type]=handler;}}},window:{location:{search},addEventListener(type,handler){windowEvents[type]=handler;}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},Option,URL,URLSearchParams,Blob,Uint8Array,TextEncoder,TextDecoder,console,setTimeout,clearTimeout,AbortSignal,Date,
     fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,parseUsbMode,MigrationApproval,cleanCliReply,assessBootloaderVersion,firmwareFilesLinks,fetch:async()=>{throw Error('Unexpected network request');},fetchFirmwareBytes:(url,options)=>verifiedDownload(url,{...options,mirrorBase:'https://mirror.example.test/firmware/',pageOrigin:'https://mirror.example.test',fetchImpl:(target,init)=>target==='https://mirror.example.test/firmware/index.json'?Promise.resolve({ok:false,status:404}):options.fetchImpl(target,init)}),assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),commonCliRestorePreview:()=>({operations:[],skipped:[],warnings:[]}),restoreCommonCli:async()=>{throw Error('Unexpected CommonCLI restore');},
     backupCoverage,createNextStepScroller,tryNativeUsbFallback,SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
   });
@@ -481,6 +481,53 @@ test('page defaults to Keymind while a saved explicit stock choice remains avail
     assert.equal(ui.elements.get('provider').value,saved?.provider||'Keymind Cascade');assert.deepEqual(ui.calls,[]);
   }
 });
+const linkedT114Item={...v4Item,provider:'Keymind Cascade',hardware:'Heltec T114',architecture:'nrf52',action:'flash',role:'companionFull',version:'v1.18.0.1-halo-keymind',name:'Heltec_t114_companion_radio_full.zip',url:'https://example.test/t114.zip'};
+const linkedCatalog=items=>({items,warnings:[],generatedAt:'2026-10-27T00:00:00Z'});
+
+test('shared URL applies exact catalog filters and build after loading, overriding saved choices without USB or downloads',async()=>{
+  let resolveCatalog;const catalogPromise=new Promise(resolve=>resolveCatalog=resolve);
+  const search='?'+new URLSearchParams({...Object.fromEntries(['provider','hardware','role','version'].map(id=>[id,linkedT114Item[id]])),mode:'update',build:linkedT114Item.name});
+  const ui=workbench({catalogPromise,search,productionDefaults:true});
+  ui.context.localStorage.setItem('meshfirmware.selections',JSON.stringify({provider:v4Item.provider,hardware:v4Item.hardware,role:v4Item.role,version:v4Item.version}));
+  assert.equal(ui.elements.get('artifact').value,'');resolveCatalog(linkedCatalog([v4Item,linkedT114Item]));await new Promise(resolve=>setImmediate(resolve));
+  for(const id of ['provider','hardware','role','version'])assert.equal(ui.elements.get(id).value,linkedT114Item[id],id);
+  assert.equal(ui.elements.get('artifact').value,'1');assert.equal(ui.elements.get('download-selected-build').href,linkedT114Item.url);
+  assert.equal(ui.elements.get('firmware-choices').open,true);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(ui.calls,[]);
+});
+
+test('partial shared filters clear unrelated saved hardware role and version',async()=>{
+  let resolveCatalog;const catalogPromise=new Promise(resolve=>resolveCatalog=resolve),ui=workbench({catalogPromise,search:'?hardware=Heltec+T114&role=companionFull'});
+  ui.context.localStorage.setItem('meshfirmware.selections',JSON.stringify(v4Item));
+  resolveCatalog(linkedCatalog([v4Item,linkedT114Item]));await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(ui.elements.get('provider').value,'Keymind Cascade');assert.equal(ui.elements.get('hardware').value,'Heltec T114');assert.equal(ui.elements.get('role').value,'companionFull');assert.equal(ui.elements.get('version').value,'');assert.equal(ui.elements.get('artifact').value,'');assert.deepEqual(ui.calls,[]);
+});
+
+test('URL mode filters builds, and an exact filename must match one visible artifact',async()=>{
+  const merged=mergedItem(v4Item);
+  for(const [mode,build,expected] of [['install',merged.name,'1'],['update',merged.name,''],['update',v4Item.name,'0']]){
+    const search='?'+new URLSearchParams({provider:'MeshCore',hardware:v4Item.hardware,role:v4Item.role,mode,build});
+    const ui=workbench({search,catalogPromise:Promise.resolve(linkedCatalog([v4Item,merged]))});await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(ui.evaluate('state.installMode'),mode);assert.equal(ui.elements.get('artifact').value,expected);assert.equal(ui.elements.get('install-mode-install').checked,mode==='install');assert.equal(ui.evaluate('state.pkg'),null);assert.deepEqual(ui.calls,[]);
+  }
+  const ui=workbench({search:'?build='+encodeURIComponent(linkedT114Item.name),catalogPromise:Promise.resolve(linkedCatalog([linkedT114Item,{...linkedT114Item,url:'https://example.test/duplicate.zip'}]))});await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(ui.elements.get('artifact').value,'');assert.deepEqual(ui.calls,[]);
+});
+
+test('invalid and duplicate URL values are ignored and unavailable filters cannot select a build',async()=>{
+  for(const search of ['?hardware=missing&build='+linkedT114Item.name,'?build=missing.zip','?mode=wipe&hardware=a&hardware=b&role=%00&version='+ 'x'.repeat(513)]){
+    const ui=workbench({search,catalogPromise:Promise.resolve(linkedCatalog([linkedT114Item]))});await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(ui.evaluate('state.installMode'),'update');assert.equal(ui.elements.get('artifact').value,'');assert.equal(ui.evaluate('state.pkg'),null);assert.deepEqual(ui.calls,[]);
+  }
+});
+
+test('URL selections preserve pending recovery migration and startup verification records',async()=>{
+  for(const pending of [{pending:{mac:'aa:bb:cc:dd:ee:ff',sha256:'a'.repeat(64)}},{recovery:{sha256:'a'.repeat(64)}},{espRecovery:{sha256:'a'.repeat(64),merged:true}},{verification:previousVerification()}]){
+    const ui=workbench({...pending,search:'?hardware=Heltec+T114&role=companionFull&mode=install&build='+linkedT114Item.name,catalogPromise:Promise.resolve(linkedCatalog([linkedT114Item]))});
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(ui.elements.get('hardware').value,'');assert.equal(ui.elements.get('artifact').value,'');assert.equal(ui.evaluate('state.installMode'),pending.recovery||pending.espRecovery?'install':'update');assert.deepEqual(ui.calls,[]);
+  }
+});
+
 test('a saved or pre-connect explicit stock provider survives connection without keeping the previous board or version',async()=>{
   for(const saved of [false,true]){
     let resolveCatalog;const catalogPromise=new Promise(resolve=>resolveCatalog=resolve),ui=workbench({productionDefaults:true,catalogPromise});serialMock(ui);
@@ -1320,8 +1367,8 @@ test('pending recovery and reset controls reveal themselves but never reset, ret
 
 test('tool navigation opens known collapsed sections and ignores unrelated fragments without USB activity',async()=>{
   const ui=workbench();await Promise.resolve();
-  for(const id of ['backups','console','capabilities','advanced-options']){
-    collapsedPanels(ui);ui.context.window.location={hash:'#'+id};ui.evaluate('openLinkedPanel();');assert.equal(ui.elements.get(id).open,true,id);
+  for(const id of ['firmware-choices','backups','console','capabilities','advanced-options']){
+    collapsedPanels(ui);ui.elements.get(id).open=false;ui.context.window.location={hash:'#'+id};ui.evaluate('openLinkedPanel();');assert.equal(ui.elements.get(id).open,true,id);
   }
   collapsedPanels(ui);ui.context.window.location={hash:'#confirm-submit'};ui.evaluate('openLinkedPanel();');
   assert.equal(ui.elements.get('advanced-options').open,false);assert.equal(ui.elements.get('backups').open,false);assert.equal(ui.elements.get('confirm-submit').open,undefined);assert.deepEqual(ui.calls,[]);
