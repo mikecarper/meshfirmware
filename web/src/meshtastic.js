@@ -8,9 +8,14 @@
 // configuration or queued packets after this request: only identity is decoded
 // or retained here. The caller closes the serial connection immediately after
 // probing; this protocol cannot promise that no other bytes were delivered.
+// The official Python StreamInterface also sends START2 32 times and waits
+// 100 ms before asking for configuration, to wake/resynchronize its receiver:
+// https://github.com/meshtastic/python/blob/master/meshtastic/stream_interface.py
+const wakeBytes=new Uint8Array(32).fill(0xc3);
 const configRequest=Uint8Array.of(0x94,0xc3,0,4,0x18,0xac,0x9e,4);
 const maxFrame=512,maxBuffered=8192,maxReceived=128*1024,maxFrames=512;
 const decoder=new TextDecoder('utf-8',{fatal:true});
+const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 
 function fields(bytes){
   const result=[];let offset=0;
@@ -89,14 +94,23 @@ function message(bytes,localNode){
   return null;
 }
 
-export async function detectMeshtastic(link,{timeoutMs=1800,assertCurrent=()=>{}}={}){
+export async function detectMeshtastic(link,{timeoutMs=25000,assertCurrent=()=>{},delay=wait,now=Date.now}={}){
   if(!link||typeof link.write!=='function'||typeof link.read!=='function')throw Error('Meshtastic detection needs a serial connection.');
-  if(!Number.isFinite(timeoutMs)||timeoutMs<1||timeoutMs>10000)throw Error('Invalid Meshtastic detection timeout.');
+  if(!Number.isFinite(timeoutMs)||timeoutMs<1||timeoutMs>30000)throw Error('Invalid Meshtastic detection timeout.');
+  if(typeof delay!=='function'||typeof now!=='function')throw Error('Invalid Meshtastic detection clock.');
+  const clock=()=>{const value=now();if(!Number.isFinite(value)||Math.abs(value)>Number.MAX_SAFE_INTEGER)throw Error('Invalid Meshtastic detection clock.');return value;};
+  clock();
   assertCurrent();if(Array.isArray(link.buffer))link.buffer.length=0;
+  await link.write(wakeBytes.slice());assertCurrent();
+  await delay(100);assertCurrent();
+  if(Array.isArray(link.buffer))link.buffer.length=0;
   await link.write(configRequest.slice());assertCurrent();
-  const until=Date.now()+timeoutMs;let buffer=[],received=0,processed=0,local=null,metadata=null,name='';
-  while(Date.now()<until){
-    assertCurrent();const chunk=await link.read(Math.max(1,Math.min(100,until-Date.now())));assertCurrent();
+  // Meshtastic 2.7.15's ESP32 native-USB console may poll only once per 20 s
+  // while HWCDC::isPlugged() is false. A short probe misses a healthy TinyUSB
+  // application; allow one bounded poll interval and return early on identity.
+  const until=clock()+timeoutMs;let buffer=[],received=0,processed=0,local=null,metadata=null,name='';
+  while(clock()<until){
+    assertCurrent();const chunk=await link.read(Math.max(1,Math.min(100,until-clock())));assertCurrent();
     if(!(chunk instanceof Uint8Array))throw Error('Invalid Meshtastic serial data.');
     received+=chunk.length;
     if(received>maxReceived)return null;

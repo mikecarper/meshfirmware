@@ -3,7 +3,7 @@
 import {detectMeshCore} from './meshcore.js';
 import {detectMeshtastic} from './meshtastic.js';
 
-export async function detectApplication(link,{assertCurrent=()=>{},meshCoreTimeoutMs=1500,meshtasticTimeoutMs=1800}={}){
+export async function detectApplication(link,{assertCurrent=()=>{},meshCoreTimeoutMs=1500,meshtasticTimeoutMs=25000}={}){
   assertCurrent();let ioFailure=null;
   const guarded={get buffer(){return link.buffer;}};
   for(const method of ['command','read','write'])guarded[method]=async(...args)=>{

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {detectApplication} from '../src/application-detection.js';
 const request=[0x94,0xc3,0,4,0x18,0xac,0x9e,4];
+const wake=Array(32).fill(0xc3);
 const frame=value=>[0x94,0xc3,value.length>>8,value.length&255,...value];
 const identity=Uint8Array.from([...frame([0x1a,2,8,9]),...frame([0x6a,9,0x0a,5,...new TextEncoder().encode('2.7.4'),0x48,69])]);
 const options={meshCoreTimeoutMs:1,meshtasticTimeoutMs:10};
@@ -16,7 +17,14 @@ test('existing MeshCore identity takes precedence without sending a Meshtastic q
 });
 
 test('Meshtastic fallback uses the same selected serial connection and returns only its local identity',async()=>{
-  const link=radio(),result=await detectApplication(link,options);assert.equal(result.firmwareFamily,'meshtastic');assert.equal(result.meshtasticHardware,69);assert.equal(result.publicKey,null);assert.equal(result.nodeNum,9);assert.deepEqual(link.writes.filter(value=>value[0]===0x94),[request]);assert.ok(!link.commands.some(command=>/^set |reboot/.test(command)));
+  const link=radio(),result=await detectApplication(link,options);assert.equal(result.firmwareFamily,'meshtastic');assert.equal(result.meshtasticHardware,69);assert.equal(result.publicKey,null);assert.equal(result.nodeNum,9);assert.deepEqual(link.writes.slice(-2),[wake,request]);assert.ok(!link.commands.some(command=>/^set |reboot/.test(command)));
+});
+
+test('a Meshtastic startup log containing a public key is not mistaken for MeshCore CommonCLI',async()=>{
+  for(const reply of ['INFO Loaded public key '+ '11'.repeat(32)+'\r\n','DEBUG signing key='+ '22'.repeat(32),'not-a-getter: '+ '33'.repeat(32)]){
+    const link=radio();link.command=async command=>{link.commands.push(command);return command==='get public.key'?reply:'Unknown command';};
+    const result=await detectApplication(link,options);assert.equal(result.firmwareFamily,'meshtastic');assert.equal(result.meshtasticHardware,69);assert.ok(!link.commands.includes('get name'));assert.ok(!link.commands.includes('board'));
+  }
 });
 
 test('genuine transport failures never launch a fallback probe on a disconnected or locked port',async()=>{

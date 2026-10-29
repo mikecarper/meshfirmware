@@ -12,15 +12,16 @@ const local=node=>frame(bytes(3,number(1,node)));
 const meta=(hardware=69,version='2.7.4.abc123',extras=[])=>frame(bytes(13,concat(bytes(1,utf8(version)),number(9,hardware),extras)));
 const nodeInfo=(node,{name='Local node',shortName='LC',hardware=69}={})=>frame(bytes(4,concat(number(1,node),bytes(2,concat(bytes(2,utf8(name)),bytes(3,utf8(shortName)),number(5,hardware))))));
 const request=[0x94,0xc3,0,4,0x18,0xac,0x9e,4];
+const wake=Array(32).fill(0xc3),noDelay=async ms=>{assert.equal(ms,100);};
 function fixture(chunks,buffer=[]){
   const queue=chunks.map(chunk=>chunk instanceof Error?chunk:Uint8Array.from(chunk)),writes=[];let reads=0;
   return {buffer:[...buffer],writes,get reads(){return reads;},async write(value){writes.push([...value]);},async read(ms){reads++;const value=queue.shift();if(value instanceof Error)throw value;if(value)return value;await new Promise(resolve=>setTimeout(resolve,ms));return new Uint8Array();}};
 }
-const detect=(link,options={})=>detectMeshtastic(link,{timeoutMs:15,...options});
+const detect=(link,options={})=>detectMeshtastic(link,{timeoutMs:15,delay:noDelay,...options});
 
 test('minimal nodeless config request reads the local T114 identity without settings, reset or RF commands',async()=>{
   const link=fixture([local(0x12345678),nodeInfo(0x12345678),meta()]);
-  const result=await detect(link);assert.deepEqual(link.writes,[request]);assert.equal(link.reads,3);
+  const result=await detect(link);assert.deepEqual(link.writes,[wake,request]);assert.equal(link.reads,3);
   assert.deepEqual(result,{firmwareFamily:'meshtastic',role:'meshtastic',meshtasticHardware:69,model:'Meshtastic hardware 69',nodeNum:0x12345678,name:'Local node',version:'2.7.4.abc123',catalogRole:null,publicKey:null});
 });
 
@@ -30,6 +31,45 @@ test('official SDK my_info fixture and device metadata identity are compatible',
   const info=Uint8Array.from(Buffer.from('1a1c08f8acd191016a1473656565645f7869616f5f6e726635325f6b6974','hex'));
   const metadata=Uint8Array.from(Buffer.from('6a100a0c322e372e342e6162633132334845','hex'));
   const result=await detect(fixture([frame(info),frame(metadata)]));assert.equal(result.nodeNum,0x12345678);assert.equal(result.meshtasticHardware,69);assert.equal(result.version,'2.7.4.abc123');
+});
+
+test('official wake bytes resynchronize the Meshtastic firmware receiver before asking for identity',async()=>{
+  const receiver=()=>{
+    let pending=[0x94]; // Firmware was left waiting for START2 by a prior client.
+    const queue=[],writes=[];
+    return {buffer:[],writes,async write(value){
+      writes.push([...value]);
+      for(const byte of value){
+        if(!pending.length){if(byte===0x94)pending=[byte];continue;}
+        if(pending.length===1){pending=byte===0xc3?[...pending,byte]:[];continue;}
+        pending.push(byte);
+        if(pending.length<4)continue;
+        const length=pending[2]*256+pending[3];
+        if(length>512){pending=[];continue;}
+        if(pending.length===length+4){
+          if(pending.join(',')===request.join(','))queue.push(concat(local(9),meta(110,'2.7.15.567b8ea')));
+          pending=[];
+        }
+      }
+    },async read(){return queue.shift()||new Uint8Array();}};
+  };
+  const control=receiver();await control.write(request);assert.equal((await control.read()).length,0,'a query alone is swallowed by the partial firmware framing state');
+  const link=receiver(),delays=[];
+  const result=await detect(link,{delay:async ms=>{delays.push(ms);assert.deepEqual(link.writes,[wake]);}});
+  assert.equal(result?.meshtasticHardware,110);assert.equal(result.version,'2.7.15.567b8ea');assert.deepEqual(delays,[100]);assert.deepEqual(link.writes,[wake,request]);
+});
+
+test('a slow Meshtastic 2.7.15 native-USB console can answer after its twenty-second idle poll',async()=>{
+  let elapsed=0,reads=0;const writes=[];
+  const link={buffer:[],async write(value){writes.push([...value]);},async read(ms){reads++;elapsed+=ms;return elapsed>=20000?concat(local(9),meta(110,'2.7.15.567b8ea')):new Uint8Array();}};
+  const result=await detectMeshtastic(link,{now:()=>elapsed,delay:noDelay});assert.equal(result?.meshtasticHardware,110);assert.equal(elapsed,20000);assert.equal(reads,200);assert.deepEqual(writes,[wake,request]);
+  elapsed=0;reads=0;assert.equal(await detectMeshtastic(link,{timeoutMs:1800,now:()=>elapsed,delay:noDelay}),null);assert.equal(elapsed,1800);assert.equal(reads,18);
+  elapsed=0;reads=0;link.read=async ms=>{reads++;elapsed+=ms;return new Uint8Array();};assert.equal(await detectMeshtastic(link,{now:()=>elapsed,delay:noDelay}),null);assert.equal(elapsed,25000);assert.equal(reads,250);
+});
+
+test('normal Meshtastic replies still return immediately without waiting for the longer deadline',async()=>{
+  let elapsed=0;const link=fixture([concat(local(9),meta())]);
+  const result=await detectMeshtastic(link,{delay:noDelay,now:()=>elapsed});assert.equal(result?.nodeNum,9);assert.equal(link.reads,1);assert.equal(elapsed,0);
 });
 
 test('serial frames survive fragmentation at every byte boundary, leading logs and concatenation',async()=>{
@@ -43,7 +83,7 @@ test('serial frames survive fragmentation at every byte boundary, leading logs a
 test('future fields and uninterpreted configuration payloads do not hide the local identity',async()=>{
   const unknown=concat(number(100,150),varint(101*8+1),new Uint8Array(8),varint(102*8+5),new Uint8Array(4),bytes(103,utf8('future')));
   const link=fixture([concat(local(9),frame(bytes(5,utf8('configuration-not-decoded'))),meta(69,'2.8.0.preview',unknown))]);
-  assert.equal((await detect(link)).meshtasticHardware,69);assert.deepEqual(link.writes,[request]);
+  assert.equal((await detect(link)).meshtasticHardware,69);assert.deepEqual(link.writes,[wake,request]);
 });
 
 test('remote node names and hardware can never select the attached board',async()=>{
@@ -65,12 +105,12 @@ test('metadata first still requires a local node and unknown hardware remains a 
 });
 
 test('preexisting input is cleared before sending the query and cannot satisfy identity discovery',async()=>{
-  const link=fixture([local(9)],[...meta()]);assert.equal(await detect(link),null);assert.deepEqual(link.buffer,[]);assert.deepEqual(link.writes,[request]);
+  const link=fixture([local(9)],[...meta()]);assert.equal(await detect(link),null);assert.deepEqual(link.buffer,[]);assert.deepEqual(link.writes,[wake,request]);
 });
 
 test('stops once identity is sufficient without requesting, parsing or logging subsequent inventory/packets',async()=>{
   const secret='PRIVATE_CHANNEL_SECRET',link=fixture([concat(local(9),meta(),frame(bytes(5,utf8(secret))),frame(bytes(2,utf8(secret)))),new Error('Must not drain further packets')]);
-  const result=await detect(link);assert.equal(link.reads,1);assert.ok(!JSON.stringify(result).includes(secret));assert.deepEqual(link.writes,[request]);
+  const result=await detect(link);assert.equal(link.reads,1);assert.ok(!JSON.stringify(result).includes(secret));assert.deepEqual(link.writes,[wake,request]);
 });
 
 test('re-synchronizes corrupted framing lengths while bounding absent or truncated frames',async()=>{
@@ -109,10 +149,13 @@ test('transport and context failures propagate before any later serial request',
   await assert.rejects(detect(fixture([new Error('Read failed')])),/Read failed/);
   const before=fixture([]);await assert.rejects(detect(before,{assertCurrent:()=>{throw Error('Selection changed');}}),/Selection changed/);assert.equal(before.writes.length,0);
   const afterWrite=fixture([]);let checks=0;await assert.rejects(detect(afterWrite,{assertCurrent:()=>{if(++checks===2)throw Error('Selection changed');}}),/Selection changed/);assert.equal(afterWrite.reads,0);
-  const afterRead=fixture([concat(local(9),meta())]);checks=0;await assert.rejects(detect(afterRead,{assertCurrent:()=>{if(++checks===4)throw Error('Selection changed');}}),/Selection changed/);assert.equal(afterRead.reads,1);
+  const duringWake=fixture([]);let current=true;await assert.rejects(detect(duringWake,{delay:async ms=>{assert.equal(ms,100);current=false;},assertCurrent:()=>{if(!current)throw Error('Selection changed');}}),/Selection changed/);assert.deepEqual(duringWake.writes,[wake]);assert.equal(duringWake.reads,0);
+  const configFailure=fixture([]);configFailure.write=async value=>{configFailure.writes.push([...value]);if(value[0]===0x94)throw Error('Port gone before query');};await assert.rejects(detect(configFailure),/Port gone before query/);assert.deepEqual(configFailure.writes,[wake,request]);assert.equal(configFailure.reads,0);
+  const afterRead=fixture([concat(local(9),meta())]);checks=0;await assert.rejects(detect(afterRead,{assertCurrent:()=>{if(++checks===6)throw Error('Selection changed');}}),/Selection changed/);assert.equal(afterRead.reads,1);
 });
 
 test('invalid API arguments are rejected before any serial write',async()=>{
-  const link=fixture([]);for(const timeoutMs of [0,-1,NaN,Infinity,10001])await assert.rejects(detect(link,{timeoutMs}),/timeout/);
+  const link=fixture([]);for(const timeoutMs of [0,-1,NaN,Infinity,30001])await assert.rejects(detect(link,{timeoutMs}),/timeout/);
+  for(const options of [{delay:null},{now:null},{now:()=>NaN},{now:()=>Infinity}])await assert.rejects(detect(link,options),/clock/);
   await assert.rejects(detectMeshtastic({}),/serial connection/);assert.equal(link.writes.length,0);
 });

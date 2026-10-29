@@ -586,6 +586,7 @@ async function detectSelectedBoard() {
     notice('Bootloader hints checked without sending DFU or application commands. Review any recovery match; the physical board is not identified by its DFU USB ID.');return;
   }
   const port=state.port,generation=state.generation;clearBootloaderInfoEvidence();state.applicationProbeFailed=false;state.device=null;state.boardDetected=false;state.backupApproved=null;
+  notice('Reading the node’s USB identity. Meshtastic may take up to 25 seconds to answer; keep the radio connected. No reset or firmware write is sent.');
   try { await linkOperation(readApplication); }
   catch(error){
     if(state.port===port&&state.generation===generation){

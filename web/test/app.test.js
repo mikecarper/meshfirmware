@@ -65,6 +65,17 @@ test('Meshtastic H2T/T114 read selects the nRF52 MeshCore target and Companion F
   assert.match(ui.elements.get('device-meta').textContent,/Meshtastic.*Heltec Mesh Node T114/);assert.match(ui.elements.get('automatic-summary').textContent,/not converted into a MeshCore backup/);assert.doesNotMatch(ui.elements.get('automatic-summary').textContent,/downgrade/i);assert.equal(ui.elements.get('nrf-bootloader-offer').hidden,true);assert.deepEqual(ui.calls,['chooser','open','close']);
 });
 
+test('slow Meshtastic detection shows the waiting period without claiming a connection failure',async()=>{
+  const ui=await meshtasticWorkbench();let release;
+  ui.context.detectApplication=()=>new Promise(resolve=>{release=resolve;});
+  const connecting=ui.elements.get('select-port').onclick();
+  for(let tick=0;!release&&tick<20;tick++)await Promise.resolve();
+  assert.equal(typeof release,'function');assert.match(ui.elements.get('notice').textContent,/Reading.*USB identity.*25 seconds/);assert.match(ui.elements.get('notice').textContent,/No reset or firmware write/);
+  assert.equal(ui.evaluate('state.busy'),true);assert.equal(ui.evaluate('state.device'),null);assert.deepEqual(ui.calls,['chooser','open']);
+  release(meshtasticDevice());await connecting;
+  assert.match(ui.elements.get('notice').textContent,/Meshtastic detected/);assert.doesNotMatch(ui.elements.get('notice').textContent,/25 seconds/);assert.deepEqual(ui.calls,['chooser','open','close']);
+});
+
 test('unknown Meshtastic hardware does not inherit an old MeshCore board or use the shared USB ID to guess',async()=>{
   const ui=await meshtasticWorkbench({device:meshtasticDevice({meshtasticHardware:99999,model:'Heltec v2'})});ui.context.pkg=fakePackage();ui.evaluate('state.pkg=pkg;state.item=inventory[0];state.detectedHardware="Heltec T114";state.device={model:"Heltec T114",catalogRole:"companionFull"};');
   await ui.elements.get('select-port').onclick();assert.equal(ui.elements.get('hardware').value,'');assert.equal(ui.elements.get('artifact').value,'');assert.equal(ui.evaluate('state.detectedHardware'),null);assert.equal(ui.evaluate('state.pkg'),null);assert.match(ui.elements.get('board-detection').textContent,/manual|unknown|reviewed/i);assert.deepEqual(ui.calls,['chooser','open','close']);

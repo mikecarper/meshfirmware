@@ -124,6 +124,13 @@ selections. The usual backup, device checks and flash confirmation still apply.
    device, change settings or send a LoRa message. The standard Meshtastic
    configuration response may contain additional records; these are ignored,
    not logged or saved as a backup.
+   The probe uses the official serial wake/resynchronization sequence, then
+   waits up to 25 seconds for local identity, returning as soon as it arrives.
+   Some Meshtastic 2.7.15 native-USB builds can take a full 20-second console
+   polling interval to respond; the page shows that it is still reading.
+   Meshtastic's own firmware may temporarily pause Bluetooth while its serial
+   API is connected. If USB serial access was disabled in the node's security
+   settings, detection cannot override that restriction.
 
    When moving from Meshtastic, the page chooses a suitable Keymind Companion
    build where available; if that exact board has no Keymind builds, it can

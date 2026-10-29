@@ -454,7 +454,10 @@ function reportedCatalogRole(value){
 }
 export async function detectMeshCore(link,{timeoutMs=1500}={}) {
   const reply=await link.command('get public.key',Math.min(timeoutMs,450));
-  const publicKey=/(?<![a-f0-9])[a-f0-9]{64}(?![a-f0-9])/i.exec(reply)?.[0].toLowerCase();
+  // Meshtastic debug output can mention a 64-hex public key too. Only accept
+  // one complete getter-response line, not a key embedded in an unrelated log.
+  const keys=cleanCliReply(reply,'get public.key').split('\n').filter(line=>/^[a-f0-9]{64}$/i.test(line));
+  const publicKey=keys.length===1?keys[0].toLowerCase():null;
   if(publicKey) {
     const name=cleanCliReply(await link.command('get name',350),'get name'),version=cleanCliReply(await link.command('ver',350),'ver'),board=cleanCliReply(await link.command('board',350),'board');
     let catalogRole=null;
