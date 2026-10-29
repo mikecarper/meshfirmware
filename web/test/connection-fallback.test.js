@@ -111,3 +111,64 @@ test('unsupported preferred methods fail before any connection, touch, or reset'
     const f=fixture();await assert.rejects(tryNativeUsbFallback({...f.options,preferredMode}),TypeError);assert.deepEqual(f.calls,[]);
   }
 });
+
+test('a marked final-phase TinyUSB interruption waits for handoff even before the disconnect event arrives',async()=>{
+  const original=Object.assign(new Error('USB endpoint disappeared during the final signal'),{name:'NetworkError',tinyUsbHandoffPending:true});
+  const f=fixture({results:[noSync()],onTouch:()=>{throw original;}});
+  assert.deepEqual(await tryNativeUsbFallback({...f.options,preferredMode:'tinyusb'}),{handoff:true});
+  assert.deepEqual(steps(f),['connect:no_reset','close','touch']);
+  assert.equal(f.options.portAvailable(),true);
+  const log=f.calls.filter(call=>call[0]==='log').at(-1)[1];
+  assert.match(log,/interrupted/);assert.match(log,/Delivery is uncertain/);assert.match(log,/No further synchronization or reset/);
+  // A delayed browser event changes availability only; it cannot trigger a
+  // second touch, reset, no-reset synchronization or different-port scan.
+  const previous=[...steps(f)];f.setAvailable(false);await Promise.resolve();
+  assert.deepEqual(steps(f),previous);
+});
+
+test('marked TinyUSB interruptions return handoff for both available and already disconnected ports, in either ordering',async()=>{
+  for(const preferredMode of [null,'tinyusb'])for(const disconnected of [false,true]){
+    const original=Object.assign(new Error('Final control-line transfer interrupted'),{tinyUsbHandoffPending:true});
+    let f;f=fixture({results:preferredMode==='tinyusb'?[noSync()]:[noSync(),noSync()],onTouch:()=>{if(disconnected)f.setAvailable(false);throw original;}});
+    assert.deepEqual(await tryNativeUsbFallback({...f.options,preferredMode}),{handoff:true});
+    assert.deepEqual(steps(f),preferredMode==='tinyusb'?['connect:no_reset','close','touch']:['connect:no_reset','close','connect:usb_reset','close','touch']);
+    assert.equal(f.calls.filter(call=>call[0]==='touch').length,1);
+    assert.equal(f.calls.filter(call=>call[0]==='connect'&&call[1]==='no_reset').length,1);
+  }
+});
+
+test('a marked interruption never overrides a changed selected-radio or firmware snapshot',async()=>{
+  const original=Object.assign(new Error('Final signal interrupted'),{tinyUsbHandoffPending:true});
+  let f;f=fixture({results:[noSync()],onTouch:()=>{f.setCurrent(false);throw original;}});
+  await assert.rejects(tryNativeUsbFallback({...f.options,preferredMode:'tinyusb'}),/selected radio or firmware changed/);
+  assert.deepEqual(steps(f),['connect:no_reset','close','touch']);
+  assert.equal(f.calls.some(call=>call[0]==='log'&&/Delivery is uncertain/.test(call[1])),false);
+});
+
+test('permission/security failures cannot be disguised as a pending TinyUSB handoff',async()=>{
+  const errors=[
+    Object.assign(new Error('Control transfer failed'),{name:'NotAllowedError'}),
+    Object.assign(new Error('Control transfer failed'),{name:'SecurityError'}),
+    Object.assign(new Error('Control transfer failed'),{name:'PermissionDeniedError'}),
+    Object.assign(new Error('Control transfer failed'),{name:'AccessDeniedError'}),
+    Object.assign(new Error('Control transfer failed'),{name:'InvalidAccessError'}),
+    new Error('Access denied'),new Error('Permission was revoked'),new Error('Operation is not allowed'),
+    new Error('Security policy blocked this operation'),new Error('Secure boot is enabled'),new Error('Encryption is enabled'),
+  ];
+  for(const original of errors){
+    original.tinyUsbHandoffPending=true;
+    const f=fixture({results:[noSync()],onTouch:()=>{throw original;}});
+    await assert.rejects(tryNativeUsbFallback({...f.options,preferredMode:'tinyusb'}),error=>error===original);
+    assert.deepEqual(steps(f),['connect:no_reset','close','touch']);
+    assert.equal(f.calls.some(call=>call[0]==='log'&&/Delivery is uncertain/.test(call[1])),false);
+  }
+});
+
+test('unmarked or non-boolean touch interruption evidence remains a failure, even if the port disconnects',async()=>{
+  for(const marker of [undefined,false,'true',1]){
+    const original=Object.assign(new Error('USB endpoint disconnected'),{tinyUsbHandoffPending:marker});
+    let f;f=fixture({results:[noSync()],onTouch:()=>{f.setAvailable(false);throw original;}});
+    await assert.rejects(tryNativeUsbFallback({...f.options,preferredMode:'tinyusb'}),error=>error===original);
+    assert.deepEqual(steps(f),['connect:no_reset','close','touch']);
+  }
+});

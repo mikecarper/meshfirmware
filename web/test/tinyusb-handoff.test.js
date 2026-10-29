@@ -2,11 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {enterTinyUsbBootloader,touch1200} from '../src/serial.js';
 
-function mockPort({openError=null,signalErrorAt=0,closeError=null}={}) {
+function mockPort({openError=null,signalErrorAt=0,signalError=null,closeError=null}={}) {
   const calls=[];let signalCount=0;
   const port={
     async open(options){calls.push(['open',options]);if(openError)throw openError;},
-    async setSignals(signals){calls.push(['signals',signals]);if(++signalCount===signalErrorAt)throw new Error('USB endpoint disconnected');},
+    async setSignals(signals){calls.push(['signals',signals]);if(++signalCount===signalErrorAt)throw signalError||new Error('USB endpoint disconnected');},
     async close(){calls.push(['close']);if(closeError)throw closeError;},
     get writable(){throw new Error('A handoff must never write serial data.');},
     get readable(){throw new Error('A handoff must not claim a ROM response.');},
@@ -35,6 +35,39 @@ test('every partial TinyUSB signal failure closes once and never repeats or fall
     const expected=expectedHandoff(),failureIndex=expected.map(([action])=>action).reduce((indices,action,index)=>action==='signals'?[...indices,index]:indices,[])[signalErrorAt-1];
     assert.deepEqual(mock.calls,[...expected.slice(0,failureIndex+1),['close']]);
     assert.equal(mock.calls.some(([action,options])=>action==='open'&&options.baudRate===1200),false);
+  }
+});
+
+test('only the final zero-state control request or DTR flush can carry uncertain handoff metadata',async()=>{
+  for(const signalErrorAt of [9,10])for(const name of ['NetworkError','Error']){
+    const original=Object.freeze(Object.assign(new Error('Failed to set control signals'),{name})),mock=mockPort({signalErrorAt,signalError:original});
+    await assert.rejects(enterTinyUsbBootloader(mock.port,{delay:mock.delay}),error=>{
+      assert.notEqual(error,original);assert.equal(error.cause,original);assert.equal(error.name,name);assert.equal(error.message,original.message);assert.equal(error.tinyUsbHandoffPending,true);
+      assert.deepEqual(error.tinyUsbHandoffEvidence,{sequence:'2-3-1-0',phase:'final-zero',operation:signalErrorAt===9?'combined-control':'dtr-flush',baudRate:115200,priorPhasesComplete:true,romVerified:false});assert.ok(Object.isFrozen(error.tinyUsbHandoffEvidence));return true;
+    });
+    assert.equal(mock.calls.filter(([action])=>action==='signals').length,signalErrorAt);assert.equal(mock.calls.filter(([action])=>action==='open').length,1);assert.equal(mock.calls.filter(([action])=>action==='close').length,1);assert.equal(mock.calls.at(-1)[0],'close');
+    assert.ok(!mock.calls.some(([action,options])=>action==='open'&&options.baudRate===1200));
+  }
+});
+
+test('earlier control-line failures are not a possible completed TinyUSB handoff',async()=>{
+  for(let signalErrorAt=1;signalErrorAt<=8;signalErrorAt++){
+    const original=Object.assign(new Error('Failed to set control signals'),{name:'NetworkError'}),mock=mockPort({signalErrorAt,signalError:original});
+    await assert.rejects(enterTinyUsbBootloader(mock.port,{delay:mock.delay}),error=>error===original&&error.tinyUsbHandoffPending===undefined&&error.tinyUsbHandoffEvidence===undefined);
+    assert.equal(mock.calls.filter(([action])=>action==='signals').length,signalErrorAt);assert.equal(mock.calls.at(-1)[0],'close');
+  }
+});
+
+test('permission and access failures never acquire handoff metadata even on the final phase',async()=>{
+  const failures=[
+    Object.assign(new Error('Failed to set control signals'),{name:'NotAllowedError'}),
+    Object.assign(new Error('Failed to set control signals'),{name:'SecurityError'}),
+    Object.assign(new Error('Failed to set control signals'),{name:'PermissionDeniedError'}),
+    Object.assign(new Error('Failed to set control signals'),{name:'AccessDeniedError'}),
+    new Error('Access is denied'),new Error('Access denied'),new Error('Permission denied'),new Error('Operation not allowed'),new Error('Security restriction'),new Error('EACCES'),
+  ];
+  for(const signalErrorAt of [9,10])for(const original of failures){
+    const mock=mockPort({signalErrorAt,signalError:original});await assert.rejects(enterTinyUsbBootloader(mock.port,{delay:mock.delay}),error=>error===original&&error.tinyUsbHandoffPending===undefined&&error.tinyUsbHandoffEvidence===undefined);assert.equal(mock.calls.filter(([action])=>action==='signals').length,signalErrorAt);assert.equal(mock.calls.at(-1)[0],'close');
   }
 });
 

@@ -5,6 +5,9 @@ const fatalNames=new Set(['NotAllowedError','SecurityError','NotFoundError','Net
 function mayTryAnotherMethod(error){
   return error?.romHandshakeFailed===true&&!fatalNames.has(error.name)&&!/permission|access.?denied|not.?allowed|security|secure boot|encrypt|disconnect|device (?:lost|removed)|mac.*(?:changed|mismatch)|unsupported.*chip|stub|flash/i.test(error.message||'');
 }
+function pendingTinyUsbHandoff(error){
+  return error?.tinyUsbHandoffPending===true&&!/^(?:NotAllowed|Security|PermissionDenied|AccessDenied|InvalidAccess)Error$/i.test(error.name||'')&&!/permission|access.?denied|not.?allowed|security|secure[\s_-]*boot|encrypt/i.test(error.message||'');
+}
 function stale(){return new Error('The selected radio or firmware changed during connection testing. No further reset was sent.');}
 
 export async function tryNativeUsbFallback({connect,close,touch,isCurrent,portAvailable,log=()=>{},preferredMode=null}={}){
@@ -39,9 +42,17 @@ export async function tryNativeUsbFallback({connect,close,touch,isCurrent,portAv
     current();
     if(!available())return {handoff:true};
     log('Trying one TinyUSB control-line handoff at 115200 baud. No UART reset or nRF52 baud touch is used.');
-    // Delivery is uncertain if this rejects: never repeat the touch or move on
-    // to another reset sequence. The existing handoff helper owns its close.
-    await touch();
+    // Only the low-level helper can mark an interruption after the reset's
+    // final control-line phase was submitted. Browser disconnect events may
+    // arrive later, so tracked availability cannot disprove that handoff.
+    // An early/unmarked error or any permission/security failure still stops.
+    try{await touch();}
+    catch(error){
+      if(!pendingTinyUsbHandoff(error))throw error;
+      current();
+      log(`TinyUSB handoff was interrupted (${error.message||String(error)}). Delivery is uncertain; select the same radio's ROM port. No further synchronization or reset was attempted.`);
+      return {handoff:true};
+    }
     current();
     if(!available())return {handoff:true};
     // Some CDC endpoints retain their already granted object. Only a no-reset

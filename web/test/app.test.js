@@ -2063,6 +2063,23 @@ test('trial handoff on USB re-enumeration guides selection without another touch
   assert.deepEqual(ui.calls,['backup-considered','connect:no_reset','close','connect:usb_reset','close','tinyusb-handoff']);assert.equal(ui.evaluate('state.port'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('transport-mode').value,'no_reset');assert.equal(ui.elements.get('already-bootloader').checked,true);assert.deepEqual(nextHighlight(ui),['select-port']);assert.match(ui.elements.get('notice').textContent,/Nothing has been erased or written/);
 });
 
+test('a final TinyUSB control-line interruption preserves Meshtastic firmware choices through a delayed disconnect and ROM reselection',async()=>{
+  for(const timing of ['immediate','delayed']){
+    const ui=await connectionTrialWorkbench({failures:2});
+    ui.evaluate("state.device={...state.device,firmwareFamily:'meshtastic',role:'meshtastic',version:'2.7.15.567b8ea',publicKey:null,meshtasticHardware:110};state.backupApproved={port:state.port,sha256:pkg.sha256,skipped:true,sourceFirmware:'meshtastic'};");
+    const device=ui.evaluate('state.device'),pkg=ui.evaluate('state.pkg'),approval=ui.evaluate('state.backupApproved'),filters=['provider','hardware','role','version','artifact'].map(id=>ui.elements.get(id).value);
+    ui.context.touch1200=async()=>{ui.calls.push('tinyusb-handoff');if(timing==='immediate')ui.serialEvents.disconnect({port:ui.port});throw Object.assign(Error("Failed to execute 'setSignals' on 'SerialPort': Failed to set control signals."),{name:'NetworkError',tinyUsbHandoffPending:true});};
+    await ui.elements.get('prepare').onclick();
+    assert.equal(ui.evaluate('state.handoff'),true);assert.equal(ui.evaluate('state.port'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.device'),device);assert.equal(ui.evaluate('state.pkg'),pkg);assert.equal(ui.evaluate('state.backupApproved'),approval);assert.equal(ui.elements.get('transport-mode').value,'no_reset');assert.deepEqual(nextHighlight(ui),['select-port']);
+    assert.match(ui.elements.get('progress-label').textContent,/handoff requested, not yet verified/);assert.doesNotMatch(ui.elements.get('notice').textContent,/Failed to execute|Automatic connection testing stopped/);assert.ok(!ui.calls.includes('prepare'));assert.equal(ui.calls.filter(call=>call==='connect:no_reset').length,1);assert.equal(ui.calls.filter(call=>call==='tinyusb-handoff').length,1);
+    if(timing==='delayed')ui.serialEvents.disconnect({port:ui.port});
+    assert.equal(ui.evaluate('state.device'),device);assert.equal(ui.evaluate('state.backupApproved'),approval);assert.deepEqual(['provider','hardware','role','version','artifact'].map(id=>ui.elements.get(id).value),filters);
+    const romPort={getInfo:ui.port.getInfo};ui.context.navigator.serial.requestPort=async()=>romPort;ui.context.confirm=async()=>true;
+    await ui.elements.get('select-port').onclick();
+    assert.equal(ui.evaluate('state.port'),romPort);assert.equal(ui.evaluate('state.pkg'),pkg);assert.equal(ui.evaluate('state.device'),device);assert.equal(ui.evaluate('state.backupApproved.port'),romPort);assert.equal(ui.elements.get('transport-mode').value,'no_reset');assert.deepEqual(['provider','hardware','role','version','artifact'].map(id=>ui.elements.get(id).value),filters);assert.equal(ui.calls.filter(call=>call==='tinyusb-handoff').length,1);
+  }
+});
+
 test('exhausted or fatal trial errors stop automation and expose the final manual connection choice',async()=>{
   for(const options of [{failures:3},{fail:new Error('Secure boot is enabled')},{fail:Object.assign(new Error('Access denied'),{name:'NotAllowedError'})}]){
     const ui=await connectionTrialWorkbench(options);await ui.elements.get('prepare').onclick();assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.esp'),null);assert.deepEqual(nextHighlight(ui),['transport-mode']);assert.equal(ui.elements.get('connection-options').open,true);assert.equal(ui.evaluate('canTryConnectionFallback()'),false);assert.match(ui.elements.get('progress-label').textContent,/Automatic connection testing stopped:/);

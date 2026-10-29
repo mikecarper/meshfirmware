@@ -87,12 +87,26 @@ export async function flashNrf(link, pkg, onProgress, {delay = sleep, now = Date
 // 115200 throughout: a 1200-baud SET_LINE_CODING can leave older S3 USB
 // endpoints stalled. This requests handoff only; the caller must explicitly
 // select the same radio's ROM port and independently verify its chip identity.
+function pendingTinyUsbHandoff(error,operation){
+  const name=typeof error?.name==='string'?error.name:'Error',message=typeof error?.message==='string'?error.message:String(error||'TinyUSB control request was interrupted.');
+  if(/^(?:NotAllowedError|SecurityError|PermissionDeniedError|AccessDeniedError)$/i.test(name)||/permission|access(?:\s+is)?[\s_-]*denied|not[\s_-]*allowed|security|unauthori[sz]ed|\b(?:EACCES|EPERM)\b/i.test(message))return error;
+  // Arduino may reset before the final zero-state control transfer is ACKed.
+  // Preserve the original failure and still throw: this only authorizes the
+  // caller to present a pending handoff, never to claim ROM or repeat a reset.
+  const pending=new Error(message,{cause:error});pending.name=name;
+  pending.tinyUsbHandoffPending=true;
+  pending.tinyUsbHandoffEvidence=Object.freeze({sequence:'2-3-1-0',phase:'final-zero',operation,baudRate:115200,priorPhasesComplete:true,romVerified:false});
+  return pending;
+}
 export async function enterTinyUsbBootloader(port,{delay=sleep}={}) {
   try {
     await port.open({baudRate:115200,flowControl:'none'});
-    for(const [dataTerminalReady,requestToSend] of [[false,false],[false,true],[true,true],[true,false],[false,false]]) {
-      await port.setSignals({dataTerminalReady,requestToSend});
-      await port.setSignals({dataTerminalReady});
+    const phases=[[false,false],[false,true],[true,true],[true,false],[false,false]];
+    for(const [index,[dataTerminalReady,requestToSend]] of phases.entries()) {
+      try{await port.setSignals({dataTerminalReady,requestToSend});}
+      catch(error){throw index===phases.length-1?pendingTinyUsbHandoff(error,'combined-control'):error;}
+      try{await port.setSignals({dataTerminalReady});}
+      catch(error){throw index===phases.length-1?pendingTinyUsbHandoff(error,'dtr-flush'):error;}
       await delay(100);
     }
   } finally { await port.close().catch(() => {}); }

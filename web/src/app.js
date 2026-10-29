@@ -1175,7 +1175,8 @@ async function prepareSelectedFirmware({waitForRom=false}={}) {
         portAvailable:()=>state.port===trialPort&&state.generation===trialGeneration,
       });
       if(result.handoff){
-        await closeEsp();state.port=null;state.generation++;$('transport-mode').value='no_reset';$('already-bootloader').checked=true;$('port-status').textContent='Choose same ROM radio';
+        await closeEsp();state.handoff=true;state.port=null;state.generation++;$('transport-mode').value='no_reset';$('already-bootloader').checked=true;$('port-status').textContent='Choose same ROM radio';
+        progress(0,'Bootloader handoff requested, not yet verified. Select the same radio’s ROM USB port; preparation will not reset it again.');
         notice('USB connection testing is waiting for the radio. Select the same radio’s ROM port; preparation will connect without another reset. Nothing has been erased or written. If a VM captured USB, pause its USB auto-capture before retrying.');return;
       }
       esp=result.session;info=result.info;mode=result.mode;

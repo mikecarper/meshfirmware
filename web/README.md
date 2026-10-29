@@ -39,6 +39,13 @@ the bridge and final firmware and continues automatically; only a newly
 ungranted USB interface may still require step 1. The numbers never imply that
 a backup or application startup was verified.
 
+An ESP32 TinyUSB radio can disconnect while acknowledging the final bootloader
+control signal. That final-stage interruption is shown as a pending handoff,
+not a failed flash: select the same radio's ROM port with step 1. The selected
+image, board and backup decision are retained, and preparation reconnects without
+another reset. ROM synchronization must still verify the bootloader. Earlier
+control failures and permission/security errors still stop the operation.
+
 After an ordinary completed transfer, **Flash a new device** is the main action;
 verification of the previous radio is an optional alternate path. The new-device
 button comes first and is highlighted; reconnecting to verify is secondary.
