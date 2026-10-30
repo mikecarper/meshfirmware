@@ -513,7 +513,7 @@ async function readApplication(link) {
   updateConnectionChoice();
   if(!state.verification&&!dfuIds.has(portId(port))&&!$('already-bootloader').checked&&/^[a-f0-9]{64}$/i.test(device.publicKey||''))state.knownApplicationPort={port,publicKey:device.publicKey,available:true};
   refreshFirmwareWarnings();
-  $('device-name').textContent=device.name||device.model||(isMeshtastic(device)?'Meshtastic':'MeshCore');$('device-meta').textContent=isMeshtastic(device)?`Meshtastic · ${device.model} · ${device.version||'version not reported'} · settings do not transfer to MeshCore`:`${device.model||device.role} · ${device.version||'version not reported'} · identity ${(device.publicKey||'').slice(0,12)}`;
+  $('device-name').textContent=device.name||device.model||(isMeshtastic(device)?'Meshtastic':'MeshCore');$('device-meta').textContent=isMeshtastic(device)?`Meshtastic · ${device.model} · ${device.version||'version not reported'}${device.meshtasticRoleName?' · '+device.meshtasticRoleName.replaceAll('_',' '):''} · settings do not transfer to MeshCore`:`${device.model||device.role} · ${device.version||'version not reported'} · identity ${(device.publicKey||'').slice(0,12)}`;
   return device;
 }
 function selectDetectedBoard() {

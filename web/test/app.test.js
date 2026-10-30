@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import {detectBoard,detectRecoveryProfile} from '../src/board-detection.js';
 import {detectMeshtasticBoard} from '../src/meshtastic-boards.js';
+import {detectMeshtastic} from '../src/meshtastic.js';
 import {parseBootloaderInfo,detectBootloaderBoard} from '../src/bootloader-info.js';
 import {chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode} from '../src/automatic.js';
 import {chooseConnection,parseUsbMode} from '../src/connection-choice.js';
@@ -63,6 +64,30 @@ test('Meshtastic H2T/T114 read selects the nRF52 MeshCore target and Companion F
   assert.equal(ui.elements.get('hardware').value,'Heltec T114');assert.equal(ui.elements.get('role').value,'companionFull');assert.equal(ui.elements.get('provider').value,'Keymind Cascade');assert.equal(ui.elements.get('artifact').value,'0');
   assert.equal(ui.evaluate('state.device.architecture'),'nrf52');assert.equal(ui.evaluate('state.device.publicKey'),null);assert.equal(ui.evaluate('state.knownApplicationPort'),null);assert.equal(ui.evaluate('state.device.bootloaderVersion'),null);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.installMode'),'update');
   assert.match(ui.elements.get('device-meta').textContent,/Meshtastic.*Heltec Mesh Node T114/);assert.match(ui.elements.get('automatic-summary').textContent,/not converted into a MeshCore backup/);assert.doesNotMatch(ui.elements.get('automatic-summary').textContent,/downgrade/i);assert.equal(ui.elements.get('nrf-bootloader-offer').hidden,true);assert.deepEqual(ui.calls,['chooser','open','close']);
+});
+
+test('Meshtastic wire metadata selects Repeater only for Router, Router Late and Client Base on the connected board',async()=>{
+  const frame=payload=>[0x94,0xc3,payload.length>>8,payload.length&255,...payload];
+  for(const role of [0,1,2,3,4,5,6,7,8,9,10,11,12,127]){
+    // Official FromRadio.my_info + DeviceMetadata with role=field7 and
+    // hw_model=field9. This is the actual parser, not a catalogRole fixture.
+    const metadata=[0x0a,6,...new TextEncoder().encode('2.7.15'),0x38,role,0x48,69],wire=Uint8Array.from([...frame([0x1a,2,0x08,9]),...frame([0x6a,metadata.length,...metadata])]);
+    const writes=[],device=await detectMeshtastic({buffer:[],async write(value){writes.push([...value]);},async read(){return wire;}},{delay:async()=>{}});
+    const ui=await meshtasticWorkbench({device});ui.context.inventory.push(t114MeshtasticItem({role:'repeater',name:'Heltec_t114_repeater-v1.18.0.1.zip',url:'https://example.test/t114-repeater.zip'}));ui.evaluate('filterCatalog();');
+    await ui.elements.get('select-port').onclick();
+    const expected=[2,11,12].includes(role)?'repeater':'companionFull';
+    assert.equal(ui.elements.get('hardware').value,'Heltec T114');assert.equal(ui.elements.get('role').value,expected,device.meshtasticRoleName);assert.equal(ui.elements.get('artifact').value,expected==='repeater'?'2':'0');assert.equal(ui.evaluate('state.device.meshtasticRole'),role);
+    assert.ok(ui.elements.get('device-meta').textContent.includes(device.meshtasticRoleName.replaceAll('_',' ')));assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.evaluate('state.installMode'),'update');
+    assert.deepEqual(ui.calls,['chooser','open','close']);assert.equal(writes.length,2);assert.deepEqual(writes[1],[0x94,0xc3,0,4,0x18,0xac,0x9e,4]);
+  }
+});
+
+test('a user can change the Meshtastic-based role default without a new probe, reset or flash',async()=>{
+  for(const meshtasticRole of [0,2,11,12]){
+    const ui=await meshtasticWorkbench({device:meshtasticDevice({meshtasticRole})});ui.context.inventory.push(t114MeshtasticItem({role:'repeater',name:'Heltec_t114_repeater-v1.18.0.1.zip',url:'https://example.test/t114-repeater.zip'}));ui.evaluate('filterCatalog();');await ui.elements.get('select-port').onclick();
+    const role=meshtasticRole===0?'repeater':'companionFull';ui.elements.get('role').value=role;await ui.elements.get('role').onchange();ui.evaluate('applyAutomaticSelections();');
+    assert.equal(ui.elements.get('role').value,role);assert.equal(ui.evaluate('state.manualSelections.role'),role);assert.equal(ui.evaluate('state.device.meshtasticRole'),meshtasticRole);assert.deepEqual(ui.calls,['chooser','open','close']);assert.equal(ui.evaluate('state.plan'),null);
+  }
 });
 
 test('slow Meshtastic detection shows the waiting period without claiming a connection failure',async()=>{

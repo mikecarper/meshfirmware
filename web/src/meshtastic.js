@@ -3,7 +3,7 @@
 // https://github.com/meshtastic/protobufs/blob/master/meshtastic/mesh.proto
 // Framing: https://meshtastic.org/docs/development/device/client-api/
 // 69420 is PhoneAPI's SPECIAL_NONCE_ONLY_CONFIG (also used by the native probe).
-// Stop at local MyNodeInfo + DeviceMetadata; do not request node DB, admin/RF
+// Stop at local MyNodeInfo + DeviceMetadata (including its device role); do not request node DB, admin/RF
 // operations, or deliberately drain packets. Firmware may stream additional
 // configuration or queued packets after this request: only identity is decoded
 // or retained here. The caller closes the serial connection immediately after
@@ -15,6 +15,9 @@ const wakeBytes=new Uint8Array(32).fill(0xc3);
 const configRequest=Uint8Array.of(0x94,0xc3,0,4,0x18,0xac,0x9e,4);
 const maxFrame=512,maxBuffered=8192,maxReceived=128*1024,maxFrames=512;
 const decoder=new TextDecoder('utf-8',{fatal:true});
+// Config.DeviceConfig.Role, reported by DeviceMetadata.role (field 7).
+// https://github.com/meshtastic/protobufs/blob/master/meshtastic/config.proto
+const roleNames=['CLIENT','CLIENT_MUTE','ROUTER','ROUTER_CLIENT','REPEATER','TRACKER','SENSOR','TAK','CLIENT_HIDDEN','LOST_AND_FOUND','TAK_TRACKER','ROUTER_LATE','CLIENT_BASE'];
 const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 
 function fields(bytes){
@@ -89,7 +92,11 @@ function message(bytes,localNode){
   if(payload.id===13){
     const hardware=uint32(field(data,9,0)),version=string(field(data,1,2),120);
     if(!hardware||hardware>0x7fffffff)throw Error('Meshtastic hardware model is unavailable.');
-    return {kind:'metadata',hardware,version};
+    // A missing proto3 enum is its zero default (CLIENT). Keep the original
+    // Meshtastic role separate from MeshCore's protocol/role and catalogRole.
+    const roleValue=field(data,7,0),role=roleValue===null?0:uint32(roleValue);
+    if(role>0x7fffffff)throw Error('Invalid Meshtastic device role.');
+    return {kind:'metadata',hardware,version,role};
   }
   return null;
 }
@@ -139,11 +146,12 @@ export async function detectMeshtastic(link,{timeoutMs=25000,assertCurrent=()=>{
         if(local!==null&&local!==decoded.nodeNum)return null;
         local=decoded.nodeNum;
       }else if(decoded.kind==='metadata'){
-        if(metadata&&(metadata.hardware!==decoded.hardware||metadata.version!==decoded.version))return null;
+        if(metadata&&(metadata.hardware!==decoded.hardware||metadata.version!==decoded.version||metadata.role!==decoded.role))return null;
         metadata=decoded;
       }else if(decoded.kind==='name'&&decoded.nodeNum===local)name=decoded.name;
       if(local!==null&&metadata){
         return {firmwareFamily:'meshtastic',role:'meshtastic',meshtasticHardware:metadata.hardware,
+          meshtasticRole:metadata.role,meshtasticRoleName:roleNames[metadata.role]||`Unknown role ${metadata.role}`,
           model:'Meshtastic hardware '+metadata.hardware,nodeNum:local,name,version:metadata.version,
           catalogRole:null,publicKey:null};
       }

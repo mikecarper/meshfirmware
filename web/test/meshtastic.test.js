@@ -22,7 +22,34 @@ const detect=(link,options={})=>detectMeshtastic(link,{timeoutMs:15,delay:noDela
 test('minimal nodeless config request reads the local T114 identity without settings, reset or RF commands',async()=>{
   const link=fixture([local(0x12345678),nodeInfo(0x12345678),meta()]);
   const result=await detect(link);assert.deepEqual(link.writes,[wake,request]);assert.equal(link.reads,3);
-  assert.deepEqual(result,{firmwareFamily:'meshtastic',role:'meshtastic',meshtasticHardware:69,model:'Meshtastic hardware 69',nodeNum:0x12345678,name:'Local node',version:'2.7.4.abc123',catalogRole:null,publicKey:null});
+  assert.deepEqual(result,{firmwareFamily:'meshtastic',role:'meshtastic',meshtasticHardware:69,meshtasticRole:0,meshtasticRoleName:'CLIENT',model:'Meshtastic hardware 69',nodeNum:0x12345678,name:'Local node',version:'2.7.4.abc123',catalogRole:null,publicKey:null});
+});
+
+test('the same read-only local metadata query reports every Meshtastic role without fetching configuration',async()=>{
+  const names=['CLIENT','CLIENT_MUTE','ROUTER','ROUTER_CLIENT','REPEATER','TRACKER','SENSOR','TAK','CLIENT_HIDDEN','LOST_AND_FOUND','TAK_TRACKER','ROUTER_LATE','CLIENT_BASE'];
+  for(const [role,name] of names.entries()){
+    const link=fixture([concat(local(9),meta(69,'2.7.15',number(7,role))),new Error('No additional role query or reads needed')]),result=await detect(link);
+    assert.equal(result.meshtasticRole,role);assert.equal(result.meshtasticRoleName,name);assert.equal(result.role,'meshtastic');assert.equal(result.catalogRole,null);assert.deepEqual(link.writes,[wake,request]);assert.equal(link.reads,1);
+  }
+});
+
+test('an omitted role is CLIENT per proto3 and an unknown future enum is retained without guessing a known role',async()=>{
+  for(const extras of [[],number(7,0)]){
+    const result=await detect(fixture([meta(69,'2.7.15',extras),local(9)]));assert.equal(result.meshtasticRole,0);assert.equal(result.meshtasticRoleName,'CLIENT');
+  }
+  const result=await detect(fixture([local(9),meta(69,'2.8.0',number(7,12345))]));assert.equal(result.meshtasticRole,12345);assert.equal(result.meshtasticRoleName,'Unknown role 12345');assert.equal(result.catalogRole,null);
+});
+
+test('local role metadata survives fragmented frames and is not taken from a node name or other configuration',async()=>{
+  const stream=concat(local(9),nodeInfo(77,{name:'ROUTER_LATE'}),nodeInfo(9,{name:'CLIENT_BASE'}),frame(bytes(5,utf8('ROUTER'))),meta(69,'2.7.15',number(7,1)));
+  for(let split=1;split<stream.length;split++){
+    const result=await detect(fixture([stream.subarray(0,split),stream.subarray(split)]));assert.equal(result?.meshtasticRole,1,`split ${split}`);assert.equal(result.meshtasticRoleName,'CLIENT_MUTE');
+  }
+});
+
+test('conflicting or malformed local device roles do not become a firmware-selection hint',async()=>{
+  assert.equal(await detect(fixture([meta(69,'2.7.15',number(7,2)),meta(69,'2.7.15',number(7,11)),local(9)])),null);
+  for(const extras of [bytes(7,[2]),concat(number(7,2),number(7,12)),number(7,0x80000000),number(7,0x100000000n)])assert.equal(await detect(fixture([local(9),meta(69,'2.7.15',extras)])),null);
 });
 
 test('official SDK my_info fixture and device metadata identity are compatible',async()=>{

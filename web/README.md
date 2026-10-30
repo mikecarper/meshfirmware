@@ -157,9 +157,13 @@ selections. The usual backup, device checks and flash confirmation still apply.
    API is connected. If USB serial access was disabled in the node's security
    settings, detection cannot override that restriction.
 
-   When moving from Meshtastic, the page chooses a suitable Keymind Companion
-   build where available; if that exact board has no Keymind builds, it can
-   choose a stock Companion instead. Explicit provider/role choices are kept. MeshCore and
+   When moving from Meshtastic, its local metadata role defaults **Router**,
+   **Router Late** and **Client Base** to MeshCore **Repeater**; every other
+   role defaults to **Full Companion**. This uses the existing identity query,
+   with no extra wait or configuration request. If the default build is
+   unavailable, choose a role explicitly; no other role is substituted.
+   Keymind is preferred; if that exact board has no Keymind builds, stock can
+   be selected instead. Explicit provider/role choices are kept. MeshCore and
    Meshtastic version numbers are not compared as upgrades/downgrades. The page
    does not back up or convert Meshtastic settings, channels or identity: export
    those separately with a Meshtastic client if needed. A clear **Continue to

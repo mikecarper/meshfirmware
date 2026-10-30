@@ -11,15 +11,47 @@ test('Meshtastic T114 maps to nRF52 and automatically selects the Keymind Full C
   assert.equal(board.hardware,'Heltec T114');const result=choose(items,{hardware:board.hardware});assert.equal(result.artifactIndex,0);assert.deepEqual(result.selections,{provider:'Keymind Cascade',hardware:'Heltec T114',role:'companionFull',version:'v1.18.0'});assert.equal(result.warning,'');assert.equal(result.downgrade,false);assert.match(result.reason,/Meshtastic detected/);
 });
 
-test('Meshtastic migration prefers Full then BLE then USB within the selected exact-board provider',()=>{
-  for(const roles of [['companionFull','companionBle','companionUsb'],['companionBle','companionUsb'],['companionUsb']]){
-    const items=roles.toReversed().map(role=>item({role,name:`t114_${role}-v1.18.0.zip`,url:`https://example.test/${role}.zip`})),result=choose(items);assert.equal(result.selections.role,roles[0]);assert.equal(items[result.artifactIndex].role,roles[0]);
+test('Meshtastic Router, Router Late and Client Base default to Repeater; every other role defaults to Full Companion',()=>{
+  const items=['companionUsb','repeater','companionBle','companionFull'].map(role=>item({role,name:`t114_${role}-v1.18.0.zip`,url:`https://example.test/${role}.zip`}));
+  // Official Config.DeviceConfig.Role values, including deprecated roles.
+  const roles=['CLIENT','CLIENT_MUTE','ROUTER','ROUTER_CLIENT','REPEATER','TRACKER','SENSOR','TAK','CLIENT_HIDDEN','LOST_AND_FOUND','TAK_TRACKER','ROUTER_LATE','CLIENT_BASE'];
+  for(const [meshtasticRole,name] of roles.entries()){
+    const result=choose(items,{device:{...device,meshtasticRole}}),expected=[2,11,12].includes(meshtasticRole)?'repeater':'companionFull';
+    assert.equal(result.selections.role,expected,name);assert.equal(items[result.artifactIndex].role,expected,name);assert.equal(result.warning,'',name);assert.equal(result.downgrade,false,name);
+  }
+});
+
+test('missing, unknown or invalid Meshtastic roles use Full Companion without reading names or firmware text',()=>{
+  const items=[item(),item({role:'repeater',name:'t114_repeater-v1.18.0.zip'})];
+  for(const meshtasticRole of [undefined,null,13,999,-1,2.5,'2','ROUTER','ROUTER_LATE','CLIENT_BASE',{},NaN]){
+    const result=choose(items,{device:{...device,meshtasticRole,name:'ROUTER',model:'Client Base',meshtasticRoleName:'ROUTER_LATE',catalogRole:'repeater',version:'Meshtastic repeater v2.7.13'}});
+    assert.equal(result.selections.role,'companionFull',String(meshtasticRole));assert.equal(result.artifactIndex,0,String(meshtasticRole));
+  }
+});
+
+test('Meshtastic defaults never replace an explicitly selected MeshCore role',()=>{
+  const items=[item(),item({role:'repeater',name:'t114_repeater-v1.18.0.zip'}),item({role:'companionUsb',name:'t114_companion_usb-v1.18.0.zip'})];
+  for(const meshtasticRole of [0,2,11,12])for(const [index,role] of ['companionFull','repeater','companionUsb'].entries()){
+    const result=choose(items,{device:{...device,meshtasticRole},role});assert.equal(result.selections.role,role);assert.equal(result.artifactIndex,index);
+  }
+});
+
+test('an unavailable Meshtastic default remains selected and requires an explicit different role rather than BLE or USB substitution',()=>{
+  for(const meshtasticRole of [undefined,0,2,11,12]){
+    const expected=[2,11,12].includes(meshtasticRole)?'repeater':'companionFull';
+    const items=['companionBle','companionUsb',expected==='repeater'?'companionFull':'repeater'].map(role=>item({role,name:`t114_${role}-v1.18.0.zip`,url:`https://example.test/${role}.zip`}));
+    for(const installMode of ['update','install']){
+      const result=choose(items,{device:{...device,meshtasticRole},installMode});assert.equal(result.selections.role,expected);assert.equal(result.artifactIndex,null);assert.match(result.reason,/Meshtastic-based.*default.*no alternative role was substituted/);
+    }
   }
 });
 
 test('stock can fill an absent automatic Keymind provider but an explicit provider is never replaced',()=>{
-  const stock=item({provider:'MeshCore',role:'companionBle'});assert.equal(choose([stock]).artifactIndex,0);assert.equal(choose([stock]).selections.provider,'MeshCore');assert.equal(choose([stock],{provider:'Keymind Cascade'}).artifactIndex,null);
+  const stock=item({provider:'MeshCore'});assert.equal(choose([stock]).artifactIndex,0);assert.equal(choose([stock]).selections.provider,'MeshCore');assert.equal(choose([stock],{provider:'Keymind Cascade'}).artifactIndex,null);
   assert.equal(choose([item(),stock],{provider:'MeshCore'}).artifactIndex,1);assert.equal(choose([item(),stock],{role:'companionUsb'}).artifactIndex,null);
+  const stockRepeater=item({provider:'MeshCore',role:'repeater',name:'t114_repeater-v1.18.0.zip'});assert.equal(choose([stockRepeater],{device:{...device,meshtasticRole:2}}).artifactIndex,0);
+  assert.equal(choose([stockRepeater],{device:{...device,meshtasticRole:2},provider:'Keymind Cascade'}).artifactIndex,null);
+  const bleOnly=choose([item({provider:'MeshCore',role:'companionBle'})]);assert.equal(bleOnly.selections.role,'companionFull');assert.equal(bleOnly.artifactIndex,null);assert.match(bleOnly.reason,/Full Companion default/);
 });
 
 test('Meshtastic role and version are never interpreted as a MeshCore role or a downgrade',()=>{
@@ -28,7 +60,7 @@ test('Meshtastic role and version are never interpreted as a MeshCore role or a 
 });
 
 test('no Companion build, unknown board, or ambiguous exact-board variants remain an explicit manual choice',()=>{
-  const repeater=item({role:'repeater'});assert.equal(choose([repeater]).artifactIndex,null);assert.equal(choose([repeater]).selections.role,'');assert.equal(choose([item()],{hardware:''}).artifactIndex,null);
+  const repeater=item({role:'repeater'});assert.equal(choose([repeater]).artifactIndex,null);assert.equal(choose([repeater]).selections.role,'companionFull');assert.equal(choose([item()],{hardware:''}).artifactIndex,null);
   const variants=[item(),item({name:'t114_other_display-v1.18.0.zip',url:'https://example.test/other.zip'})];assert.equal(choose(variants).artifactIndex,null);assert.equal(choose([repeater],{role:'repeater'}).artifactIndex,0);
 });
 

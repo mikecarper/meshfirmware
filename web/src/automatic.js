@@ -5,6 +5,9 @@ import {catalogProvider,catalogItemKey,compareVersions} from './catalog.js';
 const applicationRoles=new Set(['companionFull','companionBle','companionUsb','repeater','roomServer','sensor','kissRadio','gui','guiSD']);
 const companionRoles=new Set(['companionFull','companionBle','companionUsb']);
 const commonRoles=new Set(['repeater','roomServer','sensor']);
+// Config.DeviceConfig.Role from the local DeviceMetadata, not a friendly name:
+// https://github.com/meshtastic/protobufs/blob/master/meshtastic/config.proto
+const meshtasticRepeaterRoles=new Set([2,11,12]); // ROUTER, ROUTER_LATE, CLIENT_BASE
 const text=value=>typeof value==='string'?value.trim():'';
 const distinct=values=>[...new Set(values)];
 const numericVersion=value=>/\bv?(\d+(?:\.\d+){1,3})/i.exec(text(value))?.[1].split('.').map(Number)||null;
@@ -20,8 +23,10 @@ export function firmwareVersionWarning(runningVersion,selectedVersion){
   return `Downgrade warning: selected firmware ${text(selectedVersion)} is older than the running ${text(runningVersion)}. Older firmware may not understand current settings or partition layouts. Keep a backup and review compatibility before flashing. Downgrading is allowed after the normal checks and confirmation.`;
 }
 function inferredRole(device){
-  // Meshtastic CLIENT/ROUTER roles and version numbers are not MeshCore roles.
-  if(['meshtastic','bootloader'].includes(device?.firmwareFamily)||['meshtastic','bootloader'].includes(device?.role))return '';
+  // This is a migration default only, not a configuration/identity conversion.
+  // Missing, future or invalid role evidence uses the requested Full default.
+  if(device?.firmwareFamily==='meshtastic'||device?.role==='meshtastic')return meshtasticRepeaterRoles.has(device.meshtasticRole)?'repeater':'companionFull';
+  if(device?.firmwareFamily==='bootloader'||device?.role==='bootloader')return '';
   if(applicationRoles.has(device?.catalogRole))return device.catalogRole;
   const version=text(device?.version);
   const patterns=[['roomServer',/\broom[\s_-]*server\b/i],['repeater',/\brepeater\b/i],['sensor',/\bsensor\b/i],['companionFull',/\b(?:full[\s_-]*companion|companion[\s_-]*(?:radio[\s_-]*)?full)\b/i],['companionBle',/\bcompanion[\s_-]*(?:radio[\s_-]*)?ble\b/i],['companionUsb',/\bcompanion[\s_-]*(?:radio[\s_-]*)?usb\b/i]];
@@ -120,7 +125,10 @@ export function chooseFirmware({items=[],device={},hardware='',provider='',role=
     else return result('The running role/companion transport is not uniquely known. Choose the role to preserve; no role or BLE/USB transport was guessed.',candidates.map(({index})=>index));
   }
   candidates=candidates.filter(({item})=>item.role===selections.role);
-  if(!candidates.length)return result(installMode==='install'?'No erase/new install matches the selected role. An unsupported explicit role is never replaced automatically.':'No write-only application update matches the selected role. An unsupported explicit role is never replaced automatically.');
+  if(!candidates.length){
+    if(meshtastic&&!text(role))return result(`No ${installMode==='install'?'erase/new install':'write-only application update'} matches the Meshtastic-based ${selections.role==='repeater'?'Repeater':'Full Companion'} default for this exact hardware/provider. Choose another role or provider explicitly; no alternative role was substituted.`);
+    return result(installMode==='install'?'No erase/new install matches the selected role. An unsupported explicit role is never replaced automatically.':'No write-only application update matches the selected role. An unsupported explicit role is never replaced automatically.');
+  }
   const exactTarget=text(device?.firmwareTarget||device?.exactTarget),hardwareId=text(device?.hardwareId)||(!exactTarget?reviewedModelHardware(device,selections):'');
   if(exactTarget||hardwareId){
     candidates=candidates.filter(({item})=>{
