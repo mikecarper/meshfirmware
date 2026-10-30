@@ -29,22 +29,28 @@ test('ESP32 Heltec V2.1, V3, V4 and R8 have separate exact mappings', () => {
 test('reviewed nRF52 and ESP32 models select only their exact target labels', () => {
   const cases = [
     [3, 'LilyGo LoRa32 V2.1_1.6', 'esp32'], [7, 'LilyGo T-Echo', 'nrf52'],
+    [9, 'RAK WisBlock / WisMesh (RAK 4631)', 'nrf52'],
     [18, 'UnitEng Nano G2 Ultra', 'nrf52'], [31, 'UnitEng Station G2', 'esp32'],
-    [44, 'Heltec WSL3', 'esp32'], [49, 'Heltec Heltec Wireless Paper', 'esp32'],
+    [44, 'Heltec WSL3', 'esp32'], [49, 'Heltec Wireless Paper', 'esp32'],
     [50, 'LilyGo T-Deck', 'esp32'], [53, 'Heltec CT62', 'esp32'],
     [61, 'Ebyte EoRa-S3', 'esp32'], [66, 'Heltec Vision Master T190', 'esp32'],
     [67, 'Heltec Vision Master E213', 'esp32'], [68, 'Heltec Vision Master E290', 'esp32'],
+    [70, 'Seeed Studio SenseCAP Indicator LoRa', 'esp32'],
     [71, 'Seeed Studio SenseCAP T1000-E', 'nrf52'], [75, 'Minewsemi ME25LS01', 'nrf52'],
+    [81, 'Seeed Studio Xiao S3 WIO', 'esp32'],
     [88, 'Seeed Studio Xiao nRF52 WIO', 'nrf52'], [89, 'Elecrow ThinkNode M1', 'nrf52'],
     [90, 'Elecrow ThinkNode M2', 'esp32'], [94, 'Heltec MeshPocket', 'nrf52'],
+    [95, 'Seeed Studio SenseCAP Solar', 'nrf52'],
+    [100, 'Seeed Studio Wio Tracker L1 E-Ink', 'nrf52'],
     [101, 'Muzi Works R1 Neo', 'nrf52'], [102, 'LilyGo T-Deck Pro', 'esp32'],
     [103, 'LilyGo T-Lora Pager', 'esp32'], [105, 'RAK WisMesh Tag', 'nrf52'],
     [107, 'Elecrow ThinkNode M5', 'esp32'], [108, 'Heltec MeshSolar / MeshTower', 'nrf52'],
     [109, 'LilyGo T-Echo Lite', 'nrf52'], [111, 'M5Stack Unit C6L', 'esp32'],
     [113, 'Heltec Wireless Tracker v2', 'esp32'], [115, 'Elecrow ThinkNode M3', 'nrf52'],
+    [117, 'RAK WisMesh 1W Booster (3401 + 13302)', 'nrf52'],
     [119, 'Elecrow ThinkNode M4', 'nrf52'], [120, 'Elecrow ThinkNode M6', 'nrf52'],
     [122, 'LilyGo T-Beam 1W', 'esp32'], [126, 'LilyGo T-Display Pro', 'esp32'],
-    [127, 'Heltec Mesh Node T096', 'nrf52'], [129, 'Elecrow ThinkNode M7', 'esp32'],
+    [127, 'Heltec Mesh Node T096', 'nrf52'], [128, 'Seeed SenseCAP MeshTracker X1', 'nrf52'], [129, 'Elecrow ThinkNode M7', 'esp32'],
     [130, 'Elecrow ThinkNode M8', 'nrf52'], [131, 'Elecrow ThinkNode M9', 'esp32'],
     [133, 'Heltec Mesh Node T1', 'nrf52'], [134, 'UnitEng/BQ Voyage Station G3', 'esp32'],
     [135, 'LilyGo T-Impulse Plus nRF52840', 'nrf52'], [136, 'LilyGo T-Echo Card', 'nrf52'],
@@ -59,17 +65,12 @@ test('reviewed nRF52 and ESP32 models select only their exact target labels', ()
 test('known shared enums remain manual even with a filtered single catalog candidate', () => {
   const cases = [
     [4, ['LilyGo T-Beam (SX1262)', 'LilyGo T-Beam 1.2 (SX1276)'], 'esp32'],
-    [9, ['RAK WisBlock / WisMesh (RAK 4631)'], 'nrf52'],
     [16, ['LilyGo T3 S3 (SX126x)', 'LilyGo T3 S3 (SX127x)'], 'esp32'],
     [48, ['Heltec Wireless Tracker', 'Heltec Wireless Tracker v1.1'], 'esp32'],
     [63, ['ProMicro nrf52 (faketec)'], 'nrf52'],
-    [70, ['Seeed Studio SenseCAP Indicator ESP-NOW', 'Seeed Studio SenseCAP Indicator LoRa'], 'esp32'],
-    [81, ['Seeed Studio Xiao S3', 'Seeed Studio Xiao S3 WIO'], 'esp32'],
     [91, ['LilyGo T-ETH Elite (SX1262)'], 'esp32'],
     [93, ['Muzi Works Base Duo', 'Muzi Works Base Uno'], 'nrf52'],
-    [95, ['Seeed Studio SenseCAP Solar', 'Seeed Studio SenseCAP Solar Node P1'], 'nrf52'],
     [99, ['Seeed Studio Wio Tracker L1 Pro', 'Seeed WioTracker L1 1W'], 'nrf52'],
-    [117, ['RAK WisMesh 1W Booster (3401 + 13302)'], 'nrf52'],
   ];
   for (const [hwModel, names, architecture] of cases) {
     for (const available of [names, names.slice(0, 1)]) {
@@ -81,12 +82,39 @@ test('known shared enums remain manual even with a filtered single catalog candi
   }
 });
 
-test('multiple exact catalog labels remain ambiguous rather than choosing the first', () => {
-  const items = [item('Seeed Studio Wio Tracker L1 EINK'), item('Seeed Studio Wio Tracker L1 E-Ink')];
-  const result = detectMeshtasticBoard({items, hwModel: 100});
-  assert.equal(result.hardware, null);
-  assert.deepEqual(result.candidates, items.map(entry => entry.hardware).sort());
-  assert.match(result.reason, /multiple exact catalog/);
+test('RAK3401 enum 117 automatically selects the universal family across providers without a carrier or storage prompt',()=>{
+  const hardware='RAK WisMesh 1W Booster (3401 + 13302)',items=[
+    item(hardware,'nrf52',{provider:'Keymind Cascade',name:'RAK_3401_companion_radio_full.zip'}),
+    item(hardware,'nrf52',{provider:'Keymind Cascade',name:'RAK_3401_repeater_unified_lora_ota-full-ota.zip'}),
+    item(hardware,'nrf52',{provider:'MeshCore',name:'RAK_3401_repeater.zip'}),
+    item('RAK WisBlock / WisMesh (RAK 4631)'),item('RAK WisMesh Tag'),
+  ];
+  for(const available of [items,items.slice(0,1),items.toReversed()]){
+    const result=detectMeshtasticBoard({items:available,hwModel:117});assert.equal(result.hardware,hardware);assert.equal(result.model,'RAK3401');assert.deepEqual(result.candidates,[hardware]);assert.doesNotMatch(result.reason,/manually|carrier|storage/);
+  }
+  for(const available of [[item(hardware,'esp32')],[item(hardware,'nrf52',{project:'Meshtastic'})],[item('RAK3401')],[item('RAK WisBlock / WisMesh (RAK 4631)')],[]])assert.equal(detectMeshtasticBoard({items:available,hwModel:117}).hardware,null);
+  assert.equal(detectMeshtasticBoard({items,hwModel:9}).hardware,'RAK WisBlock / WisMesh (RAK 4631)');
+});
+
+test('reviewed provider aliases describe one board rather than forcing a false manual choice', () => {
+  const cases=[
+    [100,'Seeed Studio Wio Tracker L1 EINK','Seeed Studio Wio Tracker L1 E-Ink'],
+    [128,'Seeed Studio SenseCAP MeshTracker X1','Seeed SenseCAP MeshTracker X1'],
+    [95,'Seeed Studio SenseCAP Solar Node P1','Seeed Studio SenseCAP Solar'],
+    [49,'Heltec Heltec Wireless Paper','Heltec Wireless Paper','esp32'],
+  ];
+  for(const [hwModel,legacy,canonical,architecture='nrf52'] of cases)for(const names of [[legacy],[canonical],[legacy,canonical],[canonical,legacy]]){
+    const result=detectMeshtasticBoard({items:names.map((hardware,index)=>item(hardware,architecture,{provider:index?'MeshCore':'Keymind Cascade'})),hwModel});
+    assert.equal(result.hardware,canonical);assert.deepEqual(result.candidates,[canonical]);
+  }
+});
+
+test('known Meshtastic LoRa wiring selects Indicator LoRa and XIAO S3 WIO, never their different feature/pin targets',()=>{
+  const items=[item('Seeed Studio SenseCAP Indicator LoRa','esp32'),item('Seeed Studio SenseCAP Indicator ESP-NOW','esp32'),item('Seeed Studio Xiao S3','esp32'),item('Seeed Studio Xiao S3 WIO','esp32')];
+  assert.equal(detectMeshtasticBoard({items,hwModel:70}).hardware,'Seeed Studio SenseCAP Indicator LoRa');
+  assert.equal(detectMeshtasticBoard({items,hwModel:81}).hardware,'Seeed Studio Xiao S3 WIO');
+  assert.equal(detectMeshtasticBoard({items:items.filter(i=>i.hardware.endsWith('ESP-NOW')),hwModel:70}).hardware,null);
+  assert.equal(detectMeshtasticBoard({items:items.filter(i=>i.hardware==='Seeed Studio Xiao S3'),hwModel:81}).hardware,null);
 });
 
 test('unknown, unset, generic, private and malformed enums never use names or USB fallback', () => {

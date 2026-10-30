@@ -46,8 +46,8 @@ test('reviewed running-firmware history is secondary to live reports and cannot 
 });
 
 test('known exact nRF52 DFU selects serial DFU without another touch',()=>{
-  for(const [vid,pid] of [[0x2886,0x0057],[0x2886,0x0044],[0x239a,0x0029]]){
-    const selected=chooseConnection({usbInfo:usb(vid,pid)});assert.equal(selected.mode,'nrf52');assert.equal(selected.alreadyBootloader,true);
+  for(const [vid,pid] of [[0x2886,0x0057],[0x2886,0x0044],[0x239a,0x0029],[0x4251,0x8695],[0x239a,0x0081]]){
+    const selected=chooseConnection({usbInfo:usb(vid,pid)});assert.equal(selected.mode,'nrf52');assert.equal(selected.alreadyBootloader,true);assert.equal(selected.source,'dfu-usb');assert.match(selected.reason,/not physical-board proof/);assert.equal(Object.hasOwn(selected,'hardware'),false);
   }
 });
 test('running nRF52 architecture selects guarded serial-DFU handoff, not already DFU',()=>{

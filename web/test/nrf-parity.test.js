@@ -5,6 +5,7 @@ import {zipSync} from 'fflate';
 import {nrfPackage,hash,crc16,checkedZip,inspectFirmware,nrfEraseIntent} from '../src/firmware.js';
 import {rakFamily,endfIdentity,payloadBoardIdentity,assessBoard,isKnownDfu} from '../src/board-safety.js';
 import {flashNrf,slipDecode,slipEncode} from '../src/serial.js';
+import {nrfDfuUsbIds} from '../src/nrf-usb-ids.js';
 const encode = value => new TextEncoder().encode(value);
 
 function zip(payload,name='firmware.bin') {
@@ -60,8 +61,14 @@ test('RAK guard uses payload and connected evidence, not a filename bypass',()=>
   assert.equal(assessBoard(pkg('Unknown board')).requiresOverride,false);
 });
 test('known DFU mode hints are exact; nearby application and shared ESP IDs are not accepted',()=>{
-  for(const [vid,pid] of [[0x2886,0x44],[0x2886,0x57],[0x239a,0x2a],[0x239a,0xb3],[0x239a,0xda]])assert.equal(isKnownDfu({usbVendorId:vid,usbProductId:pid}),true);
-  for(const [vid,pid] of [[0x2886,0x8044],[0x239a,0x802a],[0x303a,0x1001],[0x239a,0x1234]])assert.equal(isKnownDfu({usbVendorId:vid,usbProductId:pid}),false);
+  for(const [vid,pid] of [[0x2886,0x44],[0x2886,0x57],[0x239a,0x2a],[0x239a,0xb3],[0x239a,0xda],[0x4251,0x8695],[0x239a,0x0081]])assert.equal(isKnownDfu({usbVendorId:vid,usbProductId:pid}),true);
+  for(const [vid,pid] of [[0x2886,0x8044],[0x239a,0x802a],[0x303a,0x1001],[0x239a,0x1234],[0x4251,0x8694],[0x4251,0x8696],[0x239a,0x8081],[0x239a,0x0082],[0x239b,0x0081]])assert.equal(isKnownDfu({usbVendorId:vid,usbProductId:pid}),false);
+  for(const usbInfo of [{usbVendorId:'4251',usbProductId:0x8695},{usbVendorId:0x239a},{usbVendorId:0x239a,usbProductId:-1}])assert.equal(isKnownDfu(usbInfo),false);
+});
+
+test('the shared DFU inventory is exact, duplicate-free and immutable without assigning a physical board',()=>{
+  assert.equal(Object.isFrozen(nrfDfuUsbIds),true);assert.equal(new Set(nrfDfuUsbIds).size,nrfDfuUsbIds.length);assert.ok(nrfDfuUsbIds.every(value=>/^[0-9a-f]{4}:[0-9a-f]{4}$/.test(value)));
+  assert.throws(()=>nrfDfuUsbIds.push('1234:5678'),TypeError);assert.throws(()=>{nrfDfuUsbIds[0]='1234:5678';},TypeError);
 });
 test('DFU safety classification cannot be weakened after package validation',async()=>{
   for(const mutate of [p=>p.name='ordinary.zip',p=>p.destructive=false,p=>p.erase=false,p=>p.boardIdentity={family:'rak3401'},p=>p.firmwareIdentity={version:1}]){

@@ -1,6 +1,7 @@
 import {gzipSync,gunzipSync,strToU8,strFromU8} from 'fflate';
 import {validateBootloaderSnapshot,applyBootloaderCatalog} from './bootloader-catalog.js';
 import {validateRecoveryCatalog} from './bootloader-recovery.js';
+import {canonicalHardware} from './hardware-aliases.js';
 
 export function httpsUrl(value, base) {
   const url = new URL(value, base);
@@ -42,11 +43,11 @@ const publishedHash=file=>{const value=file.sha256||String(file.digest||'').repl
 // current Full images expose logging at runtime rather than as a separate fork.
 export const catalogProvider=value=>value==='Keymind Cascade Logging'?'Keymind Cascade':value;
 const ordered=value=>Array.isArray(value)?value.map(ordered):value&&typeof value==='object'?Object.fromEntries(Object.keys(value).sort().map(key=>[key,ordered(value[key])])):value;
-export const catalogItemKey=item=>JSON.stringify(ordered({...item,provider:catalogProvider(item.provider)}));
+export const catalogItemKey=item=>JSON.stringify(ordered({...item,provider:catalogProvider(item.provider),hardware:canonicalHardware(item.hardware)}));
 export function combineProviderItems(items) {
   const seen=new Set();
   return items.flatMap(source=>{
-    const provider=catalogProvider(source.provider),item=provider===source.provider?source:{...source,provider};
+    const provider=catalogProvider(source.provider),hardware=canonicalHardware(source.hardware),item=provider===source.provider&&hardware===source.hardware?source:{...source,provider,hardware};
     // Compare all metadata, not just the download URL: distinct historical
     // profiles, exact-target restrictions and utility hints must survive.
     const key=catalogItemKey(item);if(seen.has(key))return [];seen.add(key);return [item];
@@ -61,12 +62,12 @@ export function catalogItems(config, releases = [], provider = 'MeshCore') {
       let re; try { re = new RegExp(`^(?:${pattern})$`,'i'); } catch { continue; }
       for (const release of releases.filter(r => r.type === firmware.github.type)) for (const file of release.files || []) {
         if (!re.test(file.name)) continue;
-        items.push({ project: 'MeshCore', provider, hardware: device.name, architecture: device.type, role: firmware.role, version: release.version, action, name: file.name, url: validateFirmwareUrl(githubReleaseUrl(file.url)),sha256:publishedHash(file),...metadata(config,device,firmware,release) });
+        items.push({ project: 'MeshCore', provider, hardware: canonicalHardware(device.name), architecture: device.type, role: firmware.role, version: release.version, action, name: file.name, url: validateFirmwareUrl(githubReleaseUrl(file.url)),sha256:publishedHash(file),...metadata(config,device,firmware,release) });
       }
     }
     for (const [version, release] of Object.entries(firmware.version || {})) for (const file of release.files || []) {
       const raw = file.url || (typeof file.name === 'string' && /^https:/.test(file.name) ? file.name : `${config.staticPath || '/firmware'}/${file.name}`);
-      items.push({ project: 'MeshCore', provider, hardware: device.name, architecture: device.type, role: firmware.role, version, action: file.type, name: String(file.name).split('/').pop(), url: artifactUrl(raw),sha256:publishedHash(file),...metadata(config,device,firmware,release),artifactTitle:file.title||'' });
+      items.push({ project: 'MeshCore', provider, hardware: canonicalHardware(device.name), architecture: device.type, role: firmware.role, version, action: file.type, name: String(file.name).split('/').pop(), url: artifactUrl(raw),sha256:publishedHash(file),...metadata(config,device,firmware,release),artifactTitle:file.title||'' });
     }
   }
   // nRF52 is always the CLI-style serial DFU path, never a UF2 drive action.
@@ -77,7 +78,7 @@ export function catalogItems(config, releases = [], provider = 'MeshCore') {
 // conflicting official inventory is not permission to choose one arbitrarily.
 export function inheritOfficialUtilities(items) {
   const official=new Map();
-  const key=item=>typeof item.hardware==='string'&&item.hardware.trim()&&['nrf52','esp32'].includes(item.architecture)?JSON.stringify([item.hardware,item.architecture]):null;
+  const key=item=>typeof item.hardware==='string'&&item.hardware.trim()&&['nrf52','esp32'].includes(item.architecture)?JSON.stringify([canonicalHardware(item.hardware),item.architecture]):null;
   for(const item of items)if(item.provider==='MeshCore'&&key(item)!==null){
     const id=key(item);if(!official.has(id))official.set(id,[]);official.get(id).push(item);
   }

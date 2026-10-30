@@ -1,5 +1,6 @@
 // Read-only INFO_UF2.TXT parsing and installed-bootloader selection hints.
 // Nothing here opens a device, runs file contents or authorizes a firmware write.
+import {canonicalHardware} from './hardware-aliases.js';
 const maxInfoLength = 4096;
 const versionPart = '(?:0|[1-9][0-9]{0,3})';
 const semver = new RegExp(`^v?${versionPart}\\.${versionPart}\\.${versionPart}(?:-[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*)?(?:\\+[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*)?$`);
@@ -54,7 +55,8 @@ export function parseBootloaderInfo(text) {
 }
 
 // Full exact Model + Board-ID pairs reviewed against src/boards/**/board.h,
-// including inherited headers, in OTAFIX 2.4.12. No substring/case folding.
+// including inherited headers and source-confirmed factory identities. No
+// substring/case folding. The original OTAFIX 2.4.12 profile reference is:
 // https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/tree/v0.11.0-OTAFIX2.4.12/src/boards
 // These describe the INSTALLED loader, never independent physical-board proof.
 const records = [
@@ -67,24 +69,37 @@ const records = [
   ['Keepteen LT1', 'Keepteen-LT1', ['Keepteen LT1'], ['239a:00b3']],
   ['LilyGo T-Echo', 'nRF52840-TEcho-v1', ['LilyGo T-Echo'], ['239a:0029']],
   ['LilyGo T-Echo Lite', 'T-Echo-Lite-nRF52840', ['LilyGo T-Echo Lite'], ['239a:00da']],
+  // Factory identities confirmed in their source board headers. These are
+  // read-only selection hints, not qualification of a replacement bootloader.
+  ['B and Q Nano G2 Ultra', 'nRF52840-BQ-rev1', ['UnitEng Nano G2 Ultra'], ['4251:8695']],
+  ['T-Echo Card', 'LilyGo-T-Echo-Card', ['LilyGo T-Echo Card'], ['239a:00da']],
+  ['T-Impulse Plus', 'LilyGo-T-Impulse-Plus', ['LilyGo T-Impulse Plus nRF52840'], ['239a:00da']],
+  ['Meshtiny Board', 'Meshtiny-MT001-Board', ['Meshtiny'], ['239a:0029','239a:002a']],
+  ['GAT562 Mesh Watch13', 'GAT562-Watch13', ['GAT-IoT GAT562 Mesh Watch13'], ['239a:0029','239a:002a']],
   ['ELECROW ThinkNodeM1', 'nRF52840-ThinkNodeM1-v1', ['Elecrow ThinkNode M1'], ['239a:00da']],
   ['ELECROW ThinkNode-M3', 'nRF52840-ThinkNode-M3-v1', ['Elecrow ThinkNode M3'], ['239a:00da']],
   ['ELECROW ThinkNodeM6', 'nRF52840-ThinkNodeM6-v1', ['Elecrow ThinkNode M6'], ['239a:00da']],
   ['MinewSemi MX25LE01', 'MinewSemi-MX25LE01', ['Minewsemi ME25LS01'], ['239a:0029','239a:002a']],
   ['WisMesh Tag', 'WisMesh-Tag', ['RAK WisMesh Tag'], ['239a:0029','239a:002a']],
+  // Universal RAK3401 builds share this hardware family across the supported
+  // carrier/storage profiles. Exact installed Model + Board-ID is still needed;
+  // a shared RAK USB ID alone is never board identity or permission to flash.
+  ['WisBlock RAK3401', 'WisBlock-RAK3401', ['RAK WisMesh 1W Booster (3401 + 13302)'], ['239a:0029','239a:002a']],
+  ['RAK3401', '3401A', ['RAK WisMesh 1W Booster (3401 + 13302)'], ['239a:0029','239a:002a']],
+  ['WisBlock RAK3401 + RAK13302 + W25Q16', 'WisBlock-RAK3401-RAK13302-W25Q16', ['RAK WisMesh 1W Booster (3401 + 13302)'], ['239a:0029','239a:002a']],
+  // RAK4631's universal application family handles the supported stores. The
+  // exact installed profile still matters for a separately offered bootloader.
+  ['WisBlock RAK4631 Board', 'WisBlock-RAK4631-Board', ['RAK WisBlock / WisMesh (RAK 4631)'], ['239a:0029','239a:002a']],
+  ['RAK4631', '4631A', ['RAK WisBlock / WisMesh (RAK 4631)'], ['239a:0029','239a:002a']],
+  ['WisBlock RAK4631 + W25Q16', 'WisBlock-RAK4631-W25Q16', ['RAK WisBlock / WisMesh (RAK 4631)'], ['239a:0029','239a:002a']],
+  ['WisBlock RAK4631 + RAK15001 C', 'WisBlock-RAK4631-RAK15001-Slot-C', ['RAK WisBlock / WisMesh (RAK 4631)'], ['239a:0029','239a:002a']],
+  ['Seeed Solar Node P1', 'nRF52840-SeeedSenseCAPSolarP1-v1', ['Seeed Studio SenseCAP Solar'], ['2886:0044']],
   // Shared carrier/storage identities remain manual, even with a filtered list.
   ['MTools Tec GAT562', 'GAT562-Family', ['GAT-IoT GAT562 30s','GAT-IoT GAT562 EVB Pro','GAT-IoT GAT562 Tracker'], ['239a:0029','239a:002a'], 'shared'],
-  ['WisBlock RAK4631 Board', 'WisBlock-RAK4631-Board', ['RAK WisBlock / WisMesh (RAK 4631)'], ['239a:0029','239a:002a'], 'shared'],
-  ['RAK4631', '4631A', ['RAK WisBlock / WisMesh (RAK 4631)'], ['239a:0029','239a:002a'], 'shared'],
-  ['WisBlock RAK3401', 'WisBlock-RAK3401', ['RAK WisMesh 1W Booster (3401 + 13302)'], ['239a:0029','239a:002a'], 'shared'],
-  ['RAK3401', '3401A', ['RAK WisMesh 1W Booster (3401 + 13302)'], ['239a:0029','239a:002a'], 'shared'],
-  ['WisBlock RAK4631 + W25Q16', 'WisBlock-RAK4631-W25Q16', ['RAK WisBlock / WisMesh (RAK 4631)'], ['239a:0029','239a:002a'], 'shared'],
-  ['WisBlock RAK4631 + RAK15001 C', 'WisBlock-RAK4631-RAK15001-Slot-C', ['RAK WisBlock / WisMesh (RAK 4631)'], ['239a:0029','239a:002a'], 'shared'],
-  ['WisBlock RAK3401 + RAK13302 + W25Q16', 'WisBlock-RAK3401-RAK13302-W25Q16', ['RAK WisMesh 1W Booster (3401 + 13302)'], ['239a:0029','239a:002a'], 'shared'],
   ['Seeed XIAO nRF52840', 'nRF52840-SeeedXiao-v1', ['Seeed Studio Xiao nRF52 WIO','Ikoka Handheld nRF E22 30 dBm','Ikoka Nano','Ikoka Stick','SolarXiao'], ['2886:0044'], 'shared'],
   ['Seeed XIAO nRF52840', 'nRF52840-SeeedXiaoSense-v1', ['Seeed Studio Xiao nRF52 WIO'], ['2886:0045'], 'shared'],
   ['Seeed TRACKER L1', 'TRACKER L1', ['Seeed Studio Wio Tracker L1 Pro','Seeed WioTracker L1 1W'], ['2886:1667'], 'shared'],
-  ['Seeed Solar Node P1', 'nRF52840-SeeedSenseCAPSolarP1-v1', ['Seeed Studio SenseCAP Solar','Seeed Studio SenseCAP Solar Node P1'], ['2886:0044'], 'shared'],
+  ['Muzi Base', 'muzi-Base-Board', ['Muzi Works Base Duo','Muzi Works Base Uno'], ['239a:0081'], 'shared'],
   ['ProMicro NRF52840', 'nRF52840-promicro', ['ProMicro nrf52 (faketec)'], ['239a:00b3'], 'shared'],
 ];
 const reviewed = new Map(records.map(([model, boardId, hardware, usbIds, restriction]) => [JSON.stringify([model, boardId]), {hardware, usbIds, restriction}]));
@@ -106,9 +121,9 @@ export function detectBootloaderBoard({items = [], info, usbInfo = {}} = {}) {
   const id = usbIdentity(usbInfo);
   if (id === null || id && !entry.usbIds.includes(id)) return answer(null, [], 'The selected USB interface conflicts with this bootloader information or has invalid USB metadata. Select the same radio’s matching DFU interface; choose hardware manually if uncertain.');
   const sharedLegacy = entry.restriction === 'legacy-heltec' && !reviewedHeltecVersion.test(info.version);
-  const names = sharedLegacy ? legacyHeltecHardware : entry.hardware;
+  const names = (sharedLegacy ? legacyHeltecHardware : entry.hardware).map(canonicalHardware);
   const available = Array.isArray(items) ? items : [];
-  const candidates = [...new Set(available.filter(item => item?.project === 'MeshCore' && item.architecture === 'nrf52' && names.includes(item.hardware)).map(item => item.hardware))].sort();
+  const candidates = [...new Set(available.filter(item => item?.project === 'MeshCore' && item.architecture === 'nrf52' && names.includes(canonicalHardware(item.hardware))).map(item => canonicalHardware(item.hardware)))].sort();
   if (/^(?:R|TEST)_/.test(info.version)) return answer(null, candidates, 'A recovery/test loader can be installed on a different board. Its information is not a physical-board identity; choose the actual hardware manually.', true);
   if (sharedLegacy) return answer(null, candidates, 'The legacy HT-n5262 Model + Board-ID is shared by Heltec products. Only the exact reviewed OTAFIX release distinguishes these installed profiles; check the physical label and choose hardware manually.', true);
   if (entry.restriction === 'shared') return answer(null, candidates, 'This installed bootloader identity does not establish the exact physical carrier, radio or storage profile. Check the physical board and choose hardware manually, even when only one catalog candidate is present.', true);

@@ -1,10 +1,11 @@
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
+import {nrfDfuUsbIds} from './nrf-usb-ids.js';
 
 const digest = bytes => bytesToHex(sha256(bytes));
 const families = new Set(['unknown','rak3401','rak4631','ambiguous']);
 const models = /^(?:WisCore[ _-]+RAK[ _-]*(?:3401|4631)(?:[ _-]+Board)?|RAK\s+(?:3401|4631)|RAK(?:3401|4631)_OTA|RAK\s+WisMesh\s+Tag|WISMESHTAG_OTA)\s*$/i;
-const dfuIds = new Set(['2886:0044','2886:0045','2886:0057','2886:1667','239a:0029','239a:002a','239a:0071','239a:00b3','239a:00da']);
+const dfuIds = new Set(nrfDfuUsbIds);
 
 export function isKnownDfu(info = {}) {
   if (![info.usbVendorId,info.usbProductId].every(n => Number.isInteger(n) && n >= 0 && n <= 65535)) return false;

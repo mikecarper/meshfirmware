@@ -139,7 +139,12 @@ selections. The usual backup, device checks and flash confirmation still apply.
    Meshtastic radios can also be identified through a read-only local device
    report. A reviewed hardware-enum mapping selects the matching MeshCore board;
    for example, a T114 revision 2 selects **Heltec T114**, never **Heltec v2**
-   (the unrelated ESP32 board). Unknown or ambiguous hardware remains a manual
+   (the unrelated ESP32 board). RAK3401 selects **RAK WisMesh 1W Booster
+   (3401 + 13302)** automatically, including the reviewed INFO_UF2 fallback;
+   its universal builds do not need a separate carrier/storage selection.
+   Keymind Repeater defaults to the unified **Full OTA** build when feature
+   variants coexist; bridge/reduced builds remain available manually.
+   Unknown or ambiguous hardware remains a manual
    choice. This identifies the installed firmware's hardware report, not an
    independent attestation of the physical board. Detection does not reset the
    device, change settings or send a LoRa message. The standard Meshtastic
@@ -156,6 +161,24 @@ selections. The usual backup, device checks and flash confirmation still apply.
    Meshtastic's own firmware may temporarily pause Bluetooth while its serial
    API is connected. If USB serial access was disabled in the node's security
    settings, detection cannot override that restriction.
+
+   Equivalent stock/Keymind board names are unified for L1 E-Ink, MeshTracker
+   X1 and Solar/P1, including saved choices and older shared links. RAK4631
+   also selects its universal family; its default Keymind Repeater is the
+   unified Full OTA build. New Solar/P1 and MeshTracker X1 installations prefer
+   the Full OTA feature profile when only reviewed same-target Full/Reduced
+   choices differ. Meshtastic's reviewed XIAO S3 wiring selects **S3
+   WIO**, and its Indicator target selects **Indicator LoRa**. Known factory
+   bootloader identities are read-only hints; recognizing DFU does not identify
+   a physical board or qualify a replacement bootloader download.
+
+   New Keymind firmware reports Wio L1 Pro, E-Ink and 1W, and Indicator LoRa
+   and ESP-NOW, with distinct model names. Older generic model names remain
+   manual when those variants cannot be distinguished. Updating that reporting
+   does not change radio settings; startup verification accepts the refined name
+   only for the selected board and matching pre-update public identity. Distinct
+   memory revisions (such as Indicator N16R2) still require an explicit build
+   choice unless the running firmware identifies its exact target.
 
    When moving from Meshtastic, its local metadata role defaults **Router**,
    **Router Late** and **Client Base** to MeshCore **Repeater**; every other

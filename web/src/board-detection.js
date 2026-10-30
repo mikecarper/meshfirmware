@@ -1,6 +1,7 @@
 // Selection convenience only, never proof for a write/board-safety override.
 // Compare complete model strings. Do not strip vendors, suffixes, or revisions:
 // V4 and V4 R8 (or an internal/SD bootloader) are not interchangeable.
+import {canonicalHardware} from './hardware-aliases.js';
 const normalize=value=>typeof value==='string'&&value.length<=256?value.trim().toLowerCase().replace(/[\s_-]+/g,' '):'';
 const unique=values=>[...new Set(values)].sort();
 
@@ -17,6 +18,8 @@ const modelAliases=[
   ['Station G3 ESP32',['UnitEng/BQ Voyage Station G3']],
   ['Station G2',['UnitEng Station G2']],
   ['Seeed Tracker T1000-E',['Seeed Studio SenseCAP T1000-E']],
+  ['Heltec Wireless Paper',['Heltec Wireless Paper']],
+  ['Nano G2 Ultra',['UnitEng Nano G2 Ultra']],
   ['RAK 4631',['RAK WisBlock / WisMesh (RAK 4631)']],
   ['WisCore RAK4631 Board',['RAK WisBlock / WisMesh (RAK 4631)']],
   ['RAK 3401',['RAK WisMesh 1W Booster (3401 + 13302)']],
@@ -29,9 +32,15 @@ const modelAliases=[
   ['Xiao RP2040',['Seeed Studio Xiao RP2040']],
   ['Seeed Wio WM1110',['Seeed Studio Wio WM1110']],
   ['Seeed Wio Tracker L2 Pro',['Seeed Wio Tracker L2']],
-  // Both manufacturer strings are identical in the current L1/1W variants.
-  ['Seeed Wio Tracker L1',['Seeed Studio Wio Tracker L1 Pro','Seeed WioTracker L1 1W']],
-  ['Seeed SenseCap Solar',['Seeed Studio SenseCAP Solar','Seeed Studio SenseCAP Solar Node P1']],
+  // Older L1/1W/E-Ink firmware shared one manufacturer string.
+  ['Seeed Wio Tracker L1',['Seeed Studio Wio Tracker L1 Pro','Seeed WioTracker L1 1W','Seeed Studio Wio Tracker L1 E-Ink']],
+  ['Seeed Wio Tracker L1 Pro',['Seeed Studio Wio Tracker L1 Pro']],
+  ['Seeed Wio Tracker L1 E-Ink',['Seeed Studio Wio Tracker L1 E-Ink']],
+  ['Seeed Wio Tracker L1 1W',['Seeed WioTracker L1 1W']],
+  ['Seeed SenseCap Solar',['Seeed Studio SenseCAP Solar']],
+  ['Seeed SenseCAP Indicator',['Seeed Studio SenseCAP Indicator LoRa','Seeed Studio SenseCAP Indicator ESP-NOW']],
+  ['Seeed SenseCAP Indicator LoRa',['Seeed Studio SenseCAP Indicator LoRa']],
+  ['Seeed SenseCAP Indicator ESP-NOW',['Seeed Studio SenseCAP Indicator ESP-NOW']],
   ['ProMicro DIY',['ProMicro nrf52 (faketec)']],
   ['Minewsemi',['Minewsemi ME25LS01']],
   ['GAT562 30S Mesh Kit',['GAT-IoT GAT562 30s']],
@@ -46,7 +55,10 @@ const modelAliases=[
   ['Ikoka Handheld E22 30dBm (Xiao_nrf52)',['Ikoka Handheld nRF E22 30 dBm']],
   ['Waveshare RP2040-LoRa',['Waveshare RP2040-LoRa-HF/LF']],
 ];
-const aliases=new Map(modelAliases.map(([model,hardware])=>[normalize(model),hardware.map(normalize)]));
+const aliases=new Map(modelAliases.map(([model,hardware])=>[normalize(model),hardware.map(name=>normalize(canonicalHardware(name)))]));
+// Older firmware used these same names for genuinely different targets.
+// A provider/catalog filter cannot turn missing runtime evidence into proof.
+const sharedModels=new Set(['Seeed Wio Tracker L1','Seeed SenseCAP Indicator'].map(normalize));
 
 // These exact PIDs are useful hints only. Firmware/bootloaders can have been
 // installed on the wrong board and several boards deliberately share IDs.
@@ -59,14 +71,20 @@ function usbIdentity(info){
 }
 
 export function detectBoard({items=[],deviceModel='',usbInfo={}}={}) {
-  const available=items.filter(item=>item?.project==='MeshCore'&&typeof item.hardware==='string'),model=normalize(deviceModel);
+  const available=items.filter(item=>item?.project==='MeshCore'&&typeof item.hardware==='string'),model=normalize(canonicalHardware(deviceModel));
   if(model){
     const names=new Set([model,...(aliases.get(model)||[])]);
-    const candidates=unique(available.filter(item=>names.has(normalize(item.hardware))||(item.bootloaderInfo?.hardwareId&&model===normalize(item.bootloaderInfo.hardwareId))).map(item=>item.hardware));
+    // An exact running model/explicit manufacturer alias outranks a catalog
+    // bootloader utility hint. A copied utility hardwareId is not a second
+    // physical-board identity (notably GAT562 Tracker versus 30S).
+    const exact=available.filter(item=>names.has(normalize(canonicalHardware(item.hardware))));
+    const matches=exact.length||aliases.has(model)?exact:available.filter(item=>item.bootloaderInfo?.hardwareId&&model===normalize(item.bootloaderInfo.hardwareId));
+    const candidates=unique(matches.map(item=>canonicalHardware(item.hardware)));
+    if(sharedModels.has(model))return {hardware:null,candidates,source:'application-model',reason:'The older running model is shared by different hardware or firmware targets. Choose the exact target manually; filtering the catalog does not establish it.'};
     if(candidates.length===1)return {hardware:candidates[0],candidates,source:'application-model',reason:'Exact running-firmware model matched the catalog. This selects hardware only; it is not independent physical-board proof.'};
     return {hardware:null,candidates,source:'application-model',reason:candidates.length?'The reported model matches multiple catalog boards; choose the exact hardware manually.':'No complete exact catalog match for the reported model; choose hardware manually. Truncated or similar names are not guessed.'};
   }
-  const id=usbIdentity(usbInfo),hints=new Set((usbHints.get(id)||[]).map(normalize)),profileHints=recoveryUsb.get(id)||[],candidates=unique(available.filter(item=>hints.has(normalize(item.hardware))||(item.bootloaderInfo?.tag===recoveryTag&&profileHints.includes(item.bootloaderInfo.profile))).map(item=>item.hardware));
+  const id=usbIdentity(usbInfo),hints=new Set((usbHints.get(id)||[]).map(normalize)),profileHints=recoveryUsb.get(id)||[],candidates=unique(available.filter(item=>hints.has(normalize(canonicalHardware(item.hardware)))||(item.bootloaderInfo?.tag===recoveryTag&&profileHints.includes(item.bootloaderInfo.profile))).map(item=>canonicalHardware(item.hardware)));
   return {hardware:null,candidates,source:candidates.length?'usb-hint':'unknown',reason:candidates.length?`USB ${id} provides candidate hints only, not physical-board proof. Read the running node or choose hardware manually.`:'USB IDs do not identify this physical board. Read the running node or choose hardware manually.'};
 }
 

@@ -1,6 +1,7 @@
 // Selection suggestions only. This module never fetches firmware, opens USB,
 // resets a device, or authorizes a write. Byte/chip/partition checks still run.
 import {catalogProvider,catalogItemKey,compareVersions} from './catalog.js';
+import {canonicalHardware} from './hardware-aliases.js';
 
 const applicationRoles=new Set(['companionFull','companionBle','companionUsb','repeater','roomServer','sensor','kissRadio','gui','guiSD']);
 const companionRoles=new Set(['companionFull','companionBle','companionUsb']);
@@ -96,21 +97,45 @@ function reviewedModelHardware(device,selections){
   if(selections.hardware!=='Heltec v4'||selections.provider!=='Keymind Cascade'||!['repeater','roomServer','sensor','companionFull'].includes(selections.role))return '';
   return /^(?:Heltec V4(?:\.[23])? OLED|Heltec V4\.[23] none detected)$/i.test(text(device?.model))?'heltec_v4':'';
 }
+function universalRakDefault(candidates,selections,exactTarget){
+  const target=selections.hardware==='RAK WisMesh 1W Booster (3401 + 13302)'?'RAK_3401_repeater_unified_lora_ota':selections.hardware==='RAK WisBlock / WisMesh (RAK 4631)'?'RAK_4631_repeater_unified_lora_ota':null;
+  if(exactTarget||!target||selections.provider!=='Keymind Cascade'||selections.role!=='repeater')return null;
+  // Unified RAK targets select their supported storage automatically.
+  // Prefer the standard Full OTA feature set, not an
+  // arbitrary legacy, reduced-sensor or RS232 bridge build from catalog order.
+  // This is an application default, never a bootloader or storage-proof bypass.
+  const preferred=candidates.filter(({item})=>item.architecture==='nrf52'
+    &&item.name.startsWith(target+'-full-ota-v')&&/^\d[\w.+-]*\.zip$/.test(item.name.slice((target+'-full-ota-v').length))
+    &&exactTargets(item).has(target));
+  return preferred.length===1?preferred:null;
+}
+function migrationFullProfileDefault(candidates,selections,exactTarget,migrating){
+  if(!migrating||exactTarget||selections.provider!=='Keymind Cascade')return null;
+  const base=selections.hardware==='Seeed Studio SenseCAP Solar'?'SenseCap_Solar':selections.hardware==='Seeed SenseCAP MeshTracker X1'?'MeshTracker_X1':null;
+  if(!base||!['repeater','roomServer'].includes(selections.role))return null;
+  const suffix=selections.role==='repeater'?'repeater':'room_server',target=base==='SenseCap_Solar'?(suffix==='repeater'?base+'_repeater':base+'_room_server_lora_ota'):base+'_'+suffix+'_lora_ota_no_external_sensors';
+  // These reviewed Full/Reduced pairs share one exact board/environment.
+  // This chooses a feature default for a new installation, not a different
+  // radio, storage or memory variant, nor a change to a known running target.
+  if(candidates.some(({item})=>{const targets=exactTargets(item);return targets.size!==1||!targets.has(target);}))return null;
+  const preferred=candidates.filter(({item})=>item.architecture==='nrf52'&&item.name.startsWith(target+'-full-ota-v')&&/^\d[\w.+-]*\.zip$/.test(item.name.slice((target+'-full-ota-v').length)));
+  return preferred.length===1?preferred:null;
+}
 
 export function chooseFirmware({items=[],device={},hardware='',provider='',role='',version='',installMode='update'}={}){
   const meshtastic=device?.firmwareFamily==='meshtastic'||device?.role==='meshtastic';
   const bootloader=device?.firmwareFamily==='bootloader'||device?.role==='bootloader';
   const migrating=meshtastic||bootloader;
-  const selections={provider:catalogProvider(text(provider))||'Keymind Cascade',hardware:text(hardware),role:text(role)||inferredRole(device),version:text(version)};
+  const selections={provider:catalogProvider(text(provider))||'Keymind Cascade',hardware:canonicalHardware(text(hardware)),role:text(role)||inferredRole(device),version:text(version)};
   const result=(reason,candidates=[],artifactIndex=null)=>{
     const warning=migrating||artifactIndex===null?'':firmwareVersionWarning(device?.version,items[artifactIndex]?.version);
     return {selections,artifactIndex,candidates,reason,warning,downgrade:!!warning};
   };
   if(!['update','install'].includes(installMode))return result('Choose Update or Erase / new install explicitly. An unsupported install mode cannot select firmware.');
   if(!selections.hardware)return result(installMode==='install'?'Detect or choose exact hardware before selecting an erase/new install.':'Detect or choose exact hardware before selecting an application update.');
-  let candidates=items.map((item,index)=>({item,index})).filter(({item})=>matchesInstallMode(item,installMode)&&item.hardware===selections.hardware&&catalogProvider(item.provider)===selections.provider);
+  let candidates=items.map((item,index)=>({item,index})).filter(({item})=>matchesInstallMode(item,installMode)&&canonicalHardware(item.hardware)===selections.hardware&&catalogProvider(item.provider)===selections.provider);
   if(migrating&&!text(provider)&&!candidates.length){
-    const stock=items.map((item,index)=>({item,index})).filter(({item})=>matchesInstallMode(item,installMode)&&item.hardware===selections.hardware&&catalogProvider(item.provider)==='MeshCore');
+    const stock=items.map((item,index)=>({item,index})).filter(({item})=>matchesInstallMode(item,installMode)&&canonicalHardware(item.hardware)===selections.hardware&&catalogProvider(item.provider)==='MeshCore');
     if(stock.length){selections.provider='MeshCore';candidates=stock;}
   }
   if(!candidates.length)return result(installMode==='install'?'No erase/new install matches this exact hardware/provider. Choose a matching merged ESP32 install or nRF52 application ZIP; no update, component or other board was substituted.':'No write-only application update matches this exact hardware/provider. Choose another provider or an explicit firmware file; no wipe or bootloader was substituted.');
@@ -147,7 +172,11 @@ export function chooseFirmware({items=[],device={},hardware='',provider='',role=
   const equivalents=new Map();
   for(const candidate of candidates){const key=catalogItemKey(candidate.item);if(!equivalents.has(key))equivalents.set(key,candidate);}
   candidates=[...equivalents.values()];
+  const universalDefault=candidates.length>1?universalRakDefault(candidates,selections,exactTarget):null;
+  if(universalDefault)candidates=universalDefault;
+  const fullDefault=candidates.length>1?migrationFullProfileDefault(candidates,selections,exactTarget,migrating):null;
+  if(fullDefault)candidates=fullDefault;
   if(candidates.length!==1)return result('Multiple exact-board builds remain (for example a different display, storage or Full profile). Choose the exact artifact or supply its exact running build target; no first-match guess was made.',candidates.map(({index})=>index));
   const migrationNote=meshtastic?'Meshtastic detected. The selected MeshCore role is a new installation choice, not a conversion of Meshtastic settings or identity. ':bootloader?'Bootloader-file identity matched. The selected Companion is a new application choice; the file does not prove physical hardware, the previous role or a configuration backup. ':'';
-  return result(migrationNote+(installMode==='install'?'Newest matching erase/new install selected. Erasing removes application settings and identity; nRF52 requires a separately validated erase ZIP. Firmware bytes, chip identity and partition compatibility still require inspection; nothing has been loaded or written.':'Newest matching write-only application selected. Firmware bytes, chip identity and partition compatibility still require inspection; nothing has been loaded or written.'),[candidates[0].index],candidates[0].index);
+  return result(migrationNote+(universalDefault?`Universal ${selections.hardware.includes('3401')?'RAK3401':'RAK4631'} Full OTA profile selected. `:fullDefault?'Standard Full OTA profile selected for this exact hardware. ':'')+(installMode==='install'?'Newest matching erase/new install selected. Erasing removes application settings and identity; nRF52 requires a separately validated erase ZIP. Firmware bytes, chip identity and partition compatibility still require inspection; nothing has been loaded or written.':'Newest matching write-only application selected. Firmware bytes, chip identity and partition compatibility still require inspection; nothing has been loaded or written.'),[candidates[0].index],candidates[0].index);
 }

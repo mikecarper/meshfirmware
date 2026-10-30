@@ -70,17 +70,13 @@ test('reviewed exact model/board pairs map only the corresponding nRF52 hardware
   for (const [model, boardId, hardware] of cases) assert.equal(detectBootloaderBoard({items, info: info({model, boardId})}).hardware, hardware);
 });
 
-test('shared RAK, GAT, XIAO, ProMicro, L1 and Solar identities remain manual after filtering', () => {
+test('shared GAT, XIAO, ProMicro, L1 and Muzi Base identities remain manual after filtering', () => {
   const cases = [
     ['MTools Tec GAT562', 'GAT562-Family', 'GAT-IoT GAT562 30s'],
-    ['WisBlock RAK4631 Board', 'WisBlock-RAK4631-Board', 'RAK WisBlock / WisMesh (RAK 4631)'],
-    ['RAK4631', '4631A', 'RAK WisBlock / WisMesh (RAK 4631)'],
-    ['WisBlock RAK3401', 'WisBlock-RAK3401', 'RAK WisMesh 1W Booster (3401 + 13302)'],
-    ['RAK3401', '3401A', 'RAK WisMesh 1W Booster (3401 + 13302)'],
     ['Seeed XIAO nRF52840', 'nRF52840-SeeedXiao-v1', 'Seeed Studio Xiao nRF52 WIO'],
     ['Seeed XIAO nRF52840', 'nRF52840-SeeedXiaoSense-v1', 'Seeed Studio Xiao nRF52 WIO'],
     ['Seeed TRACKER L1', 'TRACKER L1', 'Seeed Studio Wio Tracker L1 Pro'],
-    ['Seeed Solar Node P1', 'nRF52840-SeeedSenseCAPSolarP1-v1', 'Seeed Studio SenseCAP Solar Node P1'],
+    ['Muzi Base', 'muzi-Base-Board', 'Muzi Works Base Uno'],
     ['ProMicro NRF52840', 'nRF52840-promicro', 'ProMicro nrf52 (faketec)'],
   ];
   for (const [model, boardId, hardware] of cases) {
@@ -88,6 +84,102 @@ test('shared RAK, GAT, XIAO, ProMicro, L1 and Solar identities remain manual aft
     assert.equal(result.hardware, null);
     assert.deepEqual(result.candidates, [hardware]);
     assert.match(result.reason, /manually/);
+  }
+});
+
+const addedFactoryPairs = [
+  ['B and Q Nano G2 Ultra','nRF52840-BQ-rev1','UnitEng Nano G2 Ultra',[0x4251,0x8695]],
+  ['T-Echo Card','LilyGo-T-Echo-Card','LilyGo T-Echo Card',[0x239a,0x00da]],
+  ['T-Impulse Plus','LilyGo-T-Impulse-Plus','LilyGo T-Impulse Plus nRF52840',[0x239a,0x00da]],
+  ['Meshtiny Board','Meshtiny-MT001-Board','Meshtiny',[0x239a,0x0029]],
+  ['GAT562 Mesh Watch13','GAT562-Watch13','GAT-IoT GAT562 Mesh Watch13',[0x239a,0x002a]],
+];
+
+test('source-confirmed factory bootloader identities select the corresponding application board without qualifying a bootloader download',()=>{
+  const items=addedFactoryPairs.map(([, , hardware])=>item(hardware));
+  for(const [model,boardId,hardware,[usbVendorId,usbProductId]] of addedFactoryPairs)for(const version of ['0.9.2','0.11.0-OTAFIX2.4.12']){
+    const result=detectBootloaderBoard({items,info:info({model,boardId,version}),usbInfo:{usbVendorId,usbProductId}});
+    assert.equal(result.hardware,hardware);assert.deepEqual(result.candidates,[hardware]);assert.equal(result.architecture,'nrf52');assert.match(result.reason,/not physical-board proof/);
+    for(const field of ['bootloader','bootloaderInfo','download','approved','reset','erase'])assert.equal(Object.hasOwn(result,field),false);
+    assert.equal(items.some(candidate=>Object.hasOwn(candidate,'bootloaderInfo')),false);
+  }
+});
+
+test('new factory hints still reject mismatched identities, conflicting USB, unavailable targets and recovery loaders',()=>{
+  for(const [model,boardId,hardware] of addedFactoryPairs){
+    const items=[item(hardware)],parsed=info({model,boardId});
+    for(const value of [{model:model+' extra',boardId},{model,boardId:boardId+' extra'},{model:'Unknown',boardId},{model,boardId:'Unknown'}])assert.equal(detectBootloaderBoard({items,info:info(value)}).hardware,null);
+    for(const usbInfo of [{usbVendorId:0x2886,usbProductId:0x0057},{usbVendorId:0x239a,usbProductId:0x0071},{usbVendorId:0x239a},{usbVendorId:'239a',usbProductId:0x0029}])assert.equal(detectBootloaderBoard({items,info:parsed,usbInfo}).hardware,null);
+    for(const available of [[],[item(hardware,'esp32')],[item(hardware,'nrf52',{project:'Meshtastic'})],[item('Some other board')]])assert.equal(detectBootloaderBoard({items:available,info:parsed}).hardware,null);
+    for(const version of ['R_0x02040CFF','TEST_0x02040C01']){const result=detectBootloaderBoard({items,info:info({model,boardId,version})});assert.equal(result.hardware,null);assert.match(result.reason,/recovery\/test/i);}
+    assert.equal(detectBootloaderBoard({items,usbInfo:{usbVendorId:0x239a,usbProductId:0x0029}}).hardware,null);
+  }
+  for(const [model,boardId,hardware] of addedFactoryPairs)for(const [,otherBoardId] of addedFactoryPairs)if(boardId!==otherBoardId)assert.equal(detectBootloaderBoard({items:[item(hardware)],info:info({model,boardId:otherBoardId})}).hardware,null);
+});
+
+test('all exact normal RAK4631 profiles select the universal family, never infer R1 Neo or another shared-USB board',()=>{
+  const hardware='RAK WisBlock / WisMesh (RAK 4631)',pairs=[['WisBlock RAK4631 Board','WisBlock-RAK4631-Board'],['RAK4631','4631A'],['WisBlock RAK4631 + W25Q16','WisBlock-RAK4631-W25Q16'],['WisBlock RAK4631 + RAK15001 C','WisBlock-RAK4631-RAK15001-Slot-C']];
+  const items=[item(hardware),item('Muzi Works R1 Neo'),item('RAK WisMesh Tag'),item('RAK WisMesh 1W Booster (3401 + 13302)')];
+  for(const [model,boardId] of pairs){
+    const result=detectBootloaderBoard({items,info:info({model,boardId}),usbInfo:{usbVendorId:0x239a,usbProductId:0x0029}});assert.equal(result.hardware,hardware);assert.deepEqual(result.candidates,[hardware]);assert.match(result.reason,/not physical-board proof/);
+    assert.equal(detectBootloaderBoard({items:items.slice(1),info:info({model,boardId})}).hardware,null);
+    assert.equal(detectBootloaderBoard({items,info:info({model,boardId,version:'R_0x02040CFF'})}).hardware,null);
+  }
+});
+
+test('the exact Solar P1 identity collapses reviewed provider-label aliases but not other Seeed boards',()=>{
+  const parsed=info({model:'Seeed Solar Node P1',boardId:'nRF52840-SeeedSenseCAPSolarP1-v1'}),hardware='Seeed Studio SenseCAP Solar';
+  for(const items of [[item(hardware)],[item('Seeed Studio SenseCAP Solar Node P1')],[item(hardware),item('Seeed Studio SenseCAP Solar Node P1')]]){
+    const result=detectBootloaderBoard({items,info:parsed,usbInfo:{usbVendorId:0x2886,usbProductId:0x0044}});assert.equal(result.hardware,hardware);assert.deepEqual(result.candidates,[hardware]);
+  }
+  assert.equal(detectBootloaderBoard({items:[item('Seeed Studio Xiao nRF52 WIO')],info:parsed}).hardware,null);
+});
+
+test('Muzi Base USB and an exact Base file retain Uno/Duo ambiguity independently of catalog filtering',()=>{
+  for(const items of [[item('Muzi Works Base Uno')],[item('Muzi Works Base Duo')],[item('Muzi Works Base Uno'),item('Muzi Works Base Duo')]]){
+    const result=detectBootloaderBoard({items,info:info({model:'Muzi Base',boardId:'muzi-Base-Board'}),usbInfo:{usbVendorId:0x239a,usbProductId:0x0081}});assert.equal(result.hardware,null);assert.match(result.reason,/manually/);assert.equal(result.architecture,'nrf52');assert.deepEqual(result.candidates,items.map(candidate=>candidate.hardware).sort());
+  }
+});
+
+const rak3401Pairs = [
+  ['WisBlock RAK3401', 'WisBlock-RAK3401'],
+  ['RAK3401', '3401A'],
+  ['WisBlock RAK3401 + RAK13302 + W25Q16', 'WisBlock-RAK3401-RAK13302-W25Q16'],
+];
+const rak3401Hardware = 'RAK WisMesh 1W Booster (3401 + 13302)';
+
+test('all exact RAK3401 bootloader profiles select the same universal family without a storage prompt', () => {
+  const items = [item(rak3401Hardware), item(rak3401Hardware, 'nrf52', {provider:'Other'}), item('RAK WisBlock / WisMesh (RAK 4631)'), item('RAK WisMesh Tag')];
+  for (const [model, boardId] of rak3401Pairs) for (const version of ['0.9.2', '0.11.0-OTAFIX2.4.12', 'BL_0x02040CFF']) {
+    for (const usbInfo of [{}, {usbVendorId:0x239a, usbProductId:0x0029}, {usbVendorId:0x239a, usbProductId:0x002a}]) {
+      const result = detectBootloaderBoard({items, info:info({model, boardId, version}), usbInfo});
+      assert.equal(result.hardware, rak3401Hardware, `${model} ${version}`);assert.deepEqual(result.candidates, [rak3401Hardware]);assert.equal(result.architecture, 'nrf52');assert.equal(result.model, model);
+      assert.doesNotMatch(result.reason, /storage profile|choose hardware manually/);assert.match(result.reason, /not physical-board proof/);assert.match(result.reason, /not.*board-safety override/);
+    }
+  }
+});
+
+test('universal RAK3401 selection still requires an exact pair, compatible USB and a matching catalog target', () => {
+  for (const [model, boardId] of rak3401Pairs) {
+    const parsed = info({model, boardId}), items = [item(rak3401Hardware)];
+    for (const wrong of [{model:'Unknown',boardId}, {model:model+' extra',boardId}, {model,boardId:'Unknown'}, {model,boardId:'WisBlock-RAK4631-Board'}]) {
+      assert.equal(detectBootloaderBoard({items, info:info(wrong)}).hardware, null);
+    }
+    for (const usbInfo of [{usbVendorId:0x2886,usbProductId:0x0044}, {usbVendorId:0x239a,usbProductId:0x0071}, {usbVendorId:0x239a}]) {
+      const result = detectBootloaderBoard({items, info:parsed, usbInfo});assert.equal(result.hardware, null);assert.match(result.reason, /conflicts/);
+    }
+    for (const available of [[], [item(rak3401Hardware,'esp32')], [item(rak3401Hardware,'nrf52',{project:'Other'})], [item('RAK3401')], [item('RAK WisBlock / WisMesh (RAK 4631)')]]) {
+      const result = detectBootloaderBoard({items:available, info:parsed});assert.equal(result.hardware, null);assert.deepEqual(result.candidates, []);
+    }
+    assert.equal(detectBootloaderBoard({items, usbInfo:{usbVendorId:0x239a,usbProductId:0x0029}}).hardware, null);
+    for (const version of ['R_0x02040CFF', 'TEST_0x02040C01']) {
+      const result = detectBootloaderBoard({items, info:info({model, boardId, version})});assert.equal(result.hardware, null);assert.deepEqual(result.candidates, [rak3401Hardware]);assert.match(result.reason, /recovery\/test/i);
+    }
+  }
+  // Even though all known profiles select one family, cross-pair combinations
+  // are not aliases and cannot be manufactured from independent fields.
+  for (const [model, boardId] of rak3401Pairs) for (const [, otherBoardId] of rak3401Pairs) if (boardId !== otherBoardId) {
+    assert.equal(detectBootloaderBoard({items:[item(rak3401Hardware)],info:info({model,boardId:otherBoardId})}).hardware, null);
   }
 });
 

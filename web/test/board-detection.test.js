@@ -11,6 +11,27 @@ test('reviewed manufacturer aliases select Station G3, T1000-E and RAK4631',()=>
   for(const [model,hardware] of [['Station G3 ESP32','UnitEng/BQ Voyage Station G3'],['Seeed Tracker T1000-E','Seeed Studio SenseCAP T1000-E'],['RAK 4631','RAK WisBlock / WisMesh (RAK 4631)']])assert.equal(detectBoard({items:[item(hardware)],deviceModel:model}).hardware,hardware);
 });
 
+test('reviewed complete manufacturer aliases bridge Wireless Paper, Nano and distinct Wio L1 firmware names',()=>{
+  for(const [deviceModel,hardware] of [['Heltec Wireless Paper','Heltec Wireless Paper'],['Nano G2 Ultra','UnitEng Nano G2 Ultra'],['Seeed Wio Tracker L1 Pro','Seeed Studio Wio Tracker L1 Pro'],['Seeed Wio Tracker L1 E-Ink','Seeed Studio Wio Tracker L1 E-Ink'],['Seeed Wio Tracker L1 1W','Seeed WioTracker L1 1W'],['Seeed SenseCAP Indicator LoRa','Seeed Studio SenseCAP Indicator LoRa'],['Seeed SenseCAP Indicator ESP-NOW','Seeed Studio SenseCAP Indicator ESP-NOW']]){
+    const items=['Heltec Wireless Paper','UnitEng Nano G2 Ultra','Seeed Studio Wio Tracker L1 Pro','Seeed Studio Wio Tracker L1 E-Ink','Seeed WioTracker L1 1W','Seeed Studio SenseCAP Indicator LoRa','Seeed Studio SenseCAP Indicator ESP-NOW'].map(name=>item(name));
+    assert.equal(detectBoard({items,deviceModel}).hardware,hardware);
+  }
+  for(const deviceModel of ['Nano G2','Seeed Wio Tracker L1 Pro unknown','Heltec Wireless Paper V2'])assert.equal(detectBoard({items:[item('UnitEng Nano G2 Ultra'),item('Heltec Wireless Paper')],deviceModel}).hardware,null);
+});
+
+test('equivalent provider labels collapse while true L1 hardware variants remain ambiguous',()=>{
+  for(const [deviceModel,legacy,canonical] of [['Seeed SenseCap Solar','Seeed Studio SenseCAP Solar Node P1','Seeed Studio SenseCAP Solar'],['Seeed Wio Tracker L1 E-Ink','Seeed Studio Wio Tracker L1 EINK','Seeed Studio Wio Tracker L1 E-Ink'],['Seeed Studio SenseCAP MeshTracker X1','Seeed Studio SenseCAP MeshTracker X1','Seeed SenseCAP MeshTracker X1'],['Heltec Wireless Paper','Heltec Heltec Wireless Paper','Heltec Wireless Paper']]){
+    for(const names of [[legacy],[legacy,canonical]]){const result=detectBoard({items:names.map(name=>item(name)),deviceModel});assert.equal(result.hardware,canonical);assert.deepEqual(result.candidates,[canonical]);}
+  }
+  const result=detectBoard({items:['Seeed Studio Wio Tracker L1 Pro','Seeed Studio Wio Tracker L1 E-Ink','Seeed WioTracker L1 1W'].map(name=>item(name)),deviceModel:'Seeed Wio Tracker L1'});assert.equal(result.hardware,null);assert.equal(result.candidates.length,3);
+});
+
+test('explicit GAT562 manufacturer identity outranks another boards copied bootloader utility hint',()=>{
+  const items=[item('GAT-IoT GAT562 Tracker',{bootloaderInfo:{hardwareId:'GAT562_Mesh_Tracker_Pro'}}),item('GAT-IoT GAT562 30s',{bootloaderInfo:{hardwareId:'GAT562_Mesh_Tracker_Pro'}})];
+  for(const inventory of [items,items.toReversed()])assert.equal(detectBoard({items:inventory,deviceModel:'GAT562 Mesh Tracker Pro'}).hardware,'GAT-IoT GAT562 Tracker');
+  assert.equal(detectBoard({items:items.slice(1),deviceModel:'GAT562 Mesh Tracker Pro'}).hardware,null,'a missing explicit Tracker target must not substitute the unrelated 30S utility hint');
+});
+
 test('old and updated V4 OLED model strings select normal V4 without guessing TFT or R8',()=>{
   const items=[item('Heltec v4'),item('Heltec v4 R8'),item('Heltec v4 + Expansion Kit (Touch)')];
   for(const deviceModel of ['Heltec V4 OLED','Heltec V4.2 OLED','Heltec V4.3 OLED'])assert.equal(detectBoard({items,deviceModel}).hardware,'Heltec v4');
@@ -40,6 +61,9 @@ test('complete names only: revisions, truncated names, prefixes and similar vend
 test('known identical model strings remain ambiguous across board variants',()=>{
   const result=detectBoard({items:[item('Seeed Studio Wio Tracker L1 Pro'),item('Seeed WioTracker L1 1W')],deviceModel:'Seeed Wio Tracker L1'});
   assert.equal(result.hardware,null);assert.equal(result.candidates.length,2);
+  for(const [deviceModel,hardware] of [['Seeed Wio Tracker L1','Seeed Studio Wio Tracker L1 Pro'],['Seeed SenseCAP Indicator','Seeed Studio SenseCAP Indicator LoRa']]){
+    const filtered=detectBoard({items:[item(hardware)],deviceModel});assert.equal(filtered.hardware,null);assert.deepEqual(filtered.candidates,[hardware]);assert.match(filtered.reason,/filtering the catalog/);
+  }
 });
 test('conflicting exact display and explicit manufacturer alias never chooses first',()=>{
   const result=detectBoard({items:[item('Station G3 ESP32'),item('UnitEng/BQ Voyage Station G3')],deviceModel:'Station G3 ESP32'});

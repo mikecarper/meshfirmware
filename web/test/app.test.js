@@ -6,6 +6,8 @@ import vm from 'node:vm';
 import {detectBoard,detectRecoveryProfile} from '../src/board-detection.js';
 import {detectMeshtasticBoard} from '../src/meshtastic-boards.js';
 import {detectMeshtastic} from '../src/meshtastic.js';
+import {canonicalHardware} from '../src/hardware-aliases.js';
+import {nrfDfuUsbIds} from '../src/nrf-usb-ids.js';
 import {parseBootloaderInfo,detectBootloaderBoard} from '../src/bootloader-info.js';
 import {chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode} from '../src/automatic.js';
 import {chooseConnection,parseUsbMode} from '../src/connection-choice.js';
@@ -40,7 +42,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
   if(recovery)storage.set('meshfirmware.nrfRecovery',JSON.stringify(recovery));
   if(espRecovery)storage.set('meshfirmware.espRecovery',JSON.stringify(espRecovery));
   if(verification)storage.set('meshfirmware.verifyApplication',JSON.stringify(verification));
-  const context=vm.createContext({lookupUsbConnectionMap,usbConnectionMap:{schemaVersion:1,builds:[]},document:{getElementById:id=>{assert.ok(elements.has(id),`Missing HTML id ${id}`);return elements.get(id);},querySelectorAll:()=>[...elements.values()]},navigator:{serial:{requestPort:async()=>{calls.push('chooser');return port;},getPorts(){throw new Error('must not enumerate automatically');},addEventListener(type,handler){serialEvents[type]=handler;}}},window:{location:{search},addEventListener(type,handler){windowEvents[type]=handler;}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},Option,URL,URLSearchParams,Blob,Uint8Array,TextEncoder,TextDecoder,console,setTimeout,clearTimeout,AbortSignal,Date,
+  const context=vm.createContext({canonicalHardware,nrfDfuUsbIds,lookupUsbConnectionMap,usbConnectionMap:{schemaVersion:1,builds:[]},document:{getElementById:id=>{assert.ok(elements.has(id),`Missing HTML id ${id}`);return elements.get(id);},querySelectorAll:()=>[...elements.values()]},navigator:{serial:{requestPort:async()=>{calls.push('chooser');return port;},getPorts(){throw new Error('must not enumerate automatically');},addEventListener(type,handler){serialEvents[type]=handler;}}},window:{location:{search},addEventListener(type,handler){windowEvents[type]=handler;}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},Option,URL,URLSearchParams,Blob,Uint8Array,TextEncoder,TextDecoder,console,setTimeout,clearTimeout,AbortSignal,Date,
     fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,parseUsbMode,MigrationApproval,cleanCliReply,assessBootloaderVersion,firmwareFilesLinks,fetch:async()=>{throw Error('Unexpected network request');},fetchFirmwareBytes:(url,options)=>verifiedDownload(url,{...options,mirrorBase:'https://mirror.example.test/firmware/',pageOrigin:'https://mirror.example.test',fetchImpl:(target,init)=>target==='https://mirror.example.test/firmware/index.json'?Promise.resolve({ok:false,status:404}):options.fetchImpl(target,init)}),assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),commonCliRestorePreview:()=>({operations:[],skipped:[],warnings:[]}),restoreCommonCli:async()=>{throw Error('Unexpected CommonCLI restore');},
     backupCoverage,createNextStepScroller,tryNativeUsbFallback,SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
   });
@@ -87,6 +89,56 @@ test('a user can change the Meshtastic-based role default without a new probe, r
     const ui=await meshtasticWorkbench({device:meshtasticDevice({meshtasticRole})});ui.context.inventory.push(t114MeshtasticItem({role:'repeater',name:'Heltec_t114_repeater-v1.18.0.1.zip',url:'https://example.test/t114-repeater.zip'}));ui.evaluate('filterCatalog();');await ui.elements.get('select-port').onclick();
     const role=meshtasticRole===0?'repeater':'companionFull';ui.elements.get('role').value=role;await ui.elements.get('role').onchange();ui.evaluate('applyAutomaticSelections();');
     assert.equal(ui.elements.get('role').value,role);assert.equal(ui.evaluate('state.manualSelections.role'),role);assert.equal(ui.evaluate('state.device.meshtasticRole'),meshtasticRole);assert.deepEqual(ui.calls,['chooser','open','close']);assert.equal(ui.evaluate('state.plan'),null);
+  }
+});
+
+test('a connected Meshtastic RAK3401 selects its universal hardware and the appropriate standard firmware without USB writes',async()=>{
+  const hardware='RAK WisMesh 1W Booster (3401 + 13302)',version='v1.18.0.1-halo-keymind-cascade-dev-03214a16';
+  const application=(target,profile='',more={})=>t114MeshtasticItem({hardware,version,role:'repeater',name:target+(profile?'-'+profile:'')+'-'+version+'.zip',url:'https://example.test/'+target+profile+'.zip',releaseNotes:'EXACT TARGET - '+target+'. Match the exact board.',bootloaderInfo:{hardwareId:'RAK_3401',profile:'wiscore_rak3401_auto',url:'https://example.test/rak3401-bootloader.zip',sha256:'f'.repeat(64),size:64,version:'2.4.12'},...more});
+  const full=application('RAK_3401_repeater_unified_lora_ota','full-ota'),companion=application('RAK_3401_companion_radio_full','',{role:'companionFull'});
+  for(const role of [0,2,11,12])for(const reverse of [false,true]){
+    const ui=await meshtasticWorkbench({device:meshtasticDevice({meshtasticHardware:117,model:'Meshtastic hardware 117',meshtasticRole:role})});
+    const inventory=[application('RAK_3401_repeater_bridge_rs232_serial1','full-ota'),application('RAK_3401_repeater_unified_lora_ota','reduced-ota'),application('RAK_3401_repeater_rak13302_w25q16_lora_ota','full-ota'),companion,full,t114MeshtasticItem()];
+    ui.context.inventory=reverse?inventory.toReversed():inventory;ui.evaluate('state.items=inventory;filterCatalog();');ui.port.getInfo=()=>({usbVendorId:0x239a,usbProductId:0x8029});
+    await ui.elements.get('select-port').onclick();
+    const expected=role===0?companion:full,index=Number(ui.elements.get('artifact').value);
+    assert.equal(ui.elements.get('hardware').value,hardware,ui.elements.get('notice').textContent);assert.equal(ui.elements.get('role').value,role===0?'companionFull':'repeater');assert.notEqual(ui.elements.get('artifact').value,'');assert.equal(ui.context.inventory[index].name,expected.name);
+    assert.equal(ui.elements.get('provider').value,'Keymind Cascade');assert.equal(ui.evaluate('state.device.architecture'),'nrf52');assert.equal(ui.evaluate('state.device.model'),'RAK3401');assert.equal(ui.elements.get('transport-mode').value,'auto');
+    assert.doesNotMatch(ui.elements.get('automatic-summary').textContent,/carrier|storage profile|Choose the exact hardware manually|Multiple exact-board builds remain/i);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.installMode'),'update');
+    assert.deepEqual(ui.calls,['chooser','open','close']);
+  }
+});
+
+test('equivalent provider hardware labels auto-select one board and remain usable after an explicit provider/role change',async()=>{
+  const cases=[
+    [100,'Seeed Studio Wio Tracker L1 E-Ink','Seeed Studio Wio Tracker L1 EINK'],
+    [128,'Seeed SenseCAP MeshTracker X1','Seeed Studio SenseCAP MeshTracker X1'],
+    [95,'Seeed Studio SenseCAP Solar','Seeed Studio SenseCAP Solar Node P1'],
+  ];
+  for(const [meshtasticHardware,canonical,oldStock] of cases){
+    const items=[t114MeshtasticItem({hardware:canonical,name:'board_companion_radio_full-v1.18.0.1.zip'}),t114MeshtasticItem({hardware:oldStock,provider:'MeshCore',role:'companionBle',name:'board_companion_radio_ble-v1.18.0.1.zip'})];
+    const ui=workbench({productionDefaults:true,catalogPromise:Promise.resolve({items,warnings:[],generatedAt:'2026-10-30T00:00:00Z'})});await new Promise(resolve=>setImmediate(resolve));serialMock(ui);ui.context.detectApplication=async()=>meshtasticDevice({meshtasticHardware});ui.port.getInfo=()=>({usbVendorId:0x239a,usbProductId:0x8029});
+    await ui.elements.get('select-port').onclick();assert.equal(ui.elements.get('hardware').value,canonical);assert.equal(ui.elements.get('artifact').value,'0');assert.equal(ui.elements.get('role').value,'companionFull');
+    ui.elements.get('provider').value='MeshCore';await ui.elements.get('provider').onchange();ui.elements.get('role').value='companionBle';await ui.elements.get('role').onchange();
+    assert.equal(ui.elements.get('hardware').value,canonical);assert.equal(ui.elements.get('artifact').value,'1');assert.equal(ui.evaluate('state.items[1].hardware'),canonical);assert.equal(items[1].hardware,oldStock,'source catalog is not mutated');assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls,['chooser','open','close']);
+  }
+});
+
+test('historical hardware names in saved selections and shared URLs resolve to canonical catalog labels without USB',async()=>{
+  const old='Seeed Studio Wio Tracker L1 EINK',canonical='Seeed Studio Wio Tracker L1 E-Ink';
+  for(const linked of [false,true]){
+    let resolveCatalog;const catalogPromise=new Promise(resolve=>resolveCatalog=resolve),search=linked?'?'+new URLSearchParams({hardware:old,provider:'Keymind Cascade',role:'companionFull'}):'',ui=workbench({catalogPromise,search,productionDefaults:true});
+    if(!linked)ui.context.localStorage.setItem('meshfirmware.selections',JSON.stringify({hardware:old,provider:'Keymind Cascade',role:'companionFull'}));
+    resolveCatalog({items:[t114MeshtasticItem({hardware:canonical})],warnings:[],generatedAt:'2026-10-30T00:00:00Z'});await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(ui.elements.get('hardware').value,canonical);assert.deepEqual(ui.calls,[]);assert.equal(ui.evaluate('state.port'),null);
+  }
+});
+
+test('Nano G2 Ultra and Muzi Base factory DFU IDs skip application probes without selecting a physical board',async()=>{
+  for(const [usbVendorId,usbProductId] of [[0x4251,0x8695],[0x239a,0x0081]]){
+    const ui=workbench({productionDefaults:true});await Promise.resolve();ui.port.getInfo=()=>({usbVendorId,usbProductId});ui.context.detectApplication=async()=>{throw Error('A DFU port must not be probed as an application');};
+    await ui.elements.get('select-port').onclick();assert.equal(ui.elements.get('already-bootloader').checked,true);assert.equal(ui.evaluate('state.device'),null);assert.equal(ui.elements.get('hardware').value,'');assert.equal(ui.evaluate('state.connection.mode'),'nrf52');assert.deepEqual(ui.calls,['chooser']);
+    await ui.elements.get('backup').onclick();assert.match(ui.elements.get('notice').textContent,/DFU|bootloader/);assert.deepEqual(ui.calls,['chooser']);
   }
 });
 
@@ -513,6 +565,31 @@ test('startup verification accepts the real firmware equals-sign storage layout 
   for(const role of ['common-cli','companion'])for(const layout of ['> int:esp32=8192K ext:none; app0*@0x10000+3072K,app1@0x310000+3072K','> get storage.layout\r\n> int:esp32=16384K ext:none; nvs@0x9000+20K,app0*@0x10000+6400K,app1@0x650000+6400K,...']){
     const ui=await storageVerificationWorkbench(role,layout);await ui.evaluate('verifyApplication();');ui.evaluate('controls();');assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.evaluate('state.finishedFirmware.verified'),true);assert.match(ui.elements.get('notice').textContent,/Application startup verified.*Storage layout answered/);assert.ok(ui.calls.includes('get storage.layout'));assert.equal(ui.calls.filter(call=>call==='application-open').length,1);assert.equal(ui.elements.get('verify-app').disabled,true);
   }
+});
+
+test('startup verification accepts a refined legacy model only for the selected hardware and unchanged public identity',async()=>{
+  const key='11'.repeat(32),items=[
+    t114MeshtasticItem({hardware:'Seeed Studio Wio Tracker L1 Pro'}),t114MeshtasticItem({hardware:'Seeed WioTracker L1 1W'}),t114MeshtasticItem({hardware:'Seeed Studio Wio Tracker L1 E-Ink'}),
+    {...v4Item,hardware:'Seeed Studio SenseCAP Indicator LoRa'},{...v4Item,hardware:'Seeed Studio SenseCAP Indicator ESP-NOW'},
+  ];
+  const cases=[['Seeed Wio Tracker L1','Seeed Wio Tracker L1 Pro',items[0].hardware],['Seeed Wio Tracker L1','Seeed Wio Tracker L1 1W',items[1].hardware],['Seeed Wio Tracker L1','Seeed Wio Tracker L1 E-Ink',items[2].hardware],['Seeed SenseCAP Indicator','Seeed SenseCAP Indicator LoRa',items[3].hardware],['Seeed SenseCAP Indicator','Seeed SenseCAP Indicator ESP-NOW',items[4].hardware]];
+  for(const [model,newModel,hardware] of cases)for(const scenario of ['same-key','missing-key','changed-key','wrong-variant','missing-target']){
+    const ui=workbench();await Promise.resolve();ui.context.inventory=items;ui.context.expected={sha256:'a'.repeat(64),architecture:'nrf52',model,hardware:scenario==='missing-target'?null:hardware,publicKey:scenario==='missing-key'?null:key};
+    ui.context.actual={model:newModel,publicKey:scenario==='changed-key'?'22'.repeat(32):key};if(scenario==='wrong-variant')ui.context.actual.model=model==='Seeed Wio Tracker L1'?'Heltec T114':'Seeed Wio Tracker L1 Pro';
+    ui.evaluate('state.items=inventory;');assert.equal(ui.evaluate('verificationModelMatches(expected,actual);'),scenario==='same-key',`${model} → ${newModel}: ${scenario}`);assert.deepEqual(ui.calls,[]);
+  }
+  const ui=workbench();await Promise.resolve();ui.context.inventory=items;ui.evaluate('state.items=inventory;');
+  assert.equal(ui.evaluate('verificationModelMatches({model:"arbitrary old model",hardware:"Seeed Studio Wio Tracker L1 Pro",publicKey:"11".repeat(32)},{model:"Seeed Wio Tracker L1 Pro",publicKey:"11".repeat(32)});'),false);
+});
+
+test('a real startup check accepts new Wio E-Ink reporting after a legacy-model update on the same selected node',async()=>{
+  const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x9667});
+  ui.context.inventory=[t114MeshtasticItem({hardware:'Seeed Studio Wio Tracker L1 E-Ink'}),t114MeshtasticItem({hardware:'Seeed Studio Wio Tracker L1 Pro'}),t114MeshtasticItem({hardware:'Seeed WioTracker L1 1W'})];ui.context.pkg=fakePackage();
+  ui.context.expected={sha256:ui.context.pkg.sha256,architecture:'nrf52',hardware:'Seeed Studio Wio Tracker L1 E-Ink',model:'Seeed Wio Tracker L1',publicKey:'11'.repeat(32),role:'common-cli',version:'v1.18.0.1'};
+  ui.evaluate('state.items=inventory;state.port=selectedPort;state.pkg=pkg;state.verification=expected;');
+  ui.context.detectMeshCore=async()=>({model:'Seeed Wio Tracker L1 E-Ink',publicKey:ui.context.expected.publicKey,role:'common-cli',version:'v1.18.0.1'});
+  ui.context.SerialLink=class{async open(){ui.calls.push('open');}async close(){ui.calls.push('close');}async command(command){ui.calls.push(command);return command==='ver'?'MeshCore v1.18.0.1':'Unknown command';}};
+  await ui.elements.get('verify-app').onclick();assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.evaluate('state.finishedFirmware.verified'),true);assert.match(ui.elements.get('notice').textContent,/Application startup verified/);assert.deepEqual(ui.calls,['open','get bootloader.ver','ver','close']);
 });
 
 test('successful startup replaces pre-flash Meshtastic, downgrade and reset-pending messages without changing the selected image',async()=>{

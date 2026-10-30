@@ -27,6 +27,8 @@ import { assessBootloaderVersion } from './bootloader-version.js';
 import { fetchFirmwareBytes } from './downloads.js';
 import { firmwareFilesLinks } from './firmware-links.js';
 import { selectionLink } from './selection-link.js';
+import { canonicalHardware } from './hardware-aliases.js';
+import { nrfDfuUsbIds } from './nrf-usb-ids.js';
 
 const $ = id => document.getElementById(id);
 const state = { installMode:'update', port: null, pkg: null, esp: null, plan: null, generation: 0, busy: false, items: [], restore: null, directory: null, archive:null, archiveContext:null, automaticSha:null, automaticShaName:null, recoveryCatalog:null,loadedRecovery:null,planner:null, migration:null, downloaded:new Set(),item:null,device:null,manualSelections:{},detectedHardware:null,connection:null,boardDetected:false,recoveryManual:false,recoveryDetectionRequested:false,backupApproved:null,backup:null,recovery:null,espRecovery:null,verification:null,handoff:false };
@@ -53,7 +55,7 @@ try{const saved=JSON.parse(localStorage.getItem('meshfirmware.espRecovery')||'nu
 if(state.recovery||state.espRecovery?.merged)state.installMode='install';
 // Exact bootloader IDs shared with the native classifier. Never match a broad
 // vendor/product range: nearby application IDs must still be probed normally.
-const dfuIds = new Set(['2886:0044','2886:0045','2886:0057','2886:1667','239a:0029','239a:002a','239a:0071','239a:00b3','239a:00da']);
+const dfuIds = new Set(nrfDfuUsbIds);
 const portId = port => { const info = port?.getInfo() || {}; return info.usbVendorId === undefined ? 'USB serial' : [info.usbVendorId,info.usbProductId].map(n => n.toString(16).padStart(4,'0')).join(':'); };
 const size = bytes => `${(bytes / (1 << 20)).toFixed(2)} MiB`;
 function syncFlashConsole({follow=false}={}){
@@ -747,7 +749,17 @@ function refreshFirmwareWarnings() {
 function verificationRecord(pkg) {
   const identity=payloadFirmwareIdentity(pkg);
   const family=pkg.architecture==='nrf52'?boardAssessment(pkg).payloadFamily:'unknown',model=isNonMeshCore()?null:state.device?.model||state.recovery?.deviceModel||null,roleText=state.item?.role||pkg.name,role=/companion/i.test(roleText)?'companion':/repeater|room|sensor/i.test(roleText)?'common-cli':null;
-  return {sha256:pkg.sha256,name:pkg.name,architecture:pkg.architecture,publicKey:!pkg.destructive&&!state.recovery?state.device?.publicKey||null:null,model:['rak4631','rak3401'].includes(family)&&rakFamily(model)!==family?null:model,family,role,version:identity?.versionText||null};
+  return {sha256:pkg.sha256,name:pkg.name,architecture:pkg.architecture,hardware:canonicalHardware(state.item?.hardware||selectedHardware())||null,publicKey:!pkg.destructive&&!state.recovery?state.device?.publicKey||null:null,model:['rak4631','rak3401'].includes(family)&&rakFamily(model)!==family?null:model,family,role,version:identity?.versionText||null};
+}
+function verificationModelMatches(expected,device){
+  if(!expected.model||!device.model||expected.model.toLowerCase()===device.model.toLowerCase())return true;
+  const before=detectBoard({items:state.items,deviceModel:expected.model}),after=detectBoard({items:state.items,deviceModel:device.model});
+  if(before.hardware&&after.hardware&&canonicalHardware(before.hardware)===canonicalHardware(after.hardware))return true;
+  // New Keymind firmware distinguishes these formerly shared model strings.
+  // Accept that refinement only for the selected catalog target and the same
+  // verified public identity, never by choosing one hidden/filtered variant.
+  const legacy=['Seeed Wio Tracker L1','Seeed SenseCAP Indicator'].includes(expected.model),target=canonicalHardware(expected.hardware||'');
+  return !!(legacy&&target&&/^[a-f0-9]{64}$/i.test(expected.publicKey||'')&&device.publicKey===expected.publicKey&&after.hardware===target&&before.candidates.includes(target));
 }
 function queueVerification(pkg){state.verification=verificationRecord(pkg);persistFlow('verification','meshfirmware.verifyApplication');}
 function completeNrfTransfer(pkg){
@@ -813,7 +825,7 @@ async function verifyApplication({automaticApproval=null,automaticReconnect=fals
     if(isMeshtastic(device))fail('Meshtastic is still running on this port. MeshCore application startup is not verified.');
     if(isBootloaderInfo(device))fail('Only bootloader information is available. MeshCore application startup is not verified.');
     if(expected.role&&expected.role!==device.role)fail('Running MeshCore interface does not match the selected firmware role.');if(expected.publicKey&&device.publicKey!==expected.publicKey)fail('Running application public identity differs from the pre-flash node. Startup verification failed.');
-    if(expected.model&&device.model&&expected.model.toLowerCase()!==device.model.toLowerCase())fail('Running application model differs from the pre-flash device.');
+    if(!verificationModelMatches(expected,device))fail('Running application model differs from the pre-flash device.');
     if(['rak4631','rak3401'].includes(expected.family)&&rakFamily(device.model)!==expected.family)fail('Running protected board family does not match the flashed payload.');
     const mc=device.role==='companion'?new MeshCore(link):null;
     version=mc?await mc.cli('version'):await link.command('ver',700);
@@ -903,7 +915,7 @@ function linkedCatalogSelections() {
     const values=params.getAll(key),value=values[0]?.trim();
     if(values.length!==1||!value||value.length>512||/[\x00-\x1f\x7f]/.test(value))continue;
     if(key==='mode'&&!['update','install'].includes(value))continue;
-    selections[key]=key==='provider'?catalogProvider(value):value;
+    selections[key]=key==='provider'?catalogProvider(value):key==='hardware'?canonicalHardware(value):value;
   }
   return selections;
 }
@@ -1532,10 +1544,11 @@ if ('serial' in navigator) {
   navigator.serial.addEventListener('disconnect',event => { if(state.knownApplicationPort?.port===(event.port||event.target))state.knownApplicationPort.available=false;if (event.target === state.port || event.port === state.port) { clearBootloaderInfoEvidence();state.applicationProbeFailed=false;state.port=null;state.generation++; state.plan = null;state.boardDetected=false;state.recoveryManual=false;state.recoveryDetectionRequested=false;$('recovery-profile').value='';$('installed-identity').value='';$('recovery-detection').textContent='';$('board-detection').textContent='Selected port disconnected; detect again after selecting the same radio.';if(!state.handoff&&!state.recovery&&!state.migration){state.device=null;state.backupApproved=null;} $('port-status').textContent = 'Disconnected'; log('Selected USB port disconnected. No different port will be substituted.'); controls(); } });
 } else { $('browser-status').textContent = 'Web Serial unavailable'; notice('Use a browser with Web Serial support (typically desktop Chrome or Edge). Catalog browsing and local file inspection still work.',true); }
 getCatalog().then(catalog => {
-  state.items=catalog.items;state.recoveryCatalog=catalog.recoveryCatalog||null;updateRecoveryChoices();
+  state.items=catalog.items.map(item=>{const hardware=canonicalHardware(item.hardware);return hardware===item.hardware?item:{...item,hardware};});state.recoveryCatalog=catalog.recoveryCatalog||null;updateRecoveryChoices();
   $('catalog-status').textContent=`${state.items.length.toLocaleString()} artifacts · snapshot ${new Date(catalog.generatedAt).toLocaleString()} · ${catalog.warnings.length} provider warnings${catalog.cached?' · cached':''}`;
   let saved={};try{const value=JSON.parse(localStorage.getItem('meshfirmware.selections')||'{}');if(value&&typeof value==='object'&&!Array.isArray(value))saved=value;}catch{}
   saved.provider=catalogProvider(saved.provider)||'Keymind Cascade';
+  if(typeof saved.hardware==='string')saved.hardware=canonicalHardware(saved.hardware);
   const linked=installModeLocked()?{}:linkedCatalogSelections(),hasLinked=Object.keys(linked).length>0;
   const selections=hasLinked?{provider:'Keymind Cascade',...linked}:saved;
   if(linked.mode){state.installMode=linked.mode;syncInstallMode();}
