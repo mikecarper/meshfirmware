@@ -31,6 +31,9 @@ import { canonicalHardware } from './hardware-aliases.js';
 import { nrfDfuUsbIds } from './nrf-usb-ids.js';
 
 const $ = id => document.getElementById(id);
+// A detected Meshtastic radio defaults to a fresh install. A later manual
+// choice belongs to that radio; automatic defaults never authorize a write.
+let installModeSource=null;
 const state = { installMode:'update', port: null, pkg: null, esp: null, plan: null, generation: 0, busy: false, items: [], restore: null, directory: null, archive:null, archiveContext:null, automaticSha:null, automaticShaName:null, recoveryCatalog:null,loadedRecovery:null,planner:null, migration:null, downloaded:new Set(),item:null,device:null,manualSelections:{},detectedHardware:null,connection:null,boardDetected:false,recoveryManual:false,recoveryDetectionRequested:false,backupApproved:null,backup:null,recovery:null,espRecovery:null,verification:null,handoff:false };
 // This write authorization is deliberately never saved in browser storage.
 state.migrationApproval=null;state.approvalPort=null;state.approvalResetPort=null;state.approvalResumeRequested=null;
@@ -137,16 +140,17 @@ function syncInstallMode(){
 function modePairKey(item){
   return catalogItemKey({...item,name:item.name.replace(/-merged(?=\.bin$)/i,''),url:'',sha256:undefined,action:'',artifactTitle:''});
 }
-async function setInstallMode(mode){
+async function setInstallMode(mode,{automatic=false}={}){
   if(!['update','install'].includes(mode))fail('Choose Update or Erase & new install.');
-  if(mode===state.installMode)return;
+  if(mode===state.installMode){if(!installModeLocked())installModeSource={kind:automatic?(mode==='install'?'meshtastic':'meshcore'):'manual',port:state.port};return;}
   if(installModeLocked())fail(canStartNewRadio()?'Use Flash a new device to begin another update, or optionally verify the previous device.':'Finish the pending handoff, reset, recovery or migration before changing installation mode.');
+  installModeSource={kind:automatic?(mode==='install'?'meshtastic':'meshcore'):'manual',port:state.port};
   const previous=$('artifact').value?state.items[Number($('artifact').value)]:state.item?.role?state.item:null;
   clearAutomaticSha();await clearFirmwareSelection();state.handoff=false;state.installMode=mode;syncInstallMode();filterCatalog();
   const pairs=previous?state.items.map((item,index)=>({item,index})).filter(({item})=>matchesCatalogInstallMode(item,mode)&&modePairKey(item)===modePairKey(previous)):[];
   if(pairs.length===1&&[...$('artifact').options].some(option=>option.value===String(pairs[0].index))){
     $('artifact').value=String(pairs[0].index);updateDownload();updateFirmwareSelectionSummary({item:pairs[0].item});
-  }else if(!previous&&$('auto-detect-board').checked)applyAutomaticSelections();
+  }else if(!previous&&!automatic&&$('auto-detect-board').checked)applyAutomaticSelections();
   else updateFirmwareSelectionSummary({item:null,reason:'Choose the exact build for this installation mode. No different screen, radio or storage profile was substituted.'});
   controls();
 }
@@ -250,7 +254,7 @@ async function startNewRadio(){
   clearBootloaderInfoEvidence();state.applicationProbeFailed=false;
   state.verification=null;state.port=null;state.handoff=false;state.device=null;state.detectedHardware=null;state.boardDetected=false;state.connection=null;state.connectionTrial=null;
   state.knownApplicationPort=null;state.autoVerifyAttempt=null;state.backup=null;state.backupApproved=null;state.recoveryManual=false;state.recoveryDetectionRequested=false;state.manualSelections=provider?{provider}:{};
-  clearBackupJson();invalidateFirmwareSelection();state.installMode='update';$('transport-mode').value='auto';$('already-bootloader').checked=false;$('skip-backup').checked=false;
+  clearBackupJson();invalidateFirmwareSelection();state.installMode='update';installModeSource=null;$('transport-mode').value='auto';$('already-bootloader').checked=false;$('skip-backup').checked=false;
   for(const id of ['expected-sha','expert-offset','firmware-file','custom-url'])$(id).value='';
   $('device-name').textContent='No USB port selected';$('device-meta').textContent='Choose the next radio’s USB port. Board and role are detected after connecting.';$('port-status').textContent='Not connected';
   $('backup-summary').textContent='';$('board-detection').textContent='Choose a USB port to detect the next radio.';$('recovery-profile').value='';$('installed-identity').value='';$('recovery-detection').textContent='';
@@ -621,6 +625,7 @@ function matchInstalledRecovery(installedIdentity='') {
 async function detectSelectedBoard() {
   if(!state.port)fail('Choose a USB port first.');
   if(state.migration||state.recovery||state.espRecovery)fail('Finish the pending write or migration before board detection.');
+  const preserveInstallMode=installModeLocked()||continuingDeviceFlow();
   if(dfuIds.has(portId(state.port))||$('already-bootloader').checked){
     state.applicationProbeFailed=false;
     selectDetectedBoard();matchInstalledRecovery($('installed-identity').value.trim());
@@ -639,6 +644,12 @@ async function detectSelectedBoard() {
     throw error;
   }
   if(state.port!==port||state.generation!==generation){state.device=null;fail('Selected port changed or disconnected during detection. Re-select and detect again.');}
+  const automaticMode=isMeshtastic()?'install':installModeSource?.kind==='meshtastic'?'update':null;
+  if(automaticMode&&installModeSource?.kind!=='manual'&&!preserveInstallMode&&!installModeLocked()&&!continuingDeviceFlow()){
+    const device=state.device;
+    await setInstallMode(automaticMode,{automatic:true});
+    if(state.port!==port||state.device!==device){state.device=null;fail('Selected port changed or disconnected while selecting the installation mode. Re-select and detect again.');}
+  }
   state.boardDetected=true;selectDetectedBoard();notice(isMeshtastic()?`Meshtastic detected; matching MeshCore hardware selected when unambiguous. ${meshtasticMigrationWarning} No reset, settings change or firmware write was sent.`:'Running MeshCore model read and matching catalog hardware selected when unambiguous. No reset, settings change or firmware write was sent.');
 }
 function clearBackupJson(){
@@ -1042,12 +1053,17 @@ async function downloadFirmwareBytes(url,name,expectedSha256=''){
 $('start-new-radio').onclick=startNewRadio;
 $('select-port').onclick = () => operation(async () => {
   const port = await navigator.serial.requestPort(); // Must remain the first awaited browser operation after the click.
+  const sameModeRadio=state.port===port;
   const previousApproval=state.backupApproved,continuation=continuingDeviceFlow();
   // A first DFU selection cannot identify physical hardware. Preserve a
   // deliberately preselected manual target, never a prior detected board.
   const manualDfuSelection=dfuIds.has(portId(port))&&!state.device&&!state.detectedHardware&&!state.boardDetected;
   await closeEsp();state.backupApproved=null;
   if(!continuation){
+    if(!sameModeRadio){
+      if(installModeSource?.port&&installModeSource.port!==port){state.installMode='update';syncInstallMode();installModeSource=null;}
+      else if(installModeSource?.port===null)installModeSource={...installModeSource,port};
+    }
     state.finishedFirmware=null;
     state.knownApplicationPort=null;state.autoVerifyAttempt=null;
     $('skip-backup').checked=false;
@@ -1554,7 +1570,7 @@ getCatalog().then(catalog => {
   if(typeof saved.hardware==='string')saved.hardware=canonicalHardware(saved.hardware);
   const linked=installModeLocked()?{}:linkedCatalogSelections(),hasLinked=Object.keys(linked).length>0;
   const selections=hasLinked?{provider:'Keymind Cascade',...linked}:saved;
-  if(linked.mode){state.installMode=linked.mode;syncInstallMode();}
+  if(linked.mode&&installModeSource===null){state.installMode=linked.mode;installModeSource={kind:'manual',port:state.port};syncInstallMode();}
   let filtersMatched=true;
   filterCatalog();
   for(const id of ['provider','hardware','role','version']){

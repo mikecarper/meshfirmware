@@ -64,7 +64,7 @@ test('no Companion build, unknown board, or ambiguous exact-board variants remai
   const variants=[item(),item({name:'t114_other_display-v1.18.0.zip',url:'https://example.test/other.zip'})];assert.equal(choose(variants).artifactIndex,null);assert.equal(choose([repeater],{role:'repeater'}).artifactIndex,0);
 });
 
-test('Meshtastic detection never implicitly switches to erase, bootloader or another version',()=>{
+test('the pure firmware chooser respects the supplied mode and never substitutes a bootloader or another version',()=>{
   const full=item(),boot=item({name:'Heltec_t114_companion_radio_full-with-bootloader-v1.18.0.zip'}),merged=item({architecture:'esp32',action:'flash-wipe',name:'t114-v1.18.0-merged.bin'}),old=item({version:'v1.17.0',name:'t114-v1.17.0.zip',url:'https://example.test/old.zip'});
   assert.equal(choose([boot,merged,full]).artifactIndex,2);assert.equal(choose([full,old],{version:'v1.17.0'}).artifactIndex,1);assert.equal(choose([merged]).artifactIndex,null);
 });

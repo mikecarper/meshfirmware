@@ -64,7 +64,7 @@ async function meshtasticWorkbench({device=meshtasticDevice()}={}){
 test('Meshtastic H2T/T114 read selects the nRF52 MeshCore target and Companion Full without MeshCore commands or writes',async()=>{
   const ui=await meshtasticWorkbench();await ui.elements.get('select-port').onclick();
   assert.equal(ui.elements.get('hardware').value,'Heltec T114');assert.equal(ui.elements.get('role').value,'companionFull');assert.equal(ui.elements.get('provider').value,'Keymind Cascade');assert.equal(ui.elements.get('artifact').value,'0');
-  assert.equal(ui.evaluate('state.device.architecture'),'nrf52');assert.equal(ui.evaluate('state.device.publicKey'),null);assert.equal(ui.evaluate('state.knownApplicationPort'),null);assert.equal(ui.evaluate('state.device.bootloaderVersion'),null);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.installMode'),'update');
+  assert.equal(ui.evaluate('state.device.architecture'),'nrf52');assert.equal(ui.evaluate('state.device.publicKey'),null);assert.equal(ui.evaluate('state.knownApplicationPort'),null);assert.equal(ui.evaluate('state.device.bootloaderVersion'),null);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.installMode'),'install');assert.equal(ui.elements.get('install-mode-install').checked,true);assert.equal(ui.elements.get('flash-action').value,'wipe');
   assert.match(ui.elements.get('device-meta').textContent,/Meshtastic.*Heltec Mesh Node T114/);assert.match(ui.elements.get('automatic-summary').textContent,/not converted into a MeshCore backup/);assert.doesNotMatch(ui.elements.get('automatic-summary').textContent,/downgrade/i);assert.equal(ui.elements.get('nrf-bootloader-offer').hidden,true);assert.deepEqual(ui.calls,['chooser','open','close']);
 });
 
@@ -79,7 +79,7 @@ test('Meshtastic wire metadata selects Repeater only for Router, Router Late and
     await ui.elements.get('select-port').onclick();
     const expected=[2,11,12].includes(role)?'repeater':'companionFull';
     assert.equal(ui.elements.get('hardware').value,'Heltec T114');assert.equal(ui.elements.get('role').value,expected,device.meshtasticRoleName);assert.equal(ui.elements.get('artifact').value,expected==='repeater'?'2':'0');assert.equal(ui.evaluate('state.device.meshtasticRole'),role);
-    assert.ok(ui.elements.get('device-meta').textContent.includes(device.meshtasticRoleName.replaceAll('_',' ')));assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.evaluate('state.installMode'),'update');
+    assert.ok(ui.elements.get('device-meta').textContent.includes(device.meshtasticRoleName.replaceAll('_',' ')));assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.evaluate('state.installMode'),'install');
     assert.deepEqual(ui.calls,['chooser','open','close']);assert.equal(writes.length,2);assert.deepEqual(writes[1],[0x94,0xc3,0,4,0x18,0xac,0x9e,4]);
   }
 });
@@ -104,7 +104,7 @@ test('a connected Meshtastic RAK3401 selects its universal hardware and the appr
     const expected=role===0?companion:full,index=Number(ui.elements.get('artifact').value);
     assert.equal(ui.elements.get('hardware').value,hardware,ui.elements.get('notice').textContent);assert.equal(ui.elements.get('role').value,role===0?'companionFull':'repeater');assert.notEqual(ui.elements.get('artifact').value,'');assert.equal(ui.context.inventory[index].name,expected.name);
     assert.equal(ui.elements.get('provider').value,'Keymind Cascade');assert.equal(ui.evaluate('state.device.architecture'),'nrf52');assert.equal(ui.evaluate('state.device.model'),'RAK3401');assert.equal(ui.elements.get('transport-mode').value,'auto');
-    assert.doesNotMatch(ui.elements.get('automatic-summary').textContent,/carrier|storage profile|Choose the exact hardware manually|Multiple exact-board builds remain/i);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.installMode'),'update');
+    assert.doesNotMatch(ui.elements.get('automatic-summary').textContent,/carrier|storage profile|Choose the exact hardware manually|Multiple exact-board builds remain/i);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.installMode'),'install');
     assert.deepEqual(ui.calls,['chooser','open','close']);
   }
 });
@@ -216,13 +216,58 @@ test('unknown Meshtastic hardware does not inherit an old MeshCore board or use 
   await ui.elements.get('select-port').onclick();assert.equal(ui.elements.get('hardware').value,'');assert.equal(ui.elements.get('artifact').value,'');assert.equal(ui.evaluate('state.detectedHardware'),null);assert.equal(ui.evaluate('state.pkg'),null);assert.match(ui.elements.get('board-detection').textContent,/manual|unknown|reviewed/i);assert.deepEqual(ui.calls,['chooser','open','close']);
 });
 
-test('moving from Meshtastic requires explicit continue and never claims a MeshCore backup or selects erase',async()=>{
+test('moving from Meshtastic defaults to Install but its backup prompt neither erases nor claims a MeshCore backup',async()=>{
   for(const answer of ['cancel','skip']){
     const ui=await meshtasticWorkbench();await ui.elements.get('select-port').onclick();ui.context.pkg=fakePackage({architecture:'nrf52'});ui.evaluate('state.pkg=pkg;');ui.calls.length=0;
     ui.context.choose=async(title,detail,buttons)=>{ui.calls.push('question');assert.match(title,/Meshtastic.*MeshCore/);assert.match(detail,/does not create or restore Meshtastic/);assert.ok(buttons.some(([,label])=>label==='Continue to MeshCore without backup'));return answer;};
     if(answer==='cancel'){await assert.rejects(ui.evaluate('ensureBackup();'),/Cancelled/);assert.equal(ui.evaluate('state.backupApproved'),null);}
     else {await ui.evaluate('ensureBackup();');assert.equal(ui.evaluate('state.backupApproved.skipped'),true);assert.equal(ui.evaluate('state.backupApproved.publicKey'),null);assert.equal(ui.evaluate('state.backupApproved.sourceFirmware'),'meshtastic');}
-    assert.equal(ui.evaluate('state.backup'),null);assert.equal(ui.evaluate('state.installMode'),'update');assert.deepEqual(ui.calls,['question']);
+    assert.equal(ui.evaluate('state.backup'),null);assert.equal(ui.evaluate('state.installMode'),'install');assert.deepEqual(ui.calls,['question']);
+  }
+});
+
+test('Meshtastic ESP32 defaults to its exact merged install, never silently falling back to an application-only update',async()=>{
+  for(const hasMerged of [true,false]){
+    const ui=await meshtasticWorkbench({device:meshtasticDevice({meshtasticHardware:110})}),update=t114MeshtasticItem({hardware:'Heltec v4',architecture:'esp32',action:'flash-update',name:'heltec_v4_companion_radio_full-v1.18.0.1.bin',url:'https://example.test/v4.bin'});
+    ui.context.inventory=hasMerged?[update,mergedItem(update)]:[update];ui.evaluate('state.items=inventory;filterCatalog();');ui.port.getInfo=()=>({usbVendorId:0x303a,usbProductId:0x1001});
+    await ui.elements.get('select-port').onclick();
+    assert.equal(ui.evaluate('state.installMode'),'install');assert.equal(ui.elements.get('install-mode-install').checked,true);assert.equal(ui.elements.get('install-mode-update').checked,false);assert.equal(ui.elements.get('flash-action').value,'wipe');assert.equal(ui.elements.get('hardware').value,'Heltec v4');assert.equal(ui.elements.get('artifact').value,hasMerged?'1':'');assert.equal(ui.elements.get('prepare-label').textContent,'Backup & prepare install');
+    assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(ui.calls,['chooser','open','close']);
+  }
+});
+
+test('a manual Update choice survives Meshtastic redetection, same-port selection and a late linked catalog',async()=>{
+  let resolveCatalog;const catalogPromise=new Promise(resolve=>resolveCatalog=resolve),ui=workbench({productionDefaults:true,catalogPromise,search:'?mode=install'});serialMock(ui);ui.context.inventory=[t114MeshtasticItem()];ui.context.detectApplication=async()=>meshtasticDevice();ui.evaluate('state.items=inventory;filterCatalog();');ui.port.getInfo=()=>({usbVendorId:0x239a,usbProductId:0x4405});
+  await ui.elements.get('select-port').onclick();assert.equal(ui.evaluate('state.installMode'),'install');
+  ui.elements.get('install-mode-update').checked=true;ui.elements.get('install-mode-install').checked=false;await ui.elements.get('install-mode-update').onchange();assert.equal(ui.evaluate('state.installMode'),'update');
+  await ui.elements.get('probe').onclick();assert.equal(ui.evaluate('state.installMode'),'update');await ui.elements.get('select-port').onclick();assert.equal(ui.evaluate('state.installMode'),'update');
+  resolveCatalog({items:ui.context.inventory,warnings:[],generatedAt:'2026-10-31T00:00:00Z'});await new Promise(resolve=>setImmediate(resolve));assert.equal(ui.evaluate('state.installMode'),'update');assert.equal(ui.elements.get('flash-action').value,'update');assert.equal(ui.elements.get('install-mode-update').checked,true);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls,['chooser','open','close','open','close','chooser','open','close']);
+});
+
+test('a new radio resets the Meshtastic default scope without carrying an automatic erase into MeshCore',async()=>{
+  for(const manualMode of [null,'update','install'])for(const nextIsMeshtastic of [false,true]){
+    const ui=await meshtasticWorkbench();await ui.elements.get('select-port').onclick();
+    if(manualMode){await ui.evaluate("setInstallMode('update');");if(manualMode==='install')await ui.evaluate("setInstallMode('install');");}
+    const nextPort={getInfo:()=>({usbVendorId:0x239a,usbProductId:0x4405})};ui.context.navigator.serial.requestPort=async()=>{ui.calls.push('chooser');return nextPort;};ui.context.detectApplication=async()=>nextIsMeshtastic?meshtasticDevice():{firmwareFamily:'meshcore',role:'common-cli',model:'Heltec T114',catalogRole:'repeater',publicKey:null};
+    await ui.elements.get('select-port').onclick();assert.equal(ui.evaluate('state.installMode'),nextIsMeshtastic?'install':'update');assert.equal(ui.elements.get('flash-action').value,nextIsMeshtastic?'wipe':'update');assert.equal(ui.evaluate('state.port'),nextPort);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.ok(!ui.calls.includes('rom')&&!ui.calls.includes('write'));
+  }
+});
+
+test('a deliberately chosen pre-connection mode belongs to the first radio, not the next one',async()=>{
+  const ui=await meshtasticWorkbench();await ui.evaluate("setInstallMode('install');");ui.context.detectApplication=async()=>({firmwareFamily:'meshcore',role:'common-cli',model:'Heltec T114',catalogRole:'repeater',publicKey:null});
+  await ui.elements.get('select-port').onclick();assert.equal(ui.evaluate('state.installMode'),'install');
+  const nextPort={getInfo:()=>({usbVendorId:0x239a,usbProductId:0x4405})};ui.context.navigator.serial.requestPort=async()=>nextPort;await ui.elements.get('select-port').onclick();assert.equal(ui.evaluate('state.installMode'),'update');assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);
+});
+
+test('an automatic Meshtastic install default clears when the same connected port later answers as MeshCore',async()=>{
+  const ui=await meshtasticWorkbench();await ui.elements.get('select-port').onclick();assert.equal(ui.evaluate('state.installMode'),'install');ui.context.detectApplication=async()=>({firmwareFamily:'meshcore',role:'common-cli',model:'Heltec T114',catalogRole:'repeater',publicKey:null});
+  await ui.elements.get('probe').onclick();assert.equal(ui.evaluate('state.installMode'),'update');assert.equal(ui.elements.get('flash-action').value,'update');assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.ok(!ui.calls.includes('rom')&&!ui.calls.includes('write'));
+});
+
+test('Meshtastic detection cannot promote a locked handoff, written plan or startup-verification flow to erase',async()=>{
+  for(const [field,value] of [['handoff',true],['verification',{sha256:'a'.repeat(64)}],['plan',{written:true}]]){
+    const ui=await meshtasticWorkbench();ui.context.selectedPort=ui.port;ui.context.pendingValue=value;ui.evaluate('state.port=selectedPort;state.'+field+'=pendingValue;');
+    await ui.evaluate('detectSelectedBoard();');assert.equal(ui.evaluate('state.installMode'),'update');assert.equal(ui.evaluate('state.'+field),field==='plan'?null:value);assert.deepEqual(ui.calls,['open','close']);
   }
 });
 

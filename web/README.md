@@ -192,7 +192,14 @@ selections. The usual backup, device checks and flash confirmation still apply.
 
    When moving from Meshtastic, its local metadata role defaults **Router**,
    **Router Late** and **Client Base** to MeshCore **Repeater**; every other
-   role defaults to **Full Companion**. This uses the existing identity query,
+   role defaults to **Full Companion**. The page also selects **Erase & new
+   install** for the new MeshCore installation.
+   ESP32 selects a matching merged image; nRF52 still requires its validated
+   erase ZIP before the application ZIP. Detection itself never erases or
+   writes anything. You can choose **Update** afterward; that choice survives
+   redetection of the same connected radio. Pending recovery, handoff and
+   verification flows retain their original installation mode.
+   Both defaults use the existing identity response,
    with no extra wait or configuration request. If the default build is
    unavailable, choose a role explicitly; no other role is substituted.
    Keymind is preferred; if that exact board has no Keymind builds, stock can
