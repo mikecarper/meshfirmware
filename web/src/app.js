@@ -1272,8 +1272,10 @@ async function prepareSelectedFirmware({waitForRom=false}={}) {
       catch(error) {
         if(!error.download) throw error;
         const {url}=error.download;
-        try { await planner.call('download',{url,bytes:await boundedFetch(url)}); }
-        catch { $('download-migration').href=httpsUrl(url);$('download-migration').hidden=false;revealPanel('migration-options');fail('The migration host blocked the browser download. Use the Download exact migration artifact link, select the exact migration ZIP / pinned USB set under Partition migration artifacts, and inspect again.'); }
+        let bytes;
+        try { bytes=await boundedFetch(url); }
+        catch(downloadError) { $('download-migration').href=httpsUrl(url);$('download-migration').hidden=false;revealPanel('migration-options');fail(`Could not automatically download the exact migration artifact: ${downloadError.message||String(downloadError)} Use the Download exact migration artifact link, select the exact migration ZIP / pinned USB set under Partition migration artifacts, and inspect again. No write was performed.`); }
+        await planner.call('download',{url,bytes});
       }
     }
     if(!prepared) fail('Could not resolve all exact migration artifacts.');

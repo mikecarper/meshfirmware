@@ -6,15 +6,22 @@ import {createHash} from 'node:crypto';
 import {gzipSync,gunzipSync} from 'node:zlib';
 import {matchesCatalogInstallMode} from '../src/automatic.js';
 import {catalogProvider,compareVersions} from '../src/catalog.js';
-import {validateMirrorIndex,MAX_MIRROR_INDEX_BYTES} from '../src/downloads.js';
+import {validateMirrorIndex,mirrorParts,MAX_MIRROR_INDEX_BYTES} from '../src/downloads.js';
 import {publicEraseUtility} from '../src/public-erase-utilities.js';
+import {migrationMetadataSource,isMigrationArchive} from '../src/migration-sources.js';
 import {inspectFirmware} from '../src/firmware.js';
+import {splitMigrationArchive} from './migration-parts.mjs';
 
 export const MIRROR_MAX_ASSET_BYTES=64<<20;
 export const MIRROR_MAX_BYTES=850<<20;
 const MAX_SOURCES=4096,MAX_RELEASES=128,MAX_METADATA_BYTES=16<<20;
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
 const sha=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
+// Current archives and their discovery metadata are required together. The
+// separate older USB set is a fallback for legacy packages, not a dependency
+// of every current (embedded-USB) archive; retain its existing availability
+// warning when that independent old release is absent.
+const requiredMigration=source=>['migration','migration-metadata'].includes(source.kind);
 class Unavailable extends Error {}
 class IntegrityError extends Error {}
 const invariant=(condition,message)=>{if(!condition)throw new IntegrityError(message);};
@@ -81,7 +88,7 @@ export function selectMirrorSources(catalog){
     for(const url of item.bootloader||[])add(reference(url,'bootloader',0,item.bootloaderInfo?.url===url?item.bootloaderInfo:{}));
     const own=githubAsset(item.url);
     if(keymind&&own?.owner==='mikecarper'&&own.repository==='MeshCore'&&/^v\d+(?:\.\d+){2,3}(?:-[A-Za-z0-9._-]+)?$/.test(item.version)){
-      const tag='utility-'+item.version;utilityReleases.set(tag,{owner:own.owner,repository:own.repository,tag,priority:2});
+      const tag='utility-'+item.version;utilityReleases.set(tag,{owner:own.owner,repository:own.repository,tag,priority:0});
     }
   }
   const bundle=catalog.recoveryCatalog?.bundle;if(bundle)add(reference(bundle.url,'recovery',0,bundle));
@@ -90,7 +97,7 @@ export function selectMirrorSources(catalog){
   return {sources:[...sources.values()].sort((a,b)=>a.priority-b.priority||a.url.localeCompare(b.url)),utilityReleases:[...utilityReleases.values()].sort((a,b)=>a.tag.localeCompare(b.tag)),selectedApplications:selected.length};
 }
 async function bodyBytes(response,limit,expected){
-  if(!response?.ok){try{await response?.body?.cancel?.();}catch{}throw new Unavailable(`HTTP ${response?.status||'unavailable'}`);}
+  if(!response?.ok){try{await response?.body?.cancel?.();}catch{}throw Object.assign(new Unavailable(`HTTP ${response?.status||'unavailable'}`),{status:response?.status});}
   const length=response.headers?.get('content-length');
   if(length!==null&&length!==undefined&&/^\d+$/.test(length)&&Number(length)>limit){try{await response.body?.cancel?.();}catch{}throw new IntegrityError('Public asset response exceeds its byte bound.');}
   invariant(response.body&&typeof response.body.getReader==='function','Public asset has no readable body.');
@@ -112,9 +119,9 @@ async function outputDirectory(value){
     const target=join(output,'index.json'),stat=await lstat(target);invariant(stat.isFile()&&!stat.isSymbolicLink()&&stat.size>0&&stat.size<=MAX_MIRROR_INDEX_BYTES,'Previous generated mirror index exceeds its safe size.');
     try{previous=validateMirrorIndex(JSON.parse(await readFile(target,'utf8')));}catch{throw new IntegrityError('Previous generated mirror index is invalid; existing files were preserved.');}
   }
-  const owned=new Map((previous?.entries||[]).map(entry=>[entry.path,entry]));
+  const owned=new Map((previous?.entries||[]).flatMap(entry=>mirrorParts(entry).map(piece=>[piece.path,piece])));
   for(const file of files)if(file.name!=='index.json')invariant(owned.has(file.name),'Unowned hash file in generated firmware directory; existing files were preserved.');
-  return {output,owned};
+  return {output,owned,previous:new Map((previous?.entries||[]).map(entry=>[entry.url,entry]))};
 }
 async function cachedGzip(target,source,metadata){
   let stat;try{stat=await lstat(target);}catch(error){if(error.code==='ENOENT')return null;throw error;}
@@ -135,7 +142,7 @@ export async function buildMirror({catalog,outputDir,fetchImpl=fetch,token,maxBy
   invariant(typeof outputDir==='string'&&typeof fetchImpl==='function'&&typeof onProgress==='function','Missing mirror output or fetch implementation.');
   invariant(token===undefined||typeof token==='string','Invalid API authorization configuration.');
   invariant(typeof minimumApplicationRatio==='number'&&Number.isFinite(minimumApplicationRatio)&&minimumApplicationRatio>=0&&minimumApplicationRatio<=1&&typeof requireApplications==='boolean','Invalid minimum public application coverage.');
-  const chosen=selectMirrorSources(catalog),{output,owned}=await outputDirectory(outputDir),warnings=[],releases=new Map(),repositories=new Map();
+  const chosen=selectMirrorSources(catalog),{output,owned,previous}=await outputDirectory(outputDir),warnings=[],releases=new Map(),releaseBytes=new Map(),repositories=new Map();
   const warn=message=>{if(warnings.length<256)warnings.push(message.slice(0,500));};
   async function fetchResponse(url,api=false,exactUtility=false){
     try{const response=await fetchImpl(url,{signal:AbortSignal.timeout(api?45000:120000),credentials:'omit',...(api||exactUtility?{redirect:'error'}:{}),headers:{'User-Agent':'meshfirmware-pages-mirror',...(api&&token?{Authorization:`Bearer ${token}`}:{})}});if(api&&response.url&&response.url!==url)throw new IntegrityError('Authoritative GitHub API metadata redirected away from its exact URL.');if(exactUtility&&response.url&&response.url!==url)throw new IntegrityError('Pinned erase utility redirected away from its exact URL.');return response;}
@@ -165,6 +172,7 @@ export async function buildMirror({catalog,outputDir,fetchImpl=fetch,token,maxBy
         const raw=await bodyBytes(await fetchResponse(url,true),MAX_METADATA_BYTES);let value;
         try{value=JSON.parse(raw.toString('utf8'));}catch{throw new IntegrityError('GitHub release metadata is not JSON.');}
         invariant(value&&value.tag_name===source.tag&&value.draft===false&&Array.isArray(value.assets)&&value.assets.length<=20000,'GitHub release identity or asset inventory is invalid.');
+        releaseBytes.set(url,raw);
         return value;
       })());
     }
@@ -176,19 +184,24 @@ export async function buildMirror({catalog,outputDir,fetchImpl=fetch,token,maxBy
   for(const utility of chosen.utilityReleases){
     try{
       const value=await release(utility);
+      const metadata=migrationMetadataSource(`https://api.github.com/repos/${utility.owner}/${utility.repository}/releases/tags/${utility.tag}`);
+      invariant(metadata,'Invalid exact migration metadata source.');
+      const raw=releaseBytes.get(metadata.url);
+      candidates.set(metadata.url,{...metadata,kind:'migration-metadata',priority:0,sha256:digest(raw),size:raw.length,bytes:raw});
       for(const asset of value.assets){
         if(typeof asset.name!=='string'||!(/-migration\.zip$/i.test(asset.name)||/^meshcore-usb-partition-bridges\.zip$/i.test(asset.name)))continue;
         const source=reference(asset.browser_download_url,'migration',utility.priority);
-        invariant(source&&source.owner===utility.owner&&source.repository===utility.repository&&source.tag===utility.tag&&source.name===asset.name,'Utility asset escaped its exact release.');
+        invariant(source&&isMigrationArchive(source.url)&&source.owner===utility.owner&&source.repository===utility.repository&&source.tag===utility.tag&&source.name===asset.name,'Utility asset escaped its exact release.');
         candidates.set(source.url,source);
       }
-    }catch(error){if(!(error instanceof Unavailable))throw error;warn(`Utility release ${utility.tag}: ${error.message}.`);}
+    }catch(error){if(!(error instanceof Unavailable))throw error;invariant(error.status===404,`Partition migration discovery for ${utility.tag} is unavailable: ${error.message}. Keep the existing deployment.`);warn(`Utility release ${utility.tag}: ${error.message}.`);}
   }
   invariant(candidates.size<=MAX_SOURCES,'Public mirror source limit exceeded.');
   const sources=[...candidates.values()].sort((a,b)=>a.priority-b.priority||a.url.localeCompare(b.url)),resolved=[];
   for(const source of sources){
     try{
       const utility=source.kind==='erase'?publicEraseUtility(source.url):null;
+      if(source.kind==='migration-metadata'){resolved.push(source);continue;}
       if(utility){
         invariant(source.name===utility.name&&source.sha256===utility.sha256&&source.size===utility.size,'Erase utility source differs from its exact registry pin.');
         resolved.push(source);continue;
@@ -203,22 +216,37 @@ export async function buildMirror({catalog,outputDir,fetchImpl=fetch,token,maxBy
       invariant(!source.sha256||source.sha256===actualHash,'Catalog SHA-256 differs from the GitHub release asset.');
       invariant(!source.size||source.size===asset.size,'Catalog size differs from the GitHub release asset.');
       resolved.push({...source,size:asset.size,sha256:actualHash});
-    }catch(error){if(!(error instanceof Unavailable))throw error;warn(`${source.owner}/${source.repository}: ${source.name}: ${error.message}.`);}
+    }catch(error){if(!(error instanceof Unavailable))throw error;invariant(!requiredMigration(source),`Required partition migration asset ${source.name} is unavailable: ${error.message}.`);warn(`${source.owner}/${source.repository}: ${source.name}: ${error.message}.`);}
   }
   const applicationUrls=new Set(chosen.sources.filter(source=>['application','merged-install'].includes(source.kind)).map(source=>source.url)),appRequested=applicationUrls.size,appResolved=resolved.filter(source=>applicationUrls.has(source.url)).length;
   invariant(!requireApplications||appRequested>0&&appResolved>0,'No verified public application assets are available; existing deployment must be retained.');
   invariant(!appRequested||appResolved/appRequested>=minimumApplicationRatio,'Verified application metadata coverage is below the required deployment threshold.');
   async function download(source){
     try{
-      const name=`${source.sha256}.gz`,target=join(output,name),cached=owned.has(name)?await cachedGzip(target,source,owned.get(name)):null;
-      if(cached)return {source,gzip:cached,gzipSha256:digest(cached)};
-      const utility=source.kind==='erase'?publicEraseUtility(source.url):null,response=await fetchResponse(source.url,false,!!utility);
-      if(response.url&&!utility){const final=new URL(response.url);invariant(!final.username&&!final.password&&['https://github.com','https://release-assets.githubusercontent.com','https://objects.githubusercontent.com'].includes(final.origin),'GitHub asset redirected to an unapproved origin.');}
-      const raw=await bodyBytes(response,source.size,source.size);
+      let raw=source.bytes;
+      const prior=previous.get(source.url);
+      if(!raw&&prior?.sha256===source.sha256&&prior.size===source.size){
+        const pieces=[];
+        for(const piece of mirrorParts(prior)){
+          const cached=await cachedGzip(join(output,piece.path),piece,owned.get(piece.path));
+          if(!cached)throw new IntegrityError('Owned public mirror cache is incomplete.');
+          pieces.push(gunzipSync(cached,{maxOutputLength:piece.size}));
+        }
+        raw=Buffer.concat(pieces,source.size);
+      }
+      if(!raw){
+        const utility=source.kind==='erase'?publicEraseUtility(source.url):null,response=await fetchResponse(source.url,false,!!utility);
+        if(response.url&&!utility){const final=new URL(response.url);invariant(!final.username&&!final.password&&['https://github.com','https://release-assets.githubusercontent.com','https://objects.githubusercontent.com'].includes(final.origin),'GitHub asset redirected to an unapproved origin.');}
+        raw=await bodyBytes(response,source.size,source.size);
+      }
       invariant(digest(raw)===source.sha256,'Public asset SHA-256 differs from its verified source.');
       verifyPinnedEraseBytes(source,raw);
-      const gzip=gzipSync(raw,{level:9,mtime:0});invariant(gzip.length<=MIRROR_MAX_ASSET_BYTES,'Compressed public asset exceeds 64 MiB.');
-      return {source,gzip,gzipSha256:digest(gzip)};
+      // Keep original bytes: share ZIP_STORED members (including .mota's
+      // duplicate app bytes) and the unchanged app after a merged prefix.
+      // The browser must reassemble and verify the complete GitHub digest.
+      const rawParts=source.kind==='migration'?splitMigrationArchive(raw):source.kind==='merged-install'&&raw.length>0x10000?[raw.subarray(0,0x10000),raw.subarray(0x10000)]:[raw];
+      const parts=rawParts.map(bytes=>{const gzip=gzipSync(bytes,{level:9,mtime:0});invariant(gzip.length<=MIRROR_MAX_ASSET_BYTES,'Compressed public asset exceeds 64 MiB.');return {sha256:digest(bytes),size:bytes.length,gzip,gzipSha256:digest(gzip),gzipSize:gzip.length};});
+      return {source,parts};
     }catch(error){if(!(error instanceof Unavailable))throw error;return {source,unavailable:error.message};}
   }
   // Bounded look-ahead keeps results deterministic in priority order without
@@ -229,17 +257,20 @@ export async function buildMirror({catalog,outputDir,fetchImpl=fetch,token,maxBy
   for(let index=0;index<resolved.length;index++){
     const settled=await pending.get(index);pending.delete(index);if(settled.error)throw settled.error;const result=settled.result;schedule();
     onProgress({completed:index+1,total:resolved.length,entries:entries.length,bytes:total});
-    if(result.unavailable){invariant(!publicEraseUtility(result.source.url),`Required pinned erase utility ${result.source.name} is unavailable: ${result.unavailable}.`);warn(`${result.source.name}: ${result.unavailable}.`);continue;}
-    const {source,gzip,gzipSha256}=result,path=`${source.sha256}.gz`,prior=files.get(path);
-    if(prior)invariant(prior.gzipSha256===gzipSha256&&prior.gzipSize===gzip.length&&prior.size===source.size,'One content hash produced inconsistent mirror bytes.');
-    else{
-      if(total+gzip.length>maxBytes){invariant(!publicEraseUtility(source.url),'Required pinned erase utility exceeds the public mirror budget.');skipped++;continue;}
+    if(result.unavailable){invariant(!publicEraseUtility(result.source.url),`Required pinned erase utility ${result.source.name} is unavailable: ${result.unavailable}.`);invariant(!requiredMigration(result.source),`Required partition migration asset ${result.source.name} is unavailable: ${result.unavailable}.`);warn(`${result.source.name}: ${result.unavailable}.`);continue;}
+    const {source,parts}=result,unique=new Map(parts.map(piece=>[piece.sha256+'.gz',piece]));
+    const extra=[...unique].reduce((sum,[path,piece])=>sum+(files.has(path)?0:piece.gzipSize),0);
+    if(total+extra>maxBytes){invariant(!publicEraseUtility(source.url),'Required pinned erase utility exceeds the public mirror budget.');invariant(!requiredMigration(source)&&source.kind!=='usb-bridge','Required partition migration asset exceeds the public mirror budget.');skipped++;continue;}
+    for(const [path,piece] of unique){
+      const {gzip,gzipSha256,gzipSize,size}=piece,prior=files.get(path);
+      if(prior){invariant(prior.gzipSha256===gzipSha256&&prior.gzipSize===gzipSize&&prior.size===size,'One content hash produced inconsistent mirror bytes.');continue;}
       const target=join(output,path);invariant(dirname(target)===output,'Mirror asset escaped its output directory.');
-      const existing=await cachedGzip(target,source,owned.get(path));
+      const existing=owned.has(path)?await cachedGzip(target,piece,owned.get(path)):null;
       if(existing)invariant(digest(existing)===gzipSha256,'Existing generated firmware asset is corrupt.');else await writeFile(target,gzip,{flag:'wx'});
-      total+=gzip.length;files.set(path,{gzipSha256,gzipSize:gzip.length,size:source.size});
+      total+=gzipSize;files.set(path,{gzipSha256,gzipSize,size});
     }
-    entries.push({url:source.url,sha256:source.sha256,size:source.size,gzipSha256,gzipSize:gzip.length,path});
+    const references=parts.map(({sha256,size,gzipSha256,gzipSize})=>({sha256,size,gzipSha256,gzipSize,path:sha256+'.gz'}));
+    entries.push({url:source.url,sha256:source.sha256,size:source.size,...(parts.length===1?references[0]:{parts:references})});
   }
   const appMirrored=entries.filter(entry=>applicationUrls.has(entry.url)).length;
   invariant(!requireApplications||appMirrored>0,'No verified public application payloads were mirrored; existing deployment must be retained.');

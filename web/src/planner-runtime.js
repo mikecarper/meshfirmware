@@ -5,6 +5,7 @@ import { hexToBytes } from '@noble/hashes/utils.js';
 const MODULES = ['meshcore_partition_expansion.py', 'meshcore_backup.py'];
 const MAX_IMAGE = 64 << 20;
 const MAX_ARTIFACT = 32 << 20;
+const MAX_CACHED_ARTIFACTS = 5;
 const MAC = /^(?:[\da-f]{2}:){5}[\da-f]{2}$/i;
 const sync = (py, populate) => new Promise((resolve, reject) => py.FS.syncfs(populate, error => error ? reject(new Error('Browser migration storage could not be synchronized. No flash is authorized.')) : resolve()));
 
@@ -37,6 +38,9 @@ export function createPlannerService({ loadRuntime, readValidator, persistent = 
         if (!fetched.has(url)) { pendingDownload = { url, limit }; throw new Error('Browser download required'); }
         const bytes = fetched.get(url);
         if (bytes.length > limit) throw new Error('Downloaded artifact exceeds validator limit.');
+        // Keep this operation's artifacts hot while bounded old board/release
+        // downloads can be evicted instead of forcing the user to reload.
+        fetched.delete(url); fetched.set(url, bytes);
         return bytes;
       };
       py.globals.set('browser_download', download);
@@ -78,7 +82,8 @@ export function createPlannerService({ loadRuntime, readValidator, persistent = 
           if (!(data.bytes instanceof Uint8Array) || data.bytes.length > MAX_ARTIFACT) throw new Error('Artifact exceeds 32 MiB.');
           const url = new URL(data.url);
           if (url.protocol !== 'https:' || url.username || url.password) throw new Error('Artifact URL must be public HTTPS.');
-          if (!fetched.has(url.href) && fetched.size >= 5) throw new Error('Too many cached migration artifacts. Reload to clear them.');
+          fetched.delete(url.href);
+          while (fetched.size >= MAX_CACHED_ARTIFACTS) fetched.delete(fetched.keys().next().value);
           fetched.set(url.href, data.bytes); return true;
         }
         const py = await initialize();

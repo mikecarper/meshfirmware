@@ -1860,7 +1860,19 @@ test('blocked migration downloads expose the offline ZIP inputs and exact downlo
   ui.context.EspSession=class{async connect(){ui.calls.push('mock-connect');return{mac:'aa:bb:cc:dd:ee:ff',chip:'ESP32',flashBytes:4<<20};}async prepare(){throw Object.assign(Error('Needs migration artifact'),{download:{url}});}async close(){ui.calls.push('mock-close');}};
   await ui.elements.get('prepare').onclick();
   assert.equal(ui.elements.get('migration-options').open,true);assert.equal(advanced.open,true);assert.equal(ui.elements.get('download-migration').hidden,false);assert.equal(ui.elements.get('download-migration').href,url);
-  assert.match(ui.elements.get('notice').textContent,/migration host blocked/);assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls,['mock-connect','mock-close']);
+  assert.match(ui.elements.get('notice').textContent,/Could not automatically download.*Fixture CORS block/);assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls,['mock-connect','mock-close']);
+});
+
+test('migration artifact validator errors are not mislabeled as download restrictions',async()=>{
+  const ui=workbench();await Promise.resolve();const advanced=collapsedPanels(ui),url='https://example.test/exact-migration.zip';
+  ui.elements.get('download-migration').hidden=true;
+  ui.context.pkg=fakePackage({name:'app.bin',architecture:'esp32'});ui.context.selectedPort=ui.port;ui.evaluate('state.pkg=pkg;state.port=selectedPort;');
+  ui.context.ensureBackup=async()=>{};ui.context.boundedFetch=async()=>new Uint8Array(8);
+  ui.context.BrowserPlanner=class{async call(op){assert.equal(op,'download');throw Error('Fixture artifact verification failed');}};
+  ui.context.EspSession=class{async connect(){return{mac:'aa:bb:cc:dd:ee:ff',chip:'ESP32',flashBytes:4<<20};}async prepare(){throw Object.assign(Error('Needs migration artifact'),{download:{url}});}async close(){}};
+  await ui.elements.get('prepare').onclick();
+  assert.match(ui.elements.get('notice').textContent,/Fixture artifact verification failed/);assert.doesNotMatch(ui.elements.get('notice').textContent,/blocked|Download exact|automatically download/);
+  assert.equal(ui.elements.get('download-migration').hidden,true);assert.equal(ui.elements.get('migration-options').open,false);assert.equal(advanced.open,false);assert.equal(ui.evaluate('state.plan'),null);
 });
 
 test('importing a validated backup reveals restore controls without restoring or opening USB',async()=>{

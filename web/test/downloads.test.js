@@ -41,6 +41,38 @@ test('verified same-origin mirror bytes download automatically with no direct Gi
   for(const call of w.calls){assert.equal(call.options.credentials,'omit');assert.equal(call.options.mode,'same-origin');assert.ok(call.options.signal instanceof AbortSignal);assert.ok(!('headers' in call.options));}
 });
 
+function multipartFixture(){
+  const a=fixture(new TextEncoder().encode('public migration prefix')),b=fixture(new Uint8Array(2048).fill(17)),raw=new Uint8Array([...a.raw,...b.raw,...a.raw]);
+  const {url,...prefix}=a.entry,{url:unused,...payload}=b.entry;
+  const entry={url:source,sha256:hash(raw),size:raw.length,parts:[prefix,payload,prefix]};
+  return {raw,entry,index:{schemaVersion:1,entries:[entry],warnings:[]},parts:new Map([[prefix.path,a],[payload.path,b]])};
+}
+
+test('multipart firmware reconstructs the exact original ZIP using only verified same-origin parts',async()=>{
+  const f=multipartFixture(),calls=[];
+  const fetchImpl=async(url,options)=>{calls.push({url,options});if(url.endsWith('/index.json'))return jsonResponse(f.index);return response(f.parts.get(url.split('/').at(-1)).gzip);};
+  assert.deepEqual(await fetchFirmwareBytes(source,{fetchImpl,mirrorBase:base,pageOrigin:base.origin,expectedSha256:f.entry.sha256}),f.raw);
+  assert.equal(calls.length,4);assert.ok(calls.every(call=>call.url.startsWith(base.href)&&call.options.mode==='same-origin'&&call.options.credentials==='omit'));
+  const index=validateMirrorIndex(f.index);assert.ok(Object.isFrozen(index.entries[0].parts));assert.ok(Object.isFrozen(index.entries[0].parts[0]));
+});
+
+test('multipart boundaries, part corruption and final release digest cannot weaken download validation',async()=>{
+  for(const change of [entry=>entry.parts=[],entry=>entry.parts=[entry.parts[0]],entry=>entry.parts=Array(129).fill(entry.parts[0]),entry=>entry.parts[0].path='../other.gz',entry=>entry.parts[0].size++,entry=>entry.path='a'.repeat(64)+'.gz']){
+    const f=multipartFixture();change(f.entry);assert.throws(()=>validateMirrorIndex(f.index),/mirror/i);
+  }
+  for(const failure of ['part','aggregate','order']){
+    const f=multipartFixture();if(failure==='aggregate')f.entry.sha256='a'.repeat(64);if(failure==='order')f.entry.parts.reverse(),[f.entry.parts[0],f.entry.parts[1]]=[f.entry.parts[1],f.entry.parts[0]];
+    const calls=[],fetchImpl=async url=>{calls.push(url);if(url.endsWith('/index.json'))return jsonResponse(f.index);const data=f.parts.get(url.split('/').at(-1)).gzip.slice();if(failure==='part')data[12]^=1;return response(data);};
+    await assert.rejects(fetchFirmwareBytes(source,{fetchImpl,mirrorBase:base,pageOrigin:base.origin}),/SHA-256/);assert.ok(calls.every(url=>url.startsWith(base.href)),'Never fall back to unverified direct bytes');
+  }
+});
+
+test('exact migration discovery metadata downloads from the same public mirror without GitHub API access',async()=>{
+  const f=fixture(new TextEncoder().encode(JSON.stringify({tag_name:'utility-v1.18.0',assets:[]}))),metadata='https://api.github.com/repos/mikecarper/MeshCore/releases/tags/utility-v1.18.0';
+  f.entry.url=metadata;const w=workbench(f);assert.deepEqual(await w.get(metadata),f.raw);assert.equal(w.calls.length,2);assert.ok(w.calls.every(call=>call.url.startsWith(base.href)));
+  for(const url of [metadata+'?token=secret',metadata.replace('mikecarper','someone'),metadata.replace('/utility-v','/v')]){const invalid=clone(f.index);invalid.entries[0].url=url;assert.throws(()=>validateMirrorIndex(invalid),/mirror/i);}
+});
+
 test('mirror lookup binds the complete original URL, never another board or a similar filename',async()=>{
   const f=fixture(),w=workbench(f);await w.get(alternate,{expectedSha256:hash(f.raw)});await w.get(source);
   assert.deepEqual(w.calls.map(call=>call.url),[new URL('index.json',base).href,alternate,new URL(f.entry.path,base).href]);

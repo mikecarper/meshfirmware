@@ -62,6 +62,33 @@ test('browser service validates download inputs before accepting artifacts', asy
   await assert.rejects(service.call('download', { url: 'https://example.test/x', bytes: [] }), /32 MiB/);
 });
 
+test('migration artifact cache stays bounded without requiring reload between boards',async()=>{
+  const globals=new Map(),runtime={
+    FS:{mkdirTree(){},writeFile(){},readdir(){return[];}},
+    globals:{set:(key,value)=>globals.set(key,value)},
+    runPythonAsync:async()=>{},runPython(){}
+  };
+  const cache=createPlannerService({persistent:false,loadRuntime:async()=>runtime,readValidator:async name=>name==='integrity.json'?manifest:sources[name]});
+  await assert.rejects(cache.call('plan',{}),/physical device MAC/);
+  const read=globals.get('browser_download'),urls=Array.from({length:8},(_,i)=>`https://example.test/board-${i}.zip`);
+  for(let i=0;i<5;i++)await cache.call('download',{url:urls[i],bytes:new Uint8Array([i])});
+  assert.deepEqual(read(urls[0],1),new Uint8Array([0])); // Keep the active board hot.
+  await cache.call('download',{url:urls[5],bytes:new Uint8Array([5])});
+  assert.throws(()=>read(urls[1],1),/Browser download required/);
+  assert.deepEqual(read(urls[0],1),new Uint8Array([0]));
+  assert.deepEqual(read(urls[5],1),new Uint8Array([5]));
+  await cache.call('download',{url:urls[5],bytes:new Uint8Array([55])});
+  assert.deepEqual(read(urls[2],1),new Uint8Array([2])); // Replacing a URL consumes no extra slot.
+  for(let i=6;i<8;i++)await cache.call('download',{url:urls[i],bytes:new Uint8Array([i])});
+  assert.throws(()=>read(urls[3],1),/Browser download required/);
+  assert.deepEqual(read(urls[5],1),new Uint8Array([55]));
+  await cache.call('download',{url:urls[3],bytes:new Uint8Array([3])});
+  assert.deepEqual(read(urls[3],1),new Uint8Array([3]));
+  assert.throws(()=>read(urls[3],0),/exceeds validator limit/);
+  await assert.rejects(cache.call('download',{url:urls[7],bytes:new Uint8Array((32<<20)+1)}),/32 MiB/);
+  await assert.rejects(cache.call('download',{url:'http://example.test/board.zip',bytes:new Uint8Array(1)}),/public HTTPS/);
+});
+
 test('browser service exact migration plan, begin and final proof work in WebAssembly', async () => {
   const fixtures = JSON.parse(py.runPython(`
 _image = suite_module.esp_image(0x140100)

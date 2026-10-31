@@ -5,6 +5,7 @@ import {tmpdir} from 'node:os';
 import {resolve,join,basename} from 'node:path';
 import {createHash} from 'node:crypto';
 import {gzipSync,gunzipSync} from 'node:zlib';
+import {zipSync} from 'fflate';
 import {buildMirror,selectMirrorSources,githubAsset,MIRROR_MAX_ASSET_BYTES,MIRROR_MAX_BYTES} from '../scripts/mirror.mjs';
 import {publicEraseUtilities} from '../src/public-erase-utilities.js';
 
@@ -155,8 +156,45 @@ test('budget selection is deterministic even when higher-priority asset fetches 
 test('Keymind utility discovery uses its exact tag and migration asset inventory only',async t=>{
   const app=application({provider:'Keymind Cascade',version:'v1.18.0.1-halo-keymind-cascade-dev-abcdef12',name:'board_repeater-v1.18.0.1-halo-keymind-cascade-dev-abcdef12.bin',url:releaseUrl('full-profiles-v1.18.0.1-halo-keymind-cascade-dev-abcdef12','board_repeater-v1.18.0.1-halo-keymind-cascade-dev-abcdef12.bin','mikecarper')}),migration={url:releaseUrl('utility-'+ 'v1.18.0.1-halo-keymind-cascade-dev-abcdef12','board-v1.18.0.1-halo-keymind-cascade-dev-abcdef12-migration.zip','mikecarper'),name:'board-v1.18.0.1-halo-keymind-cascade-dev-abcdef12-migration.zip'},fixture=inventory([app,migration]),directory=await output(t);
   const result=await build([app],directory,fixture);
-  assert.equal(result.index.entries.length,2);assert.ok(result.index.entries.some(entry=>entry.url===migration.url));assert.ok(fixture.apiRequests.some(request=>request.url.includes('/tags/utility-v1.18.0.1-halo-keymind-cascade-dev-abcdef12')));assert.ok(result.index.warnings.some(warning=>warning.includes('meshcore-usb-partition-bridges.zip')));
-  assert.equal(result.index.entries[0].url,app.url,'Applications are prioritized before optional migration archives');
+  assert.equal(result.index.entries.length,3);assert.ok(result.index.entries.some(entry=>entry.url===migration.url));assert.ok(fixture.apiRequests.some(request=>request.url.includes('/tags/utility-v1.18.0.1-halo-keymind-cascade-dev-abcdef12')));assert.ok(result.index.warnings.some(warning=>warning.includes('meshcore-usb-partition-bridges.zip')));
+  assert.notEqual(result.index.entries[0].url,app.url,'Required migration discovery and archives precede optional application profiles');
+  const metadata=result.index.entries.find(entry=>entry.url.startsWith('https://api.github.com/'));
+  assert.ok(metadata);const value=JSON.parse(gunzipSync(await readFile(join(directory,metadata.path))));
+  assert.equal(value.tag_name,'utility-v1.18.0.1-halo-keymind-cascade-dev-abcdef12');assert.equal(value.assets[0].browser_download_url,migration.url);
+});
+
+test('migration ZIP parts and merged images share original application bytes and remain cache-verifiable',async t=>{
+  const raw=Uint8Array.from({length:0x20000},(_,at)=>(at*31+Math.floor(at/251))%256),name='board_repeater-v1.18.0.bin',app=application({name}),merged=application({name:'board_repeater-v1.18.0-merged.bin',action:'flash-wipe'}),migration={name:'board-v1.18.0-migration.zip',url:releaseUrl('utility-v1.18.0','board-v1.18.0-migration.zip')};
+  const zip=zipSync({'full-application.bin':raw,'full-application.mota':Buffer.concat([bytes('MOTA'),raw]),'wifi-bridge.bin':bytes('public bridge')},{level:0}),directory=await output(t);
+  // An explicit reviewed erase reference is still an opaque ZIP, so use the
+  // Keymind discovery path to exercise migration-member splitting itself.
+  app.provider='Keymind Cascade';app.url=releaseUrl('v1.18.0',name,'mikecarper');migration.url=releaseUrl('utility-v1.18.0',migration.name,'mikecarper');
+  const complete=inventory([app,merged,migration],new Map([[app.url,raw],[merged.url,Buffer.concat([new Uint8Array(0x10000).fill(255),raw])],[migration.url,zip]]));
+  const first=await build([app,merged],directory,complete),appEntry=first.index.entries.find(entry=>entry.url===app.url),zipEntry=first.index.entries.find(entry=>entry.url===migration.url),mergedEntry=first.index.entries.find(entry=>entry.url===merged.url);
+  assert.ok(zipEntry.parts?.length>2);assert.equal(mergedEntry.parts.length,2);
+  assert.ok(zipEntry.parts.some(piece=>piece.path===appEntry.path));assert.equal(mergedEntry.parts[1].path,appEntry.path);
+  const reconstruct=async entry=>Buffer.concat(await Promise.all((entry.parts||[entry]).map(async piece=>gunzipSync(await readFile(join(directory,piece.path))))));
+  assert.deepEqual(await reconstruct(zipEntry),Buffer.from(zip));assert.deepEqual(await reconstruct(mergedEntry),Buffer.concat([new Uint8Array(0x10000).fill(255),raw]));
+  complete.assetRequests.length=0;const second=await build([app,merged],directory,complete);assert.deepEqual(second.index,first.index);assert.equal(complete.assetRequests.length,0,'Composite cache is revalidated without redownloading');
+});
+
+test('published migration archives cannot be silently omitted for space, download or missing digest',async t=>{
+  for(const failure of ['budget','network','digest']){
+    const app=application({provider:'Keymind Cascade',url:releaseUrl('v1.18.0','board_repeater-v1.18.0.bin','mikecarper')}),migration={name:'board-v1.18.0-migration.zip',url:releaseUrl('utility-v1.18.0','board-v1.18.0-migration.zip','mikecarper')},fixture=inventory([app,migration]),directory=await output(t),original=fixture.fetchImpl;
+    if(failure==='digest')[...fixture.releases.values()].find(release=>release.tag_name==='utility-v1.18.0').assets[0].digest=null;
+    if(failure==='network')fixture.fetchImpl=async(url,options)=>url===migration.url?new Response('missing',{status:503}):original(url,options);
+    await assert.rejects(build([app],directory,fixture,failure==='budget'?{maxBytes:1}:{}),/Required partition migration asset/);
+    assert.ok(!(await readdir(directory)).includes('index.json'),'Do not publish a silently incomplete migration set');
+  }
+});
+
+test('missing utility publications remain unsupported but discovery outages cannot publish incomplete coverage',async t=>{
+  for(const failure of ['unpublished','network','http']){
+    const app=application({provider:'Keymind Cascade',url:releaseUrl('v1.18.0','board_repeater-v1.18.0.bin','mikecarper')}),fixture=inventory([app]),directory=await output(t),original=fixture.fetchImpl;
+    fixture.fetchImpl=async(url,options)=>{if(url.includes('/tags/utility-v1.18.0')){if(failure==='network')throw Error('private network detail');return new Response('unavailable',{status:failure==='unpublished'?404:503});}return original(url,options);};
+    if(failure==='unpublished'){const result=await build([app],directory,fixture);assert.ok(result.index.entries.some(entry=>entry.url===app.url));assert.ok(result.index.warnings.some(warning=>warning.includes('utility-v1.18.0')));}
+    else{await assert.rejects(build([app],directory,fixture),error=>{assert.match(error.message,/Partition migration discovery.*unavailable/);assert.doesNotMatch(error.message,/private network detail/);return true;});assert.ok(!(await readdir(directory)).includes('index.json'));}
+  }
 });
 
 test('output refuses arbitrary folders, unowned hashes, pending files and symlinks; only a valid previous index proves cleanup ownership',async t=>{

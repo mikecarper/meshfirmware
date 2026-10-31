@@ -317,10 +317,19 @@ selections. The usual backup, device checks and flash confirmation still apply.
    separate erase acknowledgement. Required pinned utilities cannot be silently
    omitted because of a network failure or mirror-space limit.
 
+   Current release-matched ESP32 migration archives and their exact public
+   discovery metadata are mirrored automatically too, ahead of optional
+   application profiles. A published migration ZIP cannot be silently omitted
+   for a failed download, missing digest or space limit. Build failures retain
+   the existing deployment rather than publishing an incomplete migration set.
+   Identical public application/bridge bytes are stored once and reassembled
+   byte-for-byte; the complete original ZIP's size and SHA-256 still must match.
+   Merged ESP32 installs share their unchanged application bytes the same way.
+
    The mirror is bounded to 850 MiB to stay below GitHub Pages' published-site
-   limit. Latest application profiles in both installation modes and recommended
-   bootloader/erase/recovery assets take priority; migration archives use remaining
-   space. Older, oversized, non-GitHub or custom URLs may not be mirrored. Those
+   limit. Recommended bootloader/erase/recovery assets and required migration
+   assets take priority, followed by latest application profiles in both
+   installation modes. Older, oversized, non-GitHub or custom URLs may not be mirrored. Those
    use their original HTTPS host; if that host blocks browser access (CORS),
    **Download firmware → choose the exact local file** remains the fallback.
    The page never disables CORS, uses an opaque response or uploads private files.
@@ -684,6 +693,11 @@ an export command are not recreated by a settings restore.
 The unchanged `tools/meshcore_partition_expansion.py` validator runs inside
 Pyodide WebAssembly on demand. Only reviewed exact ESP32/C3/S3 board/role/release
 packages qualify. Unsupported layouts/chips do not silently become full wipes.
+
+For current published releases, the exact migration ZIP and release inventory
+download from the verified site mirror during inspection. No local ZIP selection
+is needed in the normal path. A bounded in-memory least-recently-used cache lets
+additional boards/releases be prepared in the same tab without a forced reload.
 
 The page reads the physical table, NVS and OTA state; the exact validator
 selects a release-pinned USB-safe middle firmware and binds the plan to the

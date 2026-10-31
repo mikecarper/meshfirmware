@@ -337,8 +337,8 @@ def unpack_package(archive: bytes, *, usb_only: bool = False) -> tuple[dict, dic
             names, files = set(), {}
             for info in infos:
                 name = info.filename
-                if (not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", name)
-                        or PurePosixPath(name).name != name or name in names
+                if (not re.fullmatch(r"[A-Za-z0-9_.-]{1,255}", name)
+                        or name in {".", ".."} or PurePosixPath(name).name != name or name in names
                         or stat.S_ISLNK(info.external_attr >> 16) or info.flag_bits & 1
                         or info.file_size <= 0 or info.compress_size > MAX_ARCHIVE_BYTES):
                     raise ExpansionError("Migration archive has unsafe paths or invalid entries.")

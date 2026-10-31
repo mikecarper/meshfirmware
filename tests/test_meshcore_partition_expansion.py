@@ -604,7 +604,9 @@ class ExpansionTests(unittest.TestCase):
 
     def test_archive_unsafe_path_duplicate_and_hash_are_rejected(self):
         source = self.package.read_bytes()
-        for extra in ("../escape.bin", "C:\\escape.bin", "wifi-bridge.bin"):
+        for extra in ("../escape.bin", "C:\\escape.bin", "wifi-bridge.bin", ".", "..",
+                      "a" * 256, "../" + "a" * 200 + ".meshtext-license.txt",
+                      "nested\\" + "a" * 200 + ".meshtext-license.txt"):
             stream = io.BytesIO(source)
             with zipfile.ZipFile(stream, "a") as zipper:
                 zipper.writestr(extra, b"unexpected")
@@ -619,6 +621,19 @@ class ExpansionTests(unittest.TestCase):
                 modified.writestr(item.filename, data)
         with self.assertRaisesRegex(EXP.ExpansionError, "SHA-256"):
             EXP.unpack_package(stream.getvalue())
+
+    def test_long_public_license_filename_is_verified_without_requiring_manual_package_edits(self):
+        suffix = ".meshtext-license.txt"
+        names = ("Station_G3_ESP32_repeater-full-usb-wifi-ota-v1.18.0.1-halo-keymind-cascade-dev-03214a16" + suffix,
+                 "L" * (255 - len(suffix)) + suffix)
+        for name in names:
+            with self.subTest(length=len(name)):
+                license_bytes = b"Public redistribution license retained byte-for-byte.\n"
+                self.package.write_bytes(migration_archive(self.image, replacements={name: license_bytes}))
+                manifest, files = EXP.unpack_package(self.package.read_bytes())
+                self.assertEqual(files[name], license_bytes)
+                self.assertEqual(manifest["files"][name]["sha256"], EXP.digest(license_bytes))
+                self.assertTrue(self.plan()["needed"])
 
     def test_automatic_resolver_uses_exact_individual_utility_asset(self):
         archive = self.package.read_bytes()

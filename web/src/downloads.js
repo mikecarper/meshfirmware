@@ -1,6 +1,7 @@
 import {Gunzip} from 'fflate';
 import {hash} from './firmware.js';
 import {publicEraseUtility} from './public-erase-utilities.js';
+import {migrationMetadataSource} from './migration-sources.js';
 
 export const MAX_FIRMWARE_BYTES=64<<20;
 export const MAX_MIRROR_INDEX_BYTES=4<<20;
@@ -21,7 +22,7 @@ function https(value){
   return url;
 }
 function releaseUrl(value){
-  if(publicEraseUtility(value))return value;
+  if(publicEraseUtility(value)||migrationMetadataSource(value))return value;
   const url=https(value);
   if(url.origin!=='https://github.com'||url.search||url.hash||!/^\/[^/]+\/[^/]+\/releases\/download\/[^/]+\/[^/]+$/.test(url.pathname)||url.href!==value)throw error('Mirror entry is not an exact public release asset or pinned erase utility URL.');
   return url.href;
@@ -40,19 +41,35 @@ export function validateMirrorIndex(value,{mirrorBase}={}){
   if(!value||value.schemaVersion!==1||!Array.isArray(value.entries)||value.entries.length>MAX_MIRROR_ENTRIES||!Array.isArray(value.warnings)||value.warnings.length>MAX_MIRROR_ENTRIES||value.warnings.some(w=>typeof w!=='string'||w.length>4096))throw error('Invalid firmware mirror index.');
   if(value.generatedAt!==undefined&&(typeof value.generatedAt!=='string'||value.generatedAt.length>64||!Number.isFinite(Date.parse(value.generatedAt))))throw error('Invalid firmware mirror timestamp.');
   const base=mirrorBase===undefined?null:mirrorBaseUrl(mirrorBase),urls=new Set(),paths=new Map();
-  const entries=value.entries.map(entry=>{
-    if(!entry||!digest(entry.sha256)||!digest(entry.gzipSha256)||!size(entry.size)||!size(entry.gzipSize)||entry.gzipSize<20||entry.path!==`${entry.sha256}.gz`)throw error('Invalid firmware mirror entry size, hash or path.');
-    const url=releaseUrl(entry.url),utility=publicEraseUtility(url);
-    if(utility&&(entry.sha256!==utility.sha256||entry.size!==utility.size))throw error('Public erase utility differs from its pinned ZIP size or SHA-256.');
-    if(urls.has(url))throw error('Ambiguous duplicate URL in firmware mirror index.');urls.add(url);
-    const result={url,sha256:entry.sha256,size:entry.size,gzipSha256:entry.gzipSha256,gzipSize:entry.gzipSize,path:entry.path};
+  const part=value=>{
+    if(!value||!digest(value.sha256)||!digest(value.gzipSha256)||!size(value.size)||!size(value.gzipSize)||value.gzipSize<20||value.path!==`${value.sha256}.gz`)throw error('Invalid firmware mirror entry size, hash or path.');
+    const result={sha256:value.sha256,size:value.size,gzipSha256:value.gzipSha256,gzipSize:value.gzipSize,path:value.path};
     const identity=JSON.stringify([result.sha256,result.size,result.gzipSha256,result.gzipSize]);
     if(paths.has(result.path)&&paths.get(result.path)!==identity)throw error('Conflicting content-addressed firmware mirror entries.');paths.set(result.path,identity);
     if(base){const target=new URL(result.path,base);if(target.origin!==base.origin||target.pathname!==base.pathname+result.path)throw error('Firmware mirror path escapes its directory.');}
     return Object.freeze(result);
+  };
+  const entries=value.entries.map(entry=>{
+    if(!entry||!digest(entry.sha256)||!size(entry.size))throw error('Invalid firmware mirror entry size or hash.');
+    const url=releaseUrl(entry.url),utility=publicEraseUtility(url);
+    if(utility&&(entry.sha256!==utility.sha256||entry.size!==utility.size))throw error('Public erase utility differs from its pinned ZIP size or SHA-256.');
+    if(urls.has(url))throw error('Ambiguous duplicate URL in firmware mirror index.');urls.add(url);
+    let result;
+    if(entry.parts!==undefined){
+      if(!Array.isArray(entry.parts)||entry.parts.length<2||entry.parts.length>128||['path','gzipSha256','gzipSize'].some(key=>entry[key]!==undefined))throw error('Invalid multipart firmware mirror entry.');
+      const parts=entry.parts.map(part);
+      if(parts.reduce((total,piece)=>total+piece.size,0)!==entry.size)throw error('Firmware mirror parts do not match the complete release size.');
+      result={url,sha256:entry.sha256,size:entry.size,parts:Object.freeze(parts)};
+    }else result={url,...part(entry)};
+    return Object.freeze(result);
   });
   return Object.freeze({schemaVersion:1,...(value.generatedAt===undefined?{}:{generatedAt:value.generatedAt}),entries:Object.freeze(entries),warnings:Object.freeze([...value.warnings])});
 }
+
+// Each part is a byte range of the ORIGINAL public asset, not a repacked ZIP.
+// Sharing identical application/bridge bytes keeps all current migration sets
+// within the static-site budget without weakening the complete release digest.
+export const mirrorParts=entry=>entry.parts||[entry];
 
 async function boundedDownload(url,{fetchImpl,maxBytes=MAX_FIRMWARE_BYTES,expectedSize,sameOrigin=false,timeoutMs=120000,cache,decodedGzipSize}={}){
   const response=await fetchImpl(url,{credentials:'omit',signal:AbortSignal.timeout(timeoutMs),...(sameOrigin?{mode:'same-origin'}:{}),...(cache?{cache}:{})});
@@ -135,15 +152,23 @@ export async function fetchFirmwareBytes(url,{expectedSha256='',fetchImpl=fetch,
   const entry=index?.get(source);
   if(entry){
     if(expected&&entry.sha256!==expected)throw error('Firmware mirror SHA-256 differs from the selected catalog release.');
-    const {bytes,httpGzip}=await boundedDownload(new URL(entry.path,base).href,{fetchImpl,maxBytes:entry.gzipSize,expectedSize:entry.gzipSize,decodedGzipSize:entry.size,sameOrigin:true});
-    // A static host can serve the .gz file with Content-Encoding:gzip, which
-    // makes the browser decode it before JavaScript can inspect compressed
-    // bytes. The authoritative raw GitHub digest and exact size ALWAYS apply.
-    // If encoded bytes remain exposed (including an extra HTTP gzip wrapper),
-    // their exact compressed digest must still pass before our own inflater.
-    if(httpGzip&&bytes.length===entry.size&&hash(bytes)===entry.sha256)return bytes;
-    if(httpGzip&&(bytes.length!==entry.gzipSize||hash(bytes)!==entry.gzipSha256))throw error('HTTP-decoded firmware mirror raw size or SHA-256 does not match the selected release asset.');
-    return unpackMirror(bytes,entry);
+    async function fetchPart(piece){
+      const {bytes,httpGzip}=await boundedDownload(new URL(piece.path,base).href,{fetchImpl,maxBytes:piece.gzipSize,expectedSize:piece.gzipSize,decodedGzipSize:piece.size,sameOrigin:true});
+      // A static host can serve the .gz file with Content-Encoding:gzip, which
+      // makes the browser decode it before JavaScript can inspect compressed
+      // bytes. The authoritative raw GitHub digest and exact size ALWAYS apply.
+      // If encoded bytes remain exposed (including an extra HTTP gzip wrapper),
+      // their exact compressed digest must still pass before our own inflater.
+      if(httpGzip&&bytes.length===piece.size&&hash(bytes)===piece.sha256)return bytes;
+      if(httpGzip&&(bytes.length!==piece.gzipSize||hash(bytes)!==piece.gzipSha256))throw error('HTTP-decoded firmware mirror raw size or SHA-256 does not match the selected release asset.');
+      return unpackMirror(bytes,piece);
+    }
+    if(!entry.parts)return fetchPart(entry);
+    const result=new Uint8Array(entry.size);let at=0;
+    // Sequential requests bound memory even for a hostile multipart index.
+    for(const piece of entry.parts){const bytes=await fetchPart(piece);result.set(bytes,at);at+=bytes.length;}
+    if(at!==entry.size||hash(result)!==entry.sha256)throw error('Reassembled firmware mirror SHA-256 does not match the complete release asset.');
+    return result;
   }
   const bytes=await boundedDownload(source,{fetchImpl,...(utility?{maxBytes:utility.size,expectedSize:utility.size}:{})});
   if(expected&&hash(bytes)!==expected)throw error('Published SHA-256 does not match the downloaded firmware.','hash');

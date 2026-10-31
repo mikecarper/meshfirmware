@@ -29,6 +29,32 @@ test('mirror boundary refuses changed bytes, raw proof and malformed or unsafe s
   await fixture(async({root,index,save})=>{index.entries[0].path='../outside.gz';await save();await assert.rejects(verifyMirrorDirectory(root),/path/);});
 });
 
+async function multipartFixture(run){
+  return fixture(async({root,index,save})=>{
+    const a=Buffer.from('PUBLIC ZIP HEADER AND METADATA'),b=Buffer.from('EXACT PUBLIC APPLICATION BINARY'),parts=[a,b,a].map(raw=>{const compressed=gzipSync(raw),sha256=sha(raw);return {raw,compressed,piece:{sha256,size:raw.length,gzipSha256:sha(compressed),gzipSize:compressed.length,path:sha256+'.gz'}};}),raw=Buffer.concat(parts.map(part=>part.raw));
+    const composite={url:'https://github.com/mikecarper/MeshCore/releases/download/utility-v1.18.0.1-halo-keymind-cascade-dev-abcdef12/board-v1.18.0.1-halo-keymind-cascade-dev-abcdef12-migration.zip',sha256:sha(raw),size:raw.length,parts:parts.map(part=>part.piece)};
+    const write=async()=>{index.entries.push(composite);await save();for(const part of parts)await writeFile(join(root,part.piece.path),part.compressed);};
+    await write();await run({root,index,parts,composite,save});
+  });
+}
+
+test('multipart public archives verify the exact original digest while shared parts consume budget only once',async()=>multipartFixture(async({root,index,parts,composite,save})=>{
+  const app=parts[1].piece;index.entries.push({url:'https://github.com/mikecarper/MeshCore/releases/download/full-v1.18.0.1/board.bin',...app});await save();
+  const budget=index.entries[0].gzipSize+parts[0].piece.gzipSize+app.gzipSize;
+  const result=await verifyMirrorDirectory(root,{maxBytes:budget});assert.equal(result.files,3);assert.equal(result.entries,3);assert.ok(result.bytes>budget);assert.equal(composite.parts.length,3);
+  await assert.rejects(verifyMirrorDirectory(root,{maxBytes:budget-1}),/budget/);
+}));
+
+test('multipart public archives reject swapped parts and changed complete-release digests even when all part hashes are valid',async()=>{
+  for(const mutation of [entry=>{[entry.parts[0],entry.parts[1]]=[entry.parts[1],entry.parts[0]];},entry=>{entry.sha256='f'.repeat(64);}])await multipartFixture(async({root,composite,save})=>{mutation(composite);await save();await assert.rejects(verifyMirrorDirectory(root),/multipart firmware SHA-256/);});
+  await multipartFixture(async({root,parts})=>{const changed=Buffer.from(parts[1].compressed);changed[12]^=1;await writeFile(join(root,parts[1].piece.path),changed);await assert.rejects(verifyMirrorDirectory(root),/compressed SHA-256/);});
+});
+
+test('only exact public migration utility release metadata may bypass firmware filename extensions',async()=>{
+  await fixture(async({root,index,entry,save})=>{index.entries[0]={...entry,url:'https://api.github.com/repos/mikecarper/MeshCore/releases/tags/utility-v1.18.0.1-halo-keymind-cascade-dev-abcdef12'};await save();assert.equal((await verifyMirrorDirectory(root)).entries,1);});
+  for(const url of ['https://api.github.com/repos/mikecarper/MeshCore/releases/tags/main','https://api.github.com/repos/other/MeshCore/releases/tags/utility-v1.18.0.1','https://github.com/mikecarper/MeshCore/releases/download/utility-v1.18.0.1/arbitrary.json'])await fixture(async({root,index,entry,save})=>{index.entries[0]={...entry,url};await save();await assert.rejects(verifyMirrorDirectory(root),/exact public release|Unapproved source/);});
+});
+
 test('Pages creates the verified public mirror after refreshing its catalog and before the static build',async()=>{
   const workflow=await readFile(new URL('../../.github/workflows/web-flasher.yml',import.meta.url),'utf8');
   const catalog=workflow.indexOf('run: node scripts/catalog.mjs'),mirror=workflow.indexOf('run: node scripts/mirror.mjs'),build=workflow.indexOf('run: pnpm build');
