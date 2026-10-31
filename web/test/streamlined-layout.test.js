@@ -86,10 +86,12 @@ test('essential firmware inputs and both write-stage buttons stay at the top wit
   assert.ok(has(get('flash'),'disabled'),'Initial page must never offer an unprepared flash');
 });
 
-test('firmware file browsing and the selected build download sit beside the main firmware selector',()=>{
-  const field=get('artifact-field'),browse=get('firmware-files'),download=get('download-selected-build'),choices=get('firmware-choices');
-  const row=browse.parent;assert.ok(hasClass(row,'firmware-file-links'));assert.equal(download.parent,row);assert.ok(inside(row,field));assert.ok(inside(row,choices));
-  assert.equal(closedAncestors(browse).length,0,'Browsing public files must not require opening an advanced panel');
+test('manual file downloads stay optional and collapsed beside the selector, not part of the numbered flash path',()=>{
+  const field=get('artifact-field'),browse=get('firmware-files'),download=get('download-selected-build'),choices=get('firmware-choices'),manual=get('manual-downloads');
+  const row=browse.parent;assert.ok(hasClass(row,'manual-download-actions'));assert.equal(download.parent,row);assert.ok(inside(row,field));assert.ok(inside(row,choices));
+  assert.equal(manual.tag,'details');assert.ok(!has(manual,'open'));assert.deepEqual(closedAncestors(browse),[manual]);assert.ok(!inside(manual,get('advanced-options')),'The optional file links remain easy to find without opening unrelated advanced tools');
+  assert.match(html.slice(manual.start).split('</summary>')[0],/Manual downloads — optional/);
+  const copy=html.slice(manual.start).split('</p>')[0];assert.match(copy,/Not needed to flash on this page/);assert.match(copy,/keep it zipped/);assert.match(copy,/Do not drag folders onto the radio/);
   assert.ok(browse.start>get('artifact-choice-hint').start&&browse.start<get('prepare').start,'File links should follow the selector before numbered preparation');
   assert.equal(browse.tag,'a');assert.equal(download.tag,'a');assert.ok(!has(browse,'hidden'));assert.ok(has(download,'hidden'),'No exact file can be downloaded before one is selected');assert.ok(!has(download,'href'));
   const destination=new URL(browse.attrs.href);assert.equal(destination.href,'https://mikecarper.github.io/MeshCore/firmware_picker/#firmware-picker-1-results');assert.equal(destination.search,'','The initial public link must not contain device data');
@@ -99,10 +101,21 @@ test('firmware file browsing and the selected build download sit beside the main
 });
 
 test('selection sharing is an accessible left-aligned local action with a phone-sized manual copy fallback',()=>{
-  const button=get('copy-selection-link'),row=get('firmware-files').parent,field=get('artifact-field'),fallback=get('selection-link-fallback'),text=get('selection-link-text'),status=get('selection-link-status');
+  const button=get('copy-selection-link'),row=get('manual-downloads').parent,field=get('artifact-field'),fallback=get('selection-link-fallback'),text=get('selection-link-text'),status=get('selection-link-status');
   assert.equal(button.parent,row);assert.equal(button.tag,'button');assert.equal(button.attrs.type,'button');assert.ok(has(button,'disabled'));assert.ok(!has(button,'hidden'));assert.equal(closedAncestors(button).length,0);assert.equal(button.attrs['aria-describedby'],'selection-link-status');assert.match(html.slice(button.start).split('</button>')[0],/>Copy selection link$/);assert.ok(button.start<get('prepare').start);
   assert.ok(inside(fallback,field));assert.ok(has(fallback,'hidden'));assert.equal(text.tag,'textarea');assert.ok(has(text,'readonly'));assert.equal(text.attrs['aria-describedby'],'selection-link-status');assert.equal(status.attrs.role,'status');assert.equal(status.attrs['aria-live'],'polite');assert.ok(nodes.some(node=>node.tag==='label'&&node.attrs.for==='selection-link-text'));
   assert.ok(declarationsFor('.firmware-file-links').some(rule=>rule['justify-content']==='flex-start'&&rule['flex-wrap']==='wrap'));assert.ok(declarationsFor('#selection-link-text').some(rule=>rule.width==='100%'&&rule['max-width']==='100%'&&rule['min-width']==='0'&&rule['font-size']==='16px'&&rule['overflow-wrap']==='anywhere'));
+});
+
+test('new users see no-folder guidance near the USB button and original-file guidance at the optional chooser',()=>{
+  const help=get('usb-workflow-help'),local=get('local-firmware-help'),input=get('firmware-file');
+  assert.ok(inside(help,get('flasher')));assert.ok(help.start>get('select-port').start&&help.start<get('notice').start);assert.equal(closedAncestors(help).length,0);
+  const copy=html.slice(help.start).split('</p>')[0];assert.match(copy,/No firmware folders to download/);assert.match(copy,/ESP32 and nRF52/);assert.match(copy,/follow the numbered buttons/);assert.match(copy,/do not unzip it or drag folders/);
+  assert.ok(declarationsFor('.usb-workflow-help').some(rule=>parseFloat(rule['font-size'])>=14&&rule['overflow-wrap']==='anywhere'));
+  assert.equal(input.attrs['aria-describedby'],local.attrs.id);assert.ok(inside(local,get('custom-firmware')));
+  const localCopy=html.slice(local.start).split('</p>')[0];assert.match(localCopy,/original BIN, ZIP or UF2 file on this page/);assert.match(localCopy,/Keep ZIP files zipped/);
+  assert.ok(!has(input,'directory')&&!has(input,'webkitdirectory')&&!has(input,'multiple'),'The local chooser is for one original file, not firmware folders');
+  assert.match(readme,/Normal ESP32\/nRF52 flashing needs no firmware folders/);
 });
 
 test('advanced, backup, console and capability controls are collapsed by default',()=>{
@@ -493,6 +506,7 @@ test('backup download status is a conditional H1 before the JSON while ordinary 
   assert.equal(generic.tag,'h2');assert.ok(inside(generic,dialog));assert.ok(title.start<generic.start&&generic.start<view.start,'The backup-specific heading precedes ordinary question content');
   assert.ok(title.start<get('question-backup-json').start);assert.equal(hint.tag,'p');assert.ok(inside(hint,view));assert.ok(hint.start<get('question-backup-json').start);
   assert.match(html.slice(hint.start).split('</p>')[0],/Check your browser[’']s Downloads for the JSON file\./);
+  assert.match(html.slice(hint.start).split('</p>')[0],/saves your settings; it is not firmware/);assert.match(html.slice(hint.start).split('</p>')[0],/Keep it on your computer, not on the radio/);
   assert.ok(declarationsFor('#question-backup-download-hint').some(rule=>rule['flex-basis']==='100%'),'The download location hint needs a readable full-width row');
   const rules=declarationsFor('#question-backup-title');
   assert.ok(rules.some(rule=>rule['flex-basis']==='100%'&&rule['overflow-wrap']==='anywhere'),'The longer H1 must wrap within the popup on phones');

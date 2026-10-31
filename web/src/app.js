@@ -1060,7 +1060,7 @@ async function downloadFirmwareBytes(url,name,expectedSha256=''){
   catch(error){
     $('download-firmware').href=source;revealPanel('firmware-choices');revealPanel('image-details');revealPanel('custom-firmware');
     const reason=error.downloadKind?'':' Browser or network restrictions, including CORS, can block access; this page cannot determine which from a failed fetch.';
-    throw new Error(`Could not download ${name} from ${new URL(source).hostname}. ${error.message}${reason} Open Download firmware, then choose that exact local file. No reset or write was sent.`);
+    throw new Error(`Could not download ${name} from ${new URL(source).hostname}. ${error.message}${reason} Retry the numbered action first. For the manual fallback, use Download firmware, then Choose a local firmware file on this page and select the original file from Downloads. Keep ZIP files zipped; do not extract or drag folders onto the radio. No reset or write was sent.`);
   }
 }
 
@@ -1192,7 +1192,8 @@ async function prepareSelectedFirmware({waitForRom=false}={}) {
   if ($('expected-sha').value.trim() && $('expected-sha').value.trim().toLowerCase() !== pkg.sha256) fail('SHA-256 mismatch.');
   if (pkg.architecture === 'uf2') {
     if($('transport-mode').value==='nrf52') fail('nRF52 uses serial DFU ZIPs, not a mounted drive. Select the matching DFU ZIP.');
-    if (!window.showDirectoryPicker) fail('This browser has no directory picker. Download the UF2 and copy it to the bootloader drive manually.');
+    if (!window.showDirectoryPicker) fail('This advanced UF2-only path needs a browser with a folder picker. Use desktop Chrome or Edge so the page can copy the single UF2 file to the radio’s bootloader drive. Do not copy downloaded folders.');
+    notice('Advanced UF2-only step: choose the radio’s bootloader drive in the folder picker, not your Downloads folder. This page will copy one UF2 file after confirmation; do not drag downloaded folders onto the radio.');
     const directory=await window.showDirectoryPicker({mode:'readwrite'}), infoFile=await directory.getFileHandle('INFO_UF2.TXT'), info=await (await infoFile.getFile()).text();
     if(/nrf52|nrf528|nordic/i.test(info)) fail('This is an nRF52 bootloader. Use its serial DFU port and a matching DFU ZIP; drive copying is disabled for nRF52.');
     if (!/UF2 Bootloader|Board-ID:/i.test(info)) fail('This directory has no recognized UF2 bootloader identity.');

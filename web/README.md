@@ -252,9 +252,19 @@ selections. The usual backup, device checks and flash confirmation still apply.
    than the node. Backup, compatibility checks and the normal write confirmation
    still apply; downgrading does not bypass any safety check.
 2. Check the automatic summary and the visible **Firmware selection** inputs.
-   **Firmware files** opens the current public picker for the selected board and
-   role; **Download selected build** downloads the exact chosen file/version.
-   Both links are beside the build selector and work without a USB connection.
+   Normal ESP32/nRF52 flashing needs no firmware folders, ZIP extraction or
+   dragging files onto the radio. Follow the numbered buttons; the page fetches
+   the selected firmware and writes it only after confirmation.
+   **Manual downloads — optional** is collapsed beside the build selector.
+   Inside it, **Firmware files** opens the public picker for the selected board
+   and role, and **Download selected build** downloads the exact file/version
+   for offline use or another tool. Both still work without a USB connection;
+   **Copy selection link** remains directly visible for sharing the setup.
+   For a custom file or failed automatic download, select the original ZIP on
+   this page without unzipping it. A downloaded backup JSON saves settings;
+   keep it on your computer, not on the radio. Only the advanced non-nRF52 UF2
+   path uses a folder picker to choose the radio's bootloader drive; the page
+   copies the single UF2 file rather than a downloaded folder.
    **Advanced options & troubleshooting → Connection & automatic setup** retains
    connection overrides. Explicit choices are not
    silently substituted. Updated firmware exposes read-only **get usb.mode**;

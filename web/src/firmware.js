@@ -169,7 +169,7 @@ export function inspectFirmware(name, bytes) {
   if (/\.uf2$/i.test(name)) {
     const family=validateUf2(bytes);
     if([0x1b57745f,0x621e937a,0xada52840,0x820d9a5f,0x72721d4e,0x6f752678].includes(family)) fail('nRF52 flashing uses serial DFU only. Select the board’s legacy DFU ZIP, not a UF2 mounted-drive file.');
-    return { name, architecture: 'uf2', kind: 'UF2 drive copy', family, sha256: hash(bytes), payloadHash:hash(bytes), payload: bytes, destructive:true, warnings: ['Choose the mounted UF2 bootloader drive yourself. Family IDs do not prove board compatibility. Target startup remains unverified after copying.'] };
+    return { name, architecture: 'uf2', kind: 'UF2 drive copy', family, sha256: hash(bytes), payloadHash:hash(bytes), payload: bytes, destructive:true, warnings: ['Advanced UF2-only path: choose the radio’s bootloader drive in the folder picker, not Downloads. This page copies one UF2 file, never downloaded folders. Family IDs do not prove board compatibility. Target startup remains unverified after copying.'] };
   }
   if (!/\.bin$/i.test(name)) fail('Choose a BIN, legacy nRF52 DFU ZIP, or UF2, or select a supported image inside a release archive.');
   const merged = bytes.length > 0x9000 && bytes[0x8000] === 0xaa && bytes[0x8001] === 0x50;

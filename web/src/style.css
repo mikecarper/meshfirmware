@@ -52,6 +52,8 @@ main { max-width: 1280px; margin: 0 auto; padding: 18px 28px 28px; }
 h1 { font-size: 28px; line-height: 1.15; letter-spacing: -.9px; font-weight: 700; margin: 0 0 5px; }
 .page-heading p { margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted); }
 .connect-controls { display: flex; align-items: center; justify-content: flex-start; flex-wrap: wrap; gap: 12px; }
+.usb-workflow-help { margin: 0; max-width: 780px; font-size: 14px; line-height: 1.55; color: #425769; overflow-wrap: anywhere; }
+.usb-workflow-help strong { color: var(--navy); }
 #start-new-radio { min-height: 64px; padding: 14px 22px; font-size: 16px; }
 .page-header.next-device { width: 100%; padding: 24px; border: 1px solid #cce0df; border-radius: 12px; background: #eaf4f2; }
 .page-header.next-device #reconnect-title { color: var(--navy); font-size: clamp(24px, 3vw, 32px); }
@@ -127,6 +129,11 @@ input[type=checkbox] { accent-color: var(--teal); vertical-align: middle; }
 .firmware-file-links { display: flex; align-items: center; justify-content: flex-start; flex-wrap: wrap; gap: 8px 12px; margin-top: 6px; min-width: 0; }
 .firmware-file-links a { display: inline-flex; align-items: center; max-width: 100%; overflow-wrap: anywhere; }
 .firmware-file-links button { flex: 0 1 auto; max-width: 100%; }
+.manual-downloads { max-width: 100%; min-width: 0; margin: 0; padding: 0; border: 0; }
+.manual-downloads summary { font-size: 12px; color: var(--muted); }
+.manual-downloads p { max-width: 620px; }
+details.manual-downloads[open] { flex-basis: 100%; }
+.manual-download-actions { display: flex; justify-content: flex-start; flex-wrap: wrap; gap: 8px 16px; }
 #selection-link-status { margin: 6px 0 0; overflow-wrap: anywhere; }
 #selection-link-status:empty { display: none; }
 .selection-link-fallback { width: 100%; min-width: 0; margin-top: 8px; }

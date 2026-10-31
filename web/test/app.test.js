@@ -1976,6 +1976,7 @@ test('a failed catalog download names its host and exposes the exact local-file 
   await ui.elements.get('fetch-firmware').onclick();
   const message=ui.elements.get('notice').textContent;
   assert.match(message,/Could not download exact-board\.bin from firmware\.example\.test/i);
+  assert.match(message,/Retry the numbered action first/);assert.match(message,/Choose a local firmware file on this page/);assert.match(message,/Keep ZIP files zipped/);assert.match(message,/do not extract or drag folders onto the radio/);
   assert.match(message,/including CORS|CORS.{0,25}(?:can|may)|(?:can|may).{0,25}CORS/i);
   assert.doesNotMatch(message,/CORS (?:caused|blocked)|blocked (?:by|because of) CORS/i);
   assert.equal(ui.elements.get('download-firmware').href,url);assert.equal(ui.elements.get('image-details').open,true);assert.equal(ui.elements.get('custom-firmware').open,true);assert.equal(advanced.open,true);
