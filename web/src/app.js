@@ -176,13 +176,13 @@ function updateStepGuidance(buildChoiceNeeded=false){
   else if(canStartNewRadio())message='Next: Flash a new device, or optionally verify the previous radio’s startup.';
   else if(state.verification)message=state.port?'Follow the verification controls to restart verified firmware, then use step 1 for its application port and startup check.':'Step 1 again: choose the same radio’s application port to check that the new firmware started.';
   else if(state.plan?.written)message='Transfer finished; startup is not yet verified. Follow the verification controls before starting another update.';
-  else if(state.recovery?.phase==='reselect-dfu'||(state.handoff&&!state.port))message='Step 1 again: choose the same radio’s requested USB port. '+($('skip-backup').checked?'Then step 4: Review & flash without backup; preparation and device checks still run.':'Then repeat step 3: Backup & prepare before step 4: Flash.');
+  else if(state.recovery?.phase==='reselect-dfu'||(state.handoff&&!state.port))message='Step 1 again: choose the same radio’s requested USB port. '+(directFlashSelected()?'Then step 4: Review & flash; preparation and device checks still run.':'Then repeat step 3: Backup & prepare before step 4: Flash.');
   else if(!state.port)message='Step 1: Choose your radio’s USB port. Then step 2: choose Update or Erase & new install and check the firmware.';
   else if(state.plan)message='Step 4: Review & flash. Check the warning and confirm the exact operation; nothing is written before confirmation.';
   else if(state.finishedFirmware?.sha256===state.pkg?.sha256&&state.finishedFirmware)message=state.finishedFirmware.verified?'Application startup verified. No further flashing step is required.':'Transfer finished. Activation remains unverified; do not flash the same image again just to check startup.';
-  else if(buildChoiceNeeded)message='Step 2.5: Choose a firmware build. Then step 3: Backup & prepare.';
-  else if(!state.pkg&&!$('artifact').value)message='Step 2: Choose Update or Erase & new install and check the firmware build. Then step 3: Backup & prepare.';
-  else if($('skip-backup').checked)message='Step 4: Review & flash without backup. Firmware validation and device checks run automatically before confirmation.';
+  else if(buildChoiceNeeded)message='Step 2.5: Choose a firmware build. Then '+(directFlashSelected()?'step 4: Review & flash.':'step 3: Backup & prepare.');
+  else if(!state.pkg&&!$('artifact').value)message='Step 2: Choose Update or Erase & new install and check the firmware build. Then '+(directFlashSelected()?'step 4: Review & flash.':'step 3: Backup & prepare.');
+  else if(directFlashSelected())message=isMeshtasticMigration()?'Step 4: Review & flash. Firmware downloads, validation and device checks run automatically before confirmation.':'Step 4: Review & flash without backup. Firmware validation and device checks run automatically before confirmation.';
   else message='Step 3: Backup & prepare. Follow the backup prompts and USB-port instructions; step 4 flashes only after confirmation.';
   $('step-guidance').textContent=message;
 }
@@ -225,7 +225,7 @@ function updateReconnectCallout(){
 }
 function canPrepareWithoutBackup(){
   const selected=$('artifact').value,hasImage=!!state.pkg||!!(selected&&state.items[Number(selected)]);
-  return !completedFirmwareSelection()&&$('skip-backup').checked&&hasImage&&!!(state.port||state.pkg?.architecture==='uf2')&&!state.verification&&!state.plan?.written&&!state.migrationApproval&&state.recovery?.phase!=='reselect-dfu';
+  return !completedFirmwareSelection()&&directFlashSelected()&&hasImage&&!!(state.port||state.pkg?.architecture==='uf2')&&!state.verification&&!state.plan?.written&&!state.migrationApproval&&state.recovery?.phase!=='reselect-dfu';
 }
 function completedFirmwareSelection(){
   const finished=state.finishedFirmware;
@@ -301,7 +301,7 @@ function nextFlasherControl(){
   if(state.finishedFirmware&&state.finishedFirmware.sha256===state.pkg?.sha256)return null;
   if(state.pkg?.expert&&!/^(?:0x[0-9a-f]+|[0-9]+)$/i.test($('expert-offset').value.trim()))return 'expert-offset';
   if(state.pkg?.architecture!=='uf2'&&$('transport-mode').value==='auto'&&!state.connection?.mode&&!canTryConnectionFallback())return 'transport-mode';
-  return $('skip-backup').checked?'flash':'prepare';
+  return directFlashSelected()?'flash':'prepare';
 }
 function updateNextAction(){
   if(state.flashProgress){setNextAction(null);return;}
@@ -329,10 +329,12 @@ function controls() {
   syncSelectionLink();
   updateBootloaderInfoPanel();
   $('select-port').disabled ||= !('serial' in navigator);
-  $('prepare').disabled ||= !!completedFirmwareSelection() || !!state.plan?.written || $('skip-backup').checked || (!state.pkg&&!$('artifact').value) || (!state.port && state.pkg?.architecture !== 'uf2');
+  $('prepare').hidden=isMeshtasticMigration();$('skip-backup-option').hidden=isMeshtasticMigration();
+  $('prepare').disabled ||= !!completedFirmwareSelection() || !!state.plan?.written || directFlashSelected() || (!state.pkg&&!$('artifact').value) || (!state.port && state.pkg?.architecture !== 'uf2');
   $('flash').disabled ||= !!completedFirmwareSelection() || (!state.plan&&!canPrepareWithoutBackup()) || state.recovery?.phase==='reselect-dfu'||!!state.plan?.written;
-  $('skip-backup').disabled ||= !!completedFirmwareSelection()||!!state.verification||!!state.plan?.written||!!state.migrationApproval;
+  $('skip-backup').disabled ||= isMeshtasticMigration()||!!completedFirmwareSelection()||!!state.verification||!!state.plan?.written||!!state.migrationApproval;
   $('skip-backup-warning').hidden=!$('skip-backup').checked;$('skip-backup-option').classList.toggle('enabled',$('skip-backup').checked);
+  $('workflow-guidance').textContent=isMeshtasticMigration()?'Step 4 downloads and validates the firmware, then asks before erasing or flashing. Meshtastic settings are not backed up or converted to MeshCore.':'Step 3 offers a backup by default. Select Skip backup to go straight to step 4; firmware and device checks run automatically before confirmation. Step 4 asks once for supported expansion + final firmware, then completes both automatically. A new USB interface may still need step 1.';
   $('finish').disabled ||= !state.esp || !state.plan?.written;
   $('wait-migration').disabled ||= !state.port || !state.migration?.uart || state.migration?.settled;
   $('recover-bridge').disabled ||= !state.port || !state.pkg || !state.migration;
@@ -451,6 +453,10 @@ function clearVerification(){state.verification=null;persistFlow('verification',
 function isMeshtastic(device=state.device){return device?.firmwareFamily==='meshtastic'||device?.role==='meshtastic';}
 function isBootloaderInfo(device=state.device){return device?.firmwareFamily==='bootloader'||device?.role==='bootloader';}
 function isNonMeshCore(device=state.device){return isMeshtastic(device)||isBootloaderInfo(device);}
+// This recovery marker preserves only the streamlined UI after a reload. It
+// never proves board identity or authorizes an erase, write or reconnect.
+function isMeshtasticMigration(){return isMeshtastic()||state.recovery?.sourceFirmware==='meshtastic';}
+function directFlashSelected(){return isMeshtasticMigration()||$('skip-backup').checked;}
 const meshtasticMigrationWarning='Meshtastic is running. Installing MeshCore replaces it; Meshtastic settings, channels and identity are not converted into a MeshCore backup. Export any Meshtastic settings separately before continuing.';
 const bootloaderInfoWarning='INFO_UF2.TXT is a file-based board hint, not proof of the selected USB device or its current mode. Select the same physical radio’s DFU serial port before flashing. No file is copied to the drive.';
 function clearBootloaderInfoEvidence(){state.bootloaderInfo=null;if(isBootloaderInfo()){state.device=null;state.detectedHardware=null;state.boardDetected=false;state.backupApproved=null;state.knownApplicationPort=null;}}
@@ -698,7 +704,7 @@ async function ensureBackup() {
   if(state.migration||state.recovery||state.espRecovery||(state.backupApproved?.sha256===state.pkg?.sha256&&state.backupApproved?.port===state.port))return;
   if(state.skipBackupForOperation){
     if(!state.port)fail('Choose the intended radio’s USB port before continuing without backup.');
-    state.backupApproved={sha256:state.pkg?.sha256||'touch',port:state.port,publicKey:state.device?.publicKey||null,skipped:true};
+    state.backupApproved={sha256:state.pkg?.sha256||'touch',port:state.port,publicKey:state.device?.publicKey||null,skipped:true,...(isMeshtasticMigration()?{sourceFirmware:'meshtastic'}:{})};
     return;
   }
   const bootloader=dfuIds.has(portId(state.port))||$('already-bootloader').checked;
@@ -1292,7 +1298,7 @@ async function flashPreparedFirmware() {
   if(plan.erasePkg)await acknowledgeBoard(plan.erasePkg);
   const token = pkg.expert ? `WRITE 0x${plan.addresses[0].toString(16)}` : pkg.destructive||plan.erasePkg ? 'WIPE WITHOUT BACKUP' : 'FLASH';
   const detail = `${pkg.name}\nSHA-256 ${pkg.sha256}\n${plan.mac ? 'Verified chip MAC ' + plan.mac : plan.uf2Info || 'Board identity unknown to this browser. Confirm the selected nRF52 board yourself.'}${selectedBootloader(pkg)?'\nOur OTAFIX '+selectedBootloader(pkg).version+' · '+selectedBootloader(pkg).profile+'\n'+bootloaderReinstallWarning:''}${plan.erasePkg?'\nERASE FIRST: '+plan.erasePkg.name+'\nSHA-256 '+plan.erasePkg.sha256+'\n'+plan.erasePkg.warnings.join(' '):''}`;
-  const backupWarning=$('skip-backup').checked?'You chose to skip backup. No new logical backup was created. ':'';
+  const backupWarning=isMeshtasticMigration()?'Meshtastic will be replaced. Its settings, channels and identity are not backed up or converted to MeshCore. ':$('skip-backup').checked?'You chose to skip backup. No new logical backup was created. ':'';
   if(state.migrationApproval&&(plan.requiresRevisionOverride||plan.chunkedRecovery))fail('The new plan needs an unapproved compatibility override or interrupted-write recovery. Automatic continuation stopped. Inspect and acknowledge it manually.');
   let allowRevisionMismatch=false;
   if(plan.requiresRevisionOverride){if(!await confirm('ESP silicon-revision mismatch',detail+'\n'+(plan.compatibilityWarnings||[]).join('\n'),'The image is not compatible with the verified chip revision, or the constrained revision could not be verified. Force only if you accept that it may not boot. This does not override security, chip-family or flash bounds checks.',plan.revisionOverrideToken||'FORCE CHIP REVISION'))return;allowRevisionMismatch=true;}
@@ -1314,7 +1320,7 @@ async function flashPreparedFirmware() {
   clearVerification();
   state.finishedFirmware=null;
   if(plan.erasePkg){
-    state.recovery={sha256:pkg.sha256,name:pkg.name,hardware:selectedHardware(),deviceModel:isBootloaderInfo()?null:state.device?.model||null,eraseUrls:state.item?.erase||state.recovery?.eraseUrls||[],phase:'erasing',eraseComplete:false};persistFlow('recovery','meshfirmware.nrfRecovery');
+    state.recovery={sha256:pkg.sha256,name:pkg.name,hardware:selectedHardware(),deviceModel:isBootloaderInfo()?null:state.device?.model||null,eraseUrls:state.item?.erase||state.recovery?.eraseUrls||[],phase:'erasing',eraseComplete:false,...(isMeshtasticMigration()?{sourceFirmware:'meshtastic'}:{})};persistFlow('recovery','meshfirmware.nrfRecovery');
     const link=new SerialLink(state.port);try{await link.open();await withFlashProgress(plan.erasePkg.name,'Preparing erase DFU…',()=>flashNrf(link,plan.erasePkg,progress));state.recovery.eraseComplete=true;}finally{await link.close();state.recovery.phase='reselect-dfu';persistFlow('recovery','meshfirmware.nrfRecovery');state.port=null;state.plan=null;state.generation++;$('port-status').textContent='Select same DFU radio';}
     notice('Erase transfer completed. The original final ZIP remains loaded. Choose the SAME radio’s new DFU serial interface, inspect, then confirm its final firmware write.');return;
   }
@@ -1346,7 +1352,7 @@ async function reviewAndFlashSelectedFirmware(){
   if(state.verification)fail('Firmware has already been transferred. Use Flash a new device to begin another update, or optionally verify the previous device.');
   assertFirmwareNotCompleted();
   if(state.migrationApproval)fail('An approved automatic update is already in progress.');
-  if(!$('skip-backup').checked)return flashPreparedFirmware();
+  if(!directFlashSelected())return flashPreparedFirmware();
   if(!canPrepareWithoutBackup())fail('Select an exact firmware build and the intended radio’s USB port first.');
   state.skipBackupForOperation=true;
   try{

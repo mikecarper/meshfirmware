@@ -206,6 +206,13 @@ selections. The usual backup, device checks and flash confirmation still apply.
    writes anything. You can choose **Update** afterward; that choice survives
    redetection of the same connected radio. Pending recovery, handoff and
    verification flows retain their original installation mode.
+   Meshtastic skips the unavailable backup step: **Step 4: Review & flash**
+   downloads and validates the selected firmware and required erase utility,
+   then asks for write confirmation. Step 3 and the backup-skip checkbox are
+   hidden for that migration; no Meshtastic backup is created or claimed.
+   nRF52 DFU/erase reconnects retain this path, but each write still needs its
+   normal board checks and confirmation. Existing MeshCore nodes keep the
+   normal backup workflow.
    Both defaults use the existing identity response,
    with no extra wait or configuration request. If the default build is
    unavailable, choose a role explicitly; no other role is substituted.

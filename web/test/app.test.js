@@ -233,7 +233,7 @@ test('Meshtastic ESP32 defaults to its exact merged install, never silently fall
     ui.context.inventory=hasMerged?[update,mergedItem(update)]:[update];ui.evaluate('state.items=inventory;filterCatalog();');ui.port.getInfo=()=>({usbVendorId:0x303a,usbProductId:0x1001});
     await ui.elements.get('select-port').onclick();
     assert.equal(ui.evaluate('state.installMode'),'install');assert.equal(ui.elements.get('install-mode-install').checked,true);assert.equal(ui.elements.get('install-mode-update').checked,false);assert.equal(ui.elements.get('flash-action').value,'wipe');assert.equal(ui.elements.get('hardware').value,'Heltec v4');assert.equal(ui.elements.get('artifact').value,hasMerged?'1':'');assert.equal(ui.elements.get('prepare-label').textContent,'Backup & prepare install');
-    assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(ui.calls,['chooser','open','close']);
+    assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.elements.get('flash').disabled,!hasMerged);assert.deepEqual(ui.calls,['chooser','open','close']);
   }
 });
 
@@ -2598,6 +2598,60 @@ async function skipBackupWorkbench({catalogOnly=false,runtime=false,architecture
   if(architecture==='esp32')ui.context.EspSession=class{async connect(mode){assert.equal(mode,'no_reset');ui.calls.push('inspect-chip');return {chip:'ESP32-S3',mac:'aa:bb:cc:dd:ee:ff',flashBytes:4<<20};}async prepare(pkg){ui.calls.push('validate-plan');return {sha256:pkg.sha256,addresses:[0x10000],mac:'aa:bb:cc:dd:ee:ff'};}async flash(){ui.calls.push('write-final');}async close(){ui.calls.push('close-rom');}};
   return ui;
 }
+
+async function meshtasticDirectWorkbench(options={}){
+  const ui=await skipBackupWorkbench(options);ui.elements.get('skip-backup').checked=false;ui.context.sourceDevice=meshtasticDevice();ui.evaluate('state.device=sourceDevice;controls();');
+  ui.context.choose=async()=>{throw Error('No separate backup dialog is needed for Meshtastic');};
+  ui.context.confirm=async(_title,_detail,warning,token)=>{if(token!=='SAME DEVICE'){assert.match(warning,/Meshtastic.*not backed up/i);assert.doesNotMatch(warning,/You chose to skip backup/);}ui.calls.push('confirm:'+token);return true;};
+  return ui;
+}
+
+test('Meshtastic hides unavailable backup controls and highlights step 4 without changing the manual skip preference',async()=>{
+  const ui=await meshtasticWorkbench();await ui.elements.get('select-port').onclick();
+  assert.equal(ui.elements.get('prepare').hidden,true);assert.equal(ui.elements.get('prepare').disabled,true);assert.equal(ui.elements.get('skip-backup-option').hidden,true);assert.equal(ui.elements.get('skip-backup').checked,false);assert.equal(ui.elements.get('flash').disabled,false);assert.deepEqual(nextHighlight(ui),['flash']);assert.match(ui.elements.get('step-guidance').textContent,/^Step 4:/);assert.doesNotMatch(ui.elements.get('workflow-guidance').textContent,/Step 3|choose.*skip/i);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls,['chooser','open','close']);
+  await ui.evaluate("setInstallMode('update');");assert.equal(ui.elements.get('prepare').hidden,true);assert.equal(ui.elements.get('flash').disabled,false);assert.deepEqual(nextHighlight(ui),['flash']);
+});
+
+test('Meshtastic step 4 downloads and validates before final consent, without an unsupported backup prompt',async()=>{
+  for(const architecture of ['nrf52','esp32']){
+    const ui=await meshtasticDirectWorkbench({catalogOnly:true,architecture});await ui.elements.get('flash').onclick();
+    assert.ok(ui.calls.indexOf('download')<ui.calls.indexOf('validate-image'));assert.ok(ui.calls.indexOf('validate-image')<ui.calls.indexOf('confirm:FLASH'));assert.ok(ui.calls.indexOf('confirm:FLASH')<ui.calls.indexOf('write-final'));assert.equal(ui.calls.filter(call=>call==='write-final').length,1);assert.equal(ui.elements.get('skip-backup').checked,false);assert.equal(ui.evaluate('state.skipBackupForOperation'),false);assert.equal(ui.evaluate('state.backup'),null);
+  }
+});
+
+test('Meshtastic direct preparation stops on invalid firmware, missing erase utility, board mismatch or declined confirmation',async()=>{
+  for(const outcome of ['invalid','erase','board','cancel']){
+    const ui=await meshtasticDirectWorkbench({catalogOnly:outcome==='invalid'});
+    if(outcome==='invalid')ui.context.inspectFirmware=()=>{throw Error('Invalid firmware');};
+    if(outcome==='erase'){ui.evaluate("state.installMode='install';syncInstallMode();");ui.context.erasePackage=async()=>{throw Error('Missing erase utility');};}
+    if(outcome==='board')ui.context.assessBoard=()=>({requiresOverride:true,firmwareFamily:'rak4631',deviceFamily:'unknown',token:'unknown-to-rak4631'});
+    if(outcome==='board'||outcome==='cancel')ui.context.confirm=async(_title,_detail,warning,token)=>{ui.calls.push('confirm:'+token);return false;};
+    await ui.elements.get('flash').onclick();assert.ok(!ui.calls.includes('write-final')&&!ui.calls.includes('write-erase'),outcome);assert.equal(ui.evaluate('state.skipBackupForOperation'),false,outcome);assert.equal(ui.elements.get('skip-backup').checked,false,outcome);
+  }
+});
+
+test('Meshtastic keeps step 4 across nRF52 runtime-to-DFU handoff without automatically writing',async()=>{
+  const ui=await meshtasticDirectWorkbench({runtime:true});await ui.elements.get('flash').onclick();assert.deepEqual(ui.calls,['enter-dfu']);assert.equal(ui.evaluate('state.backupApproved.sourceFirmware'),'meshtastic');assert.equal(ui.evaluate('state.port'),null);assert.match(ui.elements.get('step-guidance').textContent,/Step 1.*step 4/i);assert.equal(ui.elements.get('prepare').hidden,true);
+  ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0044});await ui.elements.get('select-port').onclick();assert.equal(ui.elements.get('flash').disabled,false);assert.deepEqual(nextHighlight(ui),['flash']);assert.ok(!ui.calls.includes('write-final'));await ui.elements.get('flash').onclick();assert.equal(ui.calls.filter(call=>call==='write-final').length,1);assert.equal(ui.calls.filter(call=>call==='enter-dfu').length,1);assert.ok(ui.calls.indexOf('confirm:SAME DEVICE')<ui.calls.indexOf('confirm:FLASH'));assert.equal(ui.elements.get('skip-backup').checked,false);
+});
+
+test('Meshtastic erase and final application writes each retain consent, with a UI-only recovery-source marker',async()=>{
+  const ui=await meshtasticDirectWorkbench();ui.evaluate("state.installMode='install';syncInstallMode();");ui.context.erase=fakePackage({name:'erase.zip',erase:true,destructive:true});ui.context.erasePackage=async()=>ui.context.erase;
+  await ui.elements.get('flash').onclick();assert.deepEqual(ui.calls.filter(call=>call.startsWith('write-')),['write-erase']);assert.equal(ui.evaluate('state.recovery.sourceFirmware'),'meshtastic');assert.equal(JSON.parse(ui.context.localStorage.getItem('meshfirmware.nrfRecovery')).sourceFirmware,'meshtastic');assert.equal(ui.elements.get('prepare').hidden,true);assert.equal(ui.elements.get('flash').disabled,true);
+  await ui.elements.get('select-port').onclick();assert.deepEqual(nextHighlight(ui),['flash']);assert.equal(ui.elements.get('flash').disabled,false);assert.deepEqual(ui.calls.filter(call=>call.startsWith('write-')),['write-erase']);await ui.elements.get('flash').onclick();assert.deepEqual(ui.calls.filter(call=>call.startsWith('write-')),['write-erase','write-final']);assert.equal(ui.calls.filter(call=>call==='confirm:WIPE WITHOUT BACKUP').length,1);assert.equal(ui.calls.filter(call=>call==='confirm:FLASH').length,1);assert.equal(ui.elements.get('skip-backup').checked,false);
+});
+
+test('only explicitly marked Meshtastic recovery keeps direct step 4 after reload, never a model-name guess',async()=>{
+  for(const marked of [true,false]){
+    const recovery={sha256:'a'.repeat(64),name:'sample.zip',deviceModel:'Meshtastic hardware 9',eraseComplete:true,...(marked?{sourceFirmware:'meshtastic'}:{})},ui=workbench({recovery});await Promise.resolve();serialMock(ui);ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({name:'sample.zip'});ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0044});ui.elements.get('transport-mode').value='nrf52';ui.context.confirm=async()=>true;await ui.elements.get('select-port').onclick();ui.evaluate('state.pkg=pkg;controls();');
+    assert.equal(ui.elements.get('prepare').hidden,marked);assert.equal(ui.elements.get('skip-backup-option').hidden,marked);assert.equal(ui.elements.get('flash').disabled,!marked);assert.equal(ui.evaluate('state.device'),null);assert.equal(ui.elements.get('skip-backup').checked,false);assert.deepEqual(ui.calls,['chooser']);
+  }
+});
+
+test('connecting a MeshCore node after Meshtastic restores the normal backup path',async()=>{
+  const ui=await meshtasticWorkbench();await ui.elements.get('select-port').onclick();const nextPort={getInfo:()=>({usbVendorId:0x239a,usbProductId:0x4405})};ui.context.navigator.serial.requestPort=async()=>nextPort;ui.context.detectApplication=async()=>({firmwareFamily:'meshcore',role:'companion',model:'Heltec T114',protocol:13,publicKey:'11'.repeat(32)});await ui.elements.get('select-port').onclick();
+  assert.equal(ui.elements.get('prepare').hidden,false);assert.equal(ui.elements.get('prepare').disabled,false);assert.equal(ui.elements.get('skip-backup-option').hidden,false);assert.equal(ui.elements.get('skip-backup').checked,false);assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(nextHighlight(ui),['prepare']);assert.match(ui.elements.get('workflow-guidance').textContent,/Step 3/);assert.equal(ui.evaluate('state.pkg'),null);
+});
 
 test('skip backup is opt-in and enables step 4 without requiring step 3',async()=>{
   const ui=await skipBackupWorkbench();ui.elements.get('skip-backup').checked=false;ui.evaluate('controls();');
