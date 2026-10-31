@@ -448,7 +448,7 @@ function clearBootloaderInfoEvidence(){state.bootloaderInfo=null;if(isBootloader
 function discardStaleBootloaderInfo(){if(state.bootloaderInfo&&(state.bootloaderInfo.port!==state.port||state.bootloaderInfo.generation!==state.generation))clearBootloaderInfoEvidence();}
 function bootloaderInfoAvailable(){return !!state.port&&!state.migration&&!state.migrationApproval&&!state.recovery&&!state.espRecovery&&!state.verification&&!state.handoff&&!state.esp&&!state.plan&&(state.applicationProbeFailed||dfuIds.has(portId(state.port))||isBootloaderInfo());}
 function updateBootloaderInfoPanel(){const available=bootloaderInfoAvailable();$('bootloader-info-fallback').hidden=!available;$('read-bootloader-info').disabled=state.busy||!available;const result=isBootloaderInfo()?applicationBoard():null;$('bootloader-info-status').textContent=result?[result.hardware?`Read INFO_UF2.TXT; selected ${result.hardware}.`:result.reason,result.candidates.length>1?'Candidates: '+result.candidates.join(', ')+'.':'',bootloaderInfoWarning].filter(Boolean).join(' '):'If this radio exposes a bootloader drive, choose its INFO_UF2.TXT file. The page reads it and selects a matching board and firmware when unambiguous; it never writes to that drive.';}
-function applicationBoard(device=state.device){return isBootloaderInfo(device)?detectBootloaderBoard({items:state.items,info:state.bootloaderInfo?.info,usbInfo:state.port?.getInfo()||{}}):isMeshtastic(device)?detectMeshtasticBoard({items:state.items,hwModel:device.meshtasticHardware}):detectBoard({items:state.items,deviceModel:device?.model||'',usbInfo:state.port?.getInfo()||{}});}
+function applicationBoard(device=state.device){return isBootloaderInfo(device)?detectBootloaderBoard({items:state.items,info:state.bootloaderInfo?.info,usbInfo:state.port?.getInfo()||{}}):isMeshtastic(device)?detectMeshtasticBoard({items:state.items,hwModel:device.meshtasticHardware,pioEnv:device.meshtasticPioEnv}):detectBoard({items:state.items,deviceModel:device?.model||'',usbInfo:state.port?.getInfo()||{}});}
 function requireMeshCoreApplication(){if(isBootloaderInfo())fail('Only bootloader information has been read. Select the running MeshCore application before backup, restore or serial-console commands.');if(isMeshtastic())fail('Meshtastic is running. MeshCore backup, restore and serial commands are available after MeshCore is installed. Export Meshtastic settings separately with a Meshtastic client.');}
 async function readSelectedBootloaderInfo(){
   if(!bootloaderInfoAvailable())fail('Select an unidentified radio or its DFU USB port first. Finish any pending write, recovery or verification before reading a bootloader file.');
@@ -483,7 +483,10 @@ async function readApplication(link) {
   finally{clearApplicationDetection(detection);}
   if(state.port!==port||state.generation!==generation)fail('Selected port changed or disconnected while reading the node. Re-select and detect again.');
   const board=applicationBoard(device);
-  if(isMeshtastic(device)&&board.model)device.model=board.model;
+  if(isMeshtastic(device)){
+    if(board.model)device.model=board.model;
+    log(`Meshtastic identity: hardware enum ${device.meshtasticHardware}${device.meshtasticPioEnv?' · local build '+device.meshtasticPioEnv:''}. ${board.reason}`);
+  }
   const architectures=new Set(state.items.filter(i=>i.hardware===board.hardware).map(i=>i.architecture));
   if(board.hardware&&architectures.size===1)device.architecture=[...architectures][0];
   device.bootloaderVersion=null;

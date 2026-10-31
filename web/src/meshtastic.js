@@ -87,7 +87,12 @@ function message(bytes,localNode){
   if(payload.id===3){
     const nodeNum=uint32(field(data,1,0));
     if(!nodeNum||nodeNum===0xffffffff)throw Error('Meshtastic local identity is unavailable.');
-    return {kind:'local',nodeNum};
+    // MyNodeInfo.pio_env is the local compiled build target, not a user name
+    // or a remote node's advertised hardware. Old RAK3401 development images
+    // retain the RAK4631 enum while reporting their exact target here.
+    const environment=field(data,13,2),pioEnv=environment?.length?string(environment,40):null;
+    if(pioEnv&&!/^[A-Za-z0-9_-]+$/.test(pioEnv))throw Error('Invalid Meshtastic build target.');
+    return {kind:'local',nodeNum,pioEnv};
   }
   if(payload.id===13){
     const hardware=uint32(field(data,9,0)),version=string(field(data,1,2),120);
@@ -117,7 +122,7 @@ export async function detectMeshtastic(link,{timeoutMs=25000,assertCurrent=()=>{
   // while HWCDC::isPlugged() is false. A short probe misses a healthy TinyUSB
   // application; allow one bounded poll interval and return early on identity.
   const started=clock(),until=started+timeoutMs,timeoutSeconds=Math.ceil(timeoutMs/1000);
-  let elapsedSeconds=-1,buffer=[],received=0,processed=0,local=null,metadata=null,name='';
+  let elapsedSeconds=-1,buffer=[],received=0,processed=0,local=null,pioEnv=null,metadata=null,name='';
   const report=value=>{
     const seconds=Math.min(timeoutSeconds,Math.max(elapsedSeconds,0,Math.floor((value-started)/1000)));
     if(seconds===elapsedSeconds)return;
@@ -144,13 +149,16 @@ export async function detectMeshtastic(link,{timeoutMs=25000,assertCurrent=()=>{
       if(!decoded)continue;
       if(decoded.kind==='local'){
         if(local!==null&&local!==decoded.nodeNum)return null;
+        if(pioEnv&&decoded.pioEnv&&pioEnv!==decoded.pioEnv)return null;
         local=decoded.nodeNum;
+        pioEnv=decoded.pioEnv||pioEnv;
       }else if(decoded.kind==='metadata'){
         if(metadata&&(metadata.hardware!==decoded.hardware||metadata.version!==decoded.version||metadata.role!==decoded.role))return null;
         metadata=decoded;
       }else if(decoded.kind==='name'&&decoded.nodeNum===local)name=decoded.name;
       if(local!==null&&metadata){
         return {firmwareFamily:'meshtastic',role:'meshtastic',meshtasticHardware:metadata.hardware,
+          ...(pioEnv?{meshtasticPioEnv:pioEnv}:{}),
           meshtasticRole:metadata.role,meshtasticRoleName:roleNames[metadata.role]||`Unknown role ${metadata.role}`,
           model:'Meshtastic hardware '+metadata.hardware,nodeNum:local,name,version:metadata.version,
           catalogRole:null,publicKey:null};

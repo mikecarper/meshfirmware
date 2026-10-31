@@ -96,6 +96,64 @@ test('RAK3401 enum 117 automatically selects the universal family across provide
   assert.equal(detectMeshtasticBoard({items,hwModel:9}).hardware,'RAK WisBlock / WisMesh (RAK 4631)');
 });
 
+test('the exact RAK3401 build environment resolves its legacy RAK4631 enum without globally remapping enum 9',()=>{
+  const rak3401='RAK WisMesh 1W Booster (3401 + 13302)',rak4631='RAK WisBlock / WisMesh (RAK 4631)',pioEnv='rak3401-1watt';
+  const items=[item(rak4631),item(rak3401),item(rak3401,'nrf52',{provider:'MeshCore'})];
+  for(const hwModel of [9,117])for(const available of [items,items.toReversed(),[item(rak3401)]]){
+    const result=detectMeshtasticBoard({items:available,hwModel,pioEnv});
+    assert.equal(result.hardware,rak3401);assert.equal(result.model,'RAK3401');assert.deepEqual(result.candidates,[rak3401]);assert.match(result.reason,/exact Meshtastic build environment/);
+    if(hwModel===9)assert.match(result.reason,/legacy firmware reports the shared RAK4631 enum 9/);
+  }
+  for(const value of ['',undefined,'rak4631','rak3401-1watt-extra','prefix-rak3401-1watt','RAK3401-1WATT','rak3401_1watt']){
+    assert.equal(detectMeshtasticBoard({items,hwModel:9,pioEnv:value}).hardware,rak4631);
+  }
+  assert.equal(detectMeshtasticBoard({items,hwModel:9,pioEnv:'',version:'2.7.11.47bf2b4a',deviceModel:'RAK3401',usbInfo:{usbVendorId:0x239a,usbProductId:0x8029}}).hardware,rak4631);
+});
+
+test('RAK3401 build-environment conflicts stay manual even when the catalog hides one side',()=>{
+  const rak3401='RAK WisMesh 1W Booster (3401 + 13302)',xiao='Seeed Studio Xiao nRF52 WIO';
+  for(const items of [[item(rak3401),item(xiao)],[item(rak3401)],[item(xiao)],[]]){
+    const result=detectMeshtasticBoard({items,hwModel:88,pioEnv:'rak3401-1watt'});
+    assert.equal(result.hardware,null);assert.deepEqual(result.candidates,items.map(row=>row.hardware).sort());assert.match(result.reason,/conflicts.*manually/);
+  }
+  for(const hwModel of [0,36,255,987654,'9',undefined,NaN])assert.equal(detectMeshtasticBoard({items:[item(rak3401)],hwModel,pioEnv:'rak3401-1watt'}).hardware,null);
+});
+
+test('the legacy RAK3401 environment cannot substitute a different board, architecture, project or malformed environment',()=>{
+  const hardware='RAK WisMesh 1W Booster (3401 + 13302)',other='RAK WisBlock / WisMesh (RAK 4631)';
+  for(const items of [[item(other)],[item(hardware,'esp32')],[item(hardware,'nrf52',{project:'Meshtastic'})],[item('RAK3401')],[]]){
+    const result=detectMeshtasticBoard({items,hwModel:9,pioEnv:'rak3401-1watt'});assert.equal(result.hardware,null);assert.deepEqual(result.candidates,[]);
+  }
+  for(const pioEnv of [null,{},[],9,'rak3401-1watt ',' rak3401-1watt','rak3401-1watt\n','rak3401-1watt\0','x'.repeat(41),'rak3401-1watt/extra']){
+    const result=detectMeshtasticBoard({items:[item(hardware),item(other)],hwModel:9,pioEnv});assert.equal(result.hardware,null);assert.deepEqual(result.candidates,[]);assert.match(result.reason,/malformed/);
+  }
+});
+
+test('exact Wio L1 environments distinguish Pro and E-Ink including InkHUD firmware reporting generic enum 99',()=>{
+  const pro='Seeed Studio Wio Tracker L1 Pro',eink='Seeed Studio Wio Tracker L1 E-Ink',oneWatt='Seeed WioTracker L1 1W';
+  const items=[item(pro),item(eink),item(oneWatt),item('Seeed Studio Wio Tracker L1 EINK','nrf52',{provider:'MeshCore'})];
+  const cases=[['seeed_wio_tracker_L1',99,pro],...['seeed_wio_tracker_L1_eink','seeed_wio_tracker_L1_eink-inkhud'].flatMap(env=>[99,100].map(hw=>[env,hw,eink]))];
+  for(const [pioEnv,hwModel,hardware] of cases)for(const available of [items,items.toReversed(),[item(hardware)]]){
+    const result=detectMeshtasticBoard({items:available,hwModel,pioEnv});assert.equal(result.hardware,hardware);assert.deepEqual(result.candidates,[hardware]);assert.match(result.reason,/exact Meshtastic build environment/);
+    if(hwModel===99&&hardware===eink)assert.match(result.reason,/generic Wio Tracker L1 enum 99/);
+  }
+  for(const pioEnv of ['',undefined,'seeed_wio_tracker_L1_custom','SEEED_WIO_TRACKER_L1','seeed_wio_tracker_L1_eink-extra']){
+    assert.equal(detectMeshtasticBoard({items:[item(pro)],hwModel:99,pioEnv}).hardware,null);
+  }
+  assert.equal(detectMeshtasticBoard({items,hwModel:144,pioEnv:'seeed_wio_tracker_L1_Pro_1W'}).hardware,oneWatt);
+});
+
+test('Wio environment conflicts and missing exact catalog boards never turn 1W into Pro or E-Ink',()=>{
+  const pro='Seeed Studio Wio Tracker L1 Pro',eink='Seeed Studio Wio Tracker L1 E-Ink',oneWatt='Seeed WioTracker L1 1W';
+  for(const [pioEnv,hwModel,hardware] of [['seeed_wio_tracker_L1',144,pro],['seeed_wio_tracker_L1_eink',144,eink],['seeed_wio_tracker_L1_eink-inkhud',144,eink],['seeed_wio_tracker_L1',100,pro]]){
+    for(const items of [[item(pro),item(eink),item(oneWatt)],[item(hardware)],[item(oneWatt)]]){
+      const result=detectMeshtasticBoard({items,hwModel,pioEnv});assert.equal(result.hardware,null);assert.match(result.reason,/conflicts.*manually/);
+    }
+  }
+  assert.equal(detectMeshtasticBoard({items:[item(pro)],hwModel:99,pioEnv:'seeed_wio_tracker_L1_eink'}).hardware,null);
+  assert.equal(detectMeshtasticBoard({items:[item(eink)],hwModel:99,pioEnv:'seeed_wio_tracker_L1'}).hardware,null);
+});
+
 test('reviewed provider aliases describe one board rather than forcing a false manual choice', () => {
   const cases=[
     [100,'Seeed Studio Wio Tracker L1 EINK','Seeed Studio Wio Tracker L1 E-Ink'],

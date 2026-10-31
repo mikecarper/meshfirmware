@@ -109,6 +109,39 @@ test('a connected Meshtastic RAK3401 selects its universal hardware and the appr
   }
 });
 
+test('legacy Meshtastic RAK3401 wire identity selects 3401, preserves the reported enum, and never chooses 4631 firmware',async()=>{
+  const version='v1.18.0.1',h3401='RAK WisMesh 1W Booster (3401 + 13302)',h4631='RAK WisBlock / WisMesh (RAK 4631)';
+  const application=(hardware,target,role)=>t114MeshtasticItem({hardware,role,version,name:target+(role==='repeater'?'-full-ota':'')+'-'+version+'.zip',url:'https://example.test/'+target+'.zip',releaseNotes:'EXACT TARGET - '+target+'.'});
+  const inventory=[application(h4631,'RAK_4631_companion_radio_full','companionFull'),application(h4631,'RAK_4631_repeater_unified_lora_ota','repeater'),application(h3401,'RAK_3401_companion_radio_full','companionFull'),application(h3401,'RAK_3401_repeater_unified_lora_ota','repeater')];
+  const frame=payload=>[0x94,0xc3,payload.length>>8,payload.length&255,...payload];
+  for(const hw of [9,117])for(const role of [0,2]){
+    const environment=new TextEncoder().encode('rak3401-1watt'),info=[8,9,0x6a,environment.length,...environment],versionBytes=new TextEncoder().encode('2.7.11.47bf2b4a'),metadata=[0x0a,versionBytes.length,...versionBytes,0x38,role,0x48,hw],wire=Uint8Array.from([...frame([0x1a,info.length,...info]),...frame([0x6a,metadata.length,...metadata])]);
+    const writes=[],device=await detectMeshtastic({buffer:[],async write(value){writes.push([...value]);},async read(){return wire;}},{delay:async()=>{}});
+    const ui=await meshtasticWorkbench({device});ui.context.inventory=inventory;ui.evaluate('state.items=inventory;filterCatalog();');ui.port.getInfo=()=>({usbVendorId:0x239a,usbProductId:0x8029});
+    await ui.elements.get('select-port').onclick();
+    assert.equal(ui.elements.get('hardware').value,h3401);assert.equal(ui.elements.get('artifact').value,role===0?'2':'3');assert.equal(ui.evaluate('state.device.model'),'RAK3401');assert.equal(ui.evaluate('state.device.meshtasticHardware'),hw);assert.equal(ui.evaluate('state.device.meshtasticPioEnv'),'rak3401-1watt');assert.match(ui.elements.get('device-meta').textContent,/Meshtastic · RAK3401/);
+    assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls,['chooser','open','close']);assert.equal(writes.length,2);assert.deepEqual(writes[1],[0x94,0xc3,0,4,0x18,0xac,0x9e,4]);
+  }
+});
+
+test('a real Meshtastic RAK4631 remains 4631 while conflicting build reports cannot retain an automatic choice',async()=>{
+  const h3401='RAK WisMesh 1W Booster (3401 + 13302)',h4631='RAK WisBlock / WisMesh (RAK 4631)';
+  for(const [meshtasticHardware,meshtasticPioEnv,expected] of [[9,'rak4631',h4631],[9,'rak3401-1watt',h3401],[69,'rak3401-1watt','']]){
+    const ui=await meshtasticWorkbench({device:meshtasticDevice({meshtasticHardware,meshtasticPioEnv})});ui.context.inventory=[h3401,h4631,'Heltec T114'].map((hardware,index)=>t114MeshtasticItem({hardware,name:'radio-'+index+'.zip'}));ui.evaluate('state.items=inventory;filterCatalog();');
+    await ui.elements.get('select-port').onclick();assert.equal(ui.elements.get('hardware').value,expected);if(!expected){assert.equal(ui.elements.get('artifact').value,'');assert.match(ui.elements.get('board-detection').textContent,/conflict/i);}
+    assert.equal(ui.evaluate('state.pkg'),null);assert.deepEqual(ui.calls,['chooser','open','close']);
+  }
+});
+
+test('Wio local build targets resolve Pro and E-Ink without guessing the 1W variant or changing roles',async()=>{
+  const pro='Seeed Studio Wio Tracker L1 Pro',eink='Seeed Studio Wio Tracker L1 E-Ink',oneW='Seeed WioTracker L1 1W';
+  for(const [meshtasticHardware,meshtasticPioEnv,expected] of [[99,'seeed_wio_tracker_L1',pro],[99,'seeed_wio_tracker_L1_eink-inkhud',eink],[100,'seeed_wio_tracker_L1_eink',eink],[144,'seeed_wio_tracker_L1_eink',''],[99,'private_wio_build','']]){
+    const ui=await meshtasticWorkbench({device:meshtasticDevice({meshtasticHardware,meshtasticPioEnv})});ui.context.inventory=[pro,eink,oneW].map((hardware,index)=>t114MeshtasticItem({hardware,name:'wio-'+index+'.zip'}));ui.evaluate('state.items=inventory;filterCatalog();');
+    await ui.elements.get('select-port').onclick();assert.equal(ui.elements.get('hardware').value,expected);assert.equal(ui.elements.get('role').value,expected?'companionFull':'');if(!expected)assert.equal(ui.elements.get('artifact').value,'');
+    assert.equal(ui.evaluate('state.pkg'),null);assert.deepEqual(ui.calls,['chooser','open','close']);
+  }
+});
+
 test('equivalent provider hardware labels auto-select one board and remain usable after an explicit provider/role change',async()=>{
   const cases=[
     [100,'Seeed Studio Wio Tracker L1 E-Ink','Seeed Studio Wio Tracker L1 EINK'],

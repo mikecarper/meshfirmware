@@ -142,6 +142,13 @@ selections. The usual backup, device checks and flash confirmation still apply.
    (the unrelated ESP32 board). RAK3401 selects **RAK WisMesh 1W Booster
    (3401 + 13302)** automatically, including the reviewed INFO_UF2 fallback;
    its universal builds do not need a separate carrier/storage selection.
+   Detection also reads the local compiled build target (`MyNodeInfo.pio_env`)
+   in that same USB identity response. The exact `rak3401-1watt` target resolves
+   early RAK3401 images which incorrectly report the RAK4631 enum. Reviewed Wio
+   L1 Pro and E-Ink targets similarly resolve the generic L1 enum, including
+   E-Ink InkHUD images. The raw enum is retained for diagnostics; a known target
+   paired with a conflicting enum stays manual. Remote node records, display
+   names, version hashes and similar-looking target names never override it.
    Keymind Repeater defaults to the unified **Full OTA** build when feature
    variants coexist; bridge/reduced builds remain available manually.
    Unknown or ambiguous hardware remains a manual
@@ -179,6 +186,9 @@ selections. The usual backup, device checks and flash confirmation still apply.
    only for the selected board and matching pre-update public identity. Distinct
    memory revisions (such as Indicator N16R2) still require an explicit build
    choice unless the running firmware identifies its exact target.
+   T-Beam, T3 S3, T-ETH and Muzi Base Meshtastic build targets can each enable
+   multiple radio chips at runtime, so their build name alone cannot select a
+   MeshCore radio variant. Those hardware/radio choices remain manual.
 
    When moving from Meshtastic, its local metadata role defaults **Router**,
    **Router Late** and **Client Base** to MeshCore **Repeater**; every other

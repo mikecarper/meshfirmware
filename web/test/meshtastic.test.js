@@ -8,7 +8,7 @@ const varint=value=>{let n=BigInt(value),out=[];do{let b=Number(n&127n);n>>=7n;i
 const number=(id,value)=>concat(varint(id*8),varint(value));
 const bytes=(id,value)=>concat(varint(id*8+2),varint(value.length),value);
 const frame=payload=>concat([0x94,0xc3,payload.length>>8,payload.length&255],payload);
-const local=node=>frame(bytes(3,number(1,node)));
+const local=(node,extras=[])=>frame(bytes(3,concat(number(1,node),extras)));
 const meta=(hardware=69,version='2.7.4.abc123',extras=[])=>frame(bytes(13,concat(bytes(1,utf8(version)),number(9,hardware),extras)));
 const nodeInfo=(node,{name='Local node',shortName='LC',hardware=69}={})=>frame(bytes(4,concat(number(1,node),bytes(2,concat(bytes(2,utf8(name)),bytes(3,utf8(shortName)),number(5,hardware))))));
 const request=[0x94,0xc3,0,4,0x18,0xac,0x9e,4];
@@ -58,6 +58,35 @@ test('official SDK my_info fixture and device metadata identity are compatible',
   const info=Uint8Array.from(Buffer.from('1a1c08f8acd191016a1473656565645f7869616f5f6e726635325f6b6974','hex'));
   const metadata=Uint8Array.from(Buffer.from('6a100a0c322e372e342e6162633132334845','hex'));
   const result=await detect(fixture([frame(info),frame(metadata)]));assert.equal(result.nodeNum,0x12345678);assert.equal(result.meshtasticHardware,69);assert.equal(result.version,'2.7.4.abc123');
+  assert.equal(result.meshtasticPioEnv,'seeed_xiao_nrf52_kit');
+});
+
+test('the local compiled target distinguishes a legacy RAK3401 image without a second query',async()=>{
+  const info=local(9,bytes(13,utf8('rak3401-1watt'))),metadata=meta(9,'2.7.11.47bf2b4a');
+  for(const stream of [concat(info,metadata),concat(metadata,info)]){
+    for(let split=1;split<stream.length;split++){
+      const link=fixture([stream.subarray(0,split),stream.subarray(split)]),result=await detect(link);
+      assert.equal(result?.meshtasticPioEnv,'rak3401-1watt');assert.equal(result.meshtasticHardware,9);assert.equal(result.nodeNum,9);assert.equal(link.reads,2);assert.deepEqual(link.writes,[wake,request]);
+    }
+  }
+});
+
+test('missing or empty build targets preserve old firmware support and remote display names cannot supply one',async()=>{
+  for(const info of [local(9),local(9,bytes(13,[]))]){
+    const result=await detect(fixture([info,nodeInfo(9,{name:'rak3401-1watt'}),nodeInfo(77,{name:'rak3401-1watt'}),meta(9)]));
+    assert.equal(result.meshtasticHardware,9);assert.equal(Object.hasOwn(result,'meshtasticPioEnv'),false);
+  }
+});
+
+test('malformed, ambiguous or conflicting local build targets cannot become selection evidence',async()=>{
+  for(const extras of [number(13,9),bytes(13,utf8('x'.repeat(41))),bytes(13,[0xc3,0x28]),bytes(13,utf8('rak3401-1watt\n')),bytes(13,utf8(' rak3401-1watt')),bytes(13,utf8('../rak3401-1watt')),concat(bytes(13,utf8('rak3401-1watt')),bytes(13,utf8('rak4631')))]){
+    assert.equal(await detect(fixture([local(9,extras),meta(9)])),null);
+  }
+  const first=local(9,bytes(13,utf8('rak3401-1watt'))),other=local(9,bytes(13,utf8('rak4631')));
+  assert.equal(await detect(fixture([first,other,meta(9)])),null);
+  for(const reports of [[first,first],[local(9),first],[first,local(9)]]){
+    const result=await detect(fixture([...reports,meta(9)]));assert.equal(result?.meshtasticPioEnv,'rak3401-1watt');
+  }
 });
 
 test('official wake bytes resynchronize the Meshtastic firmware receiver before asking for identity',async()=>{

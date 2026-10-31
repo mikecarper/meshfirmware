@@ -96,17 +96,39 @@ const manual = new Map([
   [255, ['Private Meshtastic hardware', '', [], 'A private hardware enum has no reviewed physical-board mapping.']],
 ]);
 
-export function detectMeshtasticBoard({items = [], hwModel} = {}) {
+// Exact build environments resolve only these source-reviewed shared enums.
+// https://github.com/meshtastic/firmware/blob/47bf2b4a/variants/nrf52840/rak3401_1watt/platformio.ini
+// https://github.com/meshtastic/firmware/tree/6d41e279f/variants/nrf52840/seeed_wio_tracker_L1
+// https://github.com/meshtastic/firmware/tree/6d41e279f/variants/nrf52840/seeed_wio_tracker_L1_eink
+const reviewedEnvironments = new Map([
+  ['rak3401-1watt', {enums:[9,117],mapping:reviewed.get(117),legacy:{9:'this legacy firmware reports the shared RAK4631 enum 9'}}],
+  ['seeed_wio_tracker_L1', {enums:[99],mapping:['Seeed Wio Tracker L1 Pro','nrf52',['Seeed Studio Wio Tracker L1 Pro']]}],
+  ['seeed_wio_tracker_L1_eink', {enums:[99,100],mapping:reviewed.get(100),legacy:{99:'this firmware reports the generic Wio Tracker L1 enum 99'}}],
+  ['seeed_wio_tracker_L1_eink-inkhud', {enums:[99,100],mapping:reviewed.get(100),legacy:{99:'this firmware reports the generic Wio Tracker L1 enum 99'}}],
+]);
+
+export function detectMeshtasticBoard({items = [], hwModel, pioEnv = ''} = {}) {
   const answer = (hardware, candidates, reason, model) => ({hardware, candidates, source: 'meshtastic-hardware', reason, ...(model ? {model} : {})});
   if (!Number.isInteger(hwModel) || hwModel < 0 || hwModel > 0x7fffffff) {
     return answer(null, [], 'No valid integer Meshtastic hardware enum was reported; choose the exact hardware manually.');
   }
-  const mapping = manual.get(hwModel) || reviewed.get(hwModel);
-  if (!mapping) return answer(null, [], `Meshtastic hardware enum ${hwModel} has no reviewed exact catalog mapping; choose the exact hardware manually. USB IDs and similar names are not used as substitutes.`);
-  const [model, architecture, names, manualReason] = mapping;
+  if (typeof pioEnv !== 'string' || pioEnv.length > 40 || pioEnv && !/^[A-Za-z0-9_-]+$/.test(pioEnv)) {
+    return answer(null, [], 'The reported Meshtastic build environment is malformed; choose the exact hardware manually.');
+  }
   const available = Array.isArray(items) ? items : [];
-  const candidates = [...new Set(available.filter(item => item?.project === 'MeshCore' && item.architecture === architecture && names.includes(canonicalHardware(item.hardware))).map(item => canonicalHardware(item.hardware)))].sort();
+  const candidatesFor = ([, architecture, names]) => [...new Set(available.filter(item => item?.project === 'MeshCore' && item.architecture === architecture && names.includes(canonicalHardware(item.hardware))).map(item => canonicalHardware(item.hardware)))].sort();
+  const environment = reviewedEnvironments.get(pioEnv);
+  if (environment && !environment.enums.includes(hwModel)) {
+    const mappings = [environment.mapping, manual.get(hwModel) || reviewed.get(hwModel)].filter(Boolean);
+    const candidates = [...new Set(mappings.flatMap(candidatesFor))].sort();
+    return answer(null, candidates, `The exact ${environment.mapping[0]} build environment ${pioEnv} conflicts with the reported Meshtastic hardware enum. Choose the exact hardware manually; catalog filtering cannot resolve conflicting reports.`);
+  }
+  const mapping = environment?.mapping || manual.get(hwModel) || reviewed.get(hwModel);
+  if (!mapping) return answer(null, [], `Meshtastic hardware enum ${hwModel} has no reviewed exact catalog mapping; choose the exact hardware manually. USB IDs and similar names are not used as substitutes.`);
+  const [model, , , manualReason] = mapping;
+  const candidates = candidatesFor(mapping);
   if (manualReason) return answer(null, candidates, `${manualReason} Choose the exact hardware manually.`, model);
   if (candidates.length !== 1) return answer(null, candidates, candidates.length ? 'The reviewed enum matches multiple exact catalog hardware labels; choose the exact hardware manually.' : 'The reviewed Meshtastic hardware has no exact compatible catalog entry; choose hardware manually. Similar names, other revisions and USB IDs are not substituted.', model);
+  if (environment) return answer(candidates[0], candidates, `The exact Meshtastic build environment ${pioEnv} identifies the ${model} target${environment.legacy?.[hwModel] ? '; '+environment.legacy[hwModel] : ', matching its hardware enum'}. This selects hardware only, not a role, firmware file or independent physical-board proof.`, model);
   return answer(candidates[0], candidates, 'The running Meshtastic hardware enum matched one reviewed exact MeshCore target. This selects hardware only, not a role, firmware file or independent physical-board proof.', model);
 }
