@@ -120,6 +120,13 @@ exact build selection. Omit `version` for a link that remains useful as releases
 change, or include both `version` and `build` to identify a particular artifact.
 The `#firmware-choices` fragment opens the selection section.
 
+Refreshing the page clears remembered catalog choices and returns to Keymind
+Cascade with no board, role, version or build selected. Browsers report normal
+and hard refreshes as the same `reload` navigation, so both reset the selection.
+Explicit shared-link selections still apply. Unfinished recovery, migration or
+startup-verification workflows keep their saved selections and recovery records;
+a refresh never authorizes another reset, erase or write.
+
 These links select catalog options only. They do not download firmware,
 request a USB port, reset a radio or authorize a write. Existing pending
 recovery, migration or startup verification takes precedence over URL

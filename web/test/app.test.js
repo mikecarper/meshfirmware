@@ -31,7 +31,7 @@ function uiElement(id=''){
   const classes=new Set(),attributes=new Map(),listeners=new Map();
   return {id,value:'',disabled:false,hidden:false,textContent:'',files:[],options:[],checked:false,classList:{toggle(name,force){const enabled=force===undefined?!classes.has(name):force;if(enabled)classes.add(name);else classes.delete(name);return enabled;},contains:name=>classes.has(name)},replaceChildren(...options){this.options=options;this.value=options[0]?.value||'';},removeAttribute:name=>attributes.delete(name),setAttribute:(name,value)=>attributes.set(name,String(value)),getAttribute:name=>attributes.get(name)??null,addEventListener(type,handler){listeners.set(type,handler);},emit(type,event){listeners.get(type)?.(event);},showModal(){this.open=true;},close(){this.open=false;},scrollHeight:0};
 }
-function workbench({pending=null,recovery=null,espRecovery=null,verification=null,catalogPromise=null,productionDefaults=false,search=''}={}) {
+function workbench({pending=null,recovery=null,espRecovery=null,verification=null,catalogPromise=null,productionDefaults=false,search='',performanceApi,savedSelections=null}={}) {
   const calls=[],elements=new Map(),serialEvents={},windowEvents={};
   class Option {constructor(text,value){this.text=text;this.value=value;}}
   for(const id of ids)elements.set(id,uiElement(id));
@@ -39,10 +39,11 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
   if(productionDefaults){for(const id of ['auto-detect-board','auto-backup','auto-finish'])elements.get(id).checked=true;elements.get('transport-mode').value='auto';elements.get('backup-role').value='auto';}
   const port={getInfo:()=>({usbVendorId:0x303a,usbProductId:0x1001})};
   const storage=new Map(pending?[['meshfirmware.pendingMigration',JSON.stringify(pending)]]:[]);
+  if(savedSelections!==null)storage.set('meshfirmware.selections',JSON.stringify(savedSelections));
   if(recovery)storage.set('meshfirmware.nrfRecovery',JSON.stringify(recovery));
   if(espRecovery)storage.set('meshfirmware.espRecovery',JSON.stringify(espRecovery));
   if(verification)storage.set('meshfirmware.verifyApplication',JSON.stringify(verification));
-  const context=vm.createContext({canonicalHardware,nrfDfuUsbIds,lookupUsbConnectionMap,usbConnectionMap:{schemaVersion:1,builds:[]},document:{getElementById:id=>{assert.ok(elements.has(id),`Missing HTML id ${id}`);return elements.get(id);},querySelectorAll:()=>[...elements.values()]},navigator:{serial:{requestPort:async()=>{calls.push('chooser');return port;},getPorts(){throw new Error('must not enumerate automatically');},addEventListener(type,handler){serialEvents[type]=handler;}}},window:{location:{search},addEventListener(type,handler){windowEvents[type]=handler;}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},Option,URL,URLSearchParams,Blob,Uint8Array,TextEncoder,TextDecoder,console,setTimeout,clearTimeout,AbortSignal,Date,
+  const context=vm.createContext({canonicalHardware,nrfDfuUsbIds,lookupUsbConnectionMap,usbConnectionMap:{schemaVersion:1,builds:[]},document:{getElementById:id=>{assert.ok(elements.has(id),`Missing HTML id ${id}`);return elements.get(id);},querySelectorAll:()=>[...elements.values()]},navigator:{serial:{requestPort:async()=>{calls.push('chooser');return port;},getPorts(){throw new Error('must not enumerate automatically');},addEventListener(type,handler){serialEvents[type]=handler;}}},window:{performance:performanceApi,location:{search},addEventListener(type,handler){windowEvents[type]=handler;}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},Option,URL,URLSearchParams,Blob,Uint8Array,TextEncoder,TextDecoder,console,setTimeout,clearTimeout,AbortSignal,Date,
     fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,parseUsbMode,MigrationApproval,cleanCliReply,assessBootloaderVersion,firmwareFilesLinks,fetch:async()=>{throw Error('Unexpected network request');},fetchFirmwareBytes:(url,options)=>verifiedDownload(url,{...options,mirrorBase:'https://mirror.example.test/firmware/',pageOrigin:'https://mirror.example.test',fetchImpl:(target,init)=>target==='https://mirror.example.test/firmware/index.json'?Promise.resolve({ok:false,status:404}):options.fetchImpl(target,init)}),assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),commonCliRestorePreview:()=>({operations:[],skipped:[],warnings:[]}),restoreCommonCli:async()=>{throw Error('Unexpected CommonCLI restore');},
     backupCoverage,createNextStepScroller,tryNativeUsbFallback,SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
   });
@@ -866,6 +867,43 @@ test('page defaults to Keymind while a saved explicit stock choice remains avail
 });
 const linkedT114Item={...v4Item,provider:'Keymind Cascade',hardware:'Heltec T114',architecture:'nrf52',action:'flash',role:'companionFull',version:'v1.18.0.1-halo-keymind',name:'Heltec_t114_companion_radio_full.zip',url:'https://example.test/t114.zip'};
 const linkedCatalog=items=>({items,warnings:[],generatedAt:'2026-10-27T00:00:00Z'});
+
+test('normal and hard reloads clear remembered catalog selections before the catalog loads without touching USB',async()=>{
+  for(const transferSize of [0,1024]){
+    let resolveCatalog;const catalogPromise=new Promise(resolve=>resolveCatalog=resolve),performanceApi={getEntriesByType:kind=>{assert.equal(kind,'navigation');return [{type:'reload',transferSize}];}},ui=workbench({catalogPromise,performanceApi,savedSelections:{provider:'MeshCore',hardware:v4Item.hardware,role:v4Item.role,version:v4Item.version},productionDefaults:true});
+    assert.equal(ui.context.localStorage.getItem('meshfirmware.selections'),undefined);
+    // An older tab can rewrite the preference while this catalog is loading.
+    if(transferSize)ui.context.localStorage.setItem('meshfirmware.selections',JSON.stringify(v4Item));
+    resolveCatalog(linkedCatalog([v4Item,{...v4Item,provider:'Keymind Cascade'}]));await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(ui.elements.get('provider').value,'Keymind Cascade');for(const id of ['hardware','role','version','artifact'])assert.equal(ui.elements.get(id).value,'',id);assert.equal(ui.evaluate('state.port'),null);assert.equal(ui.evaluate('state.device'),null);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.installMode'),'update');assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(ui.calls,[]);
+    const saved=JSON.parse(ui.context.localStorage.getItem('meshfirmware.selections'));assert.equal(saved.provider,'Keymind Cascade');assert.equal(saved.hardware,'');assert.equal(saved.role,'');assert.equal(saved.version,'');
+  }
+});
+
+test('ordinary navigation, history traversal and unavailable timing APIs retain normal saved-choice behavior',async()=>{
+  for(const performanceApi of [undefined,{}, {getEntriesByType:()=>[]},{getEntriesByType:()=>[{type:'navigate'}]},{getEntriesByType:()=>[{type:'back_forward'}]},{getEntriesByType:()=>{throw Error('Timing unavailable');}}]){
+    const ui=workbench({performanceApi,savedSelections:{provider:v4Item.provider,hardware:v4Item.hardware,role:v4Item.role,version:v4Item.version},catalogPromise:Promise.resolve(linkedCatalog([v4Item]))});await new Promise(resolve=>setImmediate(resolve));
+    for(const id of ['provider','hardware','role','version'])assert.equal(ui.elements.get(id).value,v4Item[id],id);assert.deepEqual(ui.calls,[]);
+  }
+});
+
+test('reload preserves an explicit shared selection while ignoring unrelated remembered filters',async()=>{
+  const search='?'+new URLSearchParams({provider:linkedT114Item.provider,hardware:linkedT114Item.hardware,role:linkedT114Item.role,version:linkedT114Item.version,build:linkedT114Item.name}),ui=workbench({search,performanceApi:{getEntriesByType:()=>[{type:'reload'}]},savedSelections:v4Item,catalogPromise:Promise.resolve(linkedCatalog([v4Item,linkedT114Item]))});await new Promise(resolve=>setImmediate(resolve));
+  for(const id of ['provider','hardware','role','version'])assert.equal(ui.elements.get(id).value,linkedT114Item[id],id);assert.equal(ui.elements.get('artifact').value,'1');assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.port'),null);assert.deepEqual(ui.calls,[]);
+});
+
+test('reload retains unfinished migration, erase recovery and verification records and their selections',async()=>{
+  for(const pending of [{pending:{mac:'aa:bb:cc:dd:ee:ff',sha256:'a'.repeat(64)}},{recovery:{sha256:'a'.repeat(64),name:'final.zip',eraseComplete:true}},{espRecovery:{sha256:'a'.repeat(64),mac:'aa:bb:cc:dd:ee:ff',merged:true}},{verification:{sha256:'a'.repeat(64),name:'final.zip'}}]){
+    const ui=workbench({...pending,performanceApi:{getEntriesByType:()=>[{type:'reload'}]},savedSelections:v4Item,catalogPromise:Promise.resolve(linkedCatalog([v4Item]))});
+    const keys=['meshfirmware.pendingMigration','meshfirmware.nrfRecovery','meshfirmware.espRecovery','meshfirmware.verifyApplication'],before=keys.map(key=>ui.context.localStorage.getItem(key));await new Promise(resolve=>setImmediate(resolve));assert.deepEqual(keys.map(key=>ui.context.localStorage.getItem(key)),before);assert.ok(ui.evaluate('continuingDeviceFlow()'));assert.equal(ui.elements.get('hardware').value,v4Item.hardware);assert.equal(ui.evaluate('state.migrationApproval'),null);assert.equal(ui.evaluate('state.port'),null);assert.deepEqual(ui.calls,[]);
+  }
+});
+
+test('a late catalog after reload keeps a newly detected board instead of restoring the old selection',async()=>{
+  let resolveCatalog;const catalogPromise=new Promise(resolve=>resolveCatalog=resolve),ui=workbench({catalogPromise,productionDefaults:true,performanceApi:{getEntriesByType:()=>[{type:'reload'}]},savedSelections:v4Item});
+  ui.context.selectedPort=ui.port;ui.context.inventory=[v4Item,linkedT114Item];ui.evaluate("state.items=inventory;state.port=selectedPort;state.device={model:'Heltec T114',role:'companion',version:'v1.18.0.1'};state.boardDetected=true;filterCatalog();selectDetectedBoard();");assert.equal(ui.elements.get('hardware').value,'Heltec T114');
+  resolveCatalog(linkedCatalog(ui.context.inventory));await new Promise(resolve=>setImmediate(resolve));assert.equal(ui.elements.get('hardware').value,'Heltec T114');assert.equal(ui.elements.get('artifact').value,'1');assert.equal(ui.evaluate('state.port'),ui.port);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls,[]);
+});
 
 test('shared URL applies exact catalog filters and build after loading, overriding saved choices without USB or downloads',async()=>{
   let resolveCatalog;const catalogPromise=new Promise(resolve=>resolveCatalog=resolve);

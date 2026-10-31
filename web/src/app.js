@@ -56,6 +56,11 @@ try{const saved=JSON.parse(localStorage.getItem('meshfirmware.espRecovery')||'nu
 // Restore only an already pending, hash-bound recovery's display mode, never a
 // general erase preference. New pages default to Update unless linked explicitly.
 if(state.recovery||state.espRecovery?.merged)state.installMode='install';
+// Navigation Timing reports both ordinary and cache-bypassing refreshes as
+// reload. Reset only catalog preferences, never an unfinished device workflow.
+let resetSavedSelectionsOnLoad=false;
+try{resetSavedSelectionsOnLoad=!continuingDeviceFlow()&&window.performance?.getEntriesByType?.('navigation')?.[0]?.type==='reload';}catch{}
+if(resetSavedSelectionsOnLoad)try{localStorage.removeItem('meshfirmware.selections');}catch{}
 // Exact bootloader IDs shared with the native classifier. Never match a broad
 // vendor/product range: nearby application IDs must still be probed normally.
 const dfuIds = new Set(nrfDfuUsbIds);
@@ -1565,7 +1570,8 @@ if ('serial' in navigator) {
 getCatalog().then(catalog => {
   state.items=catalog.items.map(item=>{const hardware=canonicalHardware(item.hardware);return hardware===item.hardware?item:{...item,hardware};});state.recoveryCatalog=catalog.recoveryCatalog||null;updateRecoveryChoices();
   $('catalog-status').textContent=`${state.items.length.toLocaleString()} artifacts · snapshot ${new Date(catalog.generatedAt).toLocaleString()} · ${catalog.warnings.length} provider warnings${catalog.cached?' · cached':''}`;
-  let saved={};try{const value=JSON.parse(localStorage.getItem('meshfirmware.selections')||'{}');if(value&&typeof value==='object'&&!Array.isArray(value))saved=value;}catch{}
+  let saved={...state.manualSelections};
+  if(!resetSavedSelectionsOnLoad)try{const value=JSON.parse(localStorage.getItem('meshfirmware.selections')||'{}');if(value&&typeof value==='object'&&!Array.isArray(value))saved=value;}catch{}
   saved.provider=catalogProvider(saved.provider)||'Keymind Cascade';
   if(typeof saved.hardware==='string')saved.hardware=canonicalHardware(saved.hardware);
   const linked=installModeLocked()?{}:linkedCatalogSelections(),hasLinked=Object.keys(linked).length>0;
