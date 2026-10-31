@@ -9,7 +9,8 @@ import {validateMirrorIndex,MAX_MIRROR_INDEX_BYTES} from '../src/downloads.js';
 export const MAX_PUBLIC_MIRROR_BYTES=850<<20;
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
 
-// Only build-generated, content-addressed PUBLIC release assets are allowed.
+// Only build-generated, content-addressed PUBLIC assets are allowed: verified
+// release assets and the exact hash-pinned official erase/format utilities.
 // No input path is taken from a board backup, local download or private archive.
 export async function verifyMirrorDirectory(directory,{maxBytes=MAX_PUBLIC_MIRROR_BYTES}={}){
   const root=directory instanceof URL?directory:pathToFileURL(resolve(directory)+'/');

@@ -309,6 +309,14 @@ selections. The usual backup, device checks and flash confirmation still apply.
    Normal container, chip, board, backup and write-confirmation checks still run.
    A corrupt mirror fails closed instead of silently switching sources.
 
+   The two official nRF52 SoftDevice erase ZIPs and five board-specific QSPI
+   formatters from `flasher.meshcore.io` are mirrored too. Their exact URLs,
+   ZIP sizes/hashes and known application payload hashes are pinned; this is
+   not permission to mirror arbitrary files from that host. Guided installs
+   fetch the exact board's utility automatically, retaining its validation and
+   separate erase acknowledgement. Required pinned utilities cannot be silently
+   omitted because of a network failure or mirror-space limit.
+
    The mirror is bounded to 850 MiB to stay below GitHub Pages' published-site
    limit. Latest application profiles in both installation modes and recommended
    bootloader/erase/recovery assets take priority; migration archives use remaining
@@ -760,8 +768,9 @@ allowlist; an artifact check refuses backup names, credentials, source maps,
 symlinks or unexpected root files. The workflow never publishes the repository
 root. Runtime dependencies are pinned; third-party licenses ship with the app.
 `public/firmware/` is generated and ignored by Git. The mirror builder accepts
-only verified assets from explicitly public GitHub repositories, checks both
-release metadata and payload bytes, and refuses deployment below 90% current
+verified assets from explicitly public GitHub repositories, plus the seven
+exact hash-pinned official erase/format utilities. It checks release metadata
+or registry pins and payload bytes, and refuses deployment below 90% current
 GitHub-application coverage. Publication checks every mirrored file and keeps
 the complete site below 950 MB; no local device files are mirror inputs.
 The catalog and its compressed last-known cache contain public release metadata

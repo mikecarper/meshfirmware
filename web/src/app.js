@@ -746,11 +746,14 @@ async function acknowledgeBoard(pkg) {
   return check;
 }
 async function erasePackage() {
-  const file=$('erase-file').files[0];let name,bytes;
+  const file=$('erase-file').files[0],url=$('erase-source').value,port=state.port,generation=state.generation,final=state.pkg;
+  const assertCurrent=()=>{if(state.port!==port||state.generation!==generation||state.pkg!==final||$('erase-file').files[0]!==file||$('erase-source').value!==url)fail('The selected radio, final firmware or erase utility changed. Inspect again; no erase or write was performed.');};
+  let name,bytes;
   if(file){if(file.size>(4<<20))fail('Erase ZIP exceeds 4 MiB.');name=file.name;bytes=new Uint8Array(await file.arrayBuffer());}
-  else {const url=$('erase-source').value;if(!url)fail('Select this board’s erase ZIP, or choose its exact local erase ZIP. The final firmware has not been written.');name=new URL(url).pathname.split('/').pop();try{bytes=await boundedFetch(url);}catch{ $('download-firmware').href=httpsUrl(url);revealPanel('image-details');revealPanel('nrf-actions');fail('Download the exact erase ZIP using Download, choose it under Erase ZIP, then inspect again.');}}
+  else {if(!url)fail('Select this board’s erase ZIP, or choose its exact local erase ZIP. The final firmware has not been written.');name=new URL(url).pathname.split('/').pop();try{bytes=await boundedFetch(url);}catch(error){ $('download-firmware').href=httpsUrl(url);revealPanel('image-details');revealPanel('nrf-actions');fail(`Could not automatically download ${name}: ${error.message} Download the exact erase ZIP using Download, choose it under Erase ZIP, then inspect again. No erase or write was performed.`);}}
+  assertCurrent();
   const pkg=inspectFirmware(name,bytes);if(pkg.architecture!=='nrf52'||pkg.kind!=='application'||!pkg.erase)fail('Guided erase requires an application erase ZIP, never a bootloader/SoftDevice component. Load component replacements separately.');
-  if(!/^official (?:SoftDevice v[67] erase payload|QSPI formatter payload\b)/.test(pkg.eraseEvidence||'')&&!await confirm('Custom erase application',`${pkg.name}\nPayload SHA-256 ${pkg.payloadHash}`,'Only the name marks this as an erase application. It is not one of the known official utilities. This permission does not waive board checks or the separate wipe acknowledgement.','CUSTOM ERASE'))fail('Custom erase cancelled.');return pkg;
+  if(!/^official (?:SoftDevice v[67] erase payload|QSPI formatter payload\b)/.test(pkg.eraseEvidence||'')&&!await confirm('Custom erase application',`${pkg.name}\nPayload SHA-256 ${pkg.payloadHash}`,'Only the name marks this as an erase application. It is not one of the known official utilities. This permission does not waive board checks or the separate wipe acknowledgement.','CUSTOM ERASE'))fail('Custom erase cancelled.');assertCurrent();return pkg;
 }
 function payloadFirmwareIdentity(pkg) {
   let identity=pkg.architecture==='nrf52'?pkg.firmwareIdentity:endfIdentity(pkg.payload);

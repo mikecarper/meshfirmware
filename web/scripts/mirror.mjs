@@ -7,6 +7,8 @@ import {gzipSync,gunzipSync} from 'node:zlib';
 import {matchesCatalogInstallMode} from '../src/automatic.js';
 import {catalogProvider,compareVersions} from '../src/catalog.js';
 import {validateMirrorIndex,MAX_MIRROR_INDEX_BYTES} from '../src/downloads.js';
+import {publicEraseUtility} from '../src/public-erase-utilities.js';
+import {inspectFirmware} from '../src/firmware.js';
 
 export const MIRROR_MAX_ASSET_BYTES=64<<20;
 export const MIRROR_MAX_BYTES=850<<20;
@@ -17,8 +19,9 @@ class Unavailable extends Error {}
 class IntegrityError extends Error {}
 const invariant=(condition,message)=>{if(!condition)throw new IntegrityError(message);};
 
-// Only public GitHub release routes may become mirrored assets. No arbitrary
-// origin, API route, query, userinfo, local path or private download is accepted.
+// Public GitHub release routes use authoritative repository/release metadata.
+// Only the separate exact, pinned erase registry permits a static-host asset.
+// No arbitrary origin, query, userinfo, local path or private download qualifies.
 export function githubAsset(value){
   let url;try{url=new URL(value);}catch{return null;}
   if(url.protocol!=='https:'||url.hostname!=='github.com'||url.port||url.username||url.password||url.search||url.hash)return null;
@@ -36,10 +39,21 @@ function profileKey(item){
   return JSON.stringify([catalogProvider(item.provider),item.hardware,item.architecture,item.role,item.action,name]);
 }
 function reference(value,kind,priority,evidence={}){
-  const asset=githubAsset(value);if(!asset)return null;
+  const utility=kind==='erase'?publicEraseUtility(value):null,asset=githubAsset(value)||utility;if(!asset)return null;
   if(evidence.sha256!==undefined&&!sha(evidence.sha256))throw new IntegrityError('Catalog public asset has an invalid SHA-256.');
   if(evidence.size!==undefined&&(!Number.isSafeInteger(evidence.size)||evidence.size<1||evidence.size>MIRROR_MAX_ASSET_BYTES))throw new IntegrityError('Catalog public asset has an invalid size.');
+  if(utility){
+    invariant(!evidence.sha256||evidence.sha256===utility.sha256,'Catalog SHA-256 conflicts with the pinned erase utility.');
+    invariant(!evidence.size||evidence.size===utility.size,'Catalog size conflicts with the pinned erase utility.');
+    return {...utility,kind,priority};
+  }
   return {...asset,kind,priority,...(evidence.sha256?{sha256:evidence.sha256}:{}),...(evidence.size?{size:evidence.size}:{})};
+}
+function verifyPinnedEraseBytes(source,raw){
+  const utility=source.kind==='erase'?publicEraseUtility(source.url):null;if(!utility)return;
+  invariant(source.sha256===utility.sha256&&source.size===utility.size,'Erase utility metadata differs from its exact registry pin.');
+  let pkg;try{pkg=inspectFirmware(utility.name,new Uint8Array(raw));}catch{throw new IntegrityError('Pinned erase ZIP failed firmware validation.');}
+  invariant(pkg.architecture==='nrf52'&&pkg.kind==='application'&&pkg.erase&&pkg.payloadHash===utility.payloadHash&&/^official (?:SoftDevice v[67] erase payload|QSPI formatter payload\b)/.test(pkg.eraseEvidence||''),'Pinned erase ZIP does not contain its reviewed application utility.');
 }
 export function selectMirrorSources(catalog){
   invariant(catalog&&Array.isArray(catalog.items)&&catalog.items.length<=50000,'Invalid public mirror catalog.');
@@ -84,7 +98,7 @@ async function bodyBytes(response,limit,expected){
   try{for(;;){const {value,done}=await reader.read();if(done)break;invariant(value instanceof Uint8Array,'Public response contains invalid bytes.');total+=value.length;invariant(total<=limit,'Public asset stream exceeds its byte bound.');chunks.push(value);}}
   catch(error){if(error instanceof IntegrityError)throw error;throw new Unavailable('Network response stream unavailable');}
   finally{await reader.cancel().catch(()=>{});reader.releaseLock();}
-  invariant(expected===undefined||total===expected,'Public asset size differs from its GitHub release.');
+  invariant(expected===undefined||total===expected,'Public asset size differs from its verified source.');
   return Buffer.concat(chunks,total);
 }
 async function outputDirectory(value){
@@ -110,7 +124,8 @@ async function cachedGzip(target,source,metadata){
   invariant(cached.length===stat.size&&cached[0]===31&&cached[1]===139&&cached[2]===8&&cached[3]===0&&cached.readUInt32LE(cached.length-4)===source.size,'Cached public mirror gzip header or size is invalid.');
   if(metadata)invariant(digest(cached)===metadata.gzipSha256,'Cached public mirror gzip SHA-256 differs from its owned index.');
   let raw;try{raw=gunzipSync(cached,{maxOutputLength:source.size});}catch{throw new IntegrityError('Cached public mirror gzip is corrupt or exceeds its bound.');}
-  invariant(raw.length===source.size&&digest(raw)===source.sha256,'Cached public mirror differs from its authoritative GitHub SHA-256.');
+  invariant(raw.length===source.size&&digest(raw)===source.sha256,'Cached public mirror differs from its authoritative source SHA-256.');
+  verifyPinnedEraseBytes(source,raw);
   return cached;
 }
 
@@ -122,8 +137,8 @@ export async function buildMirror({catalog,outputDir,fetchImpl=fetch,token,maxBy
   invariant(typeof minimumApplicationRatio==='number'&&Number.isFinite(minimumApplicationRatio)&&minimumApplicationRatio>=0&&minimumApplicationRatio<=1&&typeof requireApplications==='boolean','Invalid minimum public application coverage.');
   const chosen=selectMirrorSources(catalog),{output,owned}=await outputDirectory(outputDir),warnings=[],releases=new Map(),repositories=new Map();
   const warn=message=>{if(warnings.length<256)warnings.push(message.slice(0,500));};
-  async function fetchResponse(url,api=false){
-    try{const response=await fetchImpl(url,{signal:AbortSignal.timeout(api?45000:120000),credentials:'omit',...(api?{redirect:'error'}:{}),headers:{'User-Agent':'meshfirmware-pages-mirror',...(api&&token?{Authorization:`Bearer ${token}`}:{})}});if(api&&response.url&&response.url!==url)throw new IntegrityError('Authoritative GitHub API metadata redirected away from its exact URL.');return response;}
+  async function fetchResponse(url,api=false,exactUtility=false){
+    try{const response=await fetchImpl(url,{signal:AbortSignal.timeout(api?45000:120000),credentials:'omit',...(api||exactUtility?{redirect:'error'}:{}),headers:{'User-Agent':'meshfirmware-pages-mirror',...(api&&token?{Authorization:`Bearer ${token}`}:{})}});if(api&&response.url&&response.url!==url)throw new IntegrityError('Authoritative GitHub API metadata redirected away from its exact URL.');if(exactUtility&&response.url&&response.url!==url)throw new IntegrityError('Pinned erase utility redirected away from its exact URL.');return response;}
     catch(error){if(error instanceof IntegrityError)throw error;throw new Unavailable('Network request unavailable');}
   }
   async function publicRepository(source){
@@ -173,6 +188,11 @@ export async function buildMirror({catalog,outputDir,fetchImpl=fetch,token,maxBy
   const sources=[...candidates.values()].sort((a,b)=>a.priority-b.priority||a.url.localeCompare(b.url)),resolved=[];
   for(const source of sources){
     try{
+      const utility=source.kind==='erase'?publicEraseUtility(source.url):null;
+      if(utility){
+        invariant(source.name===utility.name&&source.sha256===utility.sha256&&source.size===utility.size,'Erase utility source differs from its exact registry pin.');
+        resolved.push(source);continue;
+      }
       const value=await release(source),matches=value.assets.filter(asset=>asset.name===source.name);
       if(matches.length!==1)throw new Unavailable('Exact release asset is missing or ambiguous');
       const asset=matches[0],actual=githubAsset(asset.browser_download_url);
@@ -192,10 +212,11 @@ export async function buildMirror({catalog,outputDir,fetchImpl=fetch,token,maxBy
     try{
       const name=`${source.sha256}.gz`,target=join(output,name),cached=owned.has(name)?await cachedGzip(target,source,owned.get(name)):null;
       if(cached)return {source,gzip:cached,gzipSha256:digest(cached)};
-      const response=await fetchResponse(source.url);
-      if(response.url){const final=new URL(response.url);invariant(!final.username&&!final.password&&['https://github.com','https://release-assets.githubusercontent.com','https://objects.githubusercontent.com'].includes(final.origin),'GitHub asset redirected to an unapproved origin.');}
+      const utility=source.kind==='erase'?publicEraseUtility(source.url):null,response=await fetchResponse(source.url,false,!!utility);
+      if(response.url&&!utility){const final=new URL(response.url);invariant(!final.username&&!final.password&&['https://github.com','https://release-assets.githubusercontent.com','https://objects.githubusercontent.com'].includes(final.origin),'GitHub asset redirected to an unapproved origin.');}
       const raw=await bodyBytes(response,source.size,source.size);
-      invariant(digest(raw)===source.sha256,'Public asset SHA-256 differs from its GitHub release.');
+      invariant(digest(raw)===source.sha256,'Public asset SHA-256 differs from its verified source.');
+      verifyPinnedEraseBytes(source,raw);
       const gzip=gzipSync(raw,{level:9,mtime:0});invariant(gzip.length<=MIRROR_MAX_ASSET_BYTES,'Compressed public asset exceeds 64 MiB.');
       return {source,gzip,gzipSha256:digest(gzip)};
     }catch(error){if(!(error instanceof Unavailable))throw error;return {source,unavailable:error.message};}
@@ -208,11 +229,11 @@ export async function buildMirror({catalog,outputDir,fetchImpl=fetch,token,maxBy
   for(let index=0;index<resolved.length;index++){
     const settled=await pending.get(index);pending.delete(index);if(settled.error)throw settled.error;const result=settled.result;schedule();
     onProgress({completed:index+1,total:resolved.length,entries:entries.length,bytes:total});
-    if(result.unavailable){warn(`${result.source.name}: ${result.unavailable}.`);continue;}
+    if(result.unavailable){invariant(!publicEraseUtility(result.source.url),`Required pinned erase utility ${result.source.name} is unavailable: ${result.unavailable}.`);warn(`${result.source.name}: ${result.unavailable}.`);continue;}
     const {source,gzip,gzipSha256}=result,path=`${source.sha256}.gz`,prior=files.get(path);
     if(prior)invariant(prior.gzipSha256===gzipSha256&&prior.gzipSize===gzip.length&&prior.size===source.size,'One content hash produced inconsistent mirror bytes.');
     else{
-      if(total+gzip.length>maxBytes){skipped++;continue;}
+      if(total+gzip.length>maxBytes){invariant(!publicEraseUtility(source.url),'Required pinned erase utility exceeds the public mirror budget.');skipped++;continue;}
       const target=join(output,path);invariant(dirname(target)===output,'Mirror asset escaped its output directory.');
       const existing=await cachedGzip(target,source,owned.get(path));
       if(existing)invariant(digest(existing)===gzipSha256,'Existing generated firmware asset is corrupt.');else await writeFile(target,gzip,{flag:'wx'});

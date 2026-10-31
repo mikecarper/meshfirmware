@@ -6,6 +6,7 @@ import {resolve,join,basename} from 'node:path';
 import {createHash} from 'node:crypto';
 import {gzipSync,gunzipSync} from 'node:zlib';
 import {buildMirror,selectMirrorSources,githubAsset,MIRROR_MAX_ASSET_BYTES,MIRROR_MAX_BYTES} from '../scripts/mirror.mjs';
+import {publicEraseUtilities} from '../src/public-erase-utilities.js';
 
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 const bytes=value=>new TextEncoder().encode(value);
@@ -35,7 +36,7 @@ async function output(t){
 }
 const build=(catalog,outputDir,fixture,options={})=>buildMirror({catalog:{items:catalog},outputDir,fetchImpl:fixture.fetchImpl,now:()=> '2026-10-27T00:00:00Z',...options});
 
-test('only complete public HTTPS GitHub release assets qualify as mirror sources',()=>{
+test('the GitHub route parser accepts only complete public HTTPS release assets',()=>{
   const url=releaseUrl('v1.2.3','board.zip');assert.deepEqual(githubAsset(url),{url,owner:'meshcore-dev',repository:'MeshCore',tag:'v1.2.3',name:'board.zip'});
   for(const value of ['http://github.com/a/b/releases/download/t/x.zip','https://u:p@github.com/a/b/releases/download/t/x.zip','https://github.com:444/a/b/releases/download/t/x.zip','https://github.com/a/b/releases/download/t/x.zip?q=secret','https://github.com/a/b/releases/download/t/x.zip#hash','https://raw.githubusercontent.com/a/b/main/x.zip','https://api.github.com/repos/a/b/releases/1','https://github.com/a/b/releases/download/t/subtag/file.zip','https://github.com/a/b/releases/download/t/a%2fb.zip','https://github.com/a/b/releases/download/t/a%5cb.zip','C:\\backups\\node.json'])assert.equal(githubAsset(value),null,value);
 });
@@ -53,6 +54,47 @@ test('explicit separate utility references survive without guessing a board or p
   assert.deepEqual(result.sources.filter(source=>source.priority===0).map(source=>source.kind).sort(),['bootloader','erase','recovery']);
   assert.equal(result.sources.find(source=>source.url===boot).sha256,'a'.repeat(64));assert.equal(result.sources.find(source=>source.url===recovery).size,120);
   assert.throws(()=>selectMirrorSources({items:[app,{...app,bootloaderInfo:{...app.bootloaderInfo,sha256:'c'.repeat(64)}}]}),/Conflicting catalog SHA/);
+});
+
+test('only exact registered official erase references qualify as pinned static-host mirror sources',()=>{
+  const app=application({erase:publicEraseUtilities.map(utility=>utility.url)}),result=selectMirrorSources({items:[app]});
+  const sources=result.sources.filter(source=>source.kind==='erase');assert.equal(sources.length,7);
+  for(const utility of publicEraseUtilities){const source=sources.find(source=>source.url===utility.url);assert.ok(source);assert.equal(source.priority,0);assert.equal(source.sha256,utility.sha256);assert.equal(source.size,utility.size);assert.equal(source.payloadHash,utility.payloadHash);assert.equal(source.name,utility.name);assert.equal(source.owner,undefined);}
+  const utility=publicEraseUtilities[0];
+  for(const value of [utility.url+'?token=private',utility.url+'#fragment',utility.url.replace('https:','http:'),utility.url.replace('flasher.meshcore.io','flasher.meshcore.io.evil.test'),utility.url.replace('/firmware/','/private/'),utility.url.replace('.zip','-other.zip'),'https://flasher.meshcore.io/firmware/.env']){
+    assert.deepEqual(selectMirrorSources({items:[application({erase:[value]})]}).sources.map(source=>source.kind),['application']);
+  }
+  assert.deepEqual(selectMirrorSources({items:[application({bootloader:[utility.url]})]}).sources.map(source=>source.kind),['application']);
+  assert.deepEqual(selectMirrorSources({items:[application({url:utility.url})]}).sources,[],'An erase allowlist entry cannot become an ordinary application mirror');
+});
+
+test('pinned erase downloads use no GitHub credentials or redirects and fail closed on missing, altered or overlarge bytes',async t=>{
+  const utility=publicEraseUtilities[0];
+  for(const failure of ['network','http','redirect','size','hash']){
+    const app=application({erase:[utility.url]}),fixture=inventory([app]),directory=await output(t),original=fixture.fetchImpl,requests=[];
+    fixture.fetchImpl=async(url,options)=>{
+      if(url!==utility.url)return original(url,options);
+      requests.push({url,options});assert.equal(options.credentials,'omit');assert.equal(options.redirect,'error');assert.equal(options.headers.Authorization,undefined);
+      if(failure==='network')throw Error('PRIVATE_NETWORK_DETAILS');
+      if(failure==='http')return new Response('missing',{status:404});
+      const response=new Response(new Uint8Array(failure==='size'?1:utility.size),{headers:failure==='size'?{'content-length':String(utility.size+1)}:{}});
+      Object.defineProperty(response,'url',{value:failure==='redirect'?'https://flasher.meshcore.io/firmware/unreviewed.zip':utility.url});return response;
+    };
+    await assert.rejects(build([app],directory,fixture,{token:'GITHUB_TOKEN_MUST_NOT_LEAK'}),error=>{assert.match(error.message,/Required pinned erase utility|exact URL|exceeds|SHA-256/);assert.doesNotMatch(error.message,/PRIVATE_NETWORK_DETAILS|GITHUB_TOKEN_MUST_NOT_LEAK/);return true;},failure);
+    assert.equal(requests.length,1);assert.ok(fixture.apiRequests.every(request=>request.url.startsWith('https://api.github.com/repos/meshcore-dev/MeshCore')));assert.ok(!(await readdir(directory)).includes('index.json'));
+  }
+});
+
+test('a known local public erase fixture is mirrored, budget-prioritized and revalidated from cache without network fallback',async t=>{
+  const utility=publicEraseUtilities[0];let raw;
+  try{raw=await readFile(new URL('../../meshcore-dev_MeshCore/downloads/FLASH_ERASE_nrf52_softdevice_v6.zip',import.meta.url));}catch(error){if(error.code==='ENOENT'){t.skip('Optional official public erase reference is absent; registry selection and fail-closed downloads remain hermetic.');return;}throw error;}
+  assert.equal(raw.length,utility.size);assert.equal(hash(raw),utility.sha256);
+  const app=application({erase:[utility.url]}),fixture=inventory([app]),directory=await output(t),original=fixture.fetchImpl,requests=[];
+  fixture.fetchImpl=async(url,options)=>{if(url!==utility.url)return original(url,options);requests.push({url,options});const response=new Response(raw);Object.defineProperty(response,'url',{value:utility.url});return response;};
+  const first=await build([app],directory,fixture,{token:'PUBLIC_METADATA_ONLY'}),entry=first.index.entries.find(entry=>entry.url===utility.url);assert.ok(entry);assert.equal(first.index.entries[0],entry);assert.equal(entry.sha256,utility.sha256);assert.equal(entry.size,utility.size);assert.deepEqual(gunzipSync(await readFile(join(directory,entry.path))),raw);assert.equal(requests.length,1);assert.equal(requests[0].options.headers.Authorization,undefined);assert.equal(requests[0].options.redirect,'error');assert.equal(fixture.apiRequests.length,2,'Only the application uses GitHub metadata');
+  requests.length=0;const second=await build([app],directory,fixture,{maxBytes:entry.gzipSize});assert.deepEqual(second.index.entries.map(entry=>entry.url),[utility.url]);assert.equal(second.skipped,1);assert.equal(requests.length,0,'Verified pinned erase cache avoids a new source request');
+  const snapshot=await readFile(join(directory,'index.json'),'utf8');await assert.rejects(build([app],directory,fixture,{maxBytes:1}),/Required pinned erase utility exceeds/);assert.equal(await readFile(join(directory,'index.json'),'utf8'),snapshot,'A required utility cannot be omitted from a new deployment');
+  await writeFile(join(directory,entry.path),bytes('corrupt pinned cache'));await assert.rejects(build([app],directory,fixture),/Cached public mirror/);assert.equal(requests.length,0,'A corrupt pinned cache is never silently replaced or trusted');
 });
 
 test('mirror verifies GitHub bytes then writes deterministic content-addressed gzip and a public index',async t=>{

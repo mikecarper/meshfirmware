@@ -1,5 +1,6 @@
 import {Gunzip} from 'fflate';
 import {hash} from './firmware.js';
+import {publicEraseUtility} from './public-erase-utilities.js';
 
 export const MAX_FIRMWARE_BYTES=64<<20;
 export const MAX_MIRROR_INDEX_BYTES=4<<20;
@@ -20,8 +21,9 @@ function https(value){
   return url;
 }
 function releaseUrl(value){
+  if(publicEraseUtility(value))return value;
   const url=https(value);
-  if(url.origin!=='https://github.com'||url.search||url.hash||!/^\/[^/]+\/[^/]+\/releases\/download\/[^/]+\/[^/]+$/.test(url.pathname)||url.href!==value)throw error('Mirror entry is not an exact public GitHub release-asset URL.');
+  if(url.origin!=='https://github.com'||url.search||url.hash||!/^\/[^/]+\/[^/]+\/releases\/download\/[^/]+\/[^/]+$/.test(url.pathname)||url.href!==value)throw error('Mirror entry is not an exact public release asset or pinned erase utility URL.');
   return url.href;
 }
 function mirrorBaseUrl(value,pageOrigin){
@@ -40,7 +42,9 @@ export function validateMirrorIndex(value,{mirrorBase}={}){
   const base=mirrorBase===undefined?null:mirrorBaseUrl(mirrorBase),urls=new Set(),paths=new Map();
   const entries=value.entries.map(entry=>{
     if(!entry||!digest(entry.sha256)||!digest(entry.gzipSha256)||!size(entry.size)||!size(entry.gzipSize)||entry.gzipSize<20||entry.path!==`${entry.sha256}.gz`)throw error('Invalid firmware mirror entry size, hash or path.');
-    const url=releaseUrl(entry.url);if(urls.has(url))throw error('Ambiguous duplicate URL in firmware mirror index.');urls.add(url);
+    const url=releaseUrl(entry.url),utility=publicEraseUtility(url);
+    if(utility&&(entry.sha256!==utility.sha256||entry.size!==utility.size))throw error('Public erase utility differs from its pinned ZIP size or SHA-256.');
+    if(urls.has(url))throw error('Ambiguous duplicate URL in firmware mirror index.');urls.add(url);
     const result={url,sha256:entry.sha256,size:entry.size,gzipSha256:entry.gzipSha256,gzipSize:entry.gzipSize,path:entry.path};
     const identity=JSON.stringify([result.sha256,result.size,result.gzipSha256,result.gzipSize]);
     if(paths.has(result.path)&&paths.get(result.path)!==identity)throw error('Conflicting content-addressed firmware mirror entries.');paths.set(result.path,identity);
@@ -122,10 +126,11 @@ function unpackMirror(gzip,entry){
 // Mirrored bytes still pass through the ordinary firmware/container/board
 // validators. This helper never opens USB, authorizes a write or uses a proxy.
 export async function fetchFirmwareBytes(url,{expectedSha256='',fetchImpl=fetch,mirrorBase=defaultMirrorBase,pageOrigin=globalThis.location?.origin}={}){
-  const source=https(url).href;
+  const source=https(url).href,utility=publicEraseUtility(source);
   if(typeof fetchImpl!=='function')throw error('A firmware download fetch function is required.','url');
   if(typeof expectedSha256!=='string'||expectedSha256&&!/^[a-f0-9]{64}$/i.test(expectedSha256))throw error('Invalid expected firmware SHA-256.','hash');
-  const expected=expectedSha256.toLowerCase(),base=mirrorBaseUrl(mirrorBase,pageOrigin);let index;
+  if(utility&&expectedSha256&&expectedSha256.toLowerCase()!==utility.sha256)throw error('Selected erase utility SHA-256 differs from its pinned public ZIP.','hash');
+  const expected=utility?.sha256||expectedSha256.toLowerCase(),base=mirrorBaseUrl(mirrorBase,pageOrigin);let index;
   try{index=await loadIndex(base,fetchImpl);}catch(cause){if(!cause.mirrorUnavailable)throw cause;}
   const entry=index?.get(source);
   if(entry){
@@ -140,7 +145,7 @@ export async function fetchFirmwareBytes(url,{expectedSha256='',fetchImpl=fetch,
     if(httpGzip&&(bytes.length!==entry.gzipSize||hash(bytes)!==entry.gzipSha256))throw error('HTTP-decoded firmware mirror raw size or SHA-256 does not match the selected release asset.');
     return unpackMirror(bytes,entry);
   }
-  const bytes=await boundedDownload(source,{fetchImpl});
+  const bytes=await boundedDownload(source,{fetchImpl,...(utility?{maxBytes:utility.size,expectedSize:utility.size}:{})});
   if(expected&&hash(bytes)!==expected)throw error('Published SHA-256 does not match the downloaded firmware.','hash');
   return bytes;
 }

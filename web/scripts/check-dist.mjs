@@ -20,4 +20,4 @@ assert.ok(!html.includes('localhost')&&!html.includes('127.0.0.1'),'Published ap
 assert.ok(/Content-Security-Policy/.test(html),'Missing CSP.');
 const expected=JSON.parse(await readFile(new URL('validators/integrity.json',root),'utf8'));
 assert.deepEqual(Object.keys(expected).sort(),['meshcore_backup.py','meshcore_partition_expansion.py']);
-console.log(`Public artifact boundary verified: ${count} whitelisted static files; no device backups. ${mirror.files} verified public firmware files (${mirror.entries} exact release URLs).`);
+console.log(`Public artifact boundary verified: ${count} whitelisted static files; no device backups. ${mirror.files} verified public firmware files (${mirror.entries} exact public source URLs).`);

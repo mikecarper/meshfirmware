@@ -2021,6 +2021,15 @@ test('a blocked erase ZIP download reveals its exact link and local erase input 
   assert.equal(ui.elements.get('custom-firmware').open,false);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls,[]);
 });
 
+test('erase download diagnostics preserve integrity failures and cannot approve a stale radio or final image',async()=>{
+  for(const failure of ['hash','radio','image','source']){
+    const ui=workbench();await Promise.resolve();ui.context.pkg=fakePackage({name:'intended-final.zip'});ui.evaluate('state.pkg=pkg;');ui.elements.get('erase-source').value='https://flasher.meshcore.io/firmware/FLASH_ERASE_nrf52_softdevice_v6.zip';let release;
+    ui.context.boundedFetch=()=>new Promise((resolve,reject)=>{release=failure==='hash'?()=>reject(Object.assign(Error('Public erase utility pinned SHA-256 mismatch'),{downloadKind:'mirror'})):()=>resolve(new Uint8Array(64));});ui.context.inspectFirmware=()=>{assert.fail('A stale download cannot be parsed or approved');};
+    const preparing=ui.evaluate('erasePackage();');if(failure==='radio')ui.evaluate('state.generation++;');if(failure==='image')ui.evaluate('state.pkg={name:"different.zip"};');if(failure==='source')ui.elements.get('erase-source').value='https://example.test/other.zip';release();
+    await assert.rejects(preparing,failure==='hash'?/pinned SHA-256 mismatch/:/selected radio, final firmware or erase utility changed/);assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls,[]);
+  }
+});
+
 const mergedItem=item=>({...item,action:'flash-wipe',name:item.name.replace(/\.bin$/i,'-merged.bin'),url:item.url.replace(/\.bin$/i,'-merged.bin'),sha256:'d'.repeat(64)});
 const artifactChoices=ui=>ui.elements.get('artifact').options.filter(option=>option.value).map(option=>option.value);
 
