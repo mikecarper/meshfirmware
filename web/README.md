@@ -578,6 +578,14 @@ board evidence, not just filenames. Unknown or conflicting evidence requires
 a directional, one-write override. That override is separate from the wipe
 acknowledgement; neither is a permanent bypass.
 
+The two verified official generic nRF52 erase applications (SoftDevice v6/v7)
+are board-neutral: their exact BIN SHA-256 and application-only DFU shape avoid
+a false RAK board-mismatch prompt. They remain destructive and still require
+wipe confirmation. They never establish board identity or bypass the final
+firmware/bootloader check. Custom erasers and board-specific QSPI formatters do
+not inherit this exception. Deployment checks exercise both canonical mirrored
+ZIPs against RAK3401 and RAK4631 without opening a USB port.
+
 After each reset/handoff, explicitly choose the **same physical radio** and
 confirm it. The browser cannot compare physical USB serial numbers. After
 erase, the final ZIP remains loaded, but no final write occurs until you

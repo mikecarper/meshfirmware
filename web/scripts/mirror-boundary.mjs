@@ -6,6 +6,10 @@ import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {validateMirrorIndex,mirrorParts,MAX_MIRROR_INDEX_BYTES} from '../src/downloads.js';
 import {migrationMetadataSource} from '../src/migration-sources.js';
+import {publicEraseUtility} from '../src/public-erase-utilities.js';
+import {genericNrfEraseIntent} from '../src/generic-nrf-erase.js';
+import {inspectFirmware} from '../src/firmware.js';
+import {assessBoard} from '../src/board-safety.js';
 
 export const MAX_PUBLIC_MIRROR_BYTES=850<<20;
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
@@ -51,6 +55,21 @@ export async function verifyMirrorDirectory(directory,{maxBytes=MAX_PUBLIC_MIRRO
     }
     assert.equal(length,entry.size,'Public multipart firmware length differs from its release.');
     assert.equal(aggregate.digest('hex'),entry.sha256,'Public multipart firmware SHA-256 differs from its release digest.');
+  }
+  // Deployment integration check against the REAL mirrored canonical ZIPs,
+  // not a mocked hash or a binary fixture bundled into the test suite. The
+  // eraser must remain destructive but must not invent a RAK board mismatch.
+  for(const entry of index.entries.filter(entry=>genericNrfEraseIntent(publicEraseUtility(entry.url)?.payloadHash))){
+    const chunks=[];
+    for(const piece of mirrorParts(entry))chunks.push(gunzipSync(await readFile(new URL(piece.path,root)),{maxOutputLength:piece.size}));
+    const utility=publicEraseUtility(entry.url),pkg=inspectFirmware(utility.name,new Uint8Array(Buffer.concat(chunks)));
+    assert.equal(pkg.payloadHash,utility.payloadHash,'Generic erase payload differs from its public pin.');
+    assert.ok(pkg.erase&&pkg.destructive,'Generic erase must retain destructive classification.');
+    for(const deviceModel of ['RAK3401','RAK4631']){
+      const check=assessBoard(pkg,{selectedHardware:deviceModel,deviceModel});
+      assert.equal(check.requiresOverride,false,'A verified generic erase application must not be a board mismatch.');
+      assert.equal(check.boardNeutralErase,true);assert.equal(check.matched,false);assert.equal(check.payloadFamily,'unknown');
+    }
   }
   return {entries:index.entries.length,files:files.size,bytes};
 }

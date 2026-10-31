@@ -1599,6 +1599,21 @@ test('nRF52 wipe retains final image, requires separate overrides, and cannot wr
   await ui.elements.get('prepare').onclick();assert.equal(ui.evaluate('state.plan.erasePkg'),null);
   await ui.elements.get('flash').onclick();assert.deepEqual(ui.calls.filter(c=>c.startsWith('flash:')),['flash:FLASH_ERASE.zip','flash:final.zip']);assert.equal(ui.evaluate('state.recovery'),null);assert.ok(ui.evaluate('state.verification'));
 });
+test('board-neutral erase keeps final-board checks and wipe consent without a spurious erase-board override',async()=>{
+  for(const outcome of ['erase','cancel-wipe','wrong-final-board']){
+    const ui=workbench();serialMock(ui);ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({name:'RAK_3401_companion.zip'});ui.context.erase=fakePackage({name:'FLASH_ERASE_nrf52_softdevice_v6.zip',erase:true,destructive:true});
+    ui.evaluate('state.port=selectedPort;state.pkg=pkg;state.device={model:"RAK3401"};state.plan={generation:0,port:selectedPort,sha256:pkg.sha256,erasePkg:erase};');
+    const assessed=[];ui.context.assessBoard=candidate=>{assessed.push(candidate.name);return candidate===ui.context.erase?{requiresOverride:false,boardNeutralErase:true,payloadFamily:'unknown',matched:false}:{requiresOverride:outcome==='wrong-final-board',token:'rak3401-to-rak4631',payloadFamily:'rak3401',firmwareFamily:'rak4631',deviceFamily:'rak3401'};};
+    ui.context.confirm=async(_title,_detail,_warning,token)=>{ui.calls.push('confirm:'+token);return outcome==='erase';};ui.context.flashNrf=async(_link,candidate)=>ui.calls.push('write:'+candidate.name);
+    await ui.elements.get('flash').onclick();
+    assert.equal(assessed[0],ui.context.pkg.name,'Final firmware is checked before the erase utility');
+    if(outcome==='wrong-final-board'){assert.deepEqual(assessed,[ui.context.pkg.name]);assert.ok(ui.calls.includes('confirm:rak3401-to-rak4631'));}
+    else{assert.deepEqual(assessed.slice(0,2),[ui.context.pkg.name,ui.context.erase.name]);assert.ok(ui.calls.includes('confirm:WIPE WITHOUT BACKUP'));assert.ok(!ui.calls.some(call=>call.startsWith('confirm:rak')),'The neutral erase result does not ask for a fake board mismatch');}
+    assert.deepEqual(ui.calls.filter(call=>call.startsWith('write:')),outcome==='erase'?['write:'+ui.context.erase.name]:[]);
+    assert.equal(ui.evaluate('state.pkg.name'),'RAK_3401_companion.zip','Erasing never substitutes or automatically writes the final image');
+    if(outcome==='erase')assert.equal(ui.evaluate('state.recovery.phase'),'reselect-dfu');else assert.ok(!ui.calls.includes('open'),'Cancellation must occur before opening DFU for writing');
+  }
+});
 test('reselection automatically verifies the running application and rejects changed identity without resets',async()=>{
   const ui=workbench();serialMock(ui);ui.context.expected={sha256:'a'.repeat(64),architecture:'nrf52',publicKey:'11'.repeat(32),family:'unknown',version:null};ui.evaluate('state.verification=expected;');
   ui.context.detectMeshCore=async()=>({role:'companion',publicKey:'22'.repeat(32),model:'test',name:'test'});ui.context.MeshCore=class{async cli(){return 'Companion v1.18.0';}};

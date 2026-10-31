@@ -1,6 +1,7 @@
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import {nrfDfuUsbIds} from './nrf-usb-ids.js';
+import {genericNrfEraseIntent} from './generic-nrf-erase.js';
 
 const digest = bytes => bytesToHex(sha256(bytes));
 const families = new Set(['unknown','rak3401','rak4631','ambiguous']);
@@ -56,6 +57,13 @@ export function assessBoard(pkg, {selectedHardware = '',deviceModel = '',usbText
   const identity = payloadBoardIdentity(pkg.payload), selectionFamily = rakFamily(`${selectedHardware} ${pkg.name || ''}`), boardFamily = rakFamily(deviceModel), usbFamily = rakFamily(usbText);
   const evidence = [boardFamily,usbFamily,deviceFamily].filter(family => family !== 'unknown');
   const connected = new Set(evidence), device = connected.size > 1 || connected.has('ambiguous') ? 'ambiguous' : evidence[0] || 'unknown';
+  // Generic erasers intentionally have no board identity. Only the two known
+  // BIN hashes, recomputed above, qualify; metadata/filenames cannot make a
+  // custom utility neutral. This does not authorize a write or establish board
+  // identity: the app still checks the final firmware and asks before wiping.
+  if(pkg.kind==='application'&&pkg.mode===4&&pkg.erase===true&&pkg.destructive===true&&pkg.appSize===pkg.payload.length&&pkg.sdSize===0&&pkg.blSize===0&&genericNrfEraseIntent(pkg.payloadHash)){
+    return Object.freeze({requiresOverride:false,token:null,firmwareFamily:'unknown',deviceFamily:device,payloadFamily:identity.family,selectionFamily,identity,matched:false,boardNeutralErase:true,reason:'Verified official generic erase application; no board identity is claimed. Erase confirmation and final-firmware board checks still apply.'});
+  }
   let firmwareFamily = identity.family, reason = '', requiresOverride = true;
   if (identity.family !== 'unknown' && selectionFamily !== 'unknown' && identity.family !== selectionFamily) { firmwareFamily = 'ambiguous'; reason = 'The embedded firmware target conflicts with the selected board or filename.'; }
   else if (identity.family !== 'unknown' && identity.family === device && device !== 'ambiguous') requiresOverride = false;

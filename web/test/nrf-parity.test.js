@@ -6,6 +6,8 @@ import {nrfPackage,hash,crc16,checkedZip,inspectFirmware,nrfEraseIntent} from '.
 import {rakFamily,endfIdentity,payloadBoardIdentity,assessBoard,isKnownDfu} from '../src/board-safety.js';
 import {flashNrf,slipDecode,slipEncode} from '../src/serial.js';
 import {nrfDfuUsbIds} from '../src/nrf-usb-ids.js';
+import {genericNrfEraseIntent} from '../src/generic-nrf-erase.js';
+import {publicEraseUtilities} from '../src/public-erase-utilities.js';
 const encode = value => new TextEncoder().encode(value);
 
 function zip(payload,name='firmware.bin') {
@@ -31,6 +33,30 @@ test('official erase payload hashes survive ZIP renaming and repacking',async t=
     let source;try{source=new Uint8Array(await readFile(new URL(`../../meshcore-dev_MeshCore/downloads/${version===7?'custom/':''}FLASH_ERASE_nrf52_softdevice_v${version}.zip`,import.meta.url)));}catch(error){if(error.code==='ENOENT'){t.diagnostic(`Optional local v${version} reference fixture is absent; canonical hash regression below remains hermetic.`);continue;}throw error;}
     const p=inspectFirmware('renamed.zip',source);assert.equal(p.erase,true);assert.equal(p.destructive,true);assert.match(p.eraseEvidence,/official SoftDevice/);
     const repacked=zipSync(checkedZip(source),{level:0});assert.notEqual(hash(repacked),hash(source));const q=inspectFirmware('renamed-again.zip',repacked);assert.equal(q.erase,true);assert.equal(q.eraseEvidence,p.eraseEvidence);
+    for(const candidate of [p,q])for(const deviceModel of ['RAK3401','RAK4631']){
+      const check=assessBoard(candidate,{selectedHardware:'RAK WisMesh 1W Booster (3401 + 13302)',deviceModel});
+      assert.equal(check.requiresOverride,false);assert.equal(check.token,null);assert.equal(check.boardNeutralErase,true);assert.equal(check.matched,false);assert.equal(check.payloadFamily,'unknown');assert.equal(check.deviceFamily,deviceModel.toLowerCase());
+    }
+    for(const change of [p=>p.kind='bootloader',p=>p.kind='softdevice_bootloader',p=>p.mode=2,p=>p.erase=false,p=>p.destructive=false,p=>p.appSize++,p=>p.sdSize=4,p=>p.blSize=4]){
+      const altered={...p};change(altered);assert.equal(assessBoard(altered,{deviceModel:'RAK3401'}).requiresOverride,true,'Only an unchanged generic erase APPLICATION may be board-neutral');
+    }
+    const altered={...p,payload:p.payload.slice()};altered.payload[0]^=1;assert.throws(()=>assessBoard(altered,{deviceModel:'RAK3401'}),/payload changed/);
+  }
+});
+test('only the two generic erase fingerprints are board-neutral, never QSPI formatters or arbitrary values',()=>{
+  const generic=publicEraseUtilities.filter(utility=>genericNrfEraseIntent(utility.payloadHash));
+  assert.deepEqual(generic.map(utility=>utility.name),['FLASH_ERASE_nrf52_softdevice_v6.zip','FLASH_ERASE_nrf52_softdevice_v7.zip']);
+  for(const value of [null,undefined,'','0'.repeat(64),'official SoftDevice v6 erase payload','FLASH_ERASE_nrf52_softdevice_v6.zip',...publicEraseUtilities.filter(utility=>utility.name.includes('QSPI')).map(utility=>utility.payloadHash)])assert.equal(genericNrfEraseIntent(value),null);
+});
+test('generic erase exemption cannot be forged with a filename, description, flags or claimed payload fingerprint',()=>{
+  for(const deviceModel of ['RAK3401','RAK4631']){
+    const custom=pkg('Unknown board','FLASH_ERASE_nrf52_softdevice_v6.zip');custom.eraseEvidence='official SoftDevice v6 erase payload';
+    const check=assessBoard(custom,{deviceModel});assert.equal(check.requiresOverride,true);assert.notEqual(check.boardNeutralErase,true);
+    for(const utility of publicEraseUtilities.slice(0,2))assert.throws(()=>assessBoard({...custom,payloadHash:utility.payloadHash},{deviceModel}),/payload changed/);
+    const wrong=pkg(deviceModel==='RAK3401'?'WisCore RAK4631 Board':'WisCore RAK3401 Board','FLASH_ERASE.zip');wrong.eraseEvidence='official SoftDevice v7 erase payload';
+    assert.equal(assessBoard(wrong,{deviceModel}).requiresOverride,true,'Erase labels never bypass a real application board mismatch');
+    const component={...pkg('Unknown board','bootloader.zip'),kind:'softdevice_bootloader',mode:3,erase:true,destructive:true,eraseEvidence:'official SoftDevice v6 erase payload'};
+    assert.equal(assessBoard(component,{deviceModel}).requiresOverride,true);
   }
 });
 test('known erase hash classification covers both canonical utilities even without local reference downloads',()=>{

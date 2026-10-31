@@ -3,6 +3,7 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { md5 } from '@noble/hashes/legacy.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { endfIdentity, payloadBoardIdentity } from './board-safety.js';
+import { genericNrfEraseIntent } from './generic-nrf-erase.js';
 
 export const hash = data => bytesToHex(sha256(data));
 export const md5hex = data => bytesToHex(md5(data));
@@ -13,8 +14,6 @@ export const nrfMetadataHash = pkg => hash(new TextEncoder().encode(JSON.stringi
 // Hash the actual destructive application, not its ZIP envelope: a renamed or
 // repacked erase package must not become an apparently ordinary app update.
 const knownNrfErasePayloads = new Map([
-  ['f17500b598ce53d4d4183f6bd20e06e9bf2bd3468d9a22ff3af7f148bb0dfc0c','official SoftDevice v6 erase payload'],
-  ['01f8d553e5ce865312fcfe3ddf1eb06f10ed7ca6bd4f34dd81e58b6f8400be8e','official SoftDevice v7 erase payload'],
   // Published by flasher.meshcore.io/firmware/*_QSPIFlash_Format-v1.2.zip.
   // Bind destructive intent to the BIN, not the ZIP filename or compression.
   ['bfd6d72de724c4b84395a963c0428c89de245038a44f02241907838e6caf9e09','official QSPI formatter payload (WioTrackerL1 v1.2)'],
@@ -24,7 +23,7 @@ const knownNrfErasePayloads = new Map([
   ['c3580dcd94d4f9983a9bf1d5e40ff678b38c6e9074f5e287360f27e992f29174','official QSPI formatter payload (Nano_G2_Ultra v1.2)']
 ]);
 const eraseName = value => /(?:^|[\\/_. -])(?:flash[_. -]*)?(?:erase|wipe|(?:qspi[_. -]*flash[_. -]*)?format(?:ter)?)(?:[\\/_. -]|$)/i.test(value || '');
-export const nrfEraseIntent = (name,payloadHash,entryNames = []) => knownNrfErasePayloads.get(payloadHash) || ([name,...entryNames].some(eraseName) ? 'erase/wipe package name (conservative destructive classification)' : null);
+export const nrfEraseIntent = (name,payloadHash,entryNames = []) => genericNrfEraseIntent(payloadHash) || knownNrfErasePayloads.get(payloadHash) || ([name,...entryNames].some(eraseName) ? 'erase/wipe package name (conservative destructive classification)' : null);
 export function crc16(data) {
   let crc = 0xffff;
   for (const b of data) { crc ^= b << 8; for (let i = 0; i < 8; i++) crc = ((crc & 0x8000) ? (crc << 1) ^ 0x1021 : crc << 1) & 0xffff; }
