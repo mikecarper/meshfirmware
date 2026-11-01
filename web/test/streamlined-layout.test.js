@@ -444,8 +444,8 @@ test('step 2 numbers the installation choices once without creating a fake actio
   const backgrounds=declarationsFor('.mode-step > .action-number').filter(rule=>Object.hasOwn(rule,'background'));assert.equal(backgrounds.at(-1)?.background,'var(--navy)','The installation badge must finish with the dark primary color');
 });
 
-test('optional bootloader identification is a hidden conditional step near the device, not a mandatory main action',()=>{
-  const panel=get('bootloader-info-fallback'),button=get('read-bootloader-info');assert.ok(has(panel,'hidden'));assert.ok(inside(button,panel));assert.equal(panel.parent,get('firmware-choices').parent);assert.ok(panel.start<get('firmware-choices').start);assert.ok(hasClass(button,'primary')&&hasClass(button,'step-button'));assert.ok(has(button,'data-lock'));assert.match(button.attrs['aria-label'],/Optional step 1\.5/);assert.ok(!get('flash').parent.children.includes(button));
+test('bootloader-drive identification is an unnumbered optional advanced tool, not a required next step',()=>{
+  const panel=get('bootloader-info-fallback'),button=get('read-bootloader-info');assert.ok(has(panel,'hidden'));assert.equal(panel.tag,'details');assert.ok(!has(panel,'open'));assert.ok(inside(panel,get('advanced-options')));assert.ok(inside(button,panel));assert.ok(!hasClass(button,'step-button'));assert.ok(has(button,'data-lock'));assert.ok(!get('flash').parent.children.includes(button));assert.match(html.slice(panel.start,button.start),/only if a drive is mounted/);
 });
 
 test('next-step instructions stay visible and numbered actions remain legible on phones',()=>{

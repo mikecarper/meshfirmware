@@ -8,6 +8,7 @@ import {detectMeshtasticBoard} from '../src/meshtastic-boards.js';
 import {detectMeshtastic} from '../src/meshtastic.js';
 import {canonicalHardware} from '../src/hardware-aliases.js';
 import {nrfDfuUsbIds} from '../src/nrf-usb-ids.js';
+import {nrfBoardCandidates} from '../src/nrf-board-candidates.js';
 import {parseBootloaderInfo,detectBootloaderBoard} from '../src/bootloader-info.js';
 import {chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode} from '../src/automatic.js';
 import {chooseConnection,parseUsbMode} from '../src/connection-choice.js';
@@ -49,7 +50,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
   });
   context.detectApplication=(...args)=>context.detectMeshCore(...args);context.detectMeshtasticBoard=detectMeshtasticBoard;
   context.parseBootloaderInfo=parseBootloaderInfo;context.detectBootloaderBoard=detectBootloaderBoard;context.chooseBootloaderInfoFile=async()=>{calls.push('file-picker');throw Error('Unexpected file chooser');};
-  context.selectionLink=selectionLink;
+  context.selectionLink=selectionLink;context.nrfBoardCandidates=nrfBoardCandidates;
   vm.runInContext(source,context);
   return {context,elements,calls,port,serialEvents,windowEvents,evaluate:code=>vm.runInContext(code,context)};
 }
@@ -295,11 +296,62 @@ async function bootloaderInfoWorkbench({dfu=false,code='APPLICATION_UNIDENTIFIED
   ui.context.detectApplication=async()=>{throw Object.assign(Error('Application was not identified'),{code});};await ui.elements.get('select-port').onclick();return ui;
 }
 
-test('an unrecognized application or initial DFU port exposes a prominent read-info action but never opens a file picker automatically',async()=>{
+test('an unidentified or DFU port highlights Hardware and offers drive info only as an optional advanced tool',async()=>{
   for(const dfu of [false,true]){
-    const ui=await bootloaderInfoWorkbench({dfu});assert.equal(ui.elements.get('bootloader-info-fallback').hidden,false);assert.equal(ui.elements.get('read-bootloader-info').disabled,false);assert.deepEqual(nextHighlight(ui),['read-bootloader-info']);assert.match(ui.elements.get('step-guidance').textContent,/INFO_UF2.TXT/);assert.ok(!ui.calls.includes('file-picker'));assert.equal(ui.evaluate('state.bootloaderInfo'),null);
+    const ui=await bootloaderInfoWorkbench({dfu});assert.equal(ui.elements.get('bootloader-info-fallback').hidden,false);assert.equal(ui.elements.get('read-bootloader-info').disabled,false);assert.ok(!ui.elements.get('bootloader-info-fallback').open);assert.deepEqual(nextHighlight(ui),['hardware']);assert.match(ui.elements.get('step-guidance').textContent,/exact hardware/);assert.ok(!ui.calls.includes('file-picker'));assert.equal(ui.evaluate('state.bootloaderInfo'),null);
   }
   const normal=await meshtasticWorkbench();await normal.elements.get('select-port').onclick();assert.equal(normal.elements.get('bootloader-info-fallback').hidden,true);assert.ok(!normal.calls.includes('file-picker'));
+});
+
+const rak3401Hardware='RAK WisMesh 1W Booster (3401 + 13302)',rak4631Hardware='RAK WisBlock / WisMesh (RAK 4631)';
+async function nrfCandidateWorkbench({id=[0x239a,0x002a],automatic=true}={}){
+  const ui=workbench({productionDefaults:automatic});await Promise.resolve();
+  ui.context.inventory=[t114MeshtasticItem({hardware:'Heltec v4',architecture:'esp32',name:'v4.bin',action:'flash-update'}),t114MeshtasticItem({hardware:rak3401Hardware,name:'rak3401.zip'}),t114MeshtasticItem(),t114MeshtasticItem({hardware:rak4631Hardware,name:'rak4631.zip'}),t114MeshtasticItem({hardware:'Other nRF52 board',name:'other.zip'}),t114MeshtasticItem({hardware:'RP2040',architecture:'noflash',action:'download',name:'rp.uf2'})];
+  ui.evaluate('state.items=inventory;filterCatalog();');ui.port.getInfo=()=>({usbVendorId:id[0],usbProductId:id[1]});await ui.elements.get('select-port').onclick();return ui;
+}
+const hardwareChoices=ui=>[...ui.elements.get('hardware').options].filter(option=>option.value).map(option=>option.value).sort();
+test('an unidentified RAK DFU port shows only matching nRF52 candidates and preserves original artifact indices',async()=>{
+  for(const automatic of [false,true]){
+    const ui=await nrfCandidateWorkbench({automatic});assert.deepEqual(hardwareChoices(ui),[rak3401Hardware,rak4631Hardware].sort());assert.deepEqual([...ui.elements.get('artifact').options].filter(option=>option.value).map(option=>option.value),['1','3']);
+    assert.equal(ui.elements.get('hardware').value,'');assert.equal(ui.elements.get('hardware').options[0].text,'Matching nRF52 boards');assert.equal(ui.elements.get('show-all-nrf-option').hidden,false);assert.equal(ui.elements.get('show-all-nrf').checked,false);assert.match(ui.elements.get('hardware-filter-status').textContent,/2 matching.*shared/);
+    assert.deepEqual(nextHighlight(ui),['hardware']);assert.equal(ui.evaluate('state.device'),null);assert.equal(ui.evaluate('state.detectedHardware'),null);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls,['chooser']);
+  }
+});
+test('showing all remains nRF52-only and switching back discards incompatible manual catalog choices and approvals',async()=>{
+  const ui=await nrfCandidateWorkbench();ui.elements.get('show-all-nrf').checked=true;await ui.elements.get('show-all-nrf').onchange();assert.deepEqual(hardwareChoices(ui),['Heltec T114','Other nRF52 board',rak3401Hardware,rak4631Hardware].sort());
+  ui.elements.get('hardware').value='Heltec T114';await ui.elements.get('hardware').onchange();assert.equal(ui.elements.get('artifact').value,'2');
+  ui.context.pkg=fakePackage({architecture:'nrf52'});ui.evaluate('state.pkg=pkg;state.backupApproved={};state.plan={port:state.port};');ui.elements.get('show-all-nrf').checked=false;await ui.elements.get('show-all-nrf').onchange();
+  assert.deepEqual(hardwareChoices(ui),[rak3401Hardware,rak4631Hardware].sort());assert.equal(ui.elements.get('hardware').value,'');assert.equal(ui.elements.get('artifact').value,'');assert.equal(ui.evaluate('state.manualSelections.hardware'),undefined);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.backupApproved'),null);assert.deepEqual(ui.calls,['chooser']);
+});
+test('nRF52 candidate filtering never turns a single remaining USB hint into an automatic physical-board match',async()=>{
+  const ui=await nrfCandidateWorkbench();ui.context.inventory=[ui.context.inventory[1]];ui.evaluate('state.items=inventory;filterCatalog();controls();');assert.deepEqual(hardwareChoices(ui),[rak3401Hardware]);assert.equal(ui.elements.get('hardware').value,'');assert.equal(ui.elements.get('artifact').value,'');assert.deepEqual(nextHighlight(ui),['hardware']);assert.equal(ui.evaluate('state.detectedHardware'),null);assert.deepEqual(ui.calls,['chooser']);
+});
+test('an unknown or ESP ROM interface is not nRF52 evidence, while explicit nRF52 mode retains all nRF52 choices',async()=>{
+  for(const id of [[0x1234,0x5678],[0x303a,0x1001]]){
+    const ui=await nrfCandidateWorkbench({id,automatic:false});assert.ok(hardwareChoices(ui).includes('Heltec v4'));assert.equal(ui.elements.get('hardware-filter-status').hidden,true);
+    ui.elements.get('already-bootloader').checked=true;await ui.elements.get('already-bootloader').onchange();assert.ok(hardwareChoices(ui).includes('Heltec v4'));
+    ui.elements.get('transport-mode').value='nrf52';await ui.elements.get('transport-mode').onchange();assert.deepEqual(hardwareChoices(ui),['Heltec T114','Other nRF52 board',rak3401Hardware,rak4631Hardware].sort());assert.equal(ui.elements.get('show-all-nrf-option').hidden,true);assert.equal(ui.evaluate('state.detectedHardware'),null);assert.deepEqual(ui.calls,['chooser']);
+  }
+});
+test('a board switch or disconnect releases the old candidate scope and never carries show-all into the new radio',async()=>{
+  const ui=await nrfCandidateWorkbench();ui.elements.get('show-all-nrf').checked=true;await ui.elements.get('show-all-nrf').onchange();
+  ui.serialEvents.disconnect({port:ui.port});assert.ok(hardwareChoices(ui).includes('Heltec v4'));assert.equal(ui.elements.get('hardware-filter-status').hidden,true);
+  const nextPort={getInfo:()=>({usbVendorId:0x239a,usbProductId:0x0071})};ui.context.navigator.serial.requestPort=async()=>{ui.calls.push('chooser');return nextPort;};await ui.elements.get('select-port').onclick();assert.deepEqual(hardwareChoices(ui),['Heltec T114']);assert.equal(ui.elements.get('show-all-nrf').checked,false);assert.equal(ui.elements.get('hardware').value,'');assert.deepEqual(ui.calls,['chooser','chooser']);
+});
+test('confirmed same-radio handoff retains the identified nRF52 target instead of replacing it with shared USB hints',async()=>{
+  const ui=await meshtasticWorkbench({device:meshtasticDevice({meshtasticHardware:117})});ui.context.inventory=[t114MeshtasticItem({hardware:rak3401Hardware,name:'rak3401.zip'}),t114MeshtasticItem({hardware:rak4631Hardware,name:'rak4631.zip'}),t114MeshtasticItem()];ui.evaluate('state.items=inventory;filterCatalog();');await ui.elements.get('select-port').onclick();assert.deepEqual(hardwareChoices(ui),[rak3401Hardware]);
+  ui.evaluate('state.handoff=true;');const dfu={getInfo:()=>({usbVendorId:0x239a,usbProductId:0x002a})};ui.context.navigator.serial.requestPort=async()=>{ui.calls.push('chooser');return dfu;};ui.context.confirm=async()=>true;await ui.elements.get('select-port').onclick();assert.deepEqual(hardwareChoices(ui),[rak3401Hardware]);assert.equal(ui.elements.get('hardware').value,rak3401Hardware);assert.match(ui.elements.get('hardware-filter-status').textContent,/previously identified/);assert.equal(ui.evaluate('state.device.firmwareFamily'),'meshtastic');assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls,['chooser','open','close','chooser']);
+});
+test('an explicit nRF52 connection override belongs to its radio and cannot hide a newly detected ESP32',async()=>{
+  for(const disconnected of [false,true]){
+    const ui=await nrfCandidateWorkbench({id:[0x1234,0x5678]});serialMock(ui);ui.elements.get('transport-mode').value='nrf52';await ui.elements.get('transport-mode').onchange();assert.ok(!hardwareChoices(ui).includes('Heltec v4'));
+    if(disconnected)ui.serialEvents.disconnect({port:ui.port});
+    const esp={getInfo:()=>({usbVendorId:0x303a,usbProductId:0x1001})};ui.context.navigator.serial.requestPort=async()=>{ui.calls.push('chooser');return esp;};ui.context.detectApplication=async()=>({firmwareFamily:'meshcore',role:'common-cli',model:'Heltec V4.2 OLED',catalogRole:'repeater',publicKey:null});
+    await ui.elements.get('select-port').onclick();assert.equal(ui.elements.get('transport-mode').value,'auto');assert.equal(ui.evaluate('state.device.architecture'),'esp32');assert.ok(hardwareChoices(ui).includes('Heltec v4'));assert.equal(ui.elements.get('hardware').value,'Heltec v4');assert.equal(ui.elements.get('hardware-filter-status').hidden,true);assert.ok(!ui.calls.includes('write')&&!ui.calls.includes('rom'));
+  }
+});
+test('nRF52 scope changes retain pending erase recovery final bytes without a write or renewed approval',async()=>{
+  const ui=workbench({recovery:{sha256:'a'.repeat(64),hardware:rak3401Hardware,phase:'reselect-dfu',eraseComplete:true}});await Promise.resolve();ui.context.inventory=[t114MeshtasticItem({hardware:rak3401Hardware,name:'rak3401.zip'}),t114MeshtasticItem({hardware:rak4631Hardware,name:'rak4631.zip'})];ui.context.pkg=fakePackage({architecture:'nrf52',sha256:'a'.repeat(64)});ui.context.selectedPort=ui.port;ui.port.getInfo=()=>({usbVendorId:0x239a,usbProductId:0x002a});ui.evaluate('state.items=inventory;state.port=selectedPort;state.pkg=pkg;controls();');assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);assert.equal(ui.evaluate('state.recovery.phase'),'reselect-dfu');assert.equal(ui.evaluate('state.recovery.eraseComplete'),true);assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.elements.get('show-all-nrf').disabled,true);assert.deepEqual(ui.calls,[]);
 });
 
 test('one explicit bootloader-info choice parses and selects the exact firmware without any drive write or flash',async()=>{
@@ -1240,7 +1292,7 @@ test('manual detection works with automatic port probing disabled and unknown mo
 });
 
 test('DFU detection checks hints without probing or treating USB as physical board proof',async()=>{
-  const ui=workbench();await Promise.resolve();ui.port.getInfo=()=>({usbVendorId:0x239a,usbProductId:0x0029});ui.elements.get('auto-detect-board').checked=true;ui.elements.get('hardware').value='Physical RAK';
+  const ui=workbench();await Promise.resolve();ui.context.inventory=[t114MeshtasticItem({hardware:'Physical RAK'})];ui.evaluate('state.items=inventory;filterCatalog();');ui.port.getInfo=()=>({usbVendorId:0x239a,usbProductId:0x0029});ui.elements.get('auto-detect-board').checked=true;ui.elements.get('hardware').value='Physical RAK';
   await ui.elements.get('select-port').onclick();assert.deepEqual(ui.calls,['chooser']);assert.equal(ui.elements.get('hardware').value,'Physical RAK');assert.equal(ui.elements.get('recovery-profile').value,'');assert.match(ui.elements.get('notice').textContent,/without sending/);
 });
 
@@ -2810,7 +2862,7 @@ test('a required firmware-build choice is highlighted and revealed without choos
   const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.inventory=[v4Item];
   const highlights=[],aria=[];ui.elements.get('artifact-field').classList.toggle=(name,value)=>highlights.push([name,value]);ui.elements.get('artifact').setAttribute=(name,value)=>aria.push([name,value]);
   ui.elements.get('artifact').focus=()=>{throw Error('A required choice must not steal keyboard focus');};
-  ui.evaluate('state.items=inventory;state.port=selectedPort;filterCatalog();');ui.elements.get('firmware-choices').open=false;ui.evaluate('controls();');
+  ui.evaluate('state.items=inventory;state.port=selectedPort;filterCatalog();');ui.elements.get('hardware').value=v4Item.hardware;ui.elements.get('firmware-choices').open=false;ui.evaluate('controls();');
   assert.deepEqual(highlights.at(-1),['choice-required',true]);assert.ok(aria.some(([name,value])=>name==='aria-required'&&value==='true'));assert.equal(ui.elements.get('artifact-required').hidden,false);assert.equal(ui.elements.get('artifact-choice-hint').hidden,false);assert.equal(ui.elements.get('firmware-choices').open,true);
   assert.ok(aria.some(([name,value])=>name==='aria-label'&&value==='Step 2.5: Firmware build'));assert.match(ui.elements.get('step-guidance').textContent,/^Step 2\.5:/);
   assert.equal(ui.elements.get('artifact').value,'');assert.equal(ui.elements.get('prepare').disabled,true);assert.deepEqual(ui.calls,[]);
@@ -2818,6 +2870,7 @@ test('a required firmware-build choice is highlighted and revealed without choos
 
 test('selecting a firmware build clears the highlight immediately and clearing the choice restores it',async()=>{
   const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.inventory=[v4Item];ui.evaluate('state.items=inventory;state.port=selectedPort;filterCatalog();');
+  ui.elements.get('hardware').value=v4Item.hardware;
   const highlights=[],aria=[],removed=[];ui.elements.get('artifact-field').classList.toggle=(name,value)=>highlights.push([name,value]);ui.elements.get('artifact').setAttribute=(name,value)=>aria.push([name,value]);ui.elements.get('artifact').removeAttribute=name=>removed.push(name);
   ui.elements.get('artifact').value='0';await ui.elements.get('artifact').onchange();
   assert.deepEqual(highlights.at(-1),['choice-required',false]);assert.deepEqual(aria.at(-1),['aria-required','false']);assert.equal(ui.elements.get('artifact-choice-hint').hidden,true);assert.equal(ui.elements.get('artifact-required').hidden,true);assert.equal(ui.elements.get('prepare').disabled,false);

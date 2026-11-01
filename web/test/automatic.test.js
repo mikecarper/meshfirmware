@@ -8,6 +8,29 @@ test('newest exact-board write-only application is selected, never merged instal
   const items=[app({version:'v1.9.0'}),app({action:'flash-wipe',name:'heltec_v4_repeater-v1.19.0-merged.bin',version:'v1.19.0'}),app(),app({hardware:'Heltec v4 R8',version:'v2.0.0'})];
   const result=choose(items);assert.equal(result.artifactIndex,2);assert.equal(result.selections.version,'v1.18.0');assert.equal(result.selections.provider,'MeshCore');assert.equal(result.selections.role,'repeater');
 });
+
+test('an optional architecture constraint excludes other chips while retaining original catalog indices',()=>{
+  const nrf=app({architecture:'nrf52',action:'flash',version:'v1.17.0',name:'board_repeater-v1.17.0.zip',url:'https://example.test/board_repeater-v1.17.0.zip'});
+  const items=[app({hardware:'Other board'}),app(),nrf];
+  const unrestricted=choose(items);assert.equal(unrestricted.artifactIndex,1);assert.equal(choose(items,{architecture:''}).artifactIndex,1);
+  const constrained=choose(items,{architecture:'nrf52'});assert.equal(constrained.artifactIndex,2);assert.deepEqual(constrained.candidates,[2]);assert.equal(constrained.selections.version,'v1.17.0');
+  const esp=choose(items,{architecture:'esp32'});assert.equal(esp.artifactIndex,1);assert.deepEqual(esp.candidates,[1]);
+  for(const architecture of ['unknown','NRF52',null])assert.equal(choose(items,{architecture}).artifactIndex,null);
+  assert.equal(choose([app()],{architecture:'nrf52'}).artifactIndex,null);
+});
+
+test('architecture limits migration stock fallback and cannot substitute another chip or provider',()=>{
+  const device={firmwareFamily:'bootloader',role:'bootloader'};
+  const esp=app({role:'companionFull'}),nrf=app({architecture:'nrf52',action:'flash',role:'companionFull',name:'board_companion-v1.18.0.zip',url:'https://example.test/board_companion-v1.18.0.zip'});
+  for(const installMode of ['update','install']){
+    const input={device,provider:'',installMode,architecture:'nrf52'};
+    const result=choose([app({hardware:'Other board'}),esp,nrf],input);assert.equal(result.selections.provider,'MeshCore');assert.equal(result.artifactIndex,2);assert.deepEqual(result.candidates,[2]);
+    const noFallback=choose([esp],input);assert.equal(noFallback.artifactIndex,null);assert.equal(noFallback.selections.provider,'Keymind Cascade');
+    const keymind={...esp,provider:'Keymind Cascade'};
+    const correctStock=choose([keymind,nrf],input);assert.equal(correctStock.artifactIndex,1);assert.equal(correctStock.selections.provider,'MeshCore');
+    const explicit=choose([keymind,nrf],{...input,provider:'Keymind Cascade'});assert.equal(explicit.artifactIndex,null);assert.equal(explicit.selections.provider,'Keymind Cascade');
+  }
+});
 test('Keymind and historical logging markers select the same fork, not a separate logging provider',()=>{
   const items=[app(),app({provider:'Keymind Cascade'}),app({provider:'Keymind Cascade Logging'})];
   assert.equal(choose(items,{provider:'',device:{catalogRole:'repeater',version:'v1.17.1-halo-keymind-cascade-dev-abcdef'}}).artifactIndex,1);

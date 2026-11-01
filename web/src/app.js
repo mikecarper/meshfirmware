@@ -29,6 +29,7 @@ import { firmwareFilesLinks } from './firmware-links.js';
 import { selectionLink } from './selection-link.js';
 import { canonicalHardware } from './hardware-aliases.js';
 import { nrfDfuUsbIds } from './nrf-usb-ids.js';
+import { nrfBoardCandidates } from './nrf-board-candidates.js';
 
 const $ = id => document.getElementById(id);
 // A detected Meshtastic radio defaults to a fresh install. A later manual
@@ -45,10 +46,13 @@ state.knownApplicationPort=null;state.autoVerifyAttempt=null;state.autoVerificat
 state.connectionTrial=null;
 state.restorePreview=null;
 state.bootloaderInfo=null;state.applicationProbeFailed=false;
+state.catalogScope='';
+state.transportModePort=null;
 state.selectionLink=null;state.selectionCopyGeneration=0;state.selectionCopyPending=null;state.selectionCopyTimer=null;
 state.applicationDetection=null;
 const nextStepScroller=createNextStepScroller({window,document});
 $('skip-backup').checked=false;
+$('show-all-nrf').checked=false;
 const bootloaderOffersShown=new Set();
 try { const pending=JSON.parse(localStorage.getItem('meshfirmware.pendingMigration') || 'null'); if(pending && /^[a-f0-9:]{17}$/i.test(pending.mac) && /^[a-f0-9]{64}$/.test(pending.sha256)) state.migration=pending; } catch { /* The worker still fails closed on any actual NVS migration state. */ }
 for(const [key,field] of [['meshfirmware.nrfRecovery','recovery'],['meshfirmware.verifyApplication','verification']])try{const saved=JSON.parse(localStorage.getItem(key)||'null');if(saved&&/^[a-f0-9]{64}$/.test(saved.sha256))state[field]=field==='recovery'?{...saved,phase:'reselect-dfu',eraseComplete:saved.eraseComplete===true}:saved;}catch{}
@@ -259,7 +263,7 @@ async function startNewRadio(){
   clearBootloaderInfoEvidence();state.applicationProbeFailed=false;
   state.verification=null;state.port=null;state.handoff=false;state.device=null;state.detectedHardware=null;state.boardDetected=false;state.connection=null;state.connectionTrial=null;
   state.knownApplicationPort=null;state.autoVerifyAttempt=null;state.backup=null;state.backupApproved=null;state.recoveryManual=false;state.recoveryDetectionRequested=false;state.manualSelections=provider?{provider}:{};
-  clearBackupJson();invalidateFirmwareSelection();state.installMode='update';installModeSource=null;$('transport-mode').value='auto';$('already-bootloader').checked=false;$('skip-backup').checked=false;
+  clearBackupJson();invalidateFirmwareSelection();state.installMode='update';installModeSource=null;$('transport-mode').value='auto';$('already-bootloader').checked=false;$('skip-backup').checked=false;$('show-all-nrf').checked=false;
   for(const id of ['expected-sha','expert-offset','firmware-file','custom-url'])$(id).value='';
   $('device-name').textContent='No USB port selected';$('device-meta').textContent='Choose the next radio’s USB port. Board and role are detected after connecting.';$('port-status').textContent='Not connected';
   $('backup-summary').textContent='';$('board-detection').textContent='Choose a USB port to detect the next radio.';$('recovery-profile').value='';$('installed-identity').value='';$('recovery-detection').textContent='';
@@ -287,12 +291,11 @@ function nextFlasherControl(){
   if(!state.port&&state.pkg?.architecture!=='uf2')return 'select-port';
   if(state.recovery?.phase==='reselect-dfu')return 'select-port';
   if(isBootloaderInfo()&&!dfuIds.has(portId(state.port))&&!$('already-bootloader').checked)return 'select-port';
-  if(bootloaderInfoAvailable()&&!isBootloaderInfo()&&!state.device&&!$('hardware').value&&!state.pkg)return 'read-bootloader-info';
   if(state.migration?.uart&&!state.migration.settled&&!['writing','written'].includes(state.migration.phase))return 'wait-migration';
   if(state.archive&&!state.pkg)return $('archive-entry').value?'load-entry':'archive-entry';
   if(!state.pkg&&!$('artifact').value){
     if(!state.items.length)return null;
-    for(const id of ['hardware','role'])if(!$(id).value&&[...$(id).options].filter(option=>option.value&&!option.disabled).length>1)return id;
+    for(const id of ['hardware','role'])if(!$(id).value&&[...$(id).options].filter(option=>option.value&&!option.disabled).length>(id==='hardware'?0:1))return id;
     return [...$('artifact').options].some(option=>option.value!==''&&!option.disabled)?'artifact':null;
   }
   if(state.finishedFirmware?.sha256===state.pkg?.sha256&&state.finishedFirmware?.kind==='temporary-recovery')return $('hardware').value&&$('bootloader-source').value?'load-bootloader':'hardware';
@@ -315,7 +318,6 @@ function updateNextAction(){
   if(id==='load-entry'||id==='archive-entry')revealPanel('archive-picker');
   const messages={hardware:'Step 2: Choose the exact hardware for this radio.',role:'Step 2: Choose the firmware role.',artifact:'Step 2.5: Choose a firmware build to continue.',finish:'Next: Reset verified ESP32 to start the firmware that was written. Keep USB and power connected.','verify-app':'Step 5: Verify running application to check startup without flashing again.','wait-migration':'Next: Wait for UART migration to verify it has settled. Do not reset an active bridge.','load-entry':'Next: Load this archive entry for the exact board, then continue preparation.','archive-entry':'Next: Choose the exact board image from this release ZIP.','expert-offset':'Next: Enter the documented flash offset for this component. No offset is guessed.','transport-mode':'Next: Choose the correct bootloader connection method; automatic detection was ambiguous.'};
   if(messages[id])$('step-guidance').textContent=messages[id];
-  if(id==='read-bootloader-info')$('step-guidance').textContent='Step 1.5: Read INFO_UF2.TXT from this radio’s bootloader drive to select its firmware. This only reads a file; flashing stays on USB serial.';
   if(id==='select-port'&&isBootloaderInfo()&&!state.verification)$('step-guidance').textContent='Next: select this same radio’s DFU serial port. INFO_UF2.TXT does not prove the current port is in DFU. For an unlisted bootloader, explicitly check Already in ROM/DFU.';
   if(id==='select-port'&&state.finishedFirmware?.verified&&!state.verification)$('step-guidance').textContent='Firmware startup verified. Next: Flash a new device — choose its USB port.';
   if(state.finishedFirmware?.kind==='temporary-recovery'&&state.finishedFirmware.sha256===state.pkg?.sha256&&['load-bootloader','hardware'].includes(id))$('step-guidance').textContent='Next: choose the actual physical board and load its NORMAL bootloader. Do not flash the temporary recovery bridge again.';
@@ -325,7 +327,14 @@ function updateNextAction(){
 function controls() {
   if(state.applicationDetection&&(state.applicationDetection.port!==state.port||state.applicationDetection.generation!==state.generation))clearApplicationDetection();
   discardStaleBootloaderInfo();
+  const scope=catalogScopeKey();
+  if(state.catalogScope!==scope){state.catalogScope=scope;filterCatalog('project',{preserveArtifact:true});return;}
+  const candidates=catalogCandidates(),nrf=catalogArchitecture()==='nrf52';
+  $('show-all-nrf-option').hidden=!nrf||!candidates.candidates.length;
+  $('hardware-filter-status').hidden=!nrf;
+  $('hardware-filter-status').textContent=!nrf?'':$('show-all-nrf').checked?'Showing all nRF52 boards. Confirm the physical hardware before flashing.':candidates.candidates.length?candidates.source==='identified-hardware'?'Showing the previously identified nRF52 hardware.':`Showing ${candidates.candidates.length} matching nRF52 board candidates. The USB bootloader identity may be shared; choose the physical board.`:'Showing nRF52 boards only. The exact hardware has not been identified.';
   document.querySelectorAll('[data-lock]').forEach(el => { el.disabled = state.busy; });
+  $('show-all-nrf').disabled ||= continuingDeviceFlow()||!!state.plan?.written;
   syncSelectionLink();
   updateBootloaderInfoPanel();
   $('select-port').disabled ||= !('serial' in navigator);
@@ -462,7 +471,7 @@ const bootloaderInfoWarning='INFO_UF2.TXT is a file-based board hint, not proof 
 function clearBootloaderInfoEvidence(){state.bootloaderInfo=null;if(isBootloaderInfo()){state.device=null;state.detectedHardware=null;state.boardDetected=false;state.backupApproved=null;state.knownApplicationPort=null;}}
 function discardStaleBootloaderInfo(){if(state.bootloaderInfo&&(state.bootloaderInfo.port!==state.port||state.bootloaderInfo.generation!==state.generation))clearBootloaderInfoEvidence();}
 function bootloaderInfoAvailable(){return !!state.port&&!state.migration&&!state.migrationApproval&&!state.recovery&&!state.espRecovery&&!state.verification&&!state.handoff&&!state.esp&&!state.plan&&(state.applicationProbeFailed||dfuIds.has(portId(state.port))||isBootloaderInfo());}
-function updateBootloaderInfoPanel(){const available=bootloaderInfoAvailable();$('bootloader-info-fallback').hidden=!available;$('read-bootloader-info').disabled=state.busy||!available;const result=isBootloaderInfo()?applicationBoard():null;$('bootloader-info-status').textContent=result?[result.hardware?`Read INFO_UF2.TXT; selected ${result.hardware}.`:result.reason,result.candidates.length>1?'Candidates: '+result.candidates.join(', ')+'.':'',bootloaderInfoWarning].filter(Boolean).join(' '):'If this radio exposes a bootloader drive, choose its INFO_UF2.TXT file. The page reads it and selects a matching board and firmware when unambiguous; it never writes to that drive.';}
+function updateBootloaderInfoPanel(){const available=bootloaderInfoAvailable();$('bootloader-info-fallback').hidden=!available;$('read-bootloader-info').disabled=state.busy||!available;const result=isBootloaderInfo()?applicationBoard():null;$('bootloader-info-status').textContent=result?[result.hardware?`Read INFO_UF2.TXT; selected ${result.hardware}.`:result.reason,result.candidates.length>1?'Candidates: '+result.candidates.join(', ')+'.':'',bootloaderInfoWarning].filter(Boolean).join(' '):'Optional: only use this if the radio exposes a bootloader drive with INFO_UF2.TXT. No drive mounted? Choose Hardware instead. Serial DFU flashing needs no drive.';}
 function applicationBoard(device=state.device){return isBootloaderInfo(device)?detectBootloaderBoard({items:state.items,info:state.bootloaderInfo?.info,usbInfo:state.port?.getInfo()||{}}):isMeshtastic(device)?detectMeshtasticBoard({items:state.items,hwModel:device.meshtasticHardware,pioEnv:device.meshtasticPioEnv}):detectBoard({items:state.items,deviceModel:device?.model||'',usbInfo:state.port?.getInfo()||{}});}
 function requireMeshCoreApplication(){if(isBootloaderInfo())fail('Only bootloader information has been read. Select the running MeshCore application before backup, restore or serial-console commands.');if(isMeshtastic())fail('Meshtastic is running. MeshCore backup, restore and serial commands are available after MeshCore is installed. Export Meshtastic settings separately with a Meshtastic client.');}
 async function readSelectedBootloaderInfo(){
@@ -564,7 +573,7 @@ function selectDetectedBoard() {
 }
 function applyAutomaticSelections(){
   if(!$('auto-detect-board').checked)return;
-  const result=chooseFirmware({items:state.items,device:state.device||{},hardware:$('hardware').value,...state.manualSelections,installMode:state.installMode});
+  const result=chooseFirmware({items:state.items,device:state.device||{},hardware:$('hardware').value,...state.manualSelections,installMode:state.installMode,architecture:catalogArchitecture()});
   const selected=result.artifactIndex===null?null:state.items[result.artifactIndex];
   if(state.pkg&&(!selected||state.item?.name!==selected.name||state.item?.url!==selected.url)){
     if(state.esp)fail('Close the current inspected session before changing the automatic firmware selection.');
@@ -640,7 +649,7 @@ async function detectSelectedBoard() {
   if(dfuIds.has(portId(state.port))||$('already-bootloader').checked){
     state.applicationProbeFailed=false;
     selectDetectedBoard();matchInstalledRecovery($('installed-identity').value.trim());
-    notice('Bootloader hints checked without sending DFU or application commands. Review any recovery match; the physical board is not identified by its DFU USB ID.');return;
+    notice(catalogArchitecture()==='nrf52'?'nRF52 DFU mode detected without sending commands. Choose the exact Hardware below; legacy serial DFU does not report a board name, and no mounted drive is needed.':'Bootloader hints checked without sending DFU or application commands. Choose the exact Hardware below; a mounted drive is not required.');return;
   }
   const port=state.port,generation=state.generation;clearBootloaderInfoEvidence();state.applicationProbeFailed=false;state.device=null;state.boardDetected=false;state.backupApproved=null;
   notice('Reading the node’s USB identity. Keep the radio connected. No reset or firmware write is sent.');
@@ -924,16 +933,26 @@ function options(id, values, placeholder) {
   const select = $(id), prior = select.value;
   // A detected physical target remains visible even when the chosen provider
   // has no build for it. In that case no firmware artifact is selected.
-  if(id==='hardware'&&state.detectedHardware)values=[...values,state.detectedHardware];
+  if(id==='hardware'&&state.detectedHardware&&(!catalogArchitecture()||catalogHardwareAllowed(state.detectedHardware)))values=[...values,state.detectedHardware];
   select.replaceChildren(new Option(placeholder,''),...Array.from(new Set(values)).filter(Boolean).sort(id==='version'?compareVersions:undefined).map(v => new Option(id==='provider'&&v==='MeshCore'?'MeshCore (stock)':v,v)));
   if ([...select.options].some(o => o.value === prior)) select.value = prior;
 }
-function filterCatalog(changed = 'project') {
-  let items = state.items.filter(i => i.project === $('project').value);
-  for (const id of ['provider','hardware','role','version']) { if (['project','provider','hardware','role','version'].indexOf(id) > ['project','provider','hardware','role','version'].indexOf(changed)) options(id,items.map(i => i[id]),`All ${id === 'hardware' ? 'boards' : id + 's'}`); if ($(id).value) items = items.filter(i => i[id] === $(id).value); }
+// The chip family and installed-loader hints narrow choices, never prove the
+// physical board or authorize a write. A proposed file is not device evidence.
+function catalogArchitecture(){return state.port&&(dfuIds.has(portId(state.port))||state.device?.architecture==='nrf52'||$('transport-mode').value==='nrf52')?'nrf52':'';}
+function catalogCandidates(){return catalogArchitecture()==='nrf52'?nrfBoardCandidates({items:state.items,usbInfo:state.port?.getInfo()||{},hardware:state.detectedHardware||''}):{candidates:[],source:'unknown'};}
+function catalogScopeKey(){return catalogArchitecture()?JSON.stringify([catalogArchitecture(),$('show-all-nrf').checked?[]:catalogCandidates().candidates]):'';}
+function catalogHardwareAllowed(hardware){const candidates=catalogCandidates().candidates;return state.items.some(item=>item.hardware===hardware&&item.architecture===catalogArchitecture())&&($('show-all-nrf').checked||!candidates.length||candidates.includes(hardware));}
+function filterCatalog(changed = 'project',{preserveArtifact=false}={}) {
+  const architecture=catalogArchitecture(),priorArtifact=$('artifact').value,candidates=catalogCandidates().candidates,narrow=architecture&&!$('show-all-nrf').checked&&candidates.length>0;
+  let items = state.items.filter(i => i.project === $('project').value&&(!architecture||i.architecture===architecture)&&(!narrow||candidates.includes(i.hardware)));
+  const compatibleHardware=new Set(items.map(item=>item.hardware));
+  if(architecture&&state.manualSelections.hardware&&!compatibleHardware.has(state.manualSelections.hardware))for(const key of ['hardware','role','version'])delete state.manualSelections[key];
+  for (const id of ['provider','hardware','role','version']) { if (['project','provider','hardware','role','version'].indexOf(id) > ['project','provider','hardware','role','version'].indexOf(changed)) options(id,items.map(i => i[id]),id==='hardware'&&narrow?'Matching nRF52 boards':`All ${id === 'hardware' ? architecture==='nrf52'?'nRF52 boards':'boards' : id + 's'}`); if ($(id).value) items = items.filter(i => i[id] === $(id).value); }
   items=items.filter(item=>matchesCatalogInstallMode(item,state.installMode));
   items.sort((a,b)=>compareVersions(a.version,b.version));
   $('artifact').replaceChildren(new Option(`${items.length} artifacts · choose a file`,''),...items.map(item => new Option(`${[item.title,item.subtitle].filter(Boolean).join(' / ')} · ${item.name} · ${item.action}`,String(state.items.indexOf(item)))));
+  if(preserveArtifact&&[...$('artifact').options].some(option=>option.value===priorArtifact))$('artifact').value=priorArtifact;
   try{localStorage.setItem('meshfirmware.selections',JSON.stringify(Object.fromEntries(['provider','hardware','role','version'].map(id=>[id,$(id).value]))));}catch{}
   updateDownload(); controls();
 }
@@ -1074,6 +1093,9 @@ $('select-port').onclick = () => operation(async () => {
   const manualDfuSelection=dfuIds.has(portId(port))&&!state.device&&!state.detectedHardware&&!state.boardDetected;
   await closeEsp();state.backupApproved=null;
   if(!continuation){
+    // A manual connection override belongs to its selected radio, not the next
+    // physical device (including after a disconnect). Keep it for handoffs.
+    if(state.transportModePort&&state.transportModePort!==port)$('transport-mode').value='auto';
     if(!sameModeRadio){
       if(installModeSource?.port&&installModeSource.port!==port){state.installMode='update';syncInstallMode();installModeSource=null;}
       else if(installModeSource?.port===null)installModeSource={...installModeSource,port};
@@ -1081,6 +1103,7 @@ $('select-port').onclick = () => operation(async () => {
     state.finishedFirmware=null;
     state.knownApplicationPort=null;state.autoVerifyAttempt=null;
     $('skip-backup').checked=false;
+    if(!sameModeRadio)$('show-all-nrf').checked=false;
     const provider=state.manualSelections.provider;
     clearBackupJson();state.device=null;state.detectedHardware=null;state.manualSelections=provider?{provider}:{};state.backup=null;$('backup-summary').textContent='';
     if($('auto-detect-board').checked&&!manualDfuSelection)resetAutomaticBoardSelection('Reading the selected USB device. Previous automatic firmware choices were cleared; no image is ready to flash.');
@@ -1088,6 +1111,7 @@ $('select-port').onclick = () => operation(async () => {
     refreshFirmwareWarnings();progress(0,'New USB port selected. Prepare its firmware before flashing.');
   }
   state.port = port; state.generation++;clearBootloaderInfoEvidence();state.applicationProbeFailed=false;
+  state.transportModePort=port;
   $('device-name').textContent = `Selected USB ${portId(port)}`; $('device-meta').textContent = 'Port permission granted. Firmware and board identity are not yet verified.'; $('port-status').textContent = dfuIds.has(portId(port)) ? 'DFU port' : 'Port selected';
   if (dfuIds.has(portId(port))&&$('transport-mode').value!=='auto') $('transport-mode').value = 'nrf52';
   $('already-bootloader').checked=dfuIds.has(portId(port));
@@ -1102,8 +1126,12 @@ if(state.recovery){if(!await confirm('Re-select the erased radio',state.recovery
   if($('auto-detect-board').checked&&!state.handoff&&!state.migration){await detectSelectedBoard();return;}
   notice('Port selected. No reset, flash or application probe was sent.');
 });
-$('transport-mode').onchange = () => operation(async () => { await closeEsp(); state.generation++;updateConnectionChoice(); });
+$('transport-mode').onchange = () => operation(async () => { await closeEsp(); state.generation++;state.transportModePort=state.port;updateConnectionChoice(); });
 $('already-bootloader').onchange=()=>operation(async()=>{await closeEsp();state.generation++;updateConnectionChoice();});
+$('show-all-nrf').onchange=()=>operation(async()=>{
+  if(continuingDeviceFlow()||state.plan?.written){$('show-all-nrf').checked=!$('show-all-nrf').checked;fail('Finish the current handoff, recovery or verification before changing the hardware list.');}
+  await clearFirmwareSelection();filterCatalog();updateFirmwareSelectionSummary();
+});
 $('auto-detect-board').onchange=()=>operation(async()=>{state.manualSelections={};if($('auto-detect-board').checked&&state.port)await detectSelectedBoard();else updateFirmwareSelectionSummary();});
 for (const id of ['expert-offset','migration-package','usb-set','erase-source','erase-file']) $(id).onchange = () => operation(async()=>{await closeEsp();state.generation++;});
 $('expected-sha').onchange = () => operation(async () => { state.automaticSha=null;state.automaticShaName=null;await closeEsp(); state.generation++; if (state.pkg && $('expected-sha').value.trim() && $('expected-sha').value.trim().toLowerCase() !== state.pkg.sha256) fail('SHA-256 mismatch. Flash plan invalidated.'); });

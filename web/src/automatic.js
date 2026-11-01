@@ -122,7 +122,7 @@ function migrationFullProfileDefault(candidates,selections,exactTarget,migrating
   return preferred.length===1?preferred:null;
 }
 
-export function chooseFirmware({items=[],device={},hardware='',provider='',role='',version='',installMode='update'}={}){
+export function chooseFirmware({items=[],device={},hardware='',provider='',role='',version='',installMode='update',architecture=''}={}){
   const meshtastic=device?.firmwareFamily==='meshtastic'||device?.role==='meshtastic';
   const bootloader=device?.firmwareFamily==='bootloader'||device?.role==='bootloader';
   const migrating=meshtastic||bootloader;
@@ -133,9 +133,12 @@ export function chooseFirmware({items=[],device={},hardware='',provider='',role=
   };
   if(!['update','install'].includes(installMode))return result('Choose Update or Erase / new install explicitly. An unsupported install mode cannot select firmware.');
   if(!selections.hardware)return result(installMode==='install'?'Detect or choose exact hardware before selecting an erase/new install.':'Detect or choose exact hardware before selecting an application update.');
-  let candidates=items.map((item,index)=>({item,index})).filter(({item})=>matchesInstallMode(item,installMode)&&canonicalHardware(item.hardware)===selections.hardware&&catalogProvider(item.provider)===selections.provider);
+  // Keep catalog indices stable while excluding other connected-device
+  // architectures from both the preferred provider and stock fallback.
+  const available=items.map((item,index)=>({item,index})).filter(({item})=>(architecture===''||item.architecture===architecture)&&matchesInstallMode(item,installMode)&&canonicalHardware(item.hardware)===selections.hardware);
+  let candidates=available.filter(({item})=>catalogProvider(item.provider)===selections.provider);
   if(migrating&&!text(provider)&&!candidates.length){
-    const stock=items.map((item,index)=>({item,index})).filter(({item})=>matchesInstallMode(item,installMode)&&canonicalHardware(item.hardware)===selections.hardware&&catalogProvider(item.provider)==='MeshCore');
+    const stock=available.filter(({item})=>catalogProvider(item.provider)==='MeshCore');
     if(stock.length){selections.provider='MeshCore';candidates=stock;}
   }
   if(!candidates.length)return result(installMode==='install'?'No erase/new install matches this exact hardware/provider. Choose a matching merged ESP32 install or nRF52 application ZIP; no update, component or other board was substituted.':'No write-only application update matches this exact hardware/provider. Choose another provider or an explicit firmware file; no wipe or bootloader was substituted.');

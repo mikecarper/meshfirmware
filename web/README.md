@@ -225,11 +225,26 @@ selections. The usual backup, device checks and flash confirmation still apply.
    claimed and no erase is selected or authorized automatically. Startup
    verification only succeeds when the expected MeshCore application answers.
 
+   A known nRF52 DFU port (or a detected nRF52 application) hides all non-nRF52
+   hardware and firmware. The Hardware list is narrowed to the previously
+   identified board, or reviewed USB bootloader candidates when only a DFU ID
+   is available. **Show all nRF52 boards** is a manual fallback for an unusual
+   or incorrectly installed bootloader. A shared ID such as `239a:002a` does
+   not distinguish RAK3401 from RAK4631; even a single catalog candidate is not
+   automatically selected as physical-board proof. Unknown IDs keep all nRF52
+   boards available after an explicit nRF52 connection choice. The shared
+   **Already in ROM/DFU** checkbox alone never implies nRF52.
+
+   Legacy Adafruit serial DFU and `adafruit-nrfutil` have no read-only board-name
+   query. Identification never sends START/erase or uploads an application to
+   discover the board. **Hardware**, not a drive picker, is the next step when
+   identity is unknown; no mounted drive is needed to flash.
+
    If neither application protocol can identify the selected radio, or an
-   initially unidentified DFU port is selected, **Read bootloader info** appears
-   beside the device summary and is highlighted as the next step. Click it and
-   choose that radio's `INFO_UF2.TXT`; the browser requires this fresh file-picker
-   permission. A reviewed exact model/Board-ID pair selects matching nRF52
+   initially unidentified DFU port is selected, **Read INFO_UF2.TXT** remains
+   available in a closed optional section under Advanced options, only for
+   radios that do expose a bootloader drive. Clicking it requires fresh
+   file-picker permission. A reviewed exact model/Board-ID pair selects matching nRF52
    hardware and a suitable Companion firmware automatically. An ambiguous pair
    shows candidates and leaves the Hardware choice to you. No drive enumeration
    runs in the background, and permission/access failures do not trigger this
