@@ -42,6 +42,7 @@ state.backupTextGeneration=0;
 state.skipBackupForOperation=false;
 state.nextActionElement=null;state.nextDialogAction=null;state.finishedFirmware=null;
 state.flashProgress=null;
+state.flashResult=null;
 state.knownApplicationPort=null;state.autoVerifyAttempt=null;state.autoVerificationRunning=false;
 state.connectionTrial=null;
 state.restorePreview=null;
@@ -71,7 +72,7 @@ const dfuIds = new Set(nrfDfuUsbIds);
 const portId = port => { const info = port?.getInfo() || {}; return info.usbVendorId === undefined ? 'USB serial' : [info.usbVendorId,info.usbProductId].map(n => n.toString(16).padStart(4,'0')).join(':'); };
 const size = bytes => `${(bytes / (1 << 20)).toFixed(2)} MiB`;
 function syncFlashConsole({follow=false}={}){
-  if(!state.flashProgress)return;
+  if(!state.flashProgress&&!state.flashResult)return;
   const output=$('flash-progress-log'),previousTop=Number(output.scrollTop)||0;
   const atBottom=follow||!Number.isFinite(output.clientHeight)||output.scrollHeight-previousTop-output.clientHeight<=24;
   output.textContent=$('log').textContent.slice(-32000);
@@ -101,18 +102,34 @@ function renderFlashProgress(value,message,{complete=false}={}){
   if($('flash-progress-stage').textContent!==stage){$('flash-progress-stage').textContent=stage;log(stage);}
   syncFlashStop();
 }
-async function withFlashProgress(name,initialStage,callback){
+function closeFlashResult(){
+  if(state.flashProgress||!state.flashResult)return;
+  state.flashResult=null;$('flash-progress-close').hidden=true;$('flash-progress-close').disabled=true;
+  if($('flash-progress-dialog').open)$('flash-progress-dialog').close();
+  updateNextAction();
+}
+async function withFlashProgress(name,initialStage,callback,{keepOpen=true}={}){
   if(state.flashProgress)fail('Another firmware transfer is already active.');
-  const transfer={name},dialog=$('flash-progress-dialog');state.flashProgress=transfer;
+  const transfer={name},dialog=$('flash-progress-dialog');state.flashProgress=transfer;state.flashResult=null;let complete=false;
   try{
+    dialog.classList.toggle('flash-complete',false);dialog.classList.toggle('flash-result-error',false);dialog.setAttribute('closedby','none');
+    $('flash-progress-title').textContent='Flashing firmware';$('flash-progress-warning').textContent='Keep this tab open. Do not unplug the radio or turn off power.';
+    $('flash-progress-close').hidden=true;$('flash-progress-close').disabled=true;
     $('flash-progress-file').textContent=name;progress(0,initialStage);setNextAction(null);
-    dialog.showModal();syncFlashConsole({follow:true});
+    if(!dialog.open)dialog.showModal();syncFlashConsole({follow:true});
     const result=await callback();
-    $('progress').value=1;renderFlashProgress(1,'',{complete:true});return result;
+    $('progress').value=1;renderFlashProgress(1,'',{complete:true});complete=true;
+    if(keepOpen){
+      state.flashResult=transfer;dialog.classList.toggle('flash-complete',true);dialog.setAttribute('closedby','closerequest');
+      $('flash-progress-title').textContent='DONE';
+      $('flash-progress-warning').textContent='Firmware transfer completed. Close this window to return to the flasher. Application startup is checked separately; keep the radio powered for any remaining steps.';
+      $('flash-progress-close').hidden=false;$('flash-progress-close').disabled=false;
+    }
+    return result;
   }finally{
     if(state.flashProgress===transfer){
       state.flashProgress=null;syncFlashStop();
-      try{if(dialog.open)dialog.close();}catch(error){log(`Progress window close: ${error.message}`);}
+      if(!complete||!keepOpen){state.flashResult=null;try{if(dialog.open)dialog.close();}catch(error){log(`Progress window close: ${error.message}`);}}
       updateNextAction();
     }
   }
@@ -309,6 +326,7 @@ function nextFlasherControl(){
 function updateNextAction(){
   if(state.flashProgress){setNextAction(null);return;}
   if(state.nextDialogAction){setNextAction(state.nextDialogAction);return;}
+  if(state.flashResult&&$('flash-progress-dialog').open){setNextAction($('flash-progress-close'));return;}
   const id=nextFlasherControl();setNextAction(id?$(id):null);
   if(!state.nextActionElement)return;
   if(['hardware','role','artifact'].includes(id))$('firmware-choices').open=true;
@@ -392,6 +410,12 @@ async function operation(callback) {
       notice(`${error.message} `+(fresh?'Chunked retry cannot continue: use Discard ESP retry record, then explicitly inspect and authorize a fresh write/wipe. Any partition migration remains pending.':"Select the SAME physical radio's waiting ROM port without resetting, inspect the original image, then acknowledge a bounded chunked retry."),true);
     }else notice(error.message || String(error),true);
     log(`Stopped: ${error.message || error}`);
+    if(state.flashResult&&$('flash-progress-dialog').open){
+      state.flashResult.failed=true;$('flash-progress-dialog').classList.toggle('flash-complete',false);$('flash-progress-dialog').classList.toggle('flash-result-error',true);
+      $('flash-progress-title').textContent='DONE — check required';
+      $('flash-progress-stage').textContent='Firmware transfer finished, but a later step stopped.';
+      $('flash-progress-warning').textContent=`A later step stopped: ${error.message||String(error)} Review the console before retrying. Transfer completion does not prove application startup.`;
+    }
   }
   finally {
     state.busy=false;controls();
@@ -1368,7 +1392,7 @@ async function flashPreparedFirmware() {
     progress(1,'UF2 copy completed. Bootloader activation and application startup remain unverified.'); state.plan=null;state.finishedFirmware={sha256:pkg.sha256,verified:false}; notice('UF2 copy completed. A disappearing drive can indicate reboot; it is not proof the intended firmware started.');
   } else if (pkg.architecture === 'esp32') {
     if(plan.needed && !plan.verified) { state.migration={mac:plan.mac,sha256:pkg.sha256,uart:!!plan.uart_completion_status,settled:false,phase:'writing'}; localStorage.setItem('meshfirmware.pendingMigration',JSON.stringify(state.migration)); }
-    await withFlashProgress(bridge?'USB expansion bridge for '+pkg.name:pkg.name,plan.merged?'Erasing and writing ESP32 firmware…':'Preparing ESP32 transfer and readback…',()=>state.esp.flash(pkg,progress,{allowRevisionMismatch,chunkedRecovery:!!plan.chunkedRecovery})); plan.written = true;
+    await withFlashProgress(bridge?'USB expansion bridge for '+pkg.name:pkg.name,plan.merged?'Erasing and writing ESP32 firmware…':'Preparing ESP32 transfer and readback…',()=>state.esp.flash(pkg,progress,{allowRevisionMismatch,chunkedRecovery:!!plan.chunkedRecovery}),{keepOpen:!bridge}); plan.written = true;
     if(approval&&state.migrationApproval===approval){if(bridge)approval.bridgeVerified(pkg,plan);else approval.finalVerified(pkg,plan);}
     state.espRecovery=null;persistEspRecovery();
     if(plan.needed && !plan.verified) {state.migration.phase='written';localStorage.setItem('meshfirmware.pendingMigration',JSON.stringify(state.migration));}
@@ -1582,6 +1606,8 @@ $('send-command').onclick = () => operation(async () => {requireMeshCoreApplicat
 $('clear-log').onclick = () => { $('log').textContent = 'Log cleared locally.';syncFlashConsole({follow:true}); };
 $('flash-progress-dialog').addEventListener('cancel',event=>{if(state.flashProgress)event.preventDefault();});
 $('flash-progress-dialog').addEventListener('keydown',event=>{if(state.flashProgress&&event.key==='Escape'){event.preventDefault();event.stopPropagation();}});
+$('flash-progress-close').onclick=closeFlashResult;
+$('flash-progress-dialog').addEventListener('close',()=>{if(!state.flashProgress){state.flashResult=null;updateNextAction();}});
 window.addEventListener('beforeunload',event => { if (state.busy||state.flashProgress||state.migrationApproval) { event.preventDefault(); event.returnValue = ''; } });
 window.addEventListener('hashchange',openLinkedPanel);openLinkedPanel();
 window.addEventListener('click',event=>{

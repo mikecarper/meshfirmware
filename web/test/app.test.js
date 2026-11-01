@@ -412,7 +412,9 @@ test('large flashing progress appears only for the scoped write and waits for fi
   assert.equal(dialog.open,true);assert.equal(ui.elements.get('flash-progress-file').textContent,'exact-firmware.zip');assert.equal(ui.elements.get('flash-progress-percent').textContent,'0%');assert.deepEqual(nextHighlight(ui),[]);
   ui.evaluate("progress(.25,'Writing DFU');");assert.equal(ui.elements.get('flash-progress').value,.25);assert.equal(ui.elements.get('flash-progress-percent').textContent,'25%');assert.equal(ui.elements.get('flash-progress-stage').textContent,'Writing DFU');
   ui.evaluate("progress(1,'Writing + verifying application');");assert.equal(ui.elements.get('flash-progress-percent').textContent,'99%');assert.match(ui.elements.get('flash-progress-stage').textContent,/final checks/);assert.equal(dialog.open,true);
-  finish('verified-result');assert.equal(await pending,'verified-result');assert.equal(dialog.open,false);assert.equal(ui.elements.get('flash-progress-percent').textContent,'100%');assert.match(ui.elements.get('flash-progress-stage').textContent,/startup remains unverified/);assert.equal(ui.evaluate('state.flashProgress'),null);assert.deepEqual(ui.calls,[]);
+  ui.elements.get('flash-progress-close').onclick();assert.equal(dialog.open,true,'Close cannot dismiss an active transfer');
+  finish('verified-result');assert.equal(await pending,'verified-result');assert.equal(dialog.open,true);assert.equal(ui.elements.get('flash-progress-title').textContent,'DONE');assert.equal(ui.elements.get('flash-progress-percent').textContent,'100%');assert.match(ui.elements.get('flash-progress-stage').textContent,/startup remains unverified/);assert.equal(ui.evaluate('state.flashProgress'),null);assert.equal(ui.elements.get('flash-progress-close').hidden,false);assert.equal(ui.elements.get('flash-progress-close').disabled,false);assert.deepEqual(nextHighlight(ui),['flash-progress-close']);assert.deepEqual(ui.calls,[]);
+  ui.elements.get('flash-progress-close').onclick();assert.equal(dialog.open,false);assert.equal(ui.evaluate('state.flashResult'),null);
 });
 
 test('the flashing popup shows recent console context and live plain-text output while retaining the normal log',async()=>{
@@ -420,7 +422,7 @@ test('the flashing popup shows recent console context and live plain-text output
   ui.context.transfer=()=>new Promise(resolve=>{finish=resolve;});const pending=ui.evaluate("withFlashProgress('firmware.bin','Preparing firmware transfer',transfer);");
   assert.match(output.textContent,/USB connection verified/);assert.match(output.textContent,/Preparing firmware transfer/);
   ui.evaluate("log('\\x1b[32mWriting bytes <not-html>\\x1b[0m');");assert.match(output.textContent,/Writing bytes <not-html>/);assert.ok(!output.textContent.includes('\x1b'));assert.match(ui.elements.get('log').textContent,/Writing bytes <not-html>/);
-  finish();await pending;assert.match(output.textContent,/Transfer stage finished/);const closedText=output.textContent;ui.evaluate("log('Read-only startup verification');");assert.equal(output.textContent,closedText);assert.match(ui.elements.get('log').textContent,/Read-only startup verification/);assert.deepEqual(ui.calls,[]);
+  finish();await pending;assert.match(output.textContent,/Transfer stage finished/);ui.evaluate("log('Read-only startup verification');");assert.match(output.textContent,/Read-only startup verification/);ui.elements.get('flash-progress-close').onclick();const closedText=output.textContent;ui.evaluate("log('Further work after closing');");assert.equal(output.textContent,closedText);assert.match(ui.elements.get('log').textContent,/Further work after closing/);assert.deepEqual(ui.calls,[]);
 });
 
 test('flashing console follows new output at the bottom but does not jump while reading earlier lines',async()=>{
@@ -455,10 +457,22 @@ test('failed transfers and modal-open failures clean up without retrying or clai
 
 test('a nested transfer cannot replace or close an active progress window',async()=>{
   const ui=workbench();await Promise.resolve();let finish;ui.context.transfer=()=>new Promise(resolve=>{finish=resolve;});const pending=ui.evaluate("withFlashProgress('original.zip','Preparing',transfer);");
-  await assert.rejects(ui.evaluate("withFlashProgress('other.zip','Preparing',()=>{throw Error('must not start');});"),/already active/);assert.equal(ui.elements.get('flash-progress-file').textContent,'original.zip');assert.equal(ui.elements.get('flash-progress-dialog').open,true);finish();await pending;assert.equal(ui.elements.get('flash-progress-dialog').open,false);assert.deepEqual(ui.calls,[]);
+  await assert.rejects(ui.evaluate("withFlashProgress('other.zip','Preparing',()=>{throw Error('must not start');});"),/already active/);assert.equal(ui.elements.get('flash-progress-file').textContent,'original.zip');assert.equal(ui.elements.get('flash-progress-dialog').open,true);finish();await pending;assert.equal(ui.elements.get('flash-progress-dialog').open,true);assert.equal(ui.elements.get('flash-progress-title').textContent,'DONE');ui.elements.get('flash-progress-close').onclick();assert.equal(ui.elements.get('flash-progress-dialog').open,false);assert.deepEqual(ui.calls,[]);
 });
 
-test('all firmware-write paths show the large dialog after approval and close it before subsequent steps',async()=>{
+test('DONE remains visible for later workflow errors and resets fully for the next transfer',async()=>{
+  const ui=workbench();await Promise.resolve();ui.context.completed=async()=>{};
+  await ui.evaluate("operation(async()=>{await withFlashProgress('final.bin','Writing',completed);throw Error('Startup check failed');});");
+  const dialog=ui.elements.get('flash-progress-dialog');assert.equal(dialog.open,true);assert.equal(ui.elements.get('flash-progress-title').textContent,'DONE — check required');assert.match(ui.elements.get('flash-progress-warning').textContent,/Startup check failed/);assert.match(ui.elements.get('flash-progress-log').textContent,/Stopped: Startup check failed/);assert.equal(ui.elements.get('flash-progress-close').disabled,false);assert.equal(ui.evaluate('state.flashProgress'),null);
+  ui.elements.get('flash-progress-close').onclick();let finish;ui.context.nextTransfer=()=>new Promise(resolve=>{finish=resolve;});const next=ui.evaluate("withFlashProgress('next.bin','Writing next',nextTransfer);");assert.equal(dialog.open,true);assert.equal(ui.elements.get('flash-progress-title').textContent,'Flashing firmware');assert.equal(ui.elements.get('flash-progress-percent').textContent,'0%');assert.equal(ui.elements.get('flash-progress-close').hidden,true);assert.equal(ui.elements.get('flash-progress-close').disabled,true);assert.equal(dialog.classList.contains('flash-result-error'),false);assert.match(ui.elements.get('flash-progress-warning').textContent,/Do not unplug/);finish();await next;assert.equal(ui.elements.get('flash-progress-title').textContent,'DONE');
+});
+
+test('a follow-up confirmation above DONE owns the highlighted action instead of the close button behind it',async()=>{
+  const ui=workbench();await Promise.resolve();ui.context.completed=async()=>{};await ui.evaluate("withFlashProgress('firmware.zip','Writing',completed);");assert.deepEqual(nextHighlight(ui),['flash-progress-close']);
+  ui.evaluate("state.nextDialogAction=$('confirm-submit');updateNextAction();");assert.deepEqual(nextHighlight(ui),['confirm-submit']);ui.evaluate('state.nextDialogAction=null;updateNextAction();');assert.deepEqual(nextHighlight(ui),['flash-progress-close']);
+});
+
+test('all final firmware-write paths keep DONE open while subsequent workflow state advances',async()=>{
   for(const kind of ['nrf52','erase','esp32','uf2']){
     const ui=workbench();await Promise.resolve();serialMock(ui);ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({name:kind==='uf2'?'firmware.uf2':'firmware.zip',architecture:kind==='esp32'?'esp32':kind==='uf2'?'uf2':'nrf52'});ui.evaluate('state.port=selectedPort;state.pkg=pkg;state.plan={generation:state.generation,port:selectedPort,sha256:pkg.sha256,addresses:[0x10000]};');
     const dialog=ui.elements.get('flash-progress-dialog');ui.context.confirm=async()=>false;await ui.elements.get('flash').onclick();assert.ok(!dialog.open);assert.equal(ui.evaluate('state.flashProgress'),null);
@@ -469,9 +483,10 @@ test('all firmware-write paths show the large dialog after approval and close it
     if(kind==='esp32')ui.evaluate('state.esp={flash:async()=>onWrite()};');
     if(kind==='esp32')ui.context.onWrite=onWrite;
     if(kind==='uf2'){ui.context.hash=()=>ui.context.pkg.payloadHash;ui.context.drive={getFileHandle:async(name)=>name==='INFO_UF2.TXT'?{getFile:async()=>({text:async()=>'UF2 Bootloader Test'})}:{createWritable:async()=>({write:async()=>onWrite(),close:async()=>assert.equal(dialog.open,true),abort:async()=>{}})}};ui.evaluate('state.directory=drive;state.plan.uf2Info="UF2 Bootloader Test";');}
-    await ui.elements.get('flash').onclick();assert.equal(ui.calls.filter(call=>call==='write').length,1,kind);assert.equal(dialog.open,false,kind);assert.equal(ui.evaluate('state.flashProgress'),null,kind);
+    await ui.elements.get('flash').onclick();assert.equal(ui.calls.filter(call=>call==='write').length,1,kind);assert.equal(dialog.open,true,kind);assert.equal(ui.elements.get('flash-progress-title').textContent,'DONE',kind);assert.equal(ui.evaluate('state.flashProgress'),null,kind);
     if(kind==='erase')assert.equal(ui.evaluate('state.recovery.phase'),'reselect-dfu');
     if(kind==='esp32'||kind==='nrf52')assert.ok(ui.evaluate('state.verification'),kind);
+    ui.elements.get('flash-progress-close').onclick();assert.equal(dialog.open,false,kind);
   }
 });
 
@@ -2727,6 +2742,7 @@ test('Meshtastic keeps step 4 across nRF52 runtime-to-DFU handoff without automa
 test('Meshtastic erase and final application writes each retain consent, with a UI-only recovery-source marker',async()=>{
   const ui=await meshtasticDirectWorkbench();ui.evaluate("state.installMode='install';syncInstallMode();");ui.context.erase=fakePackage({name:'erase.zip',erase:true,destructive:true});ui.context.erasePackage=async()=>ui.context.erase;
   await ui.elements.get('flash').onclick();assert.deepEqual(ui.calls.filter(call=>call.startsWith('write-')),['write-erase']);assert.equal(ui.evaluate('state.recovery.sourceFirmware'),'meshtastic');assert.equal(JSON.parse(ui.context.localStorage.getItem('meshfirmware.nrfRecovery')).sourceFirmware,'meshtastic');assert.equal(ui.elements.get('prepare').hidden,true);assert.equal(ui.elements.get('flash').disabled,true);
+  assert.equal(ui.elements.get('flash-progress-title').textContent,'DONE');ui.elements.get('flash-progress-close').onclick();
   await ui.elements.get('select-port').onclick();assert.deepEqual(nextHighlight(ui),['flash']);assert.equal(ui.elements.get('flash').disabled,false);assert.deepEqual(ui.calls.filter(call=>call.startsWith('write-')),['write-erase']);await ui.elements.get('flash').onclick();assert.deepEqual(ui.calls.filter(call=>call.startsWith('write-')),['write-erase','write-final']);assert.equal(ui.calls.filter(call=>call==='confirm:WIPE WITHOUT BACKUP').length,1);assert.equal(ui.calls.filter(call=>call==='confirm:FLASH').length,1);assert.equal(ui.elements.get('skip-backup').checked,false);
 });
 
@@ -3017,11 +3033,11 @@ test('stopping during a physical bridge write finishes that write without sendin
   await ui.elements.get('flash').onclick();assert.equal(approval.phase,'revoked');assert.equal(ui.evaluate('state.migrationApproval'),null);assert.equal(ui.evaluate('state.migration.phase'),'written');assert.equal(ui.evaluate('state.plan.written'),true);assert.deepEqual(ui.calls.filter(call=>/^(write|finish):/.test(call)),['write:bridge']);assert.match(ui.elements.get('notice').textContent,/stopped|no next reset/i);
 });
 
-test('automatic bridge and final writes use separate progress windows that end before each reset',async()=>{
+test('automatic migration closes only the intermediate bridge window and leaves final DONE open without another click',async()=>{
   const ui=await migrationWorkbench();await ui.elements.get('prepare').onclick();const dialog=ui.elements.get('flash-progress-dialog');let opened=0,closed=0;
   dialog.showModal=()=>{assert.ok(!dialog.open,'The previous write window must already be closed');dialog.open=true;opened++;};dialog.close=()=>{assert.equal(dialog.open,true);assert.equal(ui.elements.get('flash-progress-percent').textContent,'100%');dialog.open=false;closed++;};
-  ui.faults.duringWrite=async()=>{assert.equal(dialog.open,true);ui.evaluate("progress(.5,'Writing + verifying bridge or application');");assert.equal(ui.elements.get('flash-progress-percent').textContent,'50%');};ui.faults.duringFinish=async()=>assert.equal(dialog.open,false,'Reset is outside the active-write modal');
-  await ui.elements.get('flash').onclick();assert.equal(opened,2);assert.equal(closed,2);assert.equal(dialog.open,false);assert.equal(ui.evaluate('state.flashProgress'),null);assert.equal(ui.evaluate('state.migrationApproval'),null);assert.equal(ui.evaluate('state.verification'),null);
+  ui.faults.duringWrite=async()=>{assert.equal(dialog.open,true);ui.evaluate("progress(.5,'Writing + verifying bridge or application');");assert.equal(ui.elements.get('flash-progress-percent').textContent,'50%');};ui.faults.duringFinish=async stage=>{assert.equal(ui.evaluate('state.flashProgress'),null,'Reset is outside the active write');assert.equal(dialog.open,stage==='final');if(stage==='final')assert.equal(ui.elements.get('flash-progress-title').textContent,'DONE');};
+  await ui.elements.get('flash').onclick();assert.equal(opened,2);assert.equal(closed,1);assert.equal(dialog.open,true);assert.equal(ui.evaluate('state.flashProgress'),null);assert.equal(ui.evaluate('state.migrationApproval'),null);assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.elements.get('flash-progress-title').textContent,'DONE');ui.elements.get('flash-progress-close').onclick();assert.equal(closed,2);assert.equal(dialog.open,false);
 });
 
 test('migration errors retain recovery markers and never retry a write or reset automatically',async()=>{

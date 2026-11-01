@@ -398,8 +398,13 @@ selections. The usual backup, device checks and flash confirmation still apply.
    context and transfer output. It follows new lines while at the bottom;
    scrolling back keeps your reading position. The normal operation log remains
    available after the window closes. Console text is local, bounded and read-only.
-   It closes when the write succeeds or fails. The browser's leave-page warning
-   is best-effort, not a guarantee against closing the tab or interrupting power.
+   A successful final transfer leaves the window open with a large **DONE** and
+   **Close** button. DONE confirms the transfer, not application startup; the
+   console continues to show any remaining reset/startup checks. Automatic
+   partition expansion closes only its intermediate bridge window, so it can
+   finish the final application without an extra click. A failed transfer does
+   not display DONE. The browser's leave-page warning is best-effort, not a
+   guarantee against closing the tab or interrupting power.
    During automatic migration, **Stop after this write** stops later steps;
    it does not interrupt the current transfer.
 5. ESP32 writes require target MD5 readback before the one-time reset action.
