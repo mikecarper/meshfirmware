@@ -52,6 +52,9 @@ main { max-width: 1280px; margin: 0 auto; padding: 18px 28px 28px; }
 h1 { font-size: 28px; line-height: 1.15; letter-spacing: -.9px; font-weight: 700; margin: 0 0 5px; }
 .page-heading p { margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted); }
 .connect-controls { display: flex; align-items: center; justify-content: flex-start; flex-wrap: wrap; gap: 12px; }
+.usb-port-choice { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; max-width: 420px; text-align: left; }
+#selected-port { font-size: 12px; font-weight: 500; line-height: 1.5; overflow-wrap: anywhere; }
+#browser-status { text-decoration: underline; text-underline-offset: 3px; }
 .usb-workflow-help { margin: 0; max-width: 780px; font-size: 14px; line-height: 1.55; color: #425769; overflow-wrap: anywhere; }
 .usb-workflow-help strong { color: var(--navy); }
 #start-new-radio { min-height: 64px; padding: 14px 22px; font-size: 16px; }

@@ -41,6 +41,10 @@ startup verification is pending and an application port is selected; a pending E
 first. Backup & prepare is
 a dark primary button, matching USB selection and Flash. The installation
 choices share one numbered, accessible radio group—not another action button.
+The USB button lists the selected USB ID and, after detection, the running
+radio's model and name. Web Serial does not expose Windows COM numbers. The
+label clears on disconnect and does not reuse an application's name for a new
+DFU interface. **Web Serial available** links to the serial console at the bottom.
 The next-step hint follows the current stage. The next required control has an
 amber outline, and the next button also shows **Next**, including USB selection
 after a DFU reconnect. Newly required controls are revealed and scrolled into
@@ -526,7 +530,11 @@ On a connected nRF52 application with an exact verified board mapping, the page
 uses the read-only `get bootloader.ver` response to compare the installed
 bootloader with that board's latest stable OTAFIX release. A known older or
 preview bootloader offers **Prepare bootloader update** beside the connected
-device; a current, newer or custom bootloader does not. Unknown/unsupported
+device; a current, newer or custom OTAFIX bootloader does not. Valid non-OTAFIX
+reports, such as RAK `0.4.3` and vendor-suffixed versions, are shown by name and
+offer the separate exact-board USB ZIP. Their version numbers are not compared
+with OTAFIX, and a name never authorizes the firmware's embedded updater.
+Unknown/unsupported
 responses, older companion interfaces and DFU-only connections are reported as
 unknown, never inferred from application versions, filenames or shared USB IDs.
 Reading this status does not reset, enter DFU or write firmware. Preparing an
@@ -536,8 +544,8 @@ and explicit flash acknowledgement still apply.
 If the current firmware cannot report `bootloader.ver`, install the selected
 Keymind application normally first. After its USB application startup is
 verified, the page reads `get bootloader.ver` again and asks whether to prepare
-the separate update if it now reports an older OTAFIX version or a replaceable
-preview. It does not update the bootloader silently, and an unknown response
+the separate update if it now reports an older OTAFIX version, a replaceable
+preview or a valid non-OTAFIX version. It does not update the bootloader silently, and an unknown response
 still does not count as outdated. Declining keeps the running application.
 The exact application choice remains selected after a normal bootloader
 transfer so it can be reinstalled through the normal same-radio USB handoff,

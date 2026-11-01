@@ -42,14 +42,20 @@ test('a trailing numeric zero normalizes without treating a fourth component as 
   assert.equal(assess('OTAFIX2.4.12.1').status,'unknown');
 });
 
-test('stock, base-only, empty, unavailable and unrelated dotted versions remain unknown',()=>{
-  for(const value of [null,undefined,42,{},'', 'unknown','unsupported','Error: unsupported','0.11.0 (base)','v0.11.0','0.9.2-Seeed','1.00','MeshCore v1.18.0.2','TinyUSB 0.12.0','SoftDevice 7.3.0','UF2 Bootloader v0.11.0-OTAFIX2.4.12']){
+test('non-OTAFIX vendor reports offer the separately verified board-specific update without comparing version namespaces',()=>{
+  for(const value of ['0.4.3','0.4.4','v0.11.0','0.9.2-Seeed','0.3.2-109-gd6b28e6','0.4.1-13-g5e6690e-dirty','0.9.0-2-g836c8dc-dirty','0.10.0-18-gb93789f','1.00','99.99.99-custom']){
+    const result=assess(value);assert.equal(result.status,'non-otafix',value);assert.equal(result.installedVersion,value.replace(/^v/,''));assert.equal(result.offerUpdate,true,value);
+  }
+});
+
+test('empty, unavailable and unrelated dotted versions remain unknown',()=>{
+  for(const value of [null,undefined,42,{},'', 'unknown','unsupported','Error: unsupported','0.11.0 (base)','MeshCore v1.18.0.2','TinyUSB 0.12.0','SoftDevice 7.3.0','UF2 Bootloader v0.11.0-OTAFIX2.4.12','0.11.0-recovery-allow-all','R_0x02040CFF']){
     const result=assess(value);assert.equal(result.status,'unknown',String(value));assert.equal(result.installedVersion,null,String(value));assert.equal(result.latestVersion,latest);assert.equal(result.offerUpdate,false);
   }
 });
 
 test('malformed, conflicting or multiline responses never become version evidence',()=>{
-  for(const value of ['get bootloader.ver\r\n> OTAFIX2.4.12','OTAFIX2.4.12\nOTAFIX2.4.11','OTAFIX2.4.12\r','OTAFIX2.4.12\0','OTAFIX2.4.12\x1b[0m','>> OTAFIX2.4.12','OTAFIX2.4.12-OTAFIX2.4.11','notOTAFIX2.4.12','OTAFIX 2.4.12','OTAFIX2.x.12','OTAFIX2.4.','OTAFIX02.4.12','OTAFIX2.04.12','OTAFIX2.4.012','OTAFIX256.4.12','OTAFIX2.4.256','OTAFIX2.4.12-','OTAFIX2.4.12+','OTAFIX2.4.12_','OTAFIX2.4.12junk','OTAFIX2.4.12-<script>','OTAFIX2.4.12'+'a'.repeat(256)]){
+  for(const value of ['0.4.3\n0.4.4','0.4.3\0','0.4.3\x1b[0m','00.4.3','0.4.256','256.4.3','0.4.3-','0.4.3.<script>','get bootloader.ver\r\n> OTAFIX2.4.12','OTAFIX2.4.12\nOTAFIX2.4.11','OTAFIX2.4.12\r','OTAFIX2.4.12\0','OTAFIX2.4.12\x1b[0m','>> OTAFIX2.4.12','OTAFIX2.4.12-OTAFIX2.4.11','notOTAFIX2.4.12','OTAFIX 2.4.12','OTAFIX2.x.12','OTAFIX2.4.','OTAFIX02.4.12','OTAFIX2.04.12','OTAFIX2.4.012','OTAFIX256.4.12','OTAFIX2.4.256','OTAFIX2.4.12-','OTAFIX2.4.12+','OTAFIX2.4.12_','OTAFIX2.4.12junk','OTAFIX2.4.12-<script>','OTAFIX2.4.12'+'a'.repeat(256)]){
     const result=assess(value);assert.equal(result.status,'unknown',JSON.stringify(value));assert.equal(result.installedVersion,null,JSON.stringify(value));assert.equal(result.offerUpdate,false,JSON.stringify(value));
   }
 });

@@ -51,6 +51,9 @@ state.catalogScope='';
 state.transportModePort=null;
 state.selectionLink=null;state.selectionCopyGeneration=0;state.selectionCopyPending=null;state.selectionCopyTimer=null;
 state.applicationDetection=null;
+// Display-only identity, bound to the exact port and freshly read application.
+// A previously detected board must not label a newly selected DFU interface.
+state.portLabelEvidence=null;
 const nextStepScroller=createNextStepScroller({window,document});
 $('skip-backup').checked=false;
 $('show-all-nrf').checked=false;
@@ -231,8 +234,12 @@ function updateReconnectCallout(){
   $('reconnect-callout').setAttribute('role',ready||verified?'status':'alert');$('reconnect-callout').setAttribute('aria-live',ready||verified?'polite':'assertive');
   $('reconnect-title').textContent=verified?'Firmware verified':checking?'Checking firmware startup…':ready?'Firmware transferred':application?'Firmware transferred — verify startup':'Select the same radio again';
   $('select-port-label').textContent=verified?'Flash a new device':checking?'Verifying firmware…':nextDevice?'Verify previous device (optional)':needed&&application?'Reconnect to verify firmware':needed?'Select the same radio again':'Choose USB port';
+  const evidence=state.portLabelEvidence,device=evidence?.port===state.port&&evidence.device===state.device?state.device:null;
+  const selected=state.port?[...new Set([device?.model,device?.name].filter(Boolean)),`USB ${portId(state.port)}${dfuIds.has(portId(state.port))?' · DFU':''}`].join(' · '):'';
+  $('selected-port').hidden=!selected;$('selected-port').textContent=selected?`Selected: ${selected}`:'';
   $('select-port').classList.toggle('primary',!nextDevice);$('select-port').classList.toggle('secondary',nextDevice);
   $('select-port').setAttribute('aria-label',verified?'Step 1: Choose a new device’s USB port':nextDevice?'Optional: Reconnect the previous device’s application USB port to verify firmware':needed&&application?'Step 1 again: Reconnect the application USB port to verify firmware':needed?'Step 1 again: Select the same radio’s USB port':'Step 1: Choose USB port');
+  if(selected)$('select-port').setAttribute('aria-label',$('select-port').getAttribute('aria-label')+`. Selected: ${selected}`);
   if(ready)$('reconnect-detail').textContent='The firmware transfer finished. Flash a new device to continue, or optionally reconnect the same radio’s application USB port — not DFU/ROM — to check startup. Its startup has not been verified.';
   if(needed){
     const nrf=state.recovery||state.pkg?.architecture==='nrf52'||$('transport-mode').value==='nrf52';
@@ -561,6 +568,7 @@ async function readApplication(link) {
     if(state.port!==port||state.generation!==generation)fail('Selected port changed or disconnected while checking the bootloader. Re-select and detect again.');
   }
   state.device=device;
+  state.portLabelEvidence={port,device};
   state.bootloaderInfo=null;state.applicationProbeFailed=false;
   if(isMeshtastic(device))state.knownApplicationPort=null;
   updateConnectionChoice();
@@ -1056,6 +1064,7 @@ function updateBootloaderOffer(){
   let message;
   if(a.status==='current')message=`Reported bootloader ${a.reported} matches our ${reference}. No bootloader update is needed.`;
   else if(a.status==='older')message=`Reported bootloader ${a.reported}; ${reference} is available as a separate board-specific update.`;
+  else if(a.status==='non-otafix')message=`Reported non-OTAFIX bootloader ${a.reported}; ${reference} is available as a separate board-specific USB update. A version name alone does not authorize an embedded bootloader update.`;
   else if(a.status==='preview')message=`Reported preview bootloader ${a.reported}; ${reference} is available if you want to replace the preview.`;
   else if(a.status==='newer')message=`Reported bootloader ${a.reported} is newer than our ${reference}. No downgrade is suggested.`;
   else if(a.status==='custom')message=`Reported custom bootloader ${a.reported}; our ${reference} is available in advanced options. It is not treated as an outdated stable release.`;
@@ -1134,12 +1143,13 @@ $('select-port').onclick = () => operation(async () => {
     else updateFirmwareSelectionSummary({reason:'New USB port selected. Review the manual firmware target against this radio.'});
     refreshFirmwareWarnings();progress(0,'New USB port selected. Prepare its firmware before flashing.');
   }
-  state.port = port; state.generation++;clearBootloaderInfoEvidence();state.applicationProbeFailed=false;
+  state.port = port; state.generation++;state.portLabelEvidence=null;clearBootloaderInfoEvidence();state.applicationProbeFailed=false;
   state.transportModePort=port;
   $('device-name').textContent = `Selected USB ${portId(port)}`; $('device-meta').textContent = 'Port permission granted. Firmware and board identity are not yet verified.'; $('port-status').textContent = dfuIds.has(portId(port)) ? 'DFU port' : 'Port selected';
   if (dfuIds.has(portId(port))&&$('transport-mode').value!=='auto') $('transport-mode').value = 'nrf52';
   $('already-bootloader').checked=dfuIds.has(portId(port));
   state.boardDetected=false;state.recoveryManual=false;state.recoveryDetectionRequested=false;$('board-detection').textContent='Board not detected for this port. Use Detect board & select, or choose hardware manually.';$('recovery-detection').textContent='';$('recovery-profile').value='';$('installed-identity').value='';
+  updateReconnectCallout();
   if(state.migrationApproval){state.approvalPort=port;await continueApprovedMigration();return;}
 if(state.recovery){if(!await confirm('Re-select the erased radio',state.recovery.name,'Confirm this selected serial DFU interface is the SAME physical radio. Every recovery port change needs a new acknowledgement.','SAME DEVICE')){state.port=null;fail('Recovery port confirmation cancelled.');}state.recovery.phase='final';persistFlow('recovery','meshfirmware.nrfRecovery');$('transport-mode').value='nrf52';notice(state.recovery.eraseComplete?'Original final firmware retained. Inspect this DFU port, then review the final write.':'Erase completion is uncertain. Inspect to retry the validated erase step before the final image; it will not be silently skipped.');return;}
   if(state.espRecovery){if(!await confirm('Re-select the interrupted ESP32',`${state.espRecovery.mac}\nOriginal image SHA-256 ${state.espRecovery.sha256}`,'Select the SAME physical radio already waiting in ROM. No reset or write is performed by this selection; its MAC and exact plan will be checked again.','SAME DEVICE')){state.port=null;fail('ESP retry port confirmation cancelled.');}$('transport-mode').value='no_reset';$('already-bootloader').checked=true;notice('Waiting ROM port selected. Load the original exact image and inspect; any chunked retry needs a separate acknowledgement.');return;}
@@ -1613,7 +1623,7 @@ window.addEventListener('hashchange',openLinkedPanel);openLinkedPanel();
 window.addEventListener('click',event=>{
   // A same-fragment link does not emit hashchange; reopen a tool even if the
   // user collapsed it after the previous visit.
-  const link=event.target?.closest?.('nav a[href^="#"]'),id=link?.getAttribute('href')?.slice(1);
+  const link=event.target?.closest?.('a[href^="#"]'),id=link?.getAttribute('href')?.slice(1);
   if(['firmware-choices','backups','console','capabilities','advanced-options'].includes(id))revealPanel(id);
 });
 if(state.migration) notice('A partition migration is pending in this browser. Keep power connected, select its original firmware and the same device. Application commands are blocked until final verification.');

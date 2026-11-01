@@ -1913,6 +1913,27 @@ test('tool navigation opens known collapsed sections and ignores unrelated fragm
   assert.equal(ui.elements.get('advanced-options').open,false);assert.equal(ui.elements.get('backups').open,false);assert.equal(ui.elements.get('confirm-submit').open,undefined);assert.deepEqual(ui.calls,[]);
 });
 
+test('the Web Serial status link opens the bottom console, including a repeated same-fragment click',async()=>{
+  const ui=workbench();await Promise.resolve();collapsedPanels(ui);
+  for(let i=0;i<2;i++){
+    ui.elements.get('console').open=false;
+    ui.windowEvents.click({target:{closest(selector){assert.equal(selector,'a[href^="#"]');return {getAttribute:()=> '#console'};}}});
+    assert.equal(ui.elements.get('console').open,true);
+  }
+  assert.deepEqual(ui.calls,[]);
+});
+
+test('USB selection lists only the chosen port and its freshly read identity, clearing stale and disconnected labels',async()=>{
+  const ui=workbench();await Promise.resolve();assert.equal(ui.elements.get('selected-port').hidden,true);assert.equal(ui.elements.get('selected-port').textContent,'');
+  ui.context.chosenPort=ui.port;ui.evaluate('state.port=chosenPort;controls();');
+  assert.equal(ui.elements.get('selected-port').textContent,'Selected: USB 303a:1001');assert.match(ui.elements.get('select-port').getAttribute('aria-label'),/Selected: USB 303a:1001/);
+  ui.evaluate("state.device={model:'RAK 3401',name:'D4830D16'};state.portLabelEvidence={port:state.port,device:state.device};controls();");
+  assert.equal(ui.elements.get('selected-port').textContent,'Selected: RAK 3401 · D4830D16 · USB 303a:1001');
+  ui.context.dfuPort={getInfo:()=>({usbVendorId:0x239a,usbProductId:0x002a})};ui.evaluate('state.port=dfuPort;state.handoff=true;controls();');
+  assert.equal(ui.elements.get('selected-port').textContent,'Selected: USB 239a:002a · DFU');assert.doesNotMatch(ui.elements.get('select-port').getAttribute('aria-label'),/RAK|D4830D16/);
+  ui.serialEvents.disconnect({port:ui.context.dfuPort});assert.equal(ui.elements.get('selected-port').hidden,true);assert.equal(ui.elements.get('selected-port').textContent,'');assert.deepEqual(ui.calls,[]);
+});
+
 test('normal default controls keep extras closed and only an explicit visible nRF52 wipe expands its actions',async()=>{
   const ui=workbench();await Promise.resolve();const advanced=collapsedPanels(ui);ui.elements.get('nrf-actions').hidden=true;
   ui.evaluate('controls();');assert.equal(advanced.open,false);assert.equal(ui.elements.get('nrf-actions').open,false);
@@ -2283,6 +2304,15 @@ test('companion bootloader version reads use only the supported read-only CLI an
   }
 });
 
+test('the detected application labels the selected USB port without claiming an unavailable COM number',async()=>{
+  const ui=await bootloaderOfferWorkbench({role:'companion',reported:'> 0.4.3'});
+  assert.match(ui.elements.get('selected-port').textContent,/Selected: Seeed Xiao-nrf52 · Test XIAO · USB /);
+  assert.doesNotMatch(ui.elements.get('selected-port').textContent,/COM\d/);
+  assert.equal(ui.evaluate('state.device.bootloaderVersion'),'0.4.3');assert.equal(ui.elements.get('prepare-bootloader-update').hidden,false);
+  assert.match(ui.elements.get('nrf-bootloader-status').textContent,/non-OTAFIX bootloader 0\.4\.3/);
+  assert.deepEqual(ui.calls,['binary-query:get bootloader.ver']);
+});
+
 async function usbModeWorkbench({reply='usb.mode hardware-cdc-jtag',role='common-cli',protocol=14,usbInfo={usbVendorId:0x303a,usbProductId:0x1001},model='Heltec V4.2 none detected',map={schemaVersion:1,builds:[]},version}={}){
   const ui=workbench({productionDefaults:true});await Promise.resolve();ui.context.selectedPort=ui.port;ui.port.getInfo=()=>usbInfo;ui.context.inventory=[headlessV4Item()];ui.context.pkg=fakePackage({architecture:'esp32'});ui.evaluate('state.items=inventory;state.port=selectedPort;state.pkg=pkg;');
   ui.context.usbConnectionMap=map;ui.context.detectMeshCore=async()=>({model,role,protocol,version,publicKey:'11'.repeat(32)});
@@ -2486,12 +2516,13 @@ test('active method trials do not replace live reports, explicit overrides or pe
   }
 });
 
-test('bootloader reporting never treats current, newer, custom, upstream or unavailable versions as an outdated stable',async()=>{
+test('bootloader reporting distinguishes non-OTAFIX reports from unavailable versions and outdated OTAFIX stable releases',async()=>{
   for(const [reported,pattern,offer]of [
     ['0.11.0-OTAFIX2.4.12',/matches.*2\.4\.12|No bootloader update is needed/i,false],
     ['0.11.0-OTAFIX2.4.13',/newer.*No downgrade/i,false],
     ['OTAFIX2.4.12-custom',/custom.*not treated as.*outdated/i,false],
-    ['0.11.0',/could not be verified|unknown/i,false],
+    ['0.11.0',/non-OTAFIX bootloader 0\.11\.0.*separate board-specific USB update/i,true],
+    ['0.4.3',/non-OTAFIX bootloader 0\.4\.3.*version name alone does not authorize/i,true],
     ['unknown command',/could not be verified|unknown/i,false],
     [new Error('Optional CLI unavailable'),/could not be verified|unknown/i,false],
     ['OTAFIX2.4.12-preview.1',/preview.*replace the preview/i,true]
@@ -2565,9 +2596,20 @@ test('installing an application that can report bootloader version prompts only 
 });
 
 test('current, unknown, newer and custom bootloaders do not prompt after successful application startup',async()=>{
-  for(const reported of ['0.11.0-OTAFIX2.4.12','0.11.0-OTAFIX2.4.13','0.11.0','unknown command','OTAFIX2.4.12-custom']){
+  for(const reported of ['0.11.0-OTAFIX2.4.12','0.11.0-OTAFIX2.4.13','0.11.0 (base)','unknown command','OTAFIX2.4.12-custom']){
     const ui=await bootloaderOfferWorkbench();prepareNrfStartup(ui,{reported});ui.context.choose=async()=>{ui.calls.push('unexpected-offer');return 'prepare';};ui.context.loadBootloaderFirmware=async()=>ui.calls.push('unexpected-load');await ui.evaluate('verifyApplication();');
     assert.equal(ui.evaluate('state.verification'),null,reported);assert.match(ui.elements.get('notice').textContent,/startup verified/i,reported);assert.deepEqual(ui.calls,['application-open','application-query:get bootloader.ver','application-query:ver','application-close'],reported);
+  }
+});
+
+test('non-OTAFIX startup reports offer a separate bootloader preparation once, without automatically replacing it',async()=>{
+  for(const reported of ['0.4.3','0.11.0','0.9.2-Seeed']){
+    const ui=await bootloaderOfferWorkbench();prepareNrfStartup(ui,{reported});
+    ui.context.choose=async(_title,detail)=>{assert.ok(detail.includes(reported));ui.calls.push('offer');return 'later';};
+    ui.context.loadBootloaderFirmware=async()=>{throw Error('Must not load without approval');};
+    await ui.evaluate('verifyApplication();');await ui.evaluate('offerBootloaderAfterStartup();');
+    assert.deepEqual(ui.calls,['application-open','application-query:get bootloader.ver','application-query:ver','application-close','offer']);
+    assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.evaluate('state.plan'),null);
   }
 });
 

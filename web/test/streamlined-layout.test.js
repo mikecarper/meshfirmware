@@ -371,6 +371,14 @@ test('USB and flash actions precede non-action badges and explanatory copy',()=>
   assert.ok(get('workflow-guidance').start>get('progress-label').start,'Explanatory copy belongs below progress, not beside the buttons');
 });
 
+test('the USB button has a wrapped selected-port label and Web Serial availability links to the bottom console',()=>{
+  const selected=get('selected-port'),button=get('select-port'),link=get('browser-status');
+  assert.ok(inside(selected,button));assert.ok(has(selected,'hidden'));assert.equal(selected.tag,'small');
+  assert.equal(link.tag,'a');assert.equal(link.attrs.href,'#console');assert.match(link.attrs.title,/console/);assert.ok(get('console').start>link.start);
+  assert.ok(declarationsFor('.usb-port-choice').some(rule=>rule['flex-direction']==='column'&&rule['min-width']==='0'));
+  assert.ok(declarationsFor('#selected-port').some(rule=>rule['overflow-wrap']==='anywhere'));
+});
+
 test('backup progress and its status precede explanatory text and visible firmware warnings',()=>{
   const workflow=nodes.find(node=>hasClass(node,'workflow')),actions=get('prepare').parent,bar=get('progress'),status=get('progress-label');
   assert.equal(actions.parent,workflow);assert.equal(bar.parent,workflow);assert.equal(status.parent,workflow);
@@ -420,7 +428,7 @@ test('one visible Update or Erase/new-install switch precedes the build list and
 
 test('USB, backup and flash are primary actions while optional verification keeps its stable step 5 label',()=>{
   for(const [id,number]of [['select-port','1'],['prepare','3'],['flash','4'],['verify-app','5']]){
-    const button=get(id),badge=button.children.find(node=>hasClass(node,'action-number')),label=button.children.find(node=>hasClass(node,'action-label'));
+    const button=get(id),badge=button.children.find(node=>hasClass(node,'action-number')),label=nodes.find(node=>inside(node,button)&&hasClass(node,'action-label'));
     if(id==='verify-app'){assert.ok(hasClass(button,'secondary'),'Optional verification must use the secondary style');assert.ok(!hasClass(button,'primary'));assert.equal(button.attrs['aria-label'],'Optional step 5: Verify running application');}
     else{assert.ok(hasClass(button,'primary'),`#${id} must use the dark primary style`);assert.ok(!hasClass(button,'secondary'),`#${id} cannot use the light secondary style`);}
     assert.ok(hasClass(button,'step-button'),id);assert.ok(badge,`#${id} needs a persistent number badge`);assert.ok(label,`#${id} needs a separate editable label`);

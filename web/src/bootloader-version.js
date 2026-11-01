@@ -4,6 +4,7 @@
 const component='(?:0|[1-9][0-9]{0,2})';
 const stablePattern=new RegExp(`^(${component})\\.(${component})\\.(${component})$`);
 const installedPattern=new RegExp(`^(?:v?${component}\\.${component}\\.${component}-)?OTAFIX(${component})\\.(${component})(?:\\.(${component}))?(?:\\.(0))?([-+_][A-Za-z0-9][A-Za-z0-9._+-]*)?$`,'i');
+const otherPattern=new RegExp(`^v?(${component})\\.(${component})\\.(${component})(?:[-+_][A-Za-z0-9][A-Za-z0-9._+-]*)?$`,'i');
 const withinByte=values=>values.every(value=>Number.isInteger(value)&&value>=0&&value<=255);
 const compare=(a,b)=>{
   for(let i=0;i<3;i++)if(a[i]!==b[i])return a[i]<b[i]?-1:1;
@@ -28,7 +29,19 @@ function report(value){
 export function assessBootloaderVersion(reported,latestVersion){
   const text=report(reported),latest=stable(latestVersion);
   const result={status:'unknown',reported:text,installedVersion:null,latestVersion:latest?.version||null,offerUpdate:false};
-  if(!text||(text.match(/OTAFIX/gi)||[]).length!==1)return result;
+  if(!text)return result;
+  if(!/OTAFIX/i.test(text)){
+    const other=otherPattern.exec(text);
+    // Vendor bootloaders use a different version namespace, including Seeed's
+    // historical "1.00". Recognize their report without comparing its numeric
+    // value with OTAFIX, or using a name as embedded-upgrade authorization.
+    if((other&&withinByte(other.slice(1,4).map(Number))||text==='1.00')&&!/recovery|(?:^|[-+_])R_/i.test(text)){
+      result.installedVersion=text.replace(/^v/i,'');
+      if(latest){result.status='non-otafix';result.offerUpdate=true;}
+    }
+    return result;
+  }
+  if((text.match(/OTAFIX/gi)||[]).length!==1)return result;
   const match=installedPattern.exec(text);
   if(!match)return result;
   const parts=[Number(match[1]),Number(match[2]),Number(match[3]??0)];
