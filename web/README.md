@@ -44,7 +44,23 @@ choices share one numbered, accessible radio group—not another action button.
 The USB button lists the selected USB ID and, after detection, the running
 radio's model and name. Web Serial does not expose Windows COM numbers. The
 label clears on disconnect and does not reuse an application's name for a new
-DFU interface. **Web Serial available** links to the serial console at the bottom.
+DFU interface. **Web Serial available** links to the serial console, directly
+below the flashing area. The console is open by default; its navigation link is
+immediately after Flash firmware. Everyday controls use 140% of the previous
+font size, with repeated details kept in the Firmware details disclosure.
+
+**Common settings**, below the console, offers USB logging on/off, Wi-Fi status
+and enablement, an ESP32 update hotspot, node name, admin password and Wi-Fi
+credentials. Each click rechecks the running MeshCore application and sends only
+reviewed serial commands; Companion shortcuts require protocol 14 or newer.
+Unsupported firmware features are reported, not assumed successful. These tools
+are unavailable in ROM/DFU or during a pending flash, handoff or recovery.
+Password requests, replies and errors are never logged. Local **Show/Hide**
+buttons reveal only what you type, not a password read from the radio. Fields
+clear and return to hidden after an attempt. A blank Wi-Fi password keeps the saved secret. Wi-Fi changes
+can reconnect services or require a reboot, and logging on can move a Companion
+USB port from binary to text mode. These controls do not automatically reboot.
+
 The next-step hint follows the current stage. The next required control has an
 amber outline, and the next button also shows **Next**, including USB selection
 after a DFU reconnect. Newly required controls are revealed and scrolled into

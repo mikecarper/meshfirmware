@@ -10,7 +10,8 @@ import { parseBootloaderInfo, detectBootloaderBoard } from './bootloader-info.js
 import { chooseBootloaderInfoFile } from './bootloader-info-file.js';
 import { exportNativeBackup } from './backup-native.js';
 import { backupCoverage } from './backup-coverage.js';
-import { commonCliRestorePreview, restoreCommonCli } from './common-cli.js';
+import { commonCliRestorePreview, restoreCommonCli, commonCliReplyState } from './common-cli.js';
+import { quickSettingPlan, quickHotspotUrl } from './quick-settings.js';
 import { assessBoard, rakFamily, endfIdentity } from './board-safety.js';
 import { BrowserPlanner } from './planner.js';
 import { waitForMigration } from './migration.js';
@@ -54,6 +55,18 @@ state.applicationDetection=null;
 // Display-only identity, bound to the exact port and freshly read application.
 // A previously detected board must not label a newly selected DFU interface.
 state.portLabelEvidence=null;
+state.quickSettingsMessage=null;
+const quickSettingButtons=['quick-logging-on','quick-logging-off','quick-wifi-status','quick-wifi-on','quick-wifi-off','quick-wifi-ota-ap','quick-name-save','quick-password-save','quick-wifi-save'];
+const quickSettingFields=['quick-name','quick-admin-password','quick-wifi-ssid','quick-wifi-password'];
+const quickPasswordControls=[['quick-admin-password','quick-admin-password-toggle','admin password'],['quick-wifi-password','quick-wifi-password-toggle','Wi-Fi password']];
+function setQuickPasswordVisibility(fieldId,shown){
+  const [,toggleId,label]=quickPasswordControls.find(([id])=>id===fieldId);
+  $(fieldId).setAttribute('type',shown?'text':'password');
+  $(toggleId).textContent=shown?'Hide':'Show';
+  $(toggleId).setAttribute('aria-pressed',String(shown));
+  $(toggleId).setAttribute('aria-label',`${shown?'Hide':'Show'} ${label}`);
+}
+for(const [fieldId,toggleId] of quickPasswordControls)$(toggleId).onclick=()=>setQuickPasswordVisibility(fieldId,$(fieldId).getAttribute('type')!=='text');
 const nextStepScroller=createNextStepScroller({window,document});
 $('skip-backup').checked=false;
 $('show-all-nrf').checked=false;
@@ -195,19 +208,19 @@ function assertInstallModePackage(pkg){
 }
 function updateStepGuidance(buildChoiceNeeded=false){
   let message;
-  if(state.migrationApproval)message=state.busy?'Automatically completing the approved expansion and final firmware. Keep USB and power connected.':'Automatic completion is waiting for the same radio. Its granted USB port resumes automatically; if it does not return, use step 1 to select it. No Prepare/Flash presses are needed.';
-  else if(state.busy)message='Follow the current prompt. Keep the radio connected and power stable.';
+  if(state.migrationApproval)message=state.busy?'Completing expansion and firmware automatically. Keep USB connected.':'Waiting for the same radio. Use step 1 only if it does not reconnect.';
+  else if(state.busy)message='Keep USB connected. Follow the current prompt.';
   else if(canStartNewRadio())message='Next: Flash a new device, or optionally verify the previous radio’s startup.';
-  else if(state.verification)message=state.port?'Follow the verification controls to restart verified firmware, then use step 1 for its application port and startup check.':'Step 1 again: choose the same radio’s application port to check that the new firmware started.';
-  else if(state.plan?.written)message='Transfer finished; startup is not yet verified. Follow the verification controls before starting another update.';
+  else if(state.verification)message=state.port?'Optional step 5: verify startup on the same radio.':'Optional verification: choose the same radio’s application USB port.';
+  else if(state.plan?.written)message='Transfer finished. Use step 5 to check startup.';
   else if(state.recovery?.phase==='reselect-dfu'||(state.handoff&&!state.port))message='Step 1 again: choose the same radio’s requested USB port. '+(directFlashSelected()?'Then step 4: Review & flash; preparation and device checks still run.':'Then repeat step 3: Backup & prepare before step 4: Flash.');
-  else if(!state.port)message='Step 1: Choose your radio’s USB port. Then step 2: choose Update or Erase & new install and check the firmware.';
-  else if(state.plan)message='Step 4: Review & flash. Check the warning and confirm the exact operation; nothing is written before confirmation.';
+  else if(!state.port)message='Step 1: Choose USB port. Hardware and firmware are selected automatically when identified.';
+  else if(state.plan)message='Step 4: Review & flash. Nothing is written until you confirm.';
   else if(state.finishedFirmware?.sha256===state.pkg?.sha256&&state.finishedFirmware)message=state.finishedFirmware.verified?'Application startup verified. No further flashing step is required.':'Transfer finished. Activation remains unverified; do not flash the same image again just to check startup.';
   else if(buildChoiceNeeded)message='Step 2.5: Choose a firmware build. Then '+(directFlashSelected()?'step 4: Review & flash.':'step 3: Backup & prepare.');
-  else if(!state.pkg&&!$('artifact').value)message='Step 2: Choose Update or Erase & new install and check the firmware build. Then '+(directFlashSelected()?'step 4: Review & flash.':'step 3: Backup & prepare.');
-  else if(directFlashSelected())message=isMeshtasticMigration()?'Step 4: Review & flash. Firmware downloads, validation and device checks run automatically before confirmation.':'Step 4: Review & flash without backup. Firmware validation and device checks run automatically before confirmation.';
-  else message='Step 3: Backup & prepare. Follow the backup prompts and USB-port instructions; step 4 flashes only after confirmation.';
+  else if(!state.pkg&&!$('artifact').value)message='Step 2: Check firmware and installation mode.';
+  else if(directFlashSelected())message=isMeshtasticMigration()?'Step 4: Review & flash. Downloads and checks run automatically.':'Step 4: Review & flash without backup. Checks run automatically.';
+  else message='Step 3: Backup & prepare. Step 4 flashes after confirmation.';
   $('step-guidance').textContent=message;
 }
 function updateArtifactChoiceHighlight(){
@@ -368,7 +381,7 @@ function controls() {
   $('flash').disabled ||= !!completedFirmwareSelection() || (!state.plan&&!canPrepareWithoutBackup()) || state.recovery?.phase==='reselect-dfu'||!!state.plan?.written;
   $('skip-backup').disabled ||= isMeshtasticMigration()||!!completedFirmwareSelection()||!!state.verification||!!state.plan?.written||!!state.migrationApproval;
   $('skip-backup-warning').hidden=!$('skip-backup').checked;$('skip-backup-option').classList.toggle('enabled',$('skip-backup').checked);
-  $('workflow-guidance').textContent=isMeshtasticMigration()?'Step 4 downloads and validates the firmware, then asks before erasing or flashing. Meshtastic settings are not backed up or converted to MeshCore.':'Step 3 offers a backup by default. Select Skip backup to go straight to step 4; firmware and device checks run automatically before confirmation. Step 4 asks once for supported expansion + final firmware, then completes both automatically. A new USB interface may still need step 1.';
+  $('workflow-guidance').textContent=isMeshtasticMigration()?'Step 4 downloads and checks firmware before confirmation. Meshtastic settings are not backed up or converted.':'Step 3 backs up settings. Skip backup goes straight to step 4. Required partition expansion and the final firmware run together after approval.';
   $('finish').disabled ||= !state.esp || !state.plan?.written;
   $('wait-migration').disabled ||= !state.port || !state.migration?.uart || state.migration?.settled;
   $('recover-bridge').disabled ||= !state.port || !state.pkg || !state.migration;
@@ -377,6 +390,7 @@ function controls() {
   $('restore').disabled ||= state.restore?.payload?.role==='common-cli'&&!state.restorePreview?.operations?.length&&!($('replace-identity').checked&&state.restorePreview?.privateIdentity);
   for (const id of ['touch','probe','backup','send-command','binary-mode','verify-app']) $(id).disabled ||= !state.port;
   if(isNonMeshCore())for(const id of ['backup','restore','send-command','binary-mode'])$(id).disabled=true;
+  updateQuickSettingsControls();
   $('verify-app').disabled ||= !state.verification||!!state.esp||!!state.plan?.written||$('already-bootloader').checked||dfuIds.has(portId(state.port))||!!state.migration||!!state.recovery||!!state.espRecovery;
   $('fetch-firmware').disabled ||= !$('artifact').value;
   $('load-bootloader').disabled ||= !$('bootloader-source').value;
@@ -391,6 +405,7 @@ function controls() {
   if(state.migration||state.plan?.needed)revealPanel('migration-options');
   if(state.recovery||(!$('nrf-actions').hidden&&$('flash-action').value==='wipe'))revealPanel('nrf-actions');
   if(state.plan?.written)revealPanel('verification-options');
+  if($('install-mode-hint').classList.contains('mode-warning'))$('firmware-details').open=true;
   if(state.migrationApproval){
     document.querySelectorAll('[data-lock]').forEach(el=>{el.disabled=true;});
     $('select-port').disabled=state.busy||!('serial'in navigator)||!['waiting-rom','waiting-application'].includes(state.migrationApproval.phase);
@@ -702,7 +717,7 @@ async function detectSelectedBoard() {
     await setInstallMode(automaticMode,{automatic:true});
     if(state.port!==port||state.device!==device){state.device=null;fail('Selected port changed or disconnected while selecting the installation mode. Re-select and detect again.');}
   }
-  state.boardDetected=true;selectDetectedBoard();notice(isMeshtastic()?`Meshtastic detected; matching MeshCore hardware selected when unambiguous. ${meshtasticMigrationWarning} No reset, settings change or firmware write was sent.`:'Running MeshCore model read and matching catalog hardware selected when unambiguous. No reset, settings change or firmware write was sent.');
+  state.boardDetected=true;selectDetectedBoard();notice(isMeshtastic()?'Meshtastic detected. Check the selected MeshCore firmware. Meshtastic settings do not transfer; export them separately. Nothing has been written.':'MeshCore detected. Hardware and firmware selected where identified. Nothing has been written.');
 }
 function clearBackupJson(){
   state.backupTextGeneration++;
@@ -1555,6 +1570,70 @@ $('backup').onclick = () => operation(async () => {
   await captureBackup();
 });
 function restoreWorkflowBlocked(){return !!(state.migrationApproval||state.migration||state.recovery||state.espRecovery||state.esp||state.plan?.written||state.handoff);}
+function quickSettingsBlocked(){return restoreWorkflowBlocked()||!!state.verification;}
+function updateQuickSettingsControls(){
+  const blocked=state.busy||!state.port||isNonMeshCore()||quickSettingsBlocked()||$('already-bootloader').checked||dfuIds.has(portId(state.port));
+  for(const id of [...quickSettingButtons,...quickSettingFields])$(id).disabled=blocked;
+  // start ota means BLE DFU on nRF52. Only a fresh application identity can
+  // expose the ESP32 Wi-Fi hotspot shortcut, never the hardware picker alone.
+  $('quick-wifi-ota-ap').disabled ||= state.device?.architecture!=='esp32';
+  const message=state.quickSettingsMessage;
+  $('quick-settings-status').textContent=state.busy?'Working… Keep USB connected.':quickSettingsBlocked()?'Finish the current flash or USB handoff before changing settings.':!state.port?'Connect the radio’s application USB port to change settings.':isNonMeshCore()?'These settings require a running MeshCore application.':$('already-bootloader').checked||dfuIds.has(portId(state.port))?'Settings are unavailable in DFU/ROM. Choose the application USB port.':message?.port===state.port&&message.generation===state.generation?message.text:'Buttons send settings over USB. Unsupported features are reported by the firmware.';
+}
+async function runQuickSetting(action){
+  requireMeshCoreApplication();
+  if(!state.port)fail('Choose a MeshCore application USB port first.');
+  if(quickSettingsBlocked())fail('Finish the current flash, verification or USB handoff before changing settings.');
+  if(dfuIds.has(portId(state.port))||$('already-bootloader').checked)fail('Settings cannot run in DFU/ROM. Choose the application USB port.');
+  const port=state.port,generation=state.generation,publicKey=state.device?.publicKey;
+  const values={name:$('quick-name').value,password:action==='password'?$('quick-admin-password').value:$('quick-wifi-password').value,ssid:$('quick-wifi-ssid').value};
+  // Validate before opening USB. The planner never includes supplied values in
+  // labels/errors. Firmware may echo secret setters, including in errors.
+  let plan;
+  const assertCurrent=()=>{if(state.port!==port||state.generation!==generation)fail('The selected radio changed or disconnected. No further settings were sent.');};
+  let completed=0,evidenceInvalidated=false,hotspotUrl=null;
+  try{
+    plan=quickSettingPlan(action,{...values,role:state.device?.role});
+    if(action==='wifi-ota-ap'&&state.device?.architecture!=='esp32')fail('The Wi-Fi hotspot shortcut requires an identified ESP32 application.');
+    invalidateApplicationEvidence();evidenceInvalidated=true;
+    await linkOperation(async link=>{
+      assertCurrent();
+      const device=await readApplication(link);assertCurrent();requireMeshCoreApplication();
+      if(!['common-cli','companion'].includes(device?.role))fail('The radio did not answer as a MeshCore application.');
+      if(publicKey&&device.publicKey&&publicKey.toLowerCase()!==device.publicKey.toLowerCase())fail('The radio identity changed. Detect it again before changing settings.');
+      if(device.role==='companion'&&!(device.protocol>=14))fail('These settings require Companion protocol 14 or newer. Use current Keymind firmware.');
+      if(action==='wifi-ota-ap'&&device.architecture!=='esp32')fail('The Wi-Fi hotspot shortcut requires an identified ESP32 application.');
+      plan=quickSettingPlan(action,{...values,role:device.role});
+      const companion=device.role==='companion'?new MeshCore(link):null;
+      for(const command of plan.commands){
+        assertCurrent();
+        const reply=await (companion?companion.cli(command):link.command(command));assertCurrent();
+        const result=commonCliReplyState(reply,command);
+        if(result.state!=='complete')fail(result.state==='unsupported'?'This setting is not supported by the running firmware.':'The firmware did not confirm this setting.');
+        if(action==='wifi-ota-ap')hotspotUrl=quickHotspotUrl(result.text);
+        const acknowledged=action==='wifi-status'||(action==='password'?/^password now:\s*/i.test(result.text):action==='wifi-ota-ap'?!!hotspotUrl:/^OK\b/i.test(result.text));
+        if(!acknowledged)fail('No setting acknowledgment was received. Check the console connection and try again.');
+        completed++;
+        // Do not log requests or raw errors. Even non-secret setters can
+        // include a secret in an unexpected reply from the application.
+        log(action==='wifi-status'?`Wi-Fi status: ${result.text}`:`${plan.label}: command accepted.`);
+      }
+    });
+    assertCurrent();
+    const message=action==='wifi-status'?'Wi-Fi status is shown in the console.':action==='wifi-ota-ap'?`Wi-Fi update hotspot started. Join MeshCore-OTA, open ${hotspotUrl} and sign in as admin with the node’s admin password. Keep USB connected.`:`${plan.label}: command accepted. ${plan.warning||'Saved by the firmware; restart if required.'}`;
+    state.quickSettingsMessage={port,generation,text:message};notice(message);
+  }catch(error){
+    const message=plan?.secret?'Settings could not be completed. Check that the firmware supports them and the radio is still connected. Earlier values may already have changed. Passwords were not logged.':`${error.message||'Settings could not be completed.'}${completed?' Earlier values may already have changed.':''}`;
+    state.quickSettingsMessage={port,generation,text:message};throw new Error(message);
+  }finally{
+    $('quick-admin-password').value='';$('quick-wifi-password').value='';
+    for(const [fieldId] of quickPasswordControls)setQuickPasswordVisibility(fieldId,false);
+    // Any setting can change future backup/flash evidence. Preserve a freshly
+    // discovered non-MeshCore identity so later controls still refuse commands.
+    if(evidenceInvalidated&&!isNonMeshCore())invalidateApplicationEvidence();
+  }
+}
+for(const [id,action] of Object.entries({'quick-logging-on':'logging-on','quick-logging-off':'logging-off','quick-wifi-status':'wifi-status','quick-wifi-on':'wifi-on','quick-wifi-off':'wifi-off','quick-wifi-ota-ap':'wifi-ota-ap','quick-name-save':'name','quick-password-save':'password','quick-wifi-save':'wifi-save'}))$(id).onclick=()=>operation(()=>runQuickSetting(action));
 function showRestorePreview(){
   state.restorePreview=null;$('restore-preview').hidden=!state.restore;$('restore-summary').textContent='';$('restore-report').textContent='';
   if(!state.restore)return;

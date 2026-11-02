@@ -280,3 +280,75 @@ dialog p { font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
   .optional { display: block; margin: 5px 0 0; }
   footer { flex-direction: column; gap: 8px; }
 }
+
+/* The everyday workflow uses 140% of its previous type size. Keep this scoped
+   instead of zooming the page, so controls still wrap on phones. */
+.sidebar nav { flex-wrap: wrap; }
+.sidebar nav a { font-size: 15.4px; min-height: 44px; }
+.page-header h1 { font-size: 39.2px; }
+.page-header .page-heading p { font-size: 16.8px; }
+.page-header .usb-workflow-help { font-size: 16.8px; }
+.page-header button, .workflow button { font-size: 16.8px; }
+.page-header .tag, .workflow .tag { font-size: 14px; }
+.page-header #selected-port { font-size: 16.8px; }
+.page-header #start-new-radio { font-size: 22.4px; }
+.workflow label, .workflow .mode-switch legend { font-size: 15.4px; }
+.workflow select, .workflow input:not([type=checkbox]):not([type=radio]):not([type=file]) { font-size: 16.8px; min-height: 46px; }
+.workflow .primary-inputs > summary { font-size: 18.2px; }
+.workflow .mode-options label { font-size: 16.8px; min-height: 46px; }
+.workflow .skip-backup-option label { font-size: 16.8px; }
+.workflow .device-display strong { font-size: 16.8px; }
+.workflow .device-display small, .workflow .hint, .workflow #automatic-summary { font-size: 15.4px; }
+.workflow .bootloader-offer > p { font-size: 16.8px; }
+.workflow .bootloader-offer > .hint { font-size: 15.4px; }
+.workflow .selected-image, .workflow .selected-image strong { font-size: 15.4px; }
+.workflow .selected-image > span { font-size: 14px; }
+.workflow #firmware-details > summary { font-size: 16.8px; }
+.workflow progress { height: 7px; }
+.workflow .step-button .action-number, .workflow .mode-step > .action-number,
+.page-header .step-button .action-number { flex-basis: 48px; height: 48px; font-size: 39.2px; }
+.workflow .artifact-step-number { min-width: 66px; height: 48px; font-size: 33.6px; }
+.workflow button.next-action:not(:disabled)::after, .page-header button.next-action:not(:disabled)::after { font-size: 15.4px; }
+#notice { font-size: 16.8px; }
+#console > summary { font-size: 16.8px; }
+#console .card-title { margin: 10px 0; }
+#console .card-title p { font-size: 15.4px; }
+#console button, #console input { font-size: 16.8px; }
+#console #log { font-size: 16.8px; height: 250px; margin: 12px 0; }
+.quick-settings { font-size: 16.8px; }
+.quick-settings h2 { font-size: 22.4px; margin: 0; letter-spacing: -.3px; }
+.quick-settings h3, .quick-settings button, .quick-settings input { font-size: 16.8px; }
+.quick-settings h3 { margin: 0; font-weight: 650; color: #526576; }
+.quick-settings label, .quick-settings .hint { font-size: 15.4px; }
+.quick-settings-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px 24px; margin-top: 18px; }
+.quick-setting { min-width: 0; }
+.quick-setting label { margin-top: 0; }
+.quick-setting .inline-actions { margin-top: 9px; }
+.quick-setting-input { display: flex; flex-wrap: wrap; justify-content: flex-start; gap: 9px; }
+.quick-setting-input input { flex: 1 1 230px; min-width: 0; }
+.quick-setting-input button { flex: 0 1 auto; }
+.password-field { display: flex; align-items: stretch; gap: 8px; flex: 1 1 230px; min-width: 0; max-width: 100%; }
+.password-field input { flex: 1 1 auto; min-width: 0; }
+.password-field button { flex: 0 0 auto; min-width: 64px; }
+.quick-wifi-network { grid-column: 1 / -1; }
+.quick-network-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; margin-top: 10px; }
+.quick-network-fields > * { min-width: 0; }
+
+@media (max-width: 900px) {
+  .sidebar { flex-wrap: wrap; }
+  .sidebar nav { width: 100%; }
+}
+@media (max-width: 600px) {
+  .sidebar nav { overflow-x: visible; }
+  .sidebar nav a { padding: 8px; }
+  .page-header h1 { font-size: 35px; }
+  .firmware-fields { grid-template-columns: minmax(0, 1fr); }
+  .quick-settings-grid, .quick-network-fields { grid-template-columns: minmax(0, 1fr); }
+  .quick-setting-input input { flex-basis: 100%; }
+  .quick-setting-input .password-field { flex-basis: 100%; }
+  .workflow .device-display { flex-wrap: wrap; }
+  .workflow .device-display > .tag { margin-left: 0; }
+  .workflow .mode-step { align-items: flex-start; }
+  .workflow .mode-options { min-width: 0; }
+  #console #log { height: 220px; }
+}

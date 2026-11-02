@@ -24,6 +24,8 @@ import {fetchFirmwareBytes as verifiedDownload} from '../src/downloads.js';
 import {firmwareFilesLinks} from '../src/firmware-links.js';
 import {selectionLink} from '../src/selection-link.js';
 import {backupCoverage} from '../src/backup-coverage.js';
+import {quickSettingPlan,quickHotspotUrl} from '../src/quick-settings.js';
+import {commonCliReplyState} from '../src/common-cli.js';
 import {gzipSync} from 'node:zlib';
 const html=await readFile(new URL('../index.html',import.meta.url),'utf8');
 const source=(await readFile(new URL('../src/app.js',import.meta.url),'utf8')).replace(/^import .*;\r?$/gm,'');
@@ -44,10 +46,11 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
   if(recovery)storage.set('meshfirmware.nrfRecovery',JSON.stringify(recovery));
   if(espRecovery)storage.set('meshfirmware.espRecovery',JSON.stringify(espRecovery));
   if(verification)storage.set('meshfirmware.verifyApplication',JSON.stringify(verification));
-  const context=vm.createContext({canonicalHardware,nrfDfuUsbIds,lookupUsbConnectionMap,usbConnectionMap:{schemaVersion:1,builds:[]},document:{getElementById:id=>{assert.ok(elements.has(id),`Missing HTML id ${id}`);return elements.get(id);},querySelectorAll:()=>[...elements.values()]},navigator:{serial:{requestPort:async()=>{calls.push('chooser');return port;},getPorts(){throw new Error('must not enumerate automatically');},addEventListener(type,handler){serialEvents[type]=handler;}}},window:{performance:performanceApi,location:{search},addEventListener(type,handler){windowEvents[type]=handler;}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},Option,URL,URLSearchParams,Blob,Uint8Array,TextEncoder,TextDecoder,console,setTimeout,clearTimeout,AbortSignal,Date,
+  const context=vm.createContext({quickSettingPlan,commonCliReplyState,canonicalHardware,nrfDfuUsbIds,lookupUsbConnectionMap,usbConnectionMap:{schemaVersion:1,builds:[]},document:{getElementById:id=>{assert.ok(elements.has(id),`Missing HTML id ${id}`);return elements.get(id);},querySelectorAll:()=>[...elements.values()]},navigator:{serial:{requestPort:async()=>{calls.push('chooser');return port;},getPorts(){throw new Error('must not enumerate automatically');},addEventListener(type,handler){serialEvents[type]=handler;}}},window:{performance:performanceApi,location:{search},addEventListener(type,handler){windowEvents[type]=handler;}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},Option,URL,URLSearchParams,Blob,Uint8Array,TextEncoder,TextDecoder,console,setTimeout,clearTimeout,AbortSignal,Date,
     fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,parseUsbMode,MigrationApproval,cleanCliReply,assessBootloaderVersion,firmwareFilesLinks,fetch:async()=>{throw Error('Unexpected network request');},fetchFirmwareBytes:(url,options)=>verifiedDownload(url,{...options,mirrorBase:'https://mirror.example.test/firmware/',pageOrigin:'https://mirror.example.test',fetchImpl:(target,init)=>target==='https://mirror.example.test/firmware/index.json'?Promise.resolve({ok:false,status:404}):options.fetchImpl(target,init)}),assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),commonCliRestorePreview:()=>({operations:[],skipped:[],warnings:[]}),restoreCommonCli:async()=>{throw Error('Unexpected CommonCLI restore');},
     backupCoverage,createNextStepScroller,tryNativeUsbFallback,SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
   });
+  context.quickHotspotUrl=quickHotspotUrl;
   context.detectApplication=(...args)=>context.detectMeshCore(...args);context.detectMeshtasticBoard=detectMeshtasticBoard;
   context.parseBootloaderInfo=parseBootloaderInfo;context.detectBootloaderBoard=detectBootloaderBoard;context.chooseBootloaderInfoFile=async()=>{calls.push('file-picker');throw Error('Unexpected file chooser');};
   context.selectionLink=selectionLink;context.nrfBoardCandidates=nrfBoardCandidates;
@@ -1756,6 +1759,121 @@ test('console commands invalidate earlier backup approval and cached board evide
     ui.context.detectMeshCore=async()=>{assert.equal(ui.evaluate('state.device'),null);assert.equal(ui.evaluate('state.backupApproved'),null);return {role:'common-cli',model:'before-command'};};
     await ui.elements.get('send-command').onclick();assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.evaluate('state.device'),null);assert.ok(ui.calls.includes('set name New'));
   }
+});
+
+async function quickSettingsWorkbench(device={role:'common-cli',publicKey:'11'.repeat(32),model:'Test radio'}){
+  const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.quickDevice=device;
+  ui.port.getInfo=()=>({usbVendorId:0x10c4,usbProductId:0xea60});
+  ui.context.SerialLink=class{async open(){ui.calls.push('open');}async close(){ui.calls.push('close');}async command(command){ui.calls.push(command);return '> OK';}};
+  ui.context.detectMeshCore=async()=>({...device});
+  ui.evaluate('state.port=selectedPort;state.device=quickDevice;controls();');
+  return ui;
+}
+
+test('common settings are disabled without an application port and never send commands on page load',async()=>{
+  const ui=workbench();await Promise.resolve();
+  for(const id of ['quick-logging-on','quick-logging-off','quick-wifi-status','quick-wifi-on','quick-wifi-off','quick-wifi-ota-ap','quick-name-save','quick-password-save','quick-wifi-save'])assert.equal(ui.elements.get(id).disabled,true,id);
+  assert.deepEqual(ui.calls,[]);
+});
+
+test('password Show/Hide controls are local, independent, accessible and do not send USB commands',async()=>{
+  const ui=workbench();await Promise.resolve();
+  for(const [field,toggle] of [['quick-admin-password','quick-admin-password-toggle'],['quick-wifi-password','quick-wifi-password-toggle']]){
+    ui.elements.get(field).value='PRIVATE_A1';
+    ui.elements.get(toggle).onclick();assert.equal(ui.elements.get(field).getAttribute('type'),'text');assert.equal(ui.elements.get(toggle).getAttribute('aria-pressed'),'true');assert.equal(ui.elements.get(toggle).textContent,'Hide');assert.equal(ui.elements.get(field).value,'PRIVATE_A1');
+    ui.elements.get(toggle).onclick();assert.equal(ui.elements.get(field).getAttribute('type'),'password');assert.equal(ui.elements.get(toggle).getAttribute('aria-pressed'),'false');assert.equal(ui.elements.get(toggle).textContent,'Show');
+  }
+  assert.deepEqual(ui.calls,[]);assert.ok(!ui.elements.get('log').textContent.includes('PRIVATE_A1'));
+});
+
+test('quick name save rechecks the radio and invalidates old backup and flash evidence',async()=>{
+  const ui=await quickSettingsWorkbench();ui.elements.get('quick-name').value='Roof radio';
+  ui.evaluate('state.backupApproved={sha256:"old"};state.backup={private:"old"};state.plan={written:false};');
+  ui.context.detectMeshCore=async()=>{assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.evaluate('state.plan'),null);return {...ui.context.quickDevice};};
+  await ui.elements.get('quick-name-save').onclick();
+  assert.deepEqual(ui.calls,['open','set name Roof radio','close']);assert.equal(ui.evaluate('state.backup'),null);assert.equal(ui.evaluate('state.device'),null);assert.equal(ui.evaluate('state.plan'),null);
+  assert.match(ui.elements.get('notice').textContent,/command accepted/);assert.equal(ui.elements.get('quick-name-save').disabled,false);
+});
+
+test('quick settings use the detected Companion command transport and logging-on sends no follow-up',async()=>{
+  const ui=await quickSettingsWorkbench({role:'companion',protocol:14,publicKey:'11'.repeat(32)});
+  ui.context.MeshCore=class{async cli(command){ui.calls.push('binary:'+command);return 'OK';}};
+  await ui.elements.get('quick-logging-on').onclick();
+  assert.deepEqual(ui.calls,['open','binary:set usb.logging on','close']);assert.match(ui.elements.get('notice').textContent,/binary.*text/i);
+});
+
+test('quick Wi-Fi buttons use the current role rather than the backup role override',async()=>{
+  for(const role of ['common-cli','companion']){
+    const ui=await quickSettingsWorkbench({role,protocol:14});ui.elements.get('backup-role').value=role==='companion'?'common-cli':'companion';
+    ui.context.MeshCore=class{async cli(command){ui.calls.push(command);return 'OK';}};
+    await ui.elements.get('quick-wifi-on').onclick();assert.deepEqual(ui.calls,['open',role==='companion'?'set wifi.enabled 1':'set wifi on','close']);
+  }
+});
+
+test('secret quick setters never display echoed credentials or raw secret errors and always clear password inputs',async()=>{
+  for(const failAt of ['none','reply','throw','close']){
+    const ui=await quickSettingsWorkbench(),secret='PRIVATE_A1';ui.elements.get('quick-admin-password').value=secret;ui.elements.get('quick-wifi-password').value='PRIVATE_WIFI';ui.elements.get('quick-admin-password-toggle').onclick();ui.elements.get('quick-wifi-password-toggle').onclick();
+    ui.context.SerialLink=class{async open(){ui.calls.push('open');}async close(){if(failAt==='close')throw Error(secret);}async command(command){ui.calls.push(command);if(failAt==='throw')throw Error('bad '+secret);return failAt==='reply'?'Error: '+secret:'password now: '+secret;}};
+    await ui.elements.get('quick-password-save').onclick();
+    for(const id of ['notice','log','quick-settings-status']){assert.ok(!ui.elements.get(id).textContent.includes(secret),id);assert.ok(!ui.elements.get(id).textContent.includes('PRIVATE_WIFI'),id);}
+    assert.equal(ui.elements.get('quick-admin-password').value,'');assert.equal(ui.elements.get('quick-wifi-password').value,'');
+    for(const field of ['quick-admin-password','quick-wifi-password'])assert.equal(ui.elements.get(field).getAttribute('type'),'password');
+    for(const toggle of ['quick-admin-password-toggle','quick-wifi-password-toggle'])assert.equal(ui.elements.get(toggle).getAttribute('aria-pressed'),'false');
+    assert.equal(ui.evaluate("localStorage.getItem('meshfirmware.selections')")?.includes(secret)||false,false);
+    assert.match(ui.elements.get('notice').textContent,failAt==='none'?/command accepted/:/could not be completed/);
+  }
+});
+
+test('Wi-Fi credential save stops between commands if the port or generation changes',async()=>{
+  for(const change of ['generation','port']){
+    const ui=await quickSettingsWorkbench();ui.elements.get('quick-wifi-ssid').value='Home WiFi';ui.elements.get('quick-wifi-password').value='PRIVATE_WIFI';
+    ui.context.SerialLink=class{async open(){}async close(){}async command(command){ui.calls.push(command);ui.evaluate(change==='generation'?'state.generation++':'state.port=null');return 'OK';}};
+    await ui.elements.get('quick-wifi-save').onclick();assert.deepEqual(ui.calls,['set wifi.pwd PRIVATE_WIFI']);assert.match(ui.elements.get('notice').textContent,/Earlier values may already have changed/);assert.ok(!ui.elements.get('log').textContent.includes('PRIVATE_WIFI'));
+  }
+});
+
+test('quick settings refuse known Meshtastic, DFU and pending flash/recovery flows without opening USB',async()=>{
+  for(const setup of ["state.device={role:'meshtastic'}","state.device={role:'bootloader'}","$('already-bootloader').checked=true",'state.verification={}', 'state.migration={}', 'state.recovery={phase:"reselect-dfu"}', 'state.espRecovery={}', 'state.migrationApproval={phase:"waiting-rom",revoke(){}}', 'state.esp={}', 'state.plan={written:true}', 'state.handoff=true']){
+    const ui=await quickSettingsWorkbench();ui.evaluate(setup+';updateQuickSettingsControls();');assert.equal(ui.elements.get('quick-logging-off').disabled,true,setup);
+    await ui.elements.get('quick-logging-off').onclick();assert.deepEqual(ui.calls,[],setup);
+  }
+  const ui=await quickSettingsWorkbench();ui.port.getInfo=()=>({usbVendorId:0x239a,usbProductId:0x002a});await ui.elements.get('quick-logging-off').onclick();assert.deepEqual(ui.calls,[]);
+});
+
+test('a fresh Meshtastic reply, changed identity or old Companion protocol cannot receive a quick setter',async()=>{
+  for(const next of [{role:'meshtastic',firmwareFamily:'meshtastic'},{role:'common-cli',publicKey:'22'.repeat(32)},{role:'companion',protocol:13,publicKey:'11'.repeat(32)}]){
+    const ui=await quickSettingsWorkbench();ui.context.detectMeshCore=async()=>next;
+    await ui.elements.get('quick-logging-off').onclick();assert.deepEqual(ui.calls,['open','close']);assert.doesNotMatch(ui.elements.get('notice').textContent,/command accepted/);
+    if(next.role==='meshtastic')assert.equal(ui.evaluate('state.device.role'),'meshtastic');
+  }
+});
+
+test('invalid quick-setting input fails locally, without USB or leaking values',async()=>{
+  for(const invalid of ['Roof\nreboot','Name\u202eunsafe','x'.repeat(32)]){
+    const ui=await quickSettingsWorkbench();ui.elements.get('quick-name').value=invalid;
+    await ui.elements.get('quick-name-save').onclick();assert.deepEqual(ui.calls,[]);assert.ok(!ui.elements.get('log').textContent.includes(invalid));
+  }
+});
+
+test('Wi-Fi hotspot shortcut requires fresh ESP32 identity, never a selected nRF52 board',async()=>{
+  const nrf=await quickSettingsWorkbench({role:'common-cli',architecture:'nrf52'});nrf.elements.get('hardware').value='Heltec v4';await nrf.elements.get('quick-wifi-ota-ap').onclick();assert.deepEqual(nrf.calls,[]);
+  for(const port of ['',':8080']){
+    const esp=await quickSettingsWorkbench({role:'common-cli',architecture:'esp32'});esp.context.SerialLink=class{async open(){esp.calls.push('open');}async close(){esp.calls.push('close');}async command(command){esp.calls.push(command);return `Started: http://192.168.4.1${port}/update; Login: admin / node admin password`;}};
+    await esp.elements.get('quick-wifi-ota-ap').onclick();assert.deepEqual(esp.calls,['open','start ota ap','close']);assert.match(esp.elements.get('notice').textContent,/hotspot started/);assert.ok(esp.elements.get('notice').textContent.includes(`http://192.168.4.1${port}/update`));
+  }
+});
+
+test('quick setters require positive firmware acknowledgments rather than unsolicited log banners',async()=>{
+  for(const reply of ['MeshCore ready','Saved?','> radio packet received','Started: not a URL']){
+    const ui=await quickSettingsWorkbench();ui.context.SerialLink=class{async open(){}async close(){}async command(){return reply;}};
+    await ui.elements.get('quick-logging-off').onclick();assert.match(ui.elements.get('notice').textContent,/No setting acknowledgment/);assert.doesNotMatch(ui.elements.get('log').textContent,/command accepted/);
+  }
+});
+
+test('quick-setting unsupported replies are not reported as saved and Wi-Fi status appears in the console',async()=>{
+  const ui=await quickSettingsWorkbench();ui.context.SerialLink=class{async open(){}async close(){}async command(command){ui.calls.push(command);return command==='get wifi.status'?'> wifi.status on, ip=192.0.2.1':'Unknown command';}};
+  await ui.elements.get('quick-logging-off').onclick();assert.match(ui.elements.get('notice').textContent,/not supported/);assert.doesNotMatch(ui.elements.get('log').textContent,/command accepted/);
+  await ui.elements.get('quick-wifi-status').onclick();assert.match(ui.elements.get('log').textContent,/192\.0\.2\.1/);assert.match(ui.elements.get('notice').textContent,/shown in the console/);
 });
 
 test('failed downloads and local reads clear the old firmware and write proof before failure',async()=>{

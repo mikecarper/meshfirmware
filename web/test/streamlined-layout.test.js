@@ -57,6 +57,41 @@ test('USB selection is the first initially visible main-page control in the comp
   assert.ok(!nodes.some(node=>hasClass(node,'hero')),'Large introductory hero must not precede the controls');
 });
 
+test('Serial console is immediately after Flash firmware in the top navigation',()=>{
+  const navigation=nodes.find(node=>node.tag==='nav'&&node.attrs['aria-label']==='Tools');
+  assert.ok(navigation);assert.deepEqual(navigation.children.filter(node=>node.tag==='a').map(node=>node.attrs.href),['#flasher','#console','#backups','#capabilities']);
+});
+
+test('main workflow and console controls use 140 percent type without page zoom',()=>{
+  for(const selector of ['.sidebar nav a','.workflow label'])assert.ok(declarationsFor(selector).some(rule=>rule['font-size']==='15.4px'));
+  for(const selector of ['.page-header button','.workflow button','.workflow select','#console input','#console #log','.quick-settings input'])assert.ok(declarationsFor(selector).some(rule=>rule['font-size']==='16.8px'),selector);
+  assert.ok(declarationsFor('.page-header .page-heading p').some(rule=>rule['font-size']==='16.8px'));
+  assert.ok(!styleRules.some(rule=>Object.hasOwn(rule.declarations,'zoom')),'Enlargement must reflow instead of zooming the whole layout');
+  assert.ok(declarationsFor('.firmware-fields').some(rule=>rule['grid-template-columns']==='minmax(0, 1fr)'),'Firmware inputs stack on phones');
+  assert.ok(declarationsFor('.quick-settings-grid').some(rule=>rule['grid-template-columns']==='minmax(0, 1fr)'),'Settings stack on phones');
+});
+
+test('common settings follow the console with explicit initially disabled actions and private credential fields',()=>{
+  const settings=get('quick-settings');assert.equal(settings.tag,'section');assert.equal(settings.attrs['aria-labelledby'],'quick-settings-title');
+  assert.equal(get('quick-settings-status').attrs.role,'status');assert.equal(get('quick-settings-status').attrs['aria-live'],'polite');
+  for(const id of ['quick-logging-on','quick-logging-off','quick-wifi-status','quick-wifi-on','quick-wifi-off','quick-wifi-ota-ap','quick-name-save','quick-password-save','quick-wifi-save']){
+    const button=get(id);assert.ok(inside(button,settings));assert.equal(button.tag,'button');assert.equal(button.attrs.type,'button');assert.ok(has(button,'data-lock'));assert.ok(has(button,'disabled'));assert.equal(closedAncestors(button).length,0);
+  }
+  for(const id of ['quick-name','quick-admin-password','quick-wifi-ssid','quick-wifi-password'])assert.ok(nodes.some(node=>node.tag==='label'&&node.attrs.for===id),id);
+  for(const id of ['quick-admin-password','quick-wifi-password']){const input=get(id);assert.equal(input.attrs.type,'password');assert.equal(input.attrs.autocomplete,'new-password');assert.ok(has(input,'data-lock'));}
+  assert.ok(declarationsFor('.quick-setting-input').some(rule=>rule['flex-wrap']==='wrap'&&rule['justify-content']==='flex-start'));
+});
+
+test('password visibility uses accessible local Show buttons beside initially masked inputs',()=>{
+  for(const [field,label]of [['quick-admin-password','admin password'],['quick-wifi-password','Wi-Fi password']]){
+    const input=get(field),toggle=get(field+'-toggle');assert.equal(input.attrs.type,'password');assert.equal(toggle.parent,input.parent);assert.ok(hasClass(input.parent,'password-field'));
+    assert.equal(toggle.tag,'button');assert.equal(toggle.attrs.type,'button');assert.equal(toggle.attrs['aria-controls'],field);assert.equal(toggle.attrs['aria-pressed'],'false');assert.equal(toggle.attrs['aria-label'],'Show '+label);
+    assert.match(html.slice(toggle.start).split('</button>')[0],/>Show$/);assert.ok(!has(toggle,'data-lock'));assert.ok(!has(toggle,'disabled'));assert.ok(!hasClass(toggle,'step-button'));
+  }
+  assert.ok(declarationsFor('.password-field').some(rule=>rule.display==='flex'&&rule['min-width']==='0'&&rule['max-width']==='100%'));
+  assert.ok(declarationsFor('.quick-setting-input .password-field').some(rule=>rule['flex-basis']==='100%'),'The local toggle and password remain together on phones');
+});
+
 test('detection seconds counter is visible near the top while reading and not announced every second',()=>{
   const status=get('detection-status'),stage=get('detection-stage'),timer=get('detection-timer');
   assert.ok(has(status,'hidden'));assert.ok(has(timer,'hidden'));assert.equal(stage.parent,status);assert.equal(timer.parent,status);
@@ -110,7 +145,7 @@ test('selection sharing is an accessible left-aligned local action with a phone-
 test('new users see no-folder guidance near the USB button and original-file guidance at the optional chooser',()=>{
   const help=get('usb-workflow-help'),local=get('local-firmware-help'),input=get('firmware-file');
   assert.ok(inside(help,get('flasher')));assert.ok(help.start>get('select-port').start&&help.start<get('notice').start);assert.equal(closedAncestors(help).length,0);
-  const copy=html.slice(help.start).split('</p>')[0];assert.match(copy,/No firmware folders to download/);assert.match(copy,/ESP32 and nRF52/);assert.match(copy,/follow the numbered buttons/);assert.match(copy,/do not unzip it or drag folders/);
+  const copy=html.slice(help.start).split('</p>')[0];assert.match(copy,/Firmware downloads automatically/);assert.match(copy,/No folders to copy/);assert.ok(copy.split('>').at(-1).length<90,'Top setup guidance should stay brief');
   assert.ok(declarationsFor('.usb-workflow-help').some(rule=>parseFloat(rule['font-size'])>=14&&rule['overflow-wrap']==='anywhere'));
   assert.equal(input.attrs['aria-describedby'],local.attrs.id);assert.ok(inside(local,get('custom-firmware')));
   const localCopy=html.slice(local.start).split('</p>')[0];assert.match(localCopy,/original BIN, ZIP or UF2 file on this page/);assert.match(localCopy,/Keep ZIP files zipped/);
@@ -118,8 +153,10 @@ test('new users see no-folder guidance near the USB button and original-file gui
   assert.match(readme,/Normal ESP32\/nRF52 flashing needs no firmware folders/);
 });
 
-test('advanced, backup, console and capability controls are collapsed by default',()=>{
-  for(const id of ['advanced-options','backups','console','capabilities']){const node=get(id);assert.equal(node.tag,'details',id);assert.ok(!has(node,'open'),`#${id} must start collapsed`);}
+test('extras stay collapsed while the console is open directly after the main flashing area',()=>{
+  for(const id of ['advanced-options','backups','capabilities']){const node=get(id);assert.equal(node.tag,'details',id);assert.ok(!has(node,'open'),`#${id} must start collapsed`);}
+  const workflow=nodes.find(node=>hasClass(node,'workflow')),console=get('console'),settings=get('quick-settings'),siblings=workflow.parent.children,index=siblings.indexOf(workflow);
+  assert.equal(console.tag,'details');assert.ok(has(console,'open'));assert.equal(siblings[index+1],console);assert.equal(siblings[index+2],settings);assert.ok(settings.start<get('advanced-options').start);
   for(const id of ['connection-options','custom-firmware','bootloader-options','nrf-actions','migration-options','verification-options','esp-retry-options','image-details']){
     const node=get(id);assert.equal(node.tag,'details',id);assert.ok(!has(node,'open'),id);assert.ok(inside(node,get('advanced-options')),`#${id} belongs under extras`);
   }
@@ -145,7 +182,7 @@ test('the skip-backup warning is accessible, conditional and does not claim devi
 });
 
 test('status, warnings, progress and required expert offsets cannot be trapped in closed extras',()=>{
-  for(const id of ['notice','automatic-summary','image-warning','progress','progress-label','expert-fields'])assert.equal(closedAncestors(get(id)).length,0,`#${id} must remain visible when needed`);
+  for(const id of ['notice','image-warning','progress','progress-label','expert-fields'])assert.equal(closedAncestors(get(id)).length,0,`#${id} must remain visible when needed`);
   assert.equal(get('notice').attrs.role,'status');assert.equal(get('notice').attrs['aria-live'],'polite');
   assert.equal(get('progress-label').attrs['aria-live'],'polite');assert.ok(inside(get('expert-offset'),get('expert-fields')));
   assert.ok(inside(get('archive-picker'),get('custom-firmware')));assert.ok(inside(get('download-migration'),get('migration-options')));
@@ -197,7 +234,7 @@ test('the connected nRF52 bootloader status is separate from firmware choices an
   assert.ok(device.start<offer.start&&offer.start<get('firmware-choices').start,'Version status belongs beside the connected device, before application selection');
   assert.ok(inside(status,offer));assert.equal(status.attrs.role,'status');assert.equal(status.attrs['aria-live'],'polite');
   assert.ok(inside(button,offer));assert.equal(button.tag,'button');assert.equal(button.attrs.type,'button');assert.ok(has(button,'hidden'));assert.ok(has(button,'data-lock'));assert.ok(hasClass(button,'secondary'));assert.ok(!hasClass(button,'step-button'));
-  assert.equal(button.attrs['aria-describedby'],warning.attrs.id);assert.ok(inside(warning,offer));assert.match(html.slice(warning.start).split('</p>')[0],/Back up first/);assert.match(html.slice(warning.start).split('</p>')[0],/reinstalling the exact compatible application/);assert.match(html.slice(warning.start).split('</p>')[0],/never resets.*writes firmware automatically/);
+  assert.equal(button.attrs['aria-describedby'],warning.attrs.id);assert.ok(inside(warning,offer));assert.match(html.slice(warning.start).split('</p>')[0],/Back up first/);assert.match(html.slice(warning.start).split('</p>')[0],/reinstalling the matching application/);
   assert.ok(!nodes.some(node=>inside(node,offer)&&hasClass(node,'action-number')),'A conditional bootloader offer cannot add a mandatory numbered step');
 });
 
@@ -379,14 +416,15 @@ test('the USB button has a wrapped selected-port label and Web Serial availabili
   assert.ok(declarationsFor('#selected-port').some(rule=>rule['overflow-wrap']==='anywhere'));
 });
 
-test('backup progress and its status precede explanatory text and visible firmware warnings',()=>{
+test('backup progress precedes visible warnings while repeated explanation stays in Firmware details',()=>{
   const workflow=nodes.find(node=>hasClass(node,'workflow')),actions=get('prepare').parent,bar=get('progress'),status=get('progress-label');
   assert.equal(actions.parent,workflow);assert.equal(bar.parent,workflow);assert.equal(status.parent,workflow);
   const actionIndex=workflow.children.indexOf(actions),barIndex=workflow.children.indexOf(bar);
   assert.deepEqual(workflow.children.slice(actionIndex+1,barIndex),[get('stop-migration-auto')],'Only the conditional stop control may appear between buttons and progress');
   assert.equal(workflow.children[barIndex+1],status,'Current operation status must stay directly below its progress bar');
-  const detailIds=['workflow-guidance','install-mode-hint','automatic-summary','image-name','image-warning'];
-  for(const id of detailIds){const node=get(id);assert.ok(inside(node,workflow));assert.ok(node.start>status.start,`#${id} must be below backup progress/status`);assert.equal(closedAncestors(node).length,0,`#${id} must not be hidden in optional details`);}
+  const detailIds=['workflow-guidance','install-mode-hint','automatic-summary','image-name'];
+  for(const id of detailIds){const node=get(id);assert.ok(inside(node,workflow));assert.ok(node.start>status.start,`#${id} must be below backup progress/status`);assert.deepEqual(closedAncestors(node),[get('firmware-details')],`#${id} belongs in optional details`);}
+  assert.equal(closedAncestors(get('image-warning')).length,0,'Actual write warnings must remain visible');
   assert.ok(get('firmware-details').start>get('image-warning').start,'Optional release details stay after visible warnings');
   assert.equal(get('workflow-guidance').tag,'p');assert.ok(hasClass(get('workflow-guidance'),'hint'));
   assert.equal(get('image-warning').attrs['aria-live'],'polite');assert.equal(get('install-mode-switch').attrs['aria-describedby'],'install-mode-hint');
@@ -422,7 +460,7 @@ test('one visible Update or Erase/new-install switch precedes the build list and
   assert.equal(group.tag,'fieldset');assert.ok(group.children.some(node=>node.tag==='legend'),'Mode switch requires an accessible group label');assert.ok(inside(group,workflow));assert.ok(group.start<get('artifact').start);
   for(const radio of [update,install]){assert.equal(radio.tag,'input');assert.equal(radio.attrs.type,'radio');assert.equal(radio.attrs.name,'install-mode');assert.ok(inside(radio,group));assert.equal(closedAncestors(radio).length,0);}
   assert.equal(update.attrs.value,'update');assert.equal(install.attrs.value,'install');assert.ok(has(update,'checked'));assert.ok(!has(install,'checked'));
-  assert.ok(inside(hint,workflow));assert.equal(closedAncestors(hint).length,0);assert.equal(hint.attrs['aria-live'],'polite');
+  assert.ok(inside(hint,workflow));assert.deepEqual(closedAncestors(hint),[get('firmware-details')]);assert.equal(hint.attrs['aria-live'],'polite');
   assert.equal(get('flash-action').tag,'input');assert.equal(get('flash-action').attrs.type,'hidden','The legacy nRF action is a mirror, not a second conflicting user choice');
 });
 
