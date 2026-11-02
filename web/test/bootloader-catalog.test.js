@@ -53,6 +53,22 @@ test('Tower profiles stay artifact-specific and unavailable profiles clear stale
   assert.deepEqual(retired.bootloader,[]);assert.match(retired.bootloaderUnavailable,/Retired/);assert.equal(normal.bootloaderInfo.profile,'heltec_mesh_tower_v2_sdcard');assert.deepEqual(pending.bootloader,[]);assert.match(pending.bootloaderUnavailable,/qualified/);
 });
 
+test('X1 support follows its published exact normal profile, not T1000 shared USB or an unreleased asset',()=>{
+  const snapshot=fixture(),source=item('MeshTracker_X1',{hardware:'Seeed SenseCAP MeshTracker X1'});
+  snapshot.manifest.unavailableProfiles.push({id:'meshtracker_x1',label:'MeshTracker X1',meshcoreHardware:['MeshTracker_X1'],reason:'No published normal X1 ZIP is available in this release.'});
+  const [beforeRelease]=applyBootloaderCatalog([source],snapshot);
+  assert.deepEqual(beforeRelease.bootloader,[]);assert.match(beforeRelease.bootloaderUnavailable,/No published normal X1 ZIP/);
+  const file={name:`meshtracker_x1_bootloader-${tag}_s140_7.3.0.zip`,url:`${download}meshtracker_x1_bootloader-${tag}_s140_7.3.0.zip`,size:194546,sha256:'d'.repeat(64)};
+  snapshot.manifest.unavailableProfiles.pop();
+  snapshot.manifest.profiles.push({id:'meshtracker_x1',label:'MeshTracker X1',meshcoreHardware:['MeshTracker_X1'],deviceName:'X1INT_DFU',storage:'internal',files:{zip:file}});
+  assert.throws(()=>applyBootloaderCatalog([source],snapshot),/missing or ambiguous/);
+  snapshot.release.assets.push({name:file.name,browser_download_url:file.url,size:file.size,digest:'sha256:'+file.sha256});
+  const [supported]=applyBootloaderCatalog([source],snapshot);
+  assert.equal(supported.bootloaderInfo.profile,'meshtracker_x1');assert.equal(supported.bootloaderInfo.hardwareId,'MeshTracker_X1');
+  assert.equal(supported.bootloaderInfo.deviceName,'X1INT_DFU');assert.equal(supported.bootloaderInfo.storage,'internal');assert.deepEqual(supported.bootloader,[file.url]);
+  assert.notEqual(supported.bootloaderInfo.profile,applyBootloaderCatalog([item('t1000e')],snapshot)[0].bootloaderInfo.profile);
+});
+
 test('unverified releases disable automatic nRF52 links and old embedded notices, not firmware or other chips',()=>{
   const source=item('t1000e',{notice:'Install https://flasher.meshcore.io/firmware/old-2.2.zip first',bootloaderInfo:{version:'2.2'}}),esp={...source,architecture:'esp32'},[blocked,same]=applyBootloaderCatalog([source,esp]);
   assert.deepEqual(blocked.bootloader,[]);assert.equal(blocked.bootloaderInfo,undefined);assert.ok(!blocked.notice.includes('old-2.2'));assert.equal(blocked.url,source.url);assert.equal(same,esp);

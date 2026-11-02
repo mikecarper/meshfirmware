@@ -189,6 +189,11 @@ selections. The usual backup, device checks and flash confirmation still apply.
    WIO**, and its Indicator target selects **Indicator LoRa**. Known factory
    bootloader identities are read-only hints; recognizing DFU does not identify
    a physical board or qualify a replacement bootloader download.
+   Exact X1 bootloader identities are recognized for our internal-staging
+   profile and the Meshtastic upstream profile. Both share `2886:0057` with
+   T1000-E, so USB alone never selects X1. Its automatic bootloader download
+   becomes available when a normal release publishes the exact X1 ZIP and
+   verified download-manifest entry; an unreleased source port is not a link.
 
    New Keymind firmware reports Wio L1 Pro, E-Ink and 1W, and Indicator LoRa
    and ESP-NOW, with distinct model names. Older generic model names remain

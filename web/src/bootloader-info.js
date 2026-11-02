@@ -66,6 +66,11 @@ const records = [
   ['Heltec Mesh Node T1', 'Heltec-Mesh-Node-T1', ['Heltec Mesh Node T1'], ['239a:0071']],
   ['Heltec Mesh Pocket', 'Heltec-Mesh-Pocket', ['Heltec MeshPocket'], ['239a:0071']],
   ['Seeed T1000-E for Meshtastic', 'nRF52840-T1000-E-v1', ['Seeed Studio SenseCAP T1000-E'], ['2886:0057']],
+  // Our supported internal-staging port preserves the factory v1 Board-ID.
+  // Upstream Meshtastic uses its own exact pair without the v1 suffix:
+  // https://github.com/meshtastic/nRF52_Bootloader/blob/2.6.0/src/boards/mesh_tracker_x1/board.h
+  ['Seeed MeshTracker-X1', 'nRF52840-MeshTracker-X1-v1', ['Seeed SenseCAP MeshTracker X1'], ['2886:0057']],
+  ['Seeed MeshTracker-X1 for Meshtastic', 'nRF52840-MeshTracker-X1', ['Seeed SenseCAP MeshTracker X1'], ['2886:0057']],
   ['Keepteen LT1', 'Keepteen-LT1', ['Keepteen LT1'], ['239a:00b3']],
   ['LilyGo T-Echo', 'nRF52840-TEcho-v1', ['LilyGo T-Echo'], ['239a:0029']],
   ['LilyGo T-Echo Lite', 'T-Echo-Lite-nRF52840', ['LilyGo T-Echo Lite'], ['239a:00da']],

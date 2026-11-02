@@ -135,6 +135,26 @@ test('the exact Solar P1 identity collapses reviewed provider-label aliases but 
   assert.equal(detectBootloaderBoard({items:[item('Seeed Studio Xiao nRF52 WIO')],info:parsed}).hardware,null);
 });
 
+test('exact supported and upstream X1 loader identities select X1, never the shared-USB T1000-E',()=>{
+  const hardware='Seeed SenseCAP MeshTracker X1',pairs=[
+    ['Seeed MeshTracker-X1','nRF52840-MeshTracker-X1-v1','0.11.0-OTAFIX2.4.13'],
+    ['Seeed MeshTracker-X1 for Meshtastic','nRF52840-MeshTracker-X1','0.9.2-OTAFIX2.5'],
+    ['Seeed MeshTracker-X1 for Meshtastic','nRF52840-MeshTracker-X1','2.6.0'],
+  ];
+  const items=[item(hardware),item('Seeed Studio SenseCAP MeshTracker X1'),item('Seeed Studio SenseCAP T1000-E')];
+  for(const [model,boardId,version] of pairs){
+    const parsed=info({model,boardId,version}),usbInfo={usbVendorId:0x2886,usbProductId:0x0057};
+    const result=detectBootloaderBoard({items,info:parsed,usbInfo});
+    assert.equal(result.hardware,hardware);assert.deepEqual(result.candidates,[hardware]);assert.match(result.reason,/not physical-board proof/);
+    assert.equal(detectBootloaderBoard({items:[item('Seeed Studio SenseCAP T1000-E')],info:parsed,usbInfo}).hardware,null);
+    assert.equal(detectBootloaderBoard({items,info:parsed,usbInfo:{usbVendorId:0x239a,usbProductId:0x002a}}).hardware,null);
+    assert.equal(detectBootloaderBoard({items,info:info({model,boardId,version:'R_0x02040DFF'}),usbInfo}).hardware,null);
+    for(const unknown of [{model:model+' extra',boardId},{model,boardId:boardId+' extra'}])assert.equal(detectBootloaderBoard({items,info:info(unknown),usbInfo}).hardware,null);
+  }
+  assert.equal(detectBootloaderBoard({items,info:info({model:pairs[0][0],boardId:pairs[1][1]})}).hardware,null);
+  assert.equal(detectBootloaderBoard({items,usbInfo:{usbVendorId:0x2886,usbProductId:0x0057}}).hardware,null);
+});
+
 test('Muzi Base USB and an exact Base file retain Uno/Duo ambiguity independently of catalog filtering',()=>{
   for(const items of [[item('Muzi Works Base Uno')],[item('Muzi Works Base Duo')],[item('Muzi Works Base Uno'),item('Muzi Works Base Duo')]]){
     const result=detectBootloaderBoard({items,info:info({model:'Muzi Base',boardId:'muzi-Base-Board'}),usbInfo:{usbVendorId:0x239a,usbProductId:0x0081}});assert.equal(result.hardware,null);assert.match(result.reason,/manually/);assert.equal(result.architecture,'nrf52');assert.deepEqual(result.candidates,items.map(candidate=>candidate.hardware).sort());
