@@ -3,9 +3,9 @@ name: Browser USB flasher
 on:
   push:
     branches: [main]
-    paths: ['web/**', 'tools/meshcore_partition_expansion.py', 'tools/meshcore_backup.py', '.github/workflows/web-flasher.yml']
+    paths: ['web/**', 'tools/meshcore_partition_expansion*', 'tools/generate_partition_helper_manifest.py', 'tests/test_partition_helper_manifest.py', 'tools/meshcore_backup.py', '.github/workflows/web-flasher.yml']
   pull_request:
-    paths: ['web/**', 'tools/meshcore_partition_expansion.py', 'tools/meshcore_backup.py', '.github/workflows/web-flasher.yml']
+    paths: ['web/**', 'tools/meshcore_partition_expansion*', 'tools/generate_partition_helper_manifest.py', 'tests/test_partition_helper_manifest.py', 'tools/meshcore_backup.py', '.github/workflows/web-flasher.yml']
   workflow_dispatch:
   schedule:
     - cron: '17 10 * * *'
@@ -47,6 +47,8 @@ jobs:
         run: python3 -m pip install --disable-pip-version-check meshcore==2.3.9.1 meshcore-cli==1.6.3 PyNaCl==1.6.2
       - name: Native archive and migration compatibility
         run: |
+          python3 tools/generate_partition_helper_manifest.py --check
+          python3 -m unittest discover -s tests -p test_partition_helper_manifest.py
           python3 -m unittest discover -s tests -p test_meshcore_backup.py
           python3 -m unittest discover -s tests -p test_meshcore_restore.py
           python3 -m unittest discover -s tests -p test_meshcore_partition_expansion.py

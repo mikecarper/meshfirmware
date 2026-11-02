@@ -3,9 +3,9 @@ name: Windows flasher regression tests
 on:
   push:
     branches: [main]
-    paths: ['firmware.cmd', 'tests/test_firmware_*.ps1', '.github/workflows/windows-flasher.yml']
+    paths: ['firmware.cmd', 'mcfirmware.sh', 'tools/meshcore_partition_expansion*', 'tools/generate_partition_helper_manifest.py', '.gitattributes', 'tests/test_firmware_*.ps1', 'tests/test_mcfirmware_partition*', 'tests/test_partition_helper_manifest.py', 'tests/test_meshcore_partition_expansion.py', '.github/workflows/windows-flasher.yml']
   pull_request:
-    paths: ['firmware.cmd', 'tests/test_firmware_*.ps1', '.github/workflows/windows-flasher.yml']
+    paths: ['firmware.cmd', 'mcfirmware.sh', 'tools/meshcore_partition_expansion*', 'tools/generate_partition_helper_manifest.py', '.gitattributes', 'tests/test_firmware_*.ps1', 'tests/test_mcfirmware_partition*', 'tests/test_partition_helper_manifest.py', 'tests/test_meshcore_partition_expansion.py', '.github/workflows/windows-flasher.yml']
   workflow_dispatch:
 
 permissions:
@@ -23,6 +23,11 @@ jobs:
         shell: ${{ matrix.shell }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - name: Verify generated partition helper contract
+        run: python tools/generate_partition_helper_manifest.py --check
       - name: Hardware-free startup, DFU progress, and USB safety checks
         run: |
           $engine = (Get-Process -Id $PID).Path
@@ -30,8 +35,24 @@ jobs:
             'tests/test_firmware_esp32_reboot.ps1',
             'tests/test_firmware_nrfutil_progress.ps1',
             'tests/test_firmware_esp32_bootloader.ps1',
-            'tests/test_firmware_usb_identity.ps1'
+            'tests/test_firmware_usb_identity.ps1',
+            'tests/test_firmware_partition_tool.ps1',
+            'tests/test_firmware_partition_expansion.ps1'
           )) {
             & $engine -NoProfile -File $test
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
+  partition-helper-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - name: Verify bundled integrity, future compatibility, and migration flow
+        run: |
+          python3 tools/generate_partition_helper_manifest.py --check
+          python3 -m unittest discover -s tests -p test_partition_helper_manifest.py
+          python3 -m unittest discover -s tests -p test_meshcore_partition_expansion.py
+          bash tests/test_mcfirmware_partition_tool.sh
+          bash tests/test_mcfirmware_partition_expansion.sh

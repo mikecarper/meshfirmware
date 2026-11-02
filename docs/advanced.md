@@ -200,6 +200,33 @@ keep their ordinary hard reset. A verified flash write or a matching USB
 descriptor does not confirm application startup. Verify the expected firmware
 through its application CLI before treating the update as complete.
 
+### Partition helper compatibility and updates
+
+Full checkouts include `tools/meshcore_partition_expansion.json`. Both native
+flashers verify the helper's checksum, normalized size and supported CLI API
+against that generated manifest before running it. Compatible helper revisions
+do not require changing duplicate hashes in both scripts. An incompatible API,
+altered file, missing sidecar or incomplete checkout is still refused; update
+the complete checkout rather than bypassing the check.
+
+Standalone script downloads use a checksum-pinned helper at an immutable source
+commit, not a changing `main` URL. They therefore cannot break just because the
+upstream helper changed after that script was downloaded.
+
+After a compatible helper source change, maintainers regenerate and commit the
+sidecar:
+
+```text
+python tools/generate_partition_helper_manifest.py
+python tools/generate_partition_helper_manifest.py --check
+```
+
+Bump `API_VERSION` for incompatible CLI arguments or result semantics; the
+flashers must then be updated deliberately. Native and browser CI check the
+real source/manifest pair, and native regression tests cover compatible future
+revisions, incompatible APIs, tampering, line endings and download failures.
+These checks do not connect to or flash a radio.
+
 ## MeshCore USB backup dependencies
 
 Before a logical USB backup, both flashers display the selected Python

@@ -1,0 +1,8 @@
+{
+  "schema": "org.meshfirmware.partition-helper/v1",
+  "helper": "meshcore_partition_expansion.py",
+  "api_version": 1,
+  "plan_format": "meshcore-usb-partition-expansion-v2",
+  "sha256": "fb3c38984156291e2dd6f37098160da12aa4649e5a18bdaca4068e1ef73267a2",
+  "bytes": 57089
+}

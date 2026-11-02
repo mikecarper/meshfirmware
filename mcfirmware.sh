@@ -583,8 +583,13 @@ MESHCORE_USB_RESET_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfi
 MESHCORE_USB_RESET_TOOL_SHA256="31d11f95f9155a51b66bb0f650b332f386cc5d74562d043969255a2900bc4656"
 MESHCORE_ESP32_BOOTLOADER_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_esp32_bootloader.py"
 MESHCORE_ESP32_BOOTLOADER_TOOL_SHA256="da0b074ba01561917579cfcf5add75468a887d1dbf3bb21be8f7380cce32100d"
-MESHCORE_PARTITION_EXPANSION_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_partition_expansion.py"
-MESHCORE_PARTITION_EXPANSION_TOOL_SHA256="fd1cc2c2198d31878587a2a7aa48f7ec49055b29af3cb5f2a9630ec2d8787df8"
+# Single-script distributions retain one reviewed, immutable fallback. A full
+# checkout uses its generated sidecar, allowing compatible helper updates.
+MESHCORE_PARTITION_EXPANSION_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfirmware/e0c6ee2dce3ef5a80d3560577ab703a98900336d/tools/meshcore_partition_expansion.py"
+MESHCORE_PARTITION_EXPANSION_TOOL_SHA256="f91b2102865ef6a7378dd6a072d83895d972b17826cd5f1981bd98d2a13f2f64"
+MESHCORE_PARTITION_EXPANSION_TOOL_MANIFEST="meshcore_partition_expansion.json"
+MESHCORE_PARTITION_EXPANSION_TOOL_API_VERSION=1
+MESHCORE_PARTITION_EXPANSION_TOOL_PLAN_FORMAT="meshcore-usb-partition-expansion-v2"
 MESHCORE_SERIAL_TOUCH_TOOL_URL="https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_serial_touch.py"
 MESHCORE_SERIAL_TOUCH_TOOL_SHA256="b2309b4aa49d04c5a7bc54f11c5d2175b7e8cd938e2beddcaa119619e5c580e7"
 USB_RESET_EXPECTED_IDENTITY=""
@@ -1515,22 +1520,75 @@ meshcore_esp32_bootloader_tool_hash_matches() {
 }
 
 meshcore_partition_expansion_tool_hash_matches() {
-	local tool=$1 actual_hash=""
+	local tool=$1 expected_hash=${2:-$MESHCORE_PARTITION_EXPANSION_TOOL_SHA256} expected_bytes=${3:-}
 	[[ -f "$tool" ]] || return 1
-	actual_hash="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read().replace(b"\r\n", b"\n")).hexdigest())' "$tool" 2>/dev/null)" || return 1
-	[[ "$actual_hash" == "$MESHCORE_PARTITION_EXPANSION_TOOL_SHA256" ]]
+	# Inspect bytes only: never import/run code before integrity validation.
+	python3 - "$tool" "$expected_hash" "$expected_bytes" <<'PY'
+import hashlib, pathlib, re, sys
+path, expected, count = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+try:
+    if not re.fullmatch(r"[0-9a-f]{64}", expected) or path.stat().st_size > 524288:
+        raise ValueError()
+    data = path.read_bytes().replace(b"\r\n", b"\n")
+    valid = (0 < len(data) <= 262144 and hashlib.sha256(data).hexdigest() == expected
+             and (not count or len(data) == int(count)))
+except (OSError, ValueError):
+    valid = False
+sys.exit(0 if valid else 1)
+PY
+}
+
+meshcore_partition_expansion_manifest_values() {
+	python3 - "$1" "$MESHCORE_PARTITION_EXPANSION_TOOL_API_VERSION" "$MESHCORE_PARTITION_EXPANSION_TOOL_PLAN_FORMAT" <<'PY'
+import json, pathlib, re, sys
+def unique(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate metadata key")
+        result[key] = value
+    return result
+try:
+    path = pathlib.Path(sys.argv[1])
+    if path.stat().st_size > 4096:
+        raise ValueError("oversized manifest")
+    data = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique)
+    fields = {"schema", "helper", "api_version", "plan_format", "sha256", "bytes"}
+    if (not isinstance(data, dict) or set(data) != fields
+            or data["schema"] != "org.meshfirmware.partition-helper/v1"
+            or data["helper"] != "meshcore_partition_expansion.py"
+            or type(data["api_version"]) is not int or data["api_version"] != int(sys.argv[2])
+            or data["plan_format"] != sys.argv[3]
+            or not isinstance(data["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", data["sha256"])
+            or type(data["bytes"]) is not int or not 0 < data["bytes"] <= 262144):
+        raise ValueError("unsupported API, format or invalid metadata")
+    print(str(data["sha256"]) + "\t" + str(data["bytes"]))
+except (OSError, ValueError, TypeError):
+    print("Partition helper manifest is invalid or incompatible; update the complete flasher checkout. No helper was executed.", file=sys.stderr)
+    sys.exit(1)
+PY
 }
 
 resolve_meshcore_partition_expansion_tool() {
 	local local_tool="${PWD_SCRIPT}/tools/meshcore_partition_expansion.py"
+	local manifest="${PWD_SCRIPT}/tools/${MESHCORE_PARTITION_EXPANSION_TOOL_MANIFEST}"
 	local tool_dir="${FIRMWARE_ROOT}/tools"
 	local cached_tool="${tool_dir}/meshcore_partition_expansion.py" partial_tool=""
+	local expected_hash="$MESHCORE_PARTITION_EXPANSION_TOOL_SHA256" expected_bytes="" fields=""
+	if [[ -f "$manifest" ]]; then
+		fields="$(meshcore_partition_expansion_manifest_values "$manifest")" || return 1
+		read -r expected_hash expected_bytes <<< "$fields"
+		if [[ ! -f "$local_tool" ]]; then
+			echo "The partition helper checkout is incomplete; update the helper and its manifest together." >&2
+			return 1
+		fi
+	fi
 	if [[ -f "$local_tool" ]]; then
-		if meshcore_partition_expansion_tool_hash_matches "$local_tool"; then
+		if meshcore_partition_expansion_tool_hash_matches "$local_tool" "$expected_hash" "$expected_bytes"; then
 			printf '%s\n' "$local_tool"
 			return 0
 		fi
-		echo "The bundled partition-expansion helper does not match this script; refusing to run it." >&2
+		echo "The bundled partition-expansion helper does not match its verified manifest; refusing to run it. Update the complete checkout. Developers: regenerate tools/meshcore_partition_expansion.json after compatible helper changes." >&2
 		return 1
 	fi
 	if meshcore_partition_expansion_tool_hash_matches "$cached_tool"; then
@@ -1539,7 +1597,7 @@ resolve_meshcore_partition_expansion_tool() {
 	fi
 	mkdir -p "$tool_dir" || return 1
 	partial_tool="$(mktemp "${cached_tool}.partial.XXXXXX")" || return 1
-	if ! curl -fL --retry 2 --connect-timeout 10 --max-time 30 \
+	if ! curl -fL --retry 2 --connect-timeout 10 --max-time 30 --max-filesize 262144 \
 		-o "$partial_tool" "$MESHCORE_PARTITION_EXPANSION_TOOL_URL" \
 		|| ! meshcore_partition_expansion_tool_hash_matches "$partial_tool"; then
 		echo "The partition-expansion helper could not be downloaded and verified." >&2

@@ -59,8 +59,12 @@ $KEYMIND_CASCADE_LOGGING_FALLBACK_URL = "$KEYMIND_RAW_BASE_URL/mesh-america/keym
 $MESHCORE_BACKUP_TOOL_URL = "https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_backup.py"
 $MESHCORE_BACKUP_TOOL_VERSION = '0.2.4'
 $MESHCORE_BACKUP_TOOL_SHA256 = '5183f5a250eb44380abb15801295a180dfe4d807b7705c54254a2d947db616f7'
-$MESHCORE_PARTITION_TOOL_URL = 'https://raw.githubusercontent.com/mikecarper/meshfirmware/main/tools/meshcore_partition_expansion.py'
-$MESHCORE_PARTITION_TOOL_SHA256 = 'fd1cc2c2198d31878587a2a7aa48f7ec49055b29af3cb5f2a9630ec2d8787df8'
+$MESHCORE_PARTITION_TOOL_URL = 'https://raw.githubusercontent.com/mikecarper/meshfirmware/e0c6ee2dce3ef5a80d3560577ab703a98900336d/tools/meshcore_partition_expansion.py'
+$MESHCORE_PARTITION_TOOL_SHA256 = 'f91b2102865ef6a7378dd6a072d83895d972b17826cd5f1981bd98d2a13f2f64'
+$MESHCORE_PARTITION_TOOL_MANIFEST = 'meshcore_partition_expansion.json'
+$MESHCORE_PARTITION_TOOL_API_VERSION = 1
+$MESHCORE_PARTITION_TOOL_PLAN_FORMAT = 'meshcore-usb-partition-expansion-v2'
+$MESHCORE_PARTITION_TOOL_MAX_BYTES = 262144
 
 $timeoutMeshtastic = 10 # Timeout duration in seconds
 $baud = 1200 # 115200
@@ -5213,20 +5217,92 @@ function Complete-Esp32FlashSession {
 	throw "ESP32 firmware was written, but its application did not answer on the selected USB device within $ApplicationVerificationTimeoutSec seconds after reset. Application boot is unverified; no bootloader retry was sent. Check its boot log before reporting this flash as successful."
 }
 
+function Get-PartitionExpansionToolIdentity {
+	param([Parameter(Mandatory=$true)][string]$Path)
+	$info = Get-Item -LiteralPath $Path -ErrorAction Stop
+	if ($info.PSIsContainer -or $info.Length -le 0 -or $info.Length -gt (2 * $MESHCORE_PARTITION_TOOL_MAX_BYTES)) {
+		throw 'The partition-expansion helper has an invalid file size.'
+	}
+	# A byte-preserving single-byte encoding lets CRLF normalize without changing
+	# non-ASCII bytes. No Python code is run to validate another Python program.
+	$encoding = [Text.Encoding]::GetEncoding(28591)
+	[byte[]]$bytes = $encoding.GetBytes($encoding.GetString([IO.File]::ReadAllBytes($info.FullName)).Replace("`r`n", "`n"))
+	if ($bytes.Length -le 0 -or $bytes.Length -gt $MESHCORE_PARTITION_TOOL_MAX_BYTES) {
+		throw 'The partition-expansion helper exceeds its supported normalized size.'
+	}
+	$algorithm = [Security.Cryptography.SHA256]::Create()
+	try { $hash = [BitConverter]::ToString($algorithm.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant() }
+	finally { $algorithm.Dispose() }
+	return [pscustomobject]@{ Sha256 = $hash; Bytes = $bytes.Length }
+}
+
+function Read-PartitionExpansionToolManifest {
+	param([Parameter(Mandatory=$true)][string]$Path)
+	$info = Get-Item -LiteralPath $Path -ErrorAction Stop
+	if ($info.PSIsContainer -or $info.Length -le 0 -or $info.Length -gt 4096) {
+		throw 'The bundled partition-expansion manifest has an invalid size.'
+	}
+	try {
+		$encoding = New-Object Text.UTF8Encoding($false, $true)
+		$text = $encoding.GetString([IO.File]::ReadAllBytes($info.FullName))
+		# This deliberately small flat schema needs no escaped keys/strings or
+		# nested JSON. Reject duplicates before ConvertFrom-Json can discard them.
+		$pair = '"[A-Za-z_][A-Za-z_0-9]*"\s*:\s*(?:"[^"\\\x00-\x1f]*"|[0-9]+|true|false|null)'
+		if ($text -notmatch ('\A\s*\{\s*' + $pair + '(?:\s*,\s*' + $pair + ')*\s*\}\s*\z')) { throw 'invalid JSON shape' }
+		$keys = @([regex]::Matches($text, '"([A-Za-z_][A-Za-z_0-9]*)"\s*:') | ForEach-Object { $_.Groups[1].Value })
+		$expected = @('schema', 'helper', 'api_version', 'plan_format', 'sha256', 'bytes')
+		if ($keys.Count -ne $expected.Count -or @($keys | Sort-Object -Unique).Count -ne $expected.Count -or
+			@($keys | Where-Object { $expected -cnotcontains $_ }).Count) { throw 'unexpected or duplicate fields' }
+		$manifest = $text | ConvertFrom-Json -ErrorAction Stop
+		if ($manifest.schema -isnot [string] -or $manifest.schema -cne 'org.meshfirmware.partition-helper/v1' -or
+			$manifest.helper -isnot [string] -or $manifest.helper -cne 'meshcore_partition_expansion.py' -or
+			$manifest.sha256 -isnot [string] -or $manifest.sha256 -cnotmatch '\A[a-f0-9]{64}\z' -or
+			($manifest.bytes -isnot [int] -and $manifest.bytes -isnot [long]) -or
+			$manifest.bytes -le 0 -or $manifest.bytes -gt $MESHCORE_PARTITION_TOOL_MAX_BYTES) { throw 'invalid schema, helper, size or SHA-256' }
+		if (($manifest.api_version -isnot [int] -and $manifest.api_version -isnot [long]) -or
+			$manifest.api_version -ne $MESHCORE_PARTITION_TOOL_API_VERSION -or
+			$manifest.plan_format -isnot [string] -or $manifest.plan_format -cne $MESHCORE_PARTITION_TOOL_PLAN_FORMAT) {
+			throw 'unsupported API or plan format; update the flasher and helper together'
+		}
+		return $manifest
+	} catch { throw "The bundled partition-expansion manifest is invalid or incompatible: $($_.Exception.Message)" }
+}
+
+function Test-PartitionExpansionTool {
+	param([string]$Path, [string]$Sha256 = $MESHCORE_PARTITION_TOOL_SHA256, [long]$Bytes = 0)
+	if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+	try { $identity = Get-PartitionExpansionToolIdentity -Path $Path }
+	catch { return $false }
+	return $identity.Sha256 -ceq $Sha256 -and ($Bytes -eq 0 -or $identity.Bytes -eq $Bytes)
+}
+
 function Resolve-PartitionExpansionTool {
 	Wait-FirmwareToolUpdates
 	$bundled = Join-Path $ScriptPath 'tools\meshcore_partition_expansion.py'
+	$manifestPath = Join-Path (Split-Path $bundled -Parent) $MESHCORE_PARTITION_TOOL_MANIFEST
 	$cache = Join-Path $ScriptPath '.tmp\meshcore_partition_expansion.py'
-	foreach ($path in @($bundled, $cache)) {
-		if ((Test-Path -LiteralPath $path) -and
-			(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -eq $MESHCORE_PARTITION_TOOL_SHA256) { return $path }
+	if (Test-Path -LiteralPath $manifestPath) {
+		$manifest = Read-PartitionExpansionToolManifest -Path $manifestPath
+		if (-not (Test-Path -LiteralPath $bundled -PathType Leaf)) {
+			throw 'The bundled partition-expansion helper is missing beside its manifest; update the complete checkout.'
+		}
+		if (-not (Test-PartitionExpansionTool -Path $bundled -Sha256 $manifest.sha256 -Bytes $manifest.bytes)) {
+			throw 'The bundled partition-expansion helper does not match its manifest; update both together.'
+		}
+		return $bundled
 	}
-	if (Test-Path -LiteralPath $bundled) { throw 'The bundled partition-expansion helper does not match this flasher; update both together.' }
+	# Standalone and pre-manifest scripts use only this immutable known fallback.
+	# A newer trusted checkout instead carries its own API-compatible manifest.
+	if (Test-Path -LiteralPath $bundled) {
+		if (Test-PartitionExpansionTool -Path $bundled) { return $bundled }
+		throw 'The bundled partition-expansion helper has no matching manifest; update the complete checkout.'
+	}
+	if (Test-PartitionExpansionTool -Path $cache) { return $cache }
 	New-Item -ItemType Directory -Path (Split-Path $cache -Parent) -Force | Out-Null
-	$partial = "$cache.$PID.partial"
+	$partial = "$cache.$PID.$([guid]::NewGuid().ToString('N')).partial"
 	try {
-		Invoke-WebRequest -Uri $MESHCORE_PARTITION_TOOL_URL -OutFile $partial -UseBasicParsing
-		if ((Get-FileHash -LiteralPath $partial -Algorithm SHA256).Hash.ToLowerInvariant() -ne $MESHCORE_PARTITION_TOOL_SHA256) {
+		Invoke-WebRequest -Uri $MESHCORE_PARTITION_TOOL_URL -OutFile $partial -UseBasicParsing -TimeoutSec 30
+		if (-not (Test-PartitionExpansionTool -Path $partial)) {
 			throw 'The downloaded partition-expansion helper failed its checksum check.'
 		}
 		Move-Item -LiteralPath $partial -Destination $cache -Force

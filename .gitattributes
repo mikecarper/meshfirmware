@@ -1,2 +1,5 @@
 tools/meshcore_backup.py text eol=lf
 tools/meshcore_usb_reset.py text eol=lf
+tools/meshcore_partition_expansion.py text eol=lf
+tools/meshcore_partition_expansion.json text eol=lf
+tools/generate_partition_helper_manifest.py text eol=lf

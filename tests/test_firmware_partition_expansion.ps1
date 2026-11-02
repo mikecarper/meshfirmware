@@ -7,7 +7,17 @@ $parseErrors = $null
 $firmwareAst = [System.Management.Automation.Language.Parser]::ParseFile(
     (Join-Path (Split-Path $PSScriptRoot -Parent) 'firmware.cmd'), [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw "firmware.cmd parse failed: $parseErrors" }
-foreach ($name in @('Resolve-PartitionExpansionTool', 'Read-EspPartitionSnapshot',
+foreach ($name in @('MESHCORE_PARTITION_TOOL_MANIFEST', 'MESHCORE_PARTITION_TOOL_API_VERSION',
+    'MESHCORE_PARTITION_TOOL_PLAN_FORMAT', 'MESHCORE_PARTITION_TOOL_MAX_BYTES')) {
+    $definition = $firmwareAst.Find({ param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and $node.Left.VariablePath.UserPath -eq $name
+    }, $true)
+    if ($null -eq $definition) { throw "Missing constant under test: $name" }
+    Invoke-Expression $definition.Extent.Text
+}
+foreach ($name in @('Get-PartitionExpansionToolIdentity', 'Read-PartitionExpansionToolManifest',
+    'Test-PartitionExpansionTool', 'Resolve-PartitionExpansionTool', 'Read-EspPartitionSnapshot',
     'Get-EspOtadataSnapshot', 'Get-EspNvsSnapshot', 'Wait-EspPartitionBridgeRom',
     'Invoke-EspPartitionExpansion', 'flashESP32', 'updateFlashViaEspTool',
     'Assert-Esp32RomChipIdentity', 'Set-Esp32VerifiedChipMac', 'Get-EspUsbBootloaderStrategy',
@@ -253,7 +263,7 @@ try {
     $MESHCORE_PARTITION_TOOL_SHA256 = Hash-File $toolPath
     Assert-Equal $toolPath (Resolve-PartitionExpansionTool) 'Pinned bundled helper was not reused.'
     $MESHCORE_PARTITION_TOOL_SHA256 = '0' * 64
-    Expect-Failure { Resolve-PartitionExpansionTool } 'does not match'
+    Expect-Failure { Resolve-PartitionExpansionTool } 'no matching manifest'
 
     Reset-Fixture
     $script:needed = $false

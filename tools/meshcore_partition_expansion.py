@@ -34,6 +34,9 @@ REPOSITORY = "mikecarper/MeshCore"
 PUBLISHED_USB_SET_URL = "https://github.com/mikecarper/MeshCore/releases/download/utility-usb-partition-v1-3d3d5827/meshcore-usb-partition-bridges.zip"
 PUBLISHED_USB_SET_SHA256 = "187cac4f3f716d5df50e123a03ba51da637356874a434a72a60d9eb99d988ed8"
 FORMAT = "meshcore-usb-partition-expansion-v2"
+# Native callers accept compatible implementations of this CLI contract.
+# Bump for incompatible commands, required arguments or result semantics.
+API_VERSION = 1
 USB_BRIDGE_MARKER = b"MeshCore USB partition migration bridge v1"
 USB_NVS_GUARD_MARKER = b"MeshCore USB NVS no-autoerase guard v1"
 USB_PROFILES = {(0, 4 << 20), (0, 8 << 20), (5, 4 << 20),
