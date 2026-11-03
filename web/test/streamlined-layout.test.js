@@ -71,6 +71,23 @@ test('main workflow and console controls use 140 percent type without page zoom'
   assert.ok(declarationsFor('.quick-settings-grid').some(rule=>rule['grid-template-columns']==='minmax(0, 1fr)'),'Settings stack on phones');
 });
 
+test('collapsed optional tools use the same readable type as the console and common settings',()=>{
+  const lastSize=selector=>declarationsFor(selector).filter(rule=>Object.hasOwn(rule,'font-size')).at(-1)?.['font-size'];
+  for(const panel of ['#advanced-options','#backups','#capabilities']){
+    assert.equal(lastSize(panel),'16.8px',panel);
+    for(const child of ['summary','p','h3','button','.button','.text-link','input','select','textarea','pre'])assert.equal(lastSize(`${panel} ${child}`),'16.8px',`${panel} ${child}`);
+    for(const child of ['label','.hint'])assert.equal(lastSize(`${panel} ${child}`),'15.4px',`${panel} ${child}`);
+    assert.equal(lastSize(`${panel} h2`),'22.4px',`${panel} h2`);
+    assert.equal(lastSize(`${panel} button.next-action:not(:disabled)::after`),'15.4px',`${panel} next-action badge`);
+    assert.ok(declarationsFor(`${panel} summary`).some(rule=>rule['overflow-wrap']==='anywhere'),'Nested disclosure labels must wrap on phones');
+    assert.ok(declarationsFor(`${panel} button`).some(rule=>rule['min-height']==='46px'),'Optional actions keep readable touch targets');
+  }
+  for(const selector of ['#advanced-options .digest','#advanced-options .file-drop small','#advanced-options .review-grid small','footer'])assert.equal(lastSize(selector),'15.4px',selector);
+  for(const selector of ['#advanced-options .file-drop strong','#advanced-options .review-grid strong'])assert.equal(lastSize(selector),'16.8px',selector);
+  assert.ok(declarationsFor('#advanced-options input[type=file]::file-selector-button').some(rule=>rule.font==='inherit'&&rule['min-height']==='44px'),'Native file chooser buttons must not retain tiny text');
+  assert.ok(declarationsFor('.capability-grid').some(rule=>rule['grid-template-columns']==='minmax(0, 1fr)'),'Larger help content stacks on phones');
+});
+
 test('common settings follow the console with explicit initially disabled actions and private credential fields',()=>{
   const settings=get('quick-settings');assert.equal(settings.tag,'section');assert.equal(settings.attrs['aria-labelledby'],'quick-settings-title');
   assert.equal(get('quick-settings-status').attrs.role,'status');assert.equal(get('quick-settings-status').attrs['aria-live'],'polite');

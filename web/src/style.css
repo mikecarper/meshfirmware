@@ -334,9 +334,40 @@ dialog p { font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
 .quick-network-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; margin-top: 10px; }
 .quick-network-fields > * { min-width: 0; }
 
+/* Optional tools stay collapsed, not smaller: match the everyday controls. */
+#advanced-options, #backups, #capabilities { font-size: 16.8px; line-height: 1.6; }
+#advanced-options summary, #backups summary, #capabilities summary { font-size: 16.8px; overflow-wrap: anywhere; }
+#advanced-options h2, #backups h2, #capabilities h2 { font-size: 22.4px; }
+#advanced-options h3, #backups h3, #capabilities h3 { font-size: 16.8px; }
+#advanced-options p, #backups p, #capabilities p { font-size: 16.8px; }
+#advanced-options label, #backups label, #capabilities label,
+#advanced-options .hint, #backups .hint, #capabilities .hint,
+#advanced-options .digest, #advanced-options .file-drop small,
+#advanced-options .review-grid small { font-size: 15.4px; }
+#advanced-options button, #backups button, #capabilities button,
+#advanced-options .button, #backups .button, #capabilities .button,
+#advanced-options .text-link, #backups .text-link, #capabilities .text-link { font-size: 16.8px; min-height: 46px; overflow-wrap: anywhere; }
+#advanced-options button.next-action:not(:disabled)::after,
+#backups button.next-action:not(:disabled)::after,
+#capabilities button.next-action:not(:disabled)::after { font-size: 15.4px; }
+#advanced-options input, #backups input, #capabilities input,
+#advanced-options select, #backups select, #capabilities select,
+#advanced-options textarea, #backups textarea, #capabilities textarea,
+#advanced-options pre, #backups pre, #capabilities pre { font-size: 16.8px; }
+#advanced-options select, #backups select, #capabilities select { min-height: 46px; }
+#advanced-options input[type=file]::file-selector-button,
+#backups input[type=file]::file-selector-button { font: inherit; min-height: 44px; }
+#advanced-options input[type=checkbox], #backups input[type=checkbox] { width: 18px; height: 18px; flex-shrink: 0; }
+#advanced-options .file-drop strong, #advanced-options .review-grid strong { font-size: 16.8px; }
+#backups .inline-checks label { align-items: flex-start; }
+#backups .backup-json, #backups .restore-report { line-height: 1.6; }
+.capability-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+footer { font-size: 15.4px; line-height: 1.6; overflow-wrap: anywhere; }
+
 @media (max-width: 900px) {
   .sidebar { flex-wrap: wrap; }
   .sidebar nav { width: 100%; }
+  .capability-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 600px) {
   .sidebar nav { overflow-x: visible; }
@@ -351,4 +382,5 @@ dialog p { font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
   .workflow .mode-step { align-items: flex-start; }
   .workflow .mode-options { min-width: 0; }
   #console #log { height: 220px; }
+  .capability-grid { grid-template-columns: minmax(0, 1fr); }
 }
