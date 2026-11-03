@@ -62,9 +62,9 @@ DEVICE_PORT=""
 
 esp32_port_is_rom_usb_jtag() { [[ "$1" == "$native_port" ]]; }
 nrf52_port_instance() { printf 'instance-%s\n' "$(basename "$1")"; }
-wait_for_nrf52_bootloader_port() {
-	[[ -z "$5" ]] || return 1
-	printf '%s\n' "$expected_runtime_port"
+wait_for_esp32_primary_usb_port_after_reset() {
+	[[ "$#" -eq 4 ]] || return 1
+	save_selected_serial_port "$expected_runtime_port" "$2" "$3" "$4"
 }
 save_selected_serial_port() { DEVICE_PORT="$1"; }
 selected_flash_serial_port() { printf '%s\n' "$1"; }
@@ -178,7 +178,7 @@ grep -Fq 'verified ESP32 USB identity disappeared' "${tmp_dir}/missing-identity.
 echo "PASS: ESP32 finish fails when the saved USB identity disappears"
 
 selected_flash_serial_port() { printf '%s\n' "$1"; }
-wait_for_nrf52_bootloader_port() { return 1; }
+wait_for_esp32_primary_usb_port_after_reset() { return 1; }
 if finish_esp32_flash_session "$native_port" \
 	>"${tmp_dir}/missing-runtime.out" 2>"${tmp_dir}/missing-runtime.err"; then
 	echo "FAIL: native ESP32 finish accepted a missing runtime re-enumeration" >&2

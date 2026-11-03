@@ -3,9 +3,9 @@ name: Windows flasher regression tests
 on:
   push:
     branches: [main]
-    paths: ['firmware.cmd', 'mcfirmware.sh', 'tools/meshcore_partition_expansion*', 'tools/generate_partition_helper_manifest.py', '.gitattributes', 'tests/test_firmware_*.ps1', 'tests/test_mcfirmware_partition*', 'tests/test_partition_helper_manifest.py', 'tests/test_meshcore_partition_expansion.py', '.github/workflows/windows-flasher.yml']
+    paths: ['firmware.cmd', 'mcfirmware.sh', 'tools/meshcore_partition_expansion*', 'tools/generate_partition_helper_manifest.py', '.gitattributes', 'tests/test_firmware_*.ps1', 'tests/test_mcfirmware_partition*', 'tests/test_mcfirmware_esp32*', 'tests/test_partition_helper_manifest.py', 'tests/test_meshcore_partition_expansion.py', '.github/workflows/windows-flasher.yml']
   pull_request:
-    paths: ['firmware.cmd', 'mcfirmware.sh', 'tools/meshcore_partition_expansion*', 'tools/generate_partition_helper_manifest.py', '.gitattributes', 'tests/test_firmware_*.ps1', 'tests/test_mcfirmware_partition*', 'tests/test_partition_helper_manifest.py', 'tests/test_meshcore_partition_expansion.py', '.github/workflows/windows-flasher.yml']
+    paths: ['firmware.cmd', 'mcfirmware.sh', 'tools/meshcore_partition_expansion*', 'tools/generate_partition_helper_manifest.py', '.gitattributes', 'tests/test_firmware_*.ps1', 'tests/test_mcfirmware_partition*', 'tests/test_mcfirmware_esp32*', 'tests/test_partition_helper_manifest.py', 'tests/test_meshcore_partition_expansion.py', '.github/workflows/windows-flasher.yml']
   workflow_dispatch:
 
 permissions:
@@ -56,3 +56,9 @@ jobs:
           python3 -m unittest discover -s tests -p test_meshcore_partition_expansion.py
           bash tests/test_mcfirmware_partition_tool.sh
           bash tests/test_mcfirmware_partition_expansion.sh
+      - name: Hardware-free ESP32 reset and USB reconnect regressions
+        run: |
+          bash tests/test_mcfirmware_esp32_finish.sh
+          bash tests/test_mcfirmware_esp32_s3_finish.sh
+          bash tests/test_mcfirmware_esp32_dual_cdc.sh
+          bash tests/test_mcfirmware_esp32_post_reset_identity.sh

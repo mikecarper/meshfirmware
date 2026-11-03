@@ -327,8 +327,8 @@ finish_invocation=""
 invoke_esptool_timeout() {
 	finish_invocation="$*"
 }
-wait_for_nrf52_bootloader_port() {
-	printf '%s\n' "$primary_port"
+wait_for_esp32_primary_usb_port_after_reset() {
+	save_selected_serial_port "$primary_port" "$2" "$3" "$4"
 }
 ESP32_PROBE_TIMEOUT_SECONDS=9
 HARDRESET="hard-reset"

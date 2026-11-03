@@ -62,19 +62,19 @@ invoke_esptool_timeout() {
 		&& -z "$BOOTLOADER_PROBE_PORT" ]] || return 1
 	[[ "${reset_ok:-1}" == 1 ]]
 }
-wait_for_nrf52_bootloader_port() {
+wait_for_esp32_primary_usb_port_after_reset() {
 	printf '%s\n' "$*" >> "$tmp_dir/wait.log"
-	# Only a successful verified reset may relax the inode-change demand.
-	[[ -z "$5" ]] || return 1
+	[[ "$#" -eq 4 ]] || return 1
 	[[ "${runtime_ok:-1}" == 1 ]] || return 1
 	if [[ "${same_endpoint:-0}" == 1 ]]; then
-		printf '%s\n' "$rom_port"
+		save_selected_serial_port "$rom_port" "$2" "$3" "$4"
 		return 0
 	fi
-	printf '%s\n' "$fixture_runtime_port"
+	save_selected_serial_port "$fixture_runtime_port" "$2" "$3" "$4"
 }
 save_selected_serial_port() {
 	printf '%s\n' "$1" >> "$tmp_dir/saved.log"
+	DEVICE_PORT="$1"
 }
 
 finish_esp32_flash_session "$rom_port" > "$tmp_dir/output.log"

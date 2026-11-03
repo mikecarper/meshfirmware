@@ -2413,6 +2413,8 @@ esp32_port_is_rom_usb_jtag() {
 save_selected_serial_port() {
 	local port=$1
 	local by_id_link="" identity_status=0
+	local expected_by_id="${2:-}" expected_serial="${3:-}" expected_path_stem="${4:-}"
+	local actual_serial="" checked_link=""
 
 	if by_id_link="$(serial_by_id_link_for_port "$port" 2>/dev/null)"; then
 		:
@@ -2426,12 +2428,39 @@ save_selected_serial_port() {
 		return 1
 	fi
 
+	if (( $# > 1 )); then
+		# Post-reset ESP32 discovery can see a tty before its udev symlink is
+		# ready. Require the current physical identity as well as a unique link;
+		# never let a reused by-id name override contradictory serial evidence.
+		expected_serial="$(normalize_usb_serial_identity "$expected_serial")"
+		actual_serial="$(normalize_usb_serial_identity "$(udev_device_property "$port" ID_SERIAL_SHORT)")"
+		if [[ -n "$expected_serial" && -n "$actual_serial" && "$actual_serial" != "$expected_serial" ]]; then
+			echo "The ESP32 USB serial changed before its post-reset selection could be saved." >&2
+			return 1
+		fi
+		if ! nrf52_candidate_matches_identity "$port" "$by_id_link" \
+			"$expected_by_id" "$expected_serial" "$expected_path_stem"; then
+			echo "The ESP32 USB identity changed before its post-reset selection could be saved." >&2
+			return 1
+		fi
+		# Recheck after reading udev properties: a link may disappear, become
+		# ambiguous or be reassigned while those queries run.
+		if ! checked_link="$(serial_by_id_link_for_port "$port" 2>/dev/null)" \
+			|| [[ "$checked_link" != "$by_id_link" || ! -e "$port" \
+				|| "$(readlink -f "$by_id_link" 2>/dev/null || true)" != "$port" ]]; then
+			echo "The ESP32 stable USB link changed before its post-reset selection could be saved." >&2
+			return 1
+		fi
+	fi
+
 	# Update the cached tty and stable name only after both have been proven to
 	# describe one connected USB device. If discovery fails, retain the previous
 	# selection rather than replacing it with a fail-open tty-only cache entry.
+	# Explicitly check writes: callers may test this function in an if, which
+	# suppresses errexit for commands inside the function.
+	printf '%s\n' "$port" > "$DEVICE_PORT_FILE" || return 3
+	basename -- "$by_id_link" > "$DEVICE_PORT_NAME_FILE" || return 3
 	DEVICE_PORT="$port"
-	printf '%s\n' "$port" > "$DEVICE_PORT_FILE"
-	basename -- "$by_id_link" > "$DEVICE_PORT_NAME_FILE"
 }
 
 preferred_flash_serial_link() {
@@ -6711,6 +6740,41 @@ esp32_write_after_mode() {
 	fi
 }
 
+wait_for_esp32_primary_usb_port_after_reset() {
+	local old_port=$1 selected_by_id=$2 expected_serial=$3 expected_path_stem=$4
+	local timeout_seconds="${ESP32_FLASH_REENUMERATE_TIMEOUT_SECONDS:-${NRF52_DFU_REENUMERATE_TIMEOUT_SECONDS:-30}}"
+	local poll_seconds="${ESP32_FLASH_REENUMERATE_POLL_SECONDS:-${NRF52_DFU_REENUMERATE_POLL_SECONDS:-0.25}}"
+	local deadline live_port="" save_status=0
+
+	if [[ ! "$timeout_seconds" =~ ^[0-9]{1,5}$ || ! "$poll_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+		echo "Invalid ESP32 USB re-enumeration timeout or polling interval." >&2
+		return 1
+	fi
+	deadline=$((SECONDS + 10#$timeout_seconds))
+	echo "Waiting up to ${timeout_seconds}s for the matching ESP32 primary USB port and stable by-id identity after reset..." >&2
+	while (( SECONDS <= deadline )); do
+		# This matcher may see an identity-qualified raw tty before udev creates
+		# its by-id link. Keep BOTH discovery and the stronger save condition in
+		# the same deadline; do not reset again or fall back to a bare tty.
+		if live_port="$(find_reenumerated_nrf52_port "$old_port" "$selected_by_id" \
+			"$expected_serial" "$expected_path_stem" "")" && [[ -n "$live_port" ]]; then
+			if save_selected_serial_port "$live_port" "$selected_by_id" \
+				"$expected_serial" "$expected_path_stem" 2>/dev/null; then
+				return 0
+			else
+				save_status=$?
+				if (( save_status == 3 )); then
+					echo "Could not save the ESP32 USB selection cache after reset; check the cache directory permissions." >&2
+					return 1
+				fi
+			fi
+		fi
+		sleep "$poll_seconds"
+	done
+	echo "Timed out waiting for the matching ESP32 USB device with one stable by-id identity. Application startup remains unverified; no additional reset or flash was attempted." >&2
+	return 1
+}
+
 finish_esp32_flash_session() {
 	local port="${1:-${DEVICE_PORT:-}}"
 	local runtime_port="" live_port="" native_usb=0
@@ -6813,19 +6877,16 @@ finish_esp32_flash_session() {
 		# string is required, and the descriptors do not prove ROM/runtime state.
 		# Passing no old instance permits the same endpoint, while the ordinary
 		# USB serial/path matcher still rejects missing or ambiguous identities.
-		if ! runtime_port="$(wait_for_nrf52_bootloader_port "$port" \
+		if ! wait_for_esp32_primary_usb_port_after_reset "$port" \
 			"${ESP32_FLASH_SELECTED_BY_ID:-}" \
 			"${ESP32_FLASH_EXPECTED_SERIAL:-}" \
-			"${ESP32_FLASH_EXPECTED_PATH_STEM:-}" "" \
-			"ESP32 primary USB port after reset")"; then
+			"${ESP32_FLASH_EXPECTED_PATH_STEM:-}"; then
 			echo "The flashed ESP32 did not return on its verified USB identity." >&2
 			return 1
 		fi
+		runtime_port="$DEVICE_PORT"
 		if [[ -z "$runtime_port" ]]; then
 			echo "The flashed ESP32 returned no verified physical USB port after reset." >&2
-			return 1
-		fi
-		if ! save_selected_serial_port "$runtime_port"; then
 			return 1
 		fi
 		echo "Matched ESP32 physical USB port after reset: $runtime_port"
