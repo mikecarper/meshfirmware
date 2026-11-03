@@ -2,6 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import {xiaoBootloaderSnapshot} from './fixtures/xiao-bootloader.js';
 import vm from 'node:vm';
 import {detectBoard,detectRecoveryProfile} from '../src/board-detection.js';
 import {detectMeshtasticBoard} from '../src/meshtastic-boards.js';
@@ -2416,7 +2417,7 @@ test('a read-only nRF52 bootloader query offers the exact board update separatel
 });
 
 test('XIAO bootloader recommendation follows the connected repeater status, not the shared application image',async()=>{
-  const snapshot=JSON.parse(await readFile(new URL('../public/catalog.json',import.meta.url))).bootloaderCatalog;
+  const snapshot=xiaoBootloaderSnapshot();
   for(const [board,profile] of [['28860044','xiao_nrf52840_ble'],['28860045','xiao_nrf52840_ble_sense']]){
     const ui=workbench();await Promise.resolve();ui.context.snapshot=snapshot;ui.context.selectedPort=ui.port;
     ui.context.inventory=[xiaoRepeaterItem({bootloaderInfo:{profile:'xiao_nrf52840_ble',url:'https://example.test/base.zip'},bootloader:['https://example.test/base.zip']})];
@@ -2439,7 +2440,7 @@ test('unknown, unavailable and recovery XIAO identities never fall back to the b
 });
 
 test('the selected Sense bootloader is preserved through download and image inspection',async()=>{
-  const snapshot=JSON.parse(await readFile(new URL('../public/catalog.json',import.meta.url))).bootloaderCatalog,ui=workbench();await Promise.resolve();ui.context.snapshot=snapshot;ui.context.selectedPort=ui.port;
+  const snapshot=xiaoBootloaderSnapshot(),ui=workbench();await Promise.resolve();ui.context.snapshot=snapshot;ui.context.selectedPort=ui.port;
   ui.context.inventory=[xiaoRepeaterItem({bootloaderInfo:{profile:'xiao_nrf52840_ble',url:'https://example.test/base.zip'},bootloader:['https://example.test/base.zip']})];ui.evaluate('state.items=inventory;state.port=selectedPort;state.bootloaderCatalog=snapshot;filterCatalog();');ui.elements.get('hardware').value='Seeed Studio Xiao nRF52 WIO';ui.elements.get('artifact').value='0';
   ui.context.detectMeshCore=async()=>({role:'common-cli',model:'Seeed Xiao-nrf52',publicKey:'11'.repeat(32)});ui.context.testLink={command:async command=>command==='get bootloader.ver'?'0.11.0-OTAFIX2.4.10':'BL board=28860045 target=28860045 name=XIAO_DFU crc=6F9BE280 abi=3 caps=0E | staged:none mid=-- hash=--'};
   await ui.evaluate('readApplication(testLink);');ui.evaluate('updateDownload();controls();');
@@ -2449,7 +2450,7 @@ test('the selected Sense bootloader is preserved through download and image insp
 });
 
 test('the optional INFO_UF2 fallback selects Sense only for the matching current DFU port',async()=>{
-  const snapshot=JSON.parse(await readFile(new URL('../public/catalog.json',import.meta.url))).bootloaderCatalog,ui=workbench();await Promise.resolve();ui.context.snapshot=snapshot;ui.context.selectedPort=ui.port;ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0045});
+  const snapshot=xiaoBootloaderSnapshot(),ui=workbench();await Promise.resolve();ui.context.snapshot=snapshot;ui.context.selectedPort=ui.port;ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0045});
   ui.context.inventory=[xiaoRepeaterItem({bootloaderInfo:{profile:'xiao_nrf52840_ble',url:'https://example.test/base.zip'},bootloader:['https://example.test/base.zip']})];ui.context.info=parseBootloaderInfo('UF2 Bootloader 0.6.2\nModel: Seeed XIAO nRF52840\nBoard-ID: nRF52840-SeeedXiaoSense-v1\n');
   ui.evaluate('state.items=inventory;state.port=selectedPort;state.bootloaderCatalog=snapshot;state.bootloaderInfo={info,port:selectedPort,generation:state.generation};');ui.elements.get('hardware').value='Seeed Studio Xiao nRF52 WIO';ui.elements.get('artifact').value='0';
   assert.equal(ui.evaluate('bootloaderItem().bootloaderInfo.profile'),'xiao_nrf52840_ble_sense');ui.evaluate('state.generation++;');assert.equal(ui.evaluate('bootloaderItem()'),null);

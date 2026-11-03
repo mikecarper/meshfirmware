@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
+import {xiaoBootloaderSnapshot} from './fixtures/xiao-bootloader.js';
 import {xiaoInstalledStatus,xiaoInfoProfile,xiaoBootloaderItem} from '../src/xiao-bootloader.js';
 import {parseBootloaderInfo} from '../src/bootloader-info.js';
 
-const snapshot=JSON.parse(await readFile(new URL('../public/catalog.json',import.meta.url))).bootloaderCatalog;
+const snapshot=xiaoBootloaderSnapshot();
 const item={hardware:'Seeed Studio Xiao nRF52 WIO',architecture:'nrf52'};
 const info=sense=>parseBootloaderInfo(`UF2 Bootloader 0.6.2\nModel: Seeed XIAO nRF52840\nBoard-ID: nRF52840-SeeedXiao${sense?'Sense':''}-v1\n`);
 const usb=pid=>({usbVendorId:0x2886,usbProductId:pid});
