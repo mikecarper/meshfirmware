@@ -187,7 +187,8 @@ fi
 grep -Fq 'did not return on its verified USB identity' "${tmp_dir}/missing-runtime.err"
 echo "PASS: native ESP32 finish requires the verified physical USB identity"
 
-[[ "$(rg -c 'ESP32_WRITE_AFTER="\$\(esp32_write_after_mode "\$DEVICE_PORT"\)"' "$script_path")" -eq 2 ]] || {
+# Use the runner's standard tools; ripgrep is not installed on every CI image.
+[[ "$(grep -Fc 'ESP32_WRITE_AFTER="$(esp32_write_after_mode "$DEVICE_PORT")"' "$script_path")" -eq 2 ]] || {
 	echo "FAIL: an ESP32 write/update path bypasses the S3 finish policy" >&2
 	exit 1
 }
