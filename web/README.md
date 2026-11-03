@@ -547,6 +547,18 @@ have no automatic recommendation. If the latest-release check fails, only a
 validated last-known fork snapshot may be retained, with a catalog warning;
 old upstream bootloader links are not silently substituted.
 
+The shared XIAO nRF52840 WIO application can run on standard or Sense modules.
+For a connected repeater with CommonCLI, the page reads `ota bootloader status`
+and selects the matching XIAO or Sense normal ZIP from the verified release
+manifest only when the board ID, target ID and device name agree. A validated
+`INFO_UF2.TXT` with a matching selected DFU USB ID can also identify the
+installed loader. Recovery/test loaders, conflicts, missing identity or missing
+release assets leave the normal recommendation empty. Older firmware may not
+report this status, and some XIAO bootloaders expose no mounted INFO file;
+application updates still work and a verified ZIP can be selected manually.
+Installed-loader identity does not establish the physical module or carrier:
+confirm those and the selected device before the separate bootloader write.
+
 On a connected nRF52 application with an exact verified board mapping, the page
 uses the read-only `get bootloader.ver` response to compare the installed
 bootloader with that board's latest stable OTAFIX release. A known older or

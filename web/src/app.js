@@ -31,6 +31,7 @@ import { selectionLink } from './selection-link.js';
 import { canonicalHardware } from './hardware-aliases.js';
 import { nrfDfuUsbIds } from './nrf-usb-ids.js';
 import { nrfBoardCandidates } from './nrf-board-candidates.js';
+import { xiaoInstalledStatus, xiaoInfoProfile, xiaoBootloaderItem } from './xiao-bootloader.js';
 
 const $ = id => document.getElementById(id);
 // A detected Meshtastic radio defaults to a fresh install. A later manual
@@ -48,6 +49,7 @@ state.knownApplicationPort=null;state.autoVerifyAttempt=null;state.autoVerificat
 state.connectionTrial=null;
 state.restorePreview=null;
 state.bootloaderInfo=null;state.applicationProbeFailed=false;
+state.bootloaderCatalog=null;
 state.catalogScope='';
 state.transportModePort=null;
 state.selectionLink=null;state.selectionCopyGeneration=0;state.selectionCopyPending=null;state.selectionCopyTimer=null;
@@ -581,6 +583,12 @@ async function readApplication(link) {
       device.bootloaderVersion=reply===null?null:cleanCliReply(reply,command);
     }catch{/* Optional read-only version reporting must never block application updates. */}
     if(state.port!==port||state.generation!==generation)fail('Selected port changed or disconnected while checking the bootloader. Re-select and detect again.');
+    // Only CommonCLI exposes this optional read-only status. Version alone
+    // cannot distinguish the base and Sense bootloaders.
+    if(board.hardware==='Seeed Studio Xiao nRF52 WIO'&&device.role==='common-cli'){
+      try{const command='ota bootloader status',reply=await link.command(command,1500);device.xiaoBootloaderProfile=/^(?:R|TEST)_/i.test(device.bootloaderVersion||'')?null:xiaoInstalledStatus(cleanCliReply(reply,command));}catch{device.xiaoBootloaderProfile=null;}
+      if(state.port!==port||state.generation!==generation)fail('Selected port changed or disconnected while checking the bootloader identity. Re-select and detect again.');
+    }
   }
   state.device=device;
   state.portLabelEvidence={port,device};
@@ -1055,12 +1063,23 @@ function updateRecoveryChoices(){const catalog=state.recoveryCatalog,prior=$('re
 function setAutomaticSha(value,name=null){$('expected-sha').value=value||'';state.automaticSha=value||null;state.automaticShaName=value?name:null;}
 function clearAutomaticSha(name=null){if(name&&name===state.automaticShaName)return;if(state.automaticSha&&$('expected-sha').value.trim().toLowerCase()===state.automaticSha)$('expected-sha').value='';state.automaticSha=null;state.automaticShaName=null;}
 function bootloaderItem(){
-  if($('artifact').value)return state.items[Number($('artifact').value)]||null;
-  if(!$('hardware').value)return null;
-  const items=state.items.filter(i=>i.hardware===$('hardware').value&&(!$('provider').value||i.provider===$('provider').value)),choices=new Map();
-  for(const item of items)if(item.architecture==='nrf52'&&item.bootloaderInfo)choices.set(item.bootloaderInfo.url,item);
-  if(choices.size!==1||items.some(i=>i.architecture!=='nrf52'||!i.bootloaderInfo))return null;
-  const item=[...choices.values()][0];return {hardware:item.hardware,architecture:item.architecture,bootloader:item.bootloader,bootloaderInfo:item.bootloaderInfo};
+  let item;
+  if($('artifact').value)item=state.items[Number($('artifact').value)]||null;
+  else {
+    if(!$('hardware').value)return null;
+    const items=state.items.filter(i=>i.hardware===$('hardware').value&&(!$('provider').value||i.provider===$('provider').value)),choices=new Map();
+    for(const entry of items)if(entry.architecture==='nrf52'&&entry.bootloaderInfo)choices.set(entry.bootloaderInfo.url,entry);
+    if(choices.size!==1||items.some(i=>i.architecture!=='nrf52'||!i.bootloaderInfo))return null;
+    const entry=[...choices.values()][0];item={hardware:entry.hardware,architecture:entry.architecture,bootloader:entry.bootloader,bootloaderInfo:entry.bootloaderInfo};
+  }
+  if(item?.hardware!=='Seeed Studio Xiao nRF52 WIO'||item.architecture!=='nrf52')return item;
+  // Neither the shared application model nor its catalog's base profile
+  // identifies the installed variant. Require fresh evidence from this port.
+  if($('hardware').value!==item.hardware||!state.port)return null;
+  const running=state.portLabelEvidence?.port===state.port&&state.portLabelEvidence?.device===state.device?state.device?.xiaoBootloaderProfile:null;
+  const file=state.bootloaderInfo?.port===state.port&&state.bootloaderInfo?.generation===state.generation?xiaoInfoProfile(state.bootloaderInfo.info,state.port.getInfo()):null;
+  if(running&&file&&running!==file)return null;
+  return xiaoBootloaderItem({item,snapshot:state.bootloaderCatalog,profile:running||file});
 }
 function bootloaderUpdateContext(){
   const board=bootloaderItem(),device=state.device,info=board?.bootloaderInfo;
@@ -1104,7 +1123,7 @@ async function offerBootloaderAfterStartup(){
 function updateDownload() {
   const item = $('artifact').value?state.items[Number($('artifact').value)]:null,board=bootloaderItem(),info=board?.bootloaderInfo,urls=board?.architecture==='nrf52'?(info?[info.url]:[]):board?.bootloader||[];
   $('bootloader-source').replaceChildren(...urls.map(url=>new Option(`${info?(info.cached?'Last verified ':'')+'OTAFIX '+info.version+' · ':''}${new URL(url).pathname.split('/').pop()}`,url)));
-  $('bootloader-detail').textContent=info?`${info.cached?'Latest release could not be checked; using our last verified stable':'Our stable'} OTAFIX ${info.version} · ${info.profile}. SHA-256 is checked before loading. ${bootloaderReinstallWarning}`:item?.bootloaderUnavailable||'Select exact hardware or a firmware artifact for its board-specific bootloader recommendation; conflicting profiles require an explicit artifact.';
+  $('bootloader-detail').textContent=info?`${info.cached?'Latest release could not be checked; using our last verified stable':'Our stable'} OTAFIX ${info.version} · ${info.profile}. SHA-256 is checked before loading. ${info.profile.startsWith('xiao_nrf52840_ble')?'This matches the installed bootloader, not proof of the physical module. Confirm the board and same device. ':''}${bootloaderReinstallWarning}`:item?.hardware==='Seeed Studio Xiao nRF52 WIO'?'XIAO and Sense share an application; read the running repeater or matching DFU INFO_UF2.TXT to identify the installed loader. Confirm the physical board. Application updates remain available.':item?.bootloaderUnavailable||'Select exact hardware or a firmware artifact for its board-specific bootloader recommendation; conflicting profiles require an explicit artifact.';
   if(item){
     $('download-firmware').href=item.url;$('download-firmware').removeAttribute('aria-disabled');
     $('catalog-detail').textContent=[firmwareDowngradeWarning(null,item),item.subtitle,item.notice,item.releaseNotes,item.bootloaderUnavailable].filter(Boolean).join('\n');
@@ -1723,7 +1742,7 @@ if ('serial' in navigator) {
   navigator.serial.addEventListener('disconnect',event => { if(state.knownApplicationPort?.port===(event.port||event.target))state.knownApplicationPort.available=false;if (event.target === state.port || event.port === state.port) { clearBootloaderInfoEvidence();state.applicationProbeFailed=false;state.port=null;state.generation++; state.plan = null;state.boardDetected=false;state.recoveryManual=false;state.recoveryDetectionRequested=false;$('recovery-profile').value='';$('installed-identity').value='';$('recovery-detection').textContent='';$('board-detection').textContent='Selected port disconnected; detect again after selecting the same radio.';if(!state.handoff&&!state.recovery&&!state.migration){state.device=null;state.backupApproved=null;} $('port-status').textContent = 'Disconnected'; log('Selected USB port disconnected. No different port will be substituted.'); controls(); } });
 } else { $('browser-status').textContent = 'Web Serial unavailable'; notice('Use a browser with Web Serial support (typically desktop Chrome or Edge). Catalog browsing and local file inspection still work.',true); }
 getCatalog().then(catalog => {
-  state.items=catalog.items.map(item=>{const hardware=canonicalHardware(item.hardware);return hardware===item.hardware?item:{...item,hardware};});state.recoveryCatalog=catalog.recoveryCatalog||null;updateRecoveryChoices();
+  state.items=catalog.items.map(item=>{const hardware=canonicalHardware(item.hardware);return hardware===item.hardware?item:{...item,hardware};});state.bootloaderCatalog=catalog.bootloaderCatalog||null;state.recoveryCatalog=catalog.recoveryCatalog||null;updateRecoveryChoices();
   $('catalog-status').textContent=`${state.items.length.toLocaleString()} artifacts · snapshot ${new Date(catalog.generatedAt).toLocaleString()} · ${catalog.warnings.length} provider warnings${catalog.cached?' · cached':''}`;
   let saved={...state.manualSelections};
   if(!resetSavedSelectionsOnLoad)try{const value=JSON.parse(localStorage.getItem('meshfirmware.selections')||'{}');if(value&&typeof value==='object'&&!Array.isArray(value))saved=value;}catch{}

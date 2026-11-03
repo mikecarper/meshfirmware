@@ -10,6 +10,7 @@ import {canonicalHardware} from '../src/hardware-aliases.js';
 import {nrfDfuUsbIds} from '../src/nrf-usb-ids.js';
 import {nrfBoardCandidates} from '../src/nrf-board-candidates.js';
 import {parseBootloaderInfo,detectBootloaderBoard} from '../src/bootloader-info.js';
+import {xiaoInstalledStatus,xiaoInfoProfile,xiaoBootloaderItem} from '../src/xiao-bootloader.js';
 import {chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode} from '../src/automatic.js';
 import {chooseConnection,parseUsbMode} from '../src/connection-choice.js';
 import {lookupUsbConnectionMap} from '../src/usb-connection-map.js';
@@ -52,7 +53,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
   });
   context.quickHotspotUrl=quickHotspotUrl;
   context.detectApplication=(...args)=>context.detectMeshCore(...args);context.detectMeshtasticBoard=detectMeshtasticBoard;
-  context.parseBootloaderInfo=parseBootloaderInfo;context.detectBootloaderBoard=detectBootloaderBoard;context.chooseBootloaderInfoFile=async()=>{calls.push('file-picker');throw Error('Unexpected file chooser');};
+  context.parseBootloaderInfo=parseBootloaderInfo;context.detectBootloaderBoard=detectBootloaderBoard;context.xiaoInstalledStatus=xiaoInstalledStatus;context.xiaoInfoProfile=xiaoInfoProfile;context.xiaoBootloaderItem=xiaoBootloaderItem;context.chooseBootloaderInfoFile=async()=>{calls.push('file-picker');throw Error('Unexpected file chooser');};
   context.selectionLink=selectionLink;context.nrfBoardCandidates=nrfBoardCandidates;
   vm.runInContext(source,context);
   return {context,elements,calls,port,serialEvents,windowEvents,evaluate:code=>vm.runInContext(code,context)};
@@ -1220,7 +1221,7 @@ test('switching connected radios refreshes hardware provider role and artifact f
   await ui.elements.get('select-port').onclick();
   assert.equal(ui.evaluate('state.port'),secondPort);assert.equal(ui.elements.get('hardware').value,second.hardware);assert.equal(ui.elements.get('provider').value,'Keymind Cascade');assert.equal(ui.elements.get('role').value,'repeater');assert.equal(ui.elements.get('version').value,second.version);assert.equal(ui.elements.get('artifact').value,'1');
   const summary=ui.elements.get('automatic-summary').textContent;assert.ok(summary.includes(second.name));assert.ok(!summary.includes(first.name));assert.doesNotMatch(summary,/downgrade/i);
-  assert.equal(ui.evaluate('state.device.architecture'),'nrf52');assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(ui.calls,['chooser','open','close','chooser','open','get bootloader.ver','close']);
+  assert.equal(ui.evaluate('state.device.architecture'),'nrf52');assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(ui.calls,['chooser','open','close','chooser','open','get bootloader.ver','ota bootloader status','close']);
 });
 
 test('a manual hardware override with automatic setup on immediately refreshes the chosen target',async()=>{
@@ -2390,10 +2391,10 @@ test('nRF52 firmware choices contain only the two application profiles in both U
   assert.deepEqual(ui.calls,[]);
 });
 
-async function bootloaderOfferWorkbench({reported='0.11.0-OTAFIX2.4.10',role='common-cli',protocol=14,model='Seeed Xiao-nrf52',cached=false}={}){
+async function bootloaderOfferWorkbench({reported='0.11.0-OTAFIX2.4.10',role='common-cli',protocol=14,model='Seeed Tracker T1000-E',cached=false}={}){
   const ui=workbench();await Promise.resolve();
   const info={version:'2.4.12',profile:'xiao_nrf52840_ble',hardwareId:'xiao_nrf52',url:'https://example.test/xiao_nrf52840_ble_bootloader-v0.11.0-OTAFIX2.4.12_s140_7.3.0.zip',sha256:'c'.repeat(64),size:64,cached};
-  const item=xiaoRepeaterItem({bootloader:[info.url],bootloaderInfo:info});
+  const item=xiaoRepeaterItem({hardware:'Seeed Studio SenseCAP T1000-E',bootloader:[info.url],bootloaderInfo:info});
   ui.context.inventory=[item];ui.context.selectedPort=ui.port;ui.evaluate('state.items=inventory;state.port=selectedPort;filterCatalog();');
   for(const [id,value]of [['provider','MeshCore'],['hardware',item.hardware],['role','repeater'],['version',item.version],['artifact','0']])ui.elements.get(id).value=value;
   ui.evaluate('updateDownload();');
@@ -2414,6 +2415,47 @@ test('a read-only nRF52 bootloader query offers the exact board update separatel
   assert.equal(ui.elements.get('artifact').value,'0');assert.deepEqual(artifactChoices(ui),['0']);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls,['query:get bootloader.ver']);
 });
 
+test('XIAO bootloader recommendation follows the connected repeater status, not the shared application image',async()=>{
+  const snapshot=JSON.parse(await readFile(new URL('../public/catalog.json',import.meta.url))).bootloaderCatalog;
+  for(const [board,profile] of [['28860044','xiao_nrf52840_ble'],['28860045','xiao_nrf52840_ble_sense']]){
+    const ui=workbench();await Promise.resolve();ui.context.snapshot=snapshot;ui.context.selectedPort=ui.port;
+    ui.context.inventory=[xiaoRepeaterItem({bootloaderInfo:{profile:'xiao_nrf52840_ble',url:'https://example.test/base.zip'},bootloader:['https://example.test/base.zip']})];
+    ui.evaluate('state.items=inventory;state.port=selectedPort;state.bootloaderCatalog=snapshot;filterCatalog();');ui.elements.get('hardware').value='Seeed Studio Xiao nRF52 WIO';ui.elements.get('artifact').value='0';
+    ui.evaluate('updateDownload();');assert.equal(ui.elements.get('bootloader-source').value,'');
+    ui.context.detectMeshCore=async()=>({role:'common-cli',model:'Seeed Xiao-nrf52',publicKey:'11'.repeat(32)});
+    ui.context.testLink={command:async command=>{ui.calls.push(command);return command==='get bootloader.ver'?'0.11.0-OTAFIX2.4.10':`BL board=${board} target=${board} name=XIAO_DFU crc=6F9BE280 abi=3 caps=0E | staged:none mid=-- hash=--`;}};
+    await ui.evaluate('readApplication(testLink);');ui.evaluate('updateDownload();controls();');
+    assert.equal(ui.evaluate('bootloaderItem().bootloaderInfo.profile'),profile);assert.match(ui.elements.get('bootloader-detail').textContent,/not proof of the physical module/i);
+    assert.equal(ui.elements.get('prepare-bootloader-update').hidden,false);assert.equal(ui.evaluate('state.pkg'),null);assert.deepEqual(ui.calls,['get bootloader.ver','ota bootloader status']);
+    ui.evaluate('state.port={getInfo:()=>({})};updateDownload();');assert.equal(ui.elements.get('bootloader-source').value,'');
+  }
+});
+
+test('unknown, unavailable and recovery XIAO identities never fall back to the base bootloader',async()=>{
+  for(const [version,status] of [['0.4.3','unknown command'],['R_0x12345678','BL board=28860044 target=28860044 name=XIAO_DFU crc=6F9BE280 abi=3 caps=0E | staged:none mid=-- hash=--'],['0.4.3','BL board=28860045 target=28860044 name=XIAO_DFU crc=6F9BE280 abi=3 caps=0E | staged:none mid=-- hash=--']]){
+    const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.inventory=[xiaoRepeaterItem({bootloaderInfo:{profile:'xiao_nrf52840_ble',url:'https://example.test/base.zip'},bootloader:['https://example.test/base.zip']})];ui.evaluate('state.items=inventory;state.port=selectedPort;filterCatalog();');ui.elements.get('hardware').value='Seeed Studio Xiao nRF52 WIO';ui.elements.get('artifact').value='0';ui.context.detectMeshCore=async()=>({role:'common-cli',model:'Seeed Xiao-nrf52'});ui.context.testLink={command:async command=>command==='get bootloader.ver'?version:status};
+    await ui.evaluate('readApplication(testLink);');ui.evaluate('updateDownload();controls();');assert.equal(ui.elements.get('bootloader-source').value,'');assert.equal(ui.elements.get('prepare-bootloader-update').hidden,true);assert.equal(ui.evaluate('state.pkg'),null);
+  }
+});
+
+test('the selected Sense bootloader is preserved through download and image inspection',async()=>{
+  const snapshot=JSON.parse(await readFile(new URL('../public/catalog.json',import.meta.url))).bootloaderCatalog,ui=workbench();await Promise.resolve();ui.context.snapshot=snapshot;ui.context.selectedPort=ui.port;
+  ui.context.inventory=[xiaoRepeaterItem({bootloaderInfo:{profile:'xiao_nrf52840_ble',url:'https://example.test/base.zip'},bootloader:['https://example.test/base.zip']})];ui.evaluate('state.items=inventory;state.port=selectedPort;state.bootloaderCatalog=snapshot;filterCatalog();');ui.elements.get('hardware').value='Seeed Studio Xiao nRF52 WIO';ui.elements.get('artifact').value='0';
+  ui.context.detectMeshCore=async()=>({role:'common-cli',model:'Seeed Xiao-nrf52',publicKey:'11'.repeat(32)});ui.context.testLink={command:async command=>command==='get bootloader.ver'?'0.11.0-OTAFIX2.4.10':'BL board=28860045 target=28860045 name=XIAO_DFU crc=6F9BE280 abi=3 caps=0E | staged:none mid=-- hash=--'};
+  await ui.evaluate('readApplication(testLink);');ui.evaluate('updateDownload();controls();');
+  const selected=ui.evaluate('bootloaderItem().bootloaderInfo');ui.context.component=fakePackage({name:new URL(selected.url).pathname.split('/').pop(),kind:'softdevice_bootloader',destructive:true,sha256:selected.sha256});
+  ui.context.boundedFetch=async()=>new Uint8Array(selected.size);ui.context.hash=()=>selected.sha256;ui.context.checkedZip=()=>[{name:'manifest.json'},{name:'bootloader.bin'},{name:'bootloader.dat'}];ui.context.inspectFirmware=()=>ui.context.component;
+  await ui.elements.get('prepare-bootloader-update').onclick();assert.equal(ui.evaluate('state.item.bootloaderInfo.profile'),'xiao_nrf52840_ble_sense');assert.equal(ui.evaluate('selectedBootloader(state.pkg).profile'),'xiao_nrf52840_ble_sense');assert.equal(ui.evaluate('state.plan'),null);
+});
+
+test('the optional INFO_UF2 fallback selects Sense only for the matching current DFU port',async()=>{
+  const snapshot=JSON.parse(await readFile(new URL('../public/catalog.json',import.meta.url))).bootloaderCatalog,ui=workbench();await Promise.resolve();ui.context.snapshot=snapshot;ui.context.selectedPort=ui.port;ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0045});
+  ui.context.inventory=[xiaoRepeaterItem({bootloaderInfo:{profile:'xiao_nrf52840_ble',url:'https://example.test/base.zip'},bootloader:['https://example.test/base.zip']})];ui.context.info=parseBootloaderInfo('UF2 Bootloader 0.6.2\nModel: Seeed XIAO nRF52840\nBoard-ID: nRF52840-SeeedXiaoSense-v1\n');
+  ui.evaluate('state.items=inventory;state.port=selectedPort;state.bootloaderCatalog=snapshot;state.bootloaderInfo={info,port:selectedPort,generation:state.generation};');ui.elements.get('hardware').value='Seeed Studio Xiao nRF52 WIO';ui.elements.get('artifact').value='0';
+  assert.equal(ui.evaluate('bootloaderItem().bootloaderInfo.profile'),'xiao_nrf52840_ble_sense');ui.evaluate('state.generation++;');assert.equal(ui.evaluate('bootloaderItem()'),null);
+  ui.evaluate('state.bootloaderInfo.generation=state.generation;');ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0044});assert.equal(ui.evaluate('bootloaderItem()'),null);
+});
+
 test('companion bootloader version reads use only the supported read-only CLI and older companions stay usable',async()=>{
   for(const protocol of [13,14,15]){
     const ui=await bootloaderOfferWorkbench({role:'companion',protocol});
@@ -2424,7 +2466,7 @@ test('companion bootloader version reads use only the supported read-only CLI an
 
 test('the detected application labels the selected USB port without claiming an unavailable COM number',async()=>{
   const ui=await bootloaderOfferWorkbench({role:'companion',reported:'> 0.4.3'});
-  assert.match(ui.elements.get('selected-port').textContent,/Selected: Seeed Xiao-nrf52 · Test XIAO · USB /);
+  assert.match(ui.elements.get('selected-port').textContent,/Selected: Seeed Tracker T1000-E · Test XIAO · USB /);
   assert.doesNotMatch(ui.elements.get('selected-port').textContent,/COM\d/);
   assert.equal(ui.evaluate('state.device.bootloaderVersion'),'0.4.3');assert.equal(ui.elements.get('prepare-bootloader-update').hidden,false);
   assert.match(ui.elements.get('nrf-bootloader-status').textContent,/non-OTAFIX bootloader 0\.4\.3/);

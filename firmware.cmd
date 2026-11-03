@@ -6528,6 +6528,13 @@ function Get-MeshCoreBootloaderHintText {
 		return ""
 	}
 
+	# A XIAO application can run on the standard and Sense modules. The
+	# application model and its catalog entry do not identify the installed
+	# bootloader, and recommending the first URL can suggest the wrong image.
+	if (@($bootloaders | Where-Object { $_ -match '(?i)xiao[_-]nrf52840[_-]ble' }).Count -gt 0) {
+		return 'COM port returned but did not enter serial DFU. This device may need an OTAFIX bootloader. Check the physical module and installed bootloader identity before selecting the XIAO or XIAO Sense image; the application model alone does not distinguish them.'
+	}
+
 	$preferred = @($bootloaders | Where-Object { $_ -match '(?i)\.uf2$' } | Select-Object -First 1)
 	if ($preferred.Count -eq 0) {
 		$preferred = @($bootloaders | Where-Object { $_ -match '(?i)\.zip$' } | Select-Object -First 1)

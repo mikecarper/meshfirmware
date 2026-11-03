@@ -19,7 +19,7 @@ function validDate(value) {
   return date.getUTCMonth() === month && date.getUTCDate() === Number(match[2]);
 }
 
-function validateInfo(info) {
+export function validateInfo(info) {
   if (!info || typeof info !== 'object' || ![Object.prototype, null].includes(Object.getPrototypeOf(info)) || Object.keys(info).some(key => !['version','model','boardId','softDevice'].includes(key))) fail('unexpected identity fields.');
   if (!validVersion(info.version)) fail('missing or malformed bootloader version.');
   if (!validModel(info.model)) fail('missing or malformed Model.');
