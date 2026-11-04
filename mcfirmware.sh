@@ -8520,6 +8520,30 @@ detect_device_from_fw() {
   printf '%s\n' "${v:-unknown}"
 }
 
+meshcore_bluetooth_usb_notice() {
+	local device="${1:-}" role="${2:-}" name="${3:-}"
+	name="${name##*/}"
+	# The current Keymind T1000-E Full/BLE application pauses Bluetooth for
+	# USB hosts. Do not generalize that policy to stock, USB-only companions,
+	# other boards, or the intermediate erase/bootloader/recovery transfers.
+	case "${device,,}" in
+		'seeed studio sensecap t1000-e'|'seeed tracker t1000-e'|'t1000-e') ;;
+		*) return 0 ;;
+	esac
+	case "${role,,}" in
+		companionfull|companionble|companion) ;;
+		*) return 0 ;;
+	esac
+	name="${name,,}"
+	[[ "$name" =~ ^t1000e_companion_radio_(full|ble)(-|\.) \
+		&& "$name" == *keymind* && "$name" == *.zip ]] || return 0
+	# Application wrappers may embed an update. Strip only the exact versioned
+	# marker, never the name of a standalone bootloader/SoftDevice component.
+	name="$(printf '%s' "$name" | sed -E 's/-with-bootloader-[0-9]+(\.[0-9]+){1,3}(-|\.zip$)/\2/g')"
+	[[ ! "$name" =~ (^|[_.[:space:]-])(bootloader|softdevice|erase|formatter|recovery)([_.[:space:]-]|$) ]] || return 0
+	printf '%s\n' "Bluetooth (BLE) is paused while this T1000-E is connected to a computer by USB. Finish any USB verification first, then unplug USB to use Bluetooth. Bluetooth must be enabled in the radio's settings."
+}
+
 # --------------------------------------------------
 # MAIN
 # --------------------------------------------------
@@ -8566,6 +8590,7 @@ download_firmware_selection "$URL_PATH"
 
 ARCHITECTURE=''
 DEVICE=''
+ROLE=''
 DEVICE_PORT=''
 DOWNLOADED_FILE=''
 TYPE=''
@@ -8573,6 +8598,7 @@ TYPE=''
 [[ -f "$DEVICE_PORT_FILE"     ]] && DEVICE_PORT="$(<"$DEVICE_PORT_FILE")"
 [[ -f "$DOWNLOADED_FILE_FILE" ]] && DOWNLOADED_FILE="$(<"$DOWNLOADED_FILE_FILE")"
 [[ -f "$SELECTED_DEVICE_FILE" ]] && DEVICE="$(<"$SELECTED_DEVICE_FILE")"
+[[ -f "$SELECTED_ROLE_FILE" ]] && ROLE="$(<"$SELECTED_ROLE_FILE")"
 if [[ -z $DEVICE_PORT ]]; then
 	choose_serial
 	[[ -f "$ARCHITECTURE_FILE"    ]] && ARCHITECTURE="$(<"$ARCHITECTURE_FILE")"
@@ -8903,6 +8929,7 @@ else
 	echo
 	echo "DFU package transfer completed for ${DEVICE} on ${DEVICE_PORT}."
 	echo "Application startup has not been verified; confirm the selected radio returns normally."
+	meshcore_bluetooth_usb_notice "$DEVICE" "${ROLE:-}" "$DOWNLOADED_FILE"
 fi
 
 # Restart the stopped service.

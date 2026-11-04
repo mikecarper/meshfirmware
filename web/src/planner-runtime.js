@@ -1,12 +1,14 @@
 import { hash } from './firmware.js';
 import { publicFromPrivate } from './meshcore.js';
 import { hexToBytes } from '@noble/hashes/utils.js';
+import { localRuntimeUrls } from './local-runtime-urls.js';
 
 const MODULES = ['meshcore_partition_expansion.py', 'meshcore_backup.py'];
 const MAX_IMAGE = 64 << 20;
 const MAX_ARTIFACT = 32 << 20;
 const MAX_CACHED_ARTIFACTS = 5;
 const MAC = /^(?:[\da-f]{2}:){5}[\da-f]{2}$/i;
+const localUrls = localRuntimeUrls(import.meta.url);
 const sync = (py, populate) => new Promise((resolve, reject) => py.FS.syncfs(populate, error => error ? reject(new Error('Browser migration storage could not be synchronized. No flash is authorized.')) : resolve()));
 
 export function createPlannerService({ loadRuntime, readValidator, persistent = true } = {}) {
@@ -20,16 +22,15 @@ export function createPlannerService({ loadRuntime, readValidator, persistent = 
       let py;
       if (loadRuntime) py = await loadRuntime();
       else {
-        const indexURL = new URL('../python/', import.meta.url).href;
-        const { loadPyodide } = await import(/* @vite-ignore */ indexURL + 'pyodide.mjs');
-        py = await loadPyodide({ indexURL });
+        const { loadPyodide } = await import(/* @vite-ignore */ localUrls.moduleURL);
+        py = await loadPyodide({ indexURL: localUrls.indexURL });
       }
-      const manifestResponse = readValidator ? await readValidator('integrity.json') : await fetch(new URL('../validators/integrity.json', import.meta.url),{cache:'no-store'}).then(response => { if (!response.ok) throw new Error('Cannot load validator integrity manifest.'); return response.text(); });
+      const manifestResponse = readValidator ? await readValidator('integrity.json') : await fetch(new URL('integrity.json', localUrls.validatorsURL),{cache:'no-store'}).then(response => { if (!response.ok) throw new Error('Cannot load validator integrity manifest.'); return response.text(); });
       const manifest = JSON.parse(manifestResponse);
       if (Object.keys(manifest).sort().join(',') !== [...MODULES].sort().join(',')) throw new Error('Shared validator module list is invalid.');
       py.FS.mkdirTree('/validators'); py.FS.mkdirTree('/work/cache');
       for (const name of MODULES) {
-        const bytes = readValidator ? await readValidator(name) : new Uint8Array(await fetch(new URL('../validators/' + name, import.meta.url),{cache:'no-store'}).then(response => { if (!response.ok) throw new Error('Cannot load shared validator.'); return response.arrayBuffer(); }));
+        const bytes = readValidator ? await readValidator(name) : new Uint8Array(await fetch(new URL(name, localUrls.validatorsURL),{cache:'no-store'}).then(response => { if (!response.ok) throw new Error('Cannot load shared validator.'); return response.arrayBuffer(); }));
         if (!/^[a-f0-9]{64}$/.test(manifest[name]) || hash(bytes) !== manifest[name]) throw new Error('Shared validator hash mismatch.');
         py.FS.writeFile('/validators/' + name, bytes);
       }

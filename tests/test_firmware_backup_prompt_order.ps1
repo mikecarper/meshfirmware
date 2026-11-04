@@ -7,7 +7,7 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile(
     (Join-Path $repoRoot 'firmware.cmd'), [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw "Parse errors: $parseErrors" }
 foreach ($name in @('Request-MeshCoreUsbBackupBeforeFlash', 'Confirm-MeshCoreUsbBackupForAction',
-    'Confirm-MeshCoreFlash', 'Test-CachedMeshCoreUsbBackup', 'flashMeshCoreNrf52',
+    'Confirm-MeshCoreFlash', 'Test-CachedMeshCoreUsbBackup', 'flashMeshCoreNrf52', 'Get-MeshCoreBluetoothUsbNotice',
     'Invoke-MeshCoreBackupOnly', 'InvokeFlash', 'flashESP32',
     'Wait-FirmwareToolUpdates', 'Enter-FirmwareToolUse')) {
     $definition = $ast.Find({ param($n)

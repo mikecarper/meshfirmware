@@ -69,16 +69,24 @@ export async function flashNrf(link, pkg, onProgress, {delay = sleep, now = Date
     }
     fail(`DFU did not acknowledge packet ${sequence}. No reset will be attempted.`);
   }
+  async function waitWithProgress(milliseconds,fraction,phase){
+    // Preserve the full bootloader safety wait. Only split it for feedback;
+    // elapsed time, USB reconnection and acknowledgements cannot shorten it.
+    for(let remaining=milliseconds;remaining>0;){
+      onProgress(fraction,`${phase} · about ${Math.ceil(remaining/1000)}s remaining. Keep USB and power connected.`);
+      const interval=Math.min(1000,remaining);await delay(interval);remaining-=interval;
+    }
+  }
   const pages = Math.ceil(pkg.payload.length / 4096) + 1, eraseWait = Math.min(30000,Math.max(500,Math.ceil(pages * 89.7)));
-  onProgress(0,'Preparing DFU'); await send(words(3,pkg.mode,pkg.sdSize,pkg.blSize,pkg.appSize)); await delay(eraseWait);
+  onProgress(0,'Preparing DFU'); await send(words(3,pkg.mode,pkg.sdSize,pkg.blSize,pkg.appSize)); await waitWithProgress(eraseWait,0,'Preparing DFU');
   await send(Uint8Array.from([...words(1),...pkg.init,0,0]));
   await delay(205);
   for (let offset = 0; offset < pkg.payload.length; offset += 512) {
     const end = Math.min(offset + 512,pkg.payload.length); await send(Uint8Array.from([...words(4),...pkg.payload.subarray(offset,end)]));
     onProgress(end / pkg.payload.length * .95,'Writing DFU'); if ((offset / 512 + 1) % 8 === 0) await delay(205);
   }
-  await delay(205); await send(words(5)); onProgress(.96,'Activating; keep power connected');
-  await delay(eraseWait + Math.ceil(pages * 204.8)); onProgress(1,'DFU transfer completed. Application / installed bootloader remains unverified.');
+  await delay(205); await send(words(5));
+  await waitWithProgress(eraseWait + Math.ceil(pages * 204.8),.96,'Activating firmware'); onProgress(1,'DFU transfer completed. Application / installed bootloader remains unverified.');
 }
 
 // Arduino TinyUSB's native-CDC reboot state machine is 2 -> 3 -> 1 -> 0
@@ -114,12 +122,25 @@ export async function enterTinyUsbBootloader(port,{delay=sleep}={}) {
 
 // User gesture only. A re-enumerated port is never silently substituted.
 // Keep the public entry point for callers, but only nRF52 uses a baud touch.
-export async function touch1200(port, kind) {
+function pendingNrf52Handoff(error){
+  const name=typeof error?.name==='string'?error.name:'Error',message=typeof error?.message==='string'?error.message:String(error||'nRF52 control request was interrupted.');
+  if(/^(?:NotAllowedError|SecurityError|PermissionDeniedError|AccessDeniedError)$/i.test(name)||/permission|access(?:\s+is)?[\s_-]*denied|not[\s_-]*allowed|security|unauthori[sz]ed|\b(?:EACCES|EPERM)\b/i.test(message))return error;
+  // The final falling DTR edge can reboot native USB before its control
+  // request is acknowledged. Earlier phases must already have completed.
+  // A pending handoff is not proof of DFU and never authorizes another reset.
+  if(!/^(?:NetworkError|NotFoundError)$/i.test(name)&&!/failed to set control signals|(?:device|port|usb|endpoint)[^\r\n]*(?:disconnect|removed|lost|not found|no longer available)/i.test(message))return error;
+  const pending=new Error(message,{cause:error});pending.name=name;
+  pending.nrf52HandoffPending=true;
+  pending.nrf52HandoffEvidence=Object.freeze({sequence:'1200-dtr-fall',phase:'final-dtr-low',operation:'control-lines',baudRate:1200,priorPhasesComplete:true,dfuVerified:false});
+  return pending;
+}
+export async function touch1200(port, kind, {delay=sleep}={}) {
   if(!['nrf52','tinyusb'].includes(kind))fail('Choose an explicit nRF52 or TinyUSB bootloader handoff.');
-  if(kind==='tinyusb')return enterTinyUsbBootloader(port);
+  if(kind==='tinyusb')return enterTinyUsbBootloader(port,{delay});
   try {
     await port.open({ baudRate: 1200 });
-    await port.setSignals({ dataTerminalReady: true, requestToSend: false }); await sleep(100);
-    await port.setSignals({ dataTerminalReady: false, requestToSend: false });
+    await port.setSignals({ dataTerminalReady: true, requestToSend: false }); await delay(100);
+    try{await port.setSignals({ dataTerminalReady: false, requestToSend: false });}
+    catch(error){throw pendingNrf52Handoff(error);}
   } finally { await port.close().catch(() => {}); }
 }

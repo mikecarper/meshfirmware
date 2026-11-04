@@ -8397,6 +8397,29 @@ function Confirm-MeshCoreFlash {
 	return $false
 }
 
+function Get-MeshCoreBluetoothUsbNotice {
+	param(
+		[string]$Device,
+		[string]$Role,
+		[string]$FirmwareFile
+	)
+
+	# Advisory only. Current Keymind T1000-E BLE/Full companions inhibit BLE
+	# for a USB host session. Stock, USB-only, and component packages do not
+	# share that policy; neither a generic nRF52 identity nor a BLE radio name
+	# is enough to tell the user to unplug after a successful transfer.
+	if ($Device.Trim() -notin @('Seeed Studio SenseCAP T1000-E', 'Seeed Tracker T1000-E', 'T1000-E')) { return '' }
+	if ($Role.Trim() -notin @('companionFull', 'companionBle', 'companion')) { return '' }
+	$name = Split-Path -Path $FirmwareFile -Leaf
+	# A reviewed application wrapper can embed a bootloader update. Remove
+	# only its versioned marker, not a generic bootloader component filename.
+	$applicationName = $name -replace '(?i)-with-bootloader-[0-9]+(?:\.[0-9]+){1,3}(?=-|\.zip$)', ''
+	if ($name -notmatch '^t1000e_companion_radio_(?:full|ble)(?:-|\.)' -or
+		$name -notmatch '(?i)keymind' -or $name -notmatch '(?i)\.zip$' -or
+		$applicationName -match '(?i)(?:^|[_.\s-])(?:bootloader|softdevice|erase|formatter|recovery)(?:[_.\s-]|$)') { return '' }
+	return 'Bluetooth (BLE) is paused while this T1000-E is connected to a computer by USB. Finish any USB verification first, then unplug USB to use Bluetooth. Bluetooth must be enabled in the radio''s settings.'
+}
+
 function flashMeshCoreNrf52 {
 	param(
 		[Parameter(Mandatory)][pscustomobject]$hw
@@ -8479,6 +8502,9 @@ function flashMeshCoreNrf52 {
 	if ($flashResult.ComPort) {
 		$hw.ComPort = $flashResult.ComPort
 	}
+	$bluetoothNotice = Get-MeshCoreBluetoothUsbNotice -Device ([string]$hw.HWNameFile) `
+		-Role ([string]$hw.Role) -FirmwareFile $selectedFirmwareFile
+	if ($bluetoothNotice) { Write-Host $bluetoothNotice -ForegroundColor Yellow }
 	return $true
 }
 

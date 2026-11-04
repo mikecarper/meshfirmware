@@ -71,6 +71,7 @@ foreach ($functionName in @(
 	'Request-MeshCoreUsbBackupBeforeFlash',
 	'Confirm-MeshCoreUsbBackupForAction',
 	'Confirm-MeshCoreFlash',
+	'Get-MeshCoreBluetoothUsbNotice',
 	'flashMeshtasticNrf52',
 	'flashMeshCoreNrf52'
 )) {

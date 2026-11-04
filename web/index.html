@@ -48,6 +48,7 @@
       <div class="review-actions"><button id="prepare" class="primary step-button" aria-label="Step 3: Backup and prepare update" data-lock><span class="action-number" aria-hidden="true">3</span><span id="prepare-label" class="action-label">Backup &amp; prepare update</span></button><button id="flash" class="primary step-button" aria-label="Step 4: Review and flash firmware" disabled data-lock><span class="action-number" aria-hidden="true">4</span><span class="action-label">Review &amp; flash</span><span class="action-icon" aria-hidden="true">→</span></button><button id="verify-app" class="secondary step-button" aria-label="Optional step 5: Verify running application" disabled data-lock><span class="action-number" aria-hidden="true">5</span><span class="action-label">Verify running application</span></button></div>
       <button id="stop-migration-auto" class="secondary" hidden>Stop automatic continuation</button>
       <progress id="progress" value="0" max="1" aria-label="Operation progress"></progress><p id="progress-label" class="hint" aria-live="polite">Waiting for an image and a selected USB port.</p>
+      <p id="post-flash-advice" class="post-flash-advice" role="status" aria-live="polite" hidden></p>
       <p id="image-warning" class="hint" aria-live="polite"></p>
       <details id="firmware-details"><summary>Firmware details</summary>
         <p id="workflow-guidance" class="hint">Step 3 offers a backup by default. Select Skip backup to go straight to step 4; firmware and device checks run automatically before confirmation.<br>Step 4 asks once for supported expansion + final firmware, then completes both automatically. A new USB interface may still need step 1.</p>
@@ -144,6 +145,7 @@ No hardware operations have been performed.</pre><div class="console-input"><lab
     <p id="flash-progress-stage" role="status" aria-live="polite">Starting firmware transfer…</p>
     <p id="flash-progress-file"></p>
     <strong id="flash-progress-warning">Keep this tab open. Do not unplug the radio or turn off power.</strong>
+    <p id="flash-progress-advice" class="post-flash-advice" role="status" aria-live="polite" hidden></p>
     <button id="flash-stop-auto" type="button" class="secondary" hidden>Stop after this write</button>
     <p id="flash-stop-auto-note" class="hint" hidden>Stops later automatic steps, not the current write.</p>
     <p class="hint">100% means the transfer finished. Application startup is verified separately.</p>

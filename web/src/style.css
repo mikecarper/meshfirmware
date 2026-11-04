@@ -225,6 +225,7 @@ dialog p { font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
 #flash-progress-stage { margin: 0 0 8px; font-size: clamp(18px, 2.5vw, 24px); font-weight: 700; line-height: 1.4; }
 #flash-progress-file { margin: 0 0 20px; font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
 #flash-progress-warning { display: block; padding: 16px; border-left: 5px solid #a96708; background: #fff7e8; color: #784908; font-size: clamp(18px, 2.5vw, 24px); line-height: 1.4; overflow-wrap: anywhere; }
+.post-flash-advice { padding: 16px; border-left: 5px solid var(--teal); background: #edf8f6; color: #075e5a; font-size: clamp(18px, 2.5vw, 24px); font-weight: 600; line-height: 1.5; overflow-wrap: anywhere; }
 #flash-stop-auto { margin-top: 16px; }
 #flash-progress-dialog > .hint { margin-top: 14px; font-size: 14px; line-height: 1.6; }
 #flash-progress-log-title { margin: 18px 0 8px; font-size: 13px; font-weight: 750; }

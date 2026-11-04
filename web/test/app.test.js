@@ -28,6 +28,7 @@ import {selectionLink} from '../src/selection-link.js';
 import {backupCoverage} from '../src/backup-coverage.js';
 import {quickSettingPlan,quickHotspotUrl} from '../src/quick-settings.js';
 import {commonCliReplyState} from '../src/common-cli.js';
+import {postFlashBleAdvice} from '../src/post-flash-advice.js';
 import {gzipSync} from 'node:zlib';
 const html=await readFile(new URL('../index.html',import.meta.url),'utf8');
 const source=(await readFile(new URL('../src/app.js',import.meta.url),'utf8')).replace(/^import .*;\r?$/gm,'');
@@ -52,7 +53,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
     fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,parseUsbMode,MigrationApproval,cleanCliReply,assessBootloaderVersion,firmwareFilesLinks,fetch:async()=>{throw Error('Unexpected network request');},fetchFirmwareBytes:(url,options)=>verifiedDownload(url,{...options,mirrorBase:'https://mirror.example.test/firmware/',pageOrigin:'https://mirror.example.test',fetchImpl:(target,init)=>target==='https://mirror.example.test/firmware/index.json'?Promise.resolve({ok:false,status:404}):options.fetchImpl(target,init)}),assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),commonCliRestorePreview:()=>({operations:[],skipped:[],warnings:[]}),restoreCommonCli:async()=>{throw Error('Unexpected CommonCLI restore');},
     backupCoverage,createNextStepScroller,tryNativeUsbFallback,SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
   });
-  context.quickHotspotUrl=quickHotspotUrl;
+  context.quickHotspotUrl=quickHotspotUrl;context.postFlashBleAdvice=postFlashBleAdvice;
   context.detectApplication=(...args)=>context.detectMeshCore(...args);context.detectMeshtasticBoard=detectMeshtasticBoard;
   context.parseBootloaderInfo=parseBootloaderInfo;context.detectBootloaderBoard=detectBootloaderBoard;context.xiaoInstalledStatus=xiaoInstalledStatus;context.xiaoInfoProfile=xiaoInfoProfile;context.xiaoBootloaderItem=xiaoBootloaderItem;context.chooseBootloaderInfoFile=async()=>{calls.push('file-picker');throw Error('Unexpected file chooser');};
   context.selectionLink=selectionLink;context.nrfBoardCandidates=nrfBoardCandidates;
@@ -484,15 +485,121 @@ test('all final firmware-write paths keep DONE open while subsequent workflow st
     ui.context.confirm=async()=>true;
     const onWrite=()=>{assert.equal(dialog.open,true,kind);assert.ok(ui.evaluate('state.flashProgress'),kind);ui.calls.push('write');ui.evaluate("progress(.42,'Writing firmware');");assert.equal(ui.elements.get('flash-progress-percent').textContent,'42%',kind);};
     ui.context.flashNrf=async(_link,actual)=>{onWrite();assert.equal(ui.elements.get('flash-progress-file').textContent,actual.name);};
-    if(kind==='erase'){ui.context.erase=fakePackage({name:'erase.zip',erase:true,destructive:true});ui.evaluate('state.plan.erasePkg=erase;');}
+    if(kind==='erase'){ui.context.erase=fakePackage({name:'erase.zip',sha256:'e'.repeat(64),erase:true,destructive:true});ui.evaluate('state.plan.erasePkg=erase;');}
     if(kind==='esp32')ui.evaluate('state.esp={flash:async()=>onWrite()};');
     if(kind==='esp32')ui.context.onWrite=onWrite;
     if(kind==='uf2'){ui.context.hash=()=>ui.context.pkg.payloadHash;ui.context.drive={getFileHandle:async(name)=>name==='INFO_UF2.TXT'?{getFile:async()=>({text:async()=>'UF2 Bootloader Test'})}:{createWritable:async()=>({write:async()=>onWrite(),close:async()=>assert.equal(dialog.open,true),abort:async()=>{}})}};ui.evaluate('state.directory=drive;state.plan.uf2Info="UF2 Bootloader Test";');}
     await ui.elements.get('flash').onclick();assert.equal(ui.calls.filter(call=>call==='write').length,1,kind);assert.equal(dialog.open,true,kind);assert.equal(ui.elements.get('flash-progress-title').textContent,'DONE',kind);assert.equal(ui.evaluate('state.flashProgress'),null,kind);
+    assert.equal(ui.evaluate('state.flashResult.sha256'),kind==='erase'?ui.context.erase.sha256:ui.context.pkg.sha256,kind);
     if(kind==='erase')assert.equal(ui.evaluate('state.recovery.phase'),'reselect-dfu');
     if(kind==='esp32'||kind==='nrf52')assert.ok(ui.evaluate('state.verification'),kind);
     ui.elements.get('flash-progress-close').onclick();assert.equal(dialog.open,false,kind);
   }
+});
+
+test('successful startup updates only the open DONE window bound to that exact transferred image',async()=>{
+  const ui=await storageVerificationWorkbench('companion','> int:esp32=16384K ext:none; app0*@0x10000+6400K');
+  ui.context.completed=async()=>{};
+  await ui.evaluate("withFlashProgress('exact.bin','Writing firmware',completed,{sha256:expected.sha256,completionAdvice:'Keep the Bluetooth reminder.'});");
+  assert.match(ui.elements.get('flash-progress-stage').textContent,/startup remains unverified/);
+  await ui.evaluate('verifyApplication();');
+  assert.equal(ui.elements.get('flash-progress-dialog').open,true);
+  assert.equal(ui.elements.get('flash-progress-title').textContent,'DONE');
+  assert.equal(ui.elements.get('flash-progress-stage').textContent,'Application startup verified.');
+  assert.match(ui.elements.get('flash-progress-warning').textContent,/transfer and application startup verified/);
+  assert.doesNotMatch(ui.elements.get('flash-progress-warning').textContent,/unverified|separately/);
+  assert.equal(ui.elements.get('flash-progress-advice').textContent,'Keep the Bluetooth reminder.');
+  assert.equal(ui.elements.get('flash-progress-advice').hidden,false);
+  assert.equal(ui.evaluate('state.flashResult.applicationVerified'),true);
+  assert.equal(ui.calls.filter(call=>call==='application-open').length,1);
+});
+
+test('startup proof cannot repaint another image, a failed result, an active write or a closed DONE window',async()=>{
+  for(const scenario of ['different-digest','no-digest','failed','active','closed']){
+    const ui=workbench();await Promise.resolve();ui.context.completed=async()=>{};
+    await ui.evaluate(`withFlashProgress('old.bin','Writing firmware',completed,{sha256:${scenario==='no-digest'?'null':"'a'.repeat(64)"}});`);
+    ui.evaluate(`state.verification={sha256:${scenario==='different-digest'?"'b'.repeat(64)":"'a'.repeat(64)"}};`);
+    if(scenario==='failed')ui.evaluate('state.flashResult.failed=true;');
+    if(scenario==='active')ui.evaluate('state.flashProgress={name:"new.bin"};');
+    if(scenario==='closed')ui.elements.get('flash-progress-dialog').close();
+    const before=['flash-progress-title','flash-progress-stage','flash-progress-warning'].map(id=>ui.elements.get(id).textContent);
+    ui.evaluate('markFlashResultStartupVerified(state.verification);');
+    assert.deepEqual(['flash-progress-title','flash-progress-stage','flash-progress-warning'].map(id=>ui.elements.get(id).textContent),before,scenario);
+    assert.notEqual(ui.evaluate('state.flashResult.applicationVerified'),true,scenario);assert.deepEqual(ui.calls,[],scenario);
+  }
+});
+
+test('failed identity, version and storage checks leave the matching DONE startup state unverified',async()=>{
+  for(const scenario of ['identity','version','storage']){
+    const ui=await storageVerificationWorkbench('companion',scenario==='storage'?'Unknown command':'int:esp32=16384K');
+    ui.context.completed=async()=>{};await ui.evaluate("withFlashProgress('exact.bin','Writing firmware',completed,{sha256:expected.sha256});");
+    if(scenario==='identity')ui.context.detectMeshCore=async()=>({role:'companion',model:ui.context.expected.model,publicKey:'22'.repeat(32),protocol:14});
+    if(scenario==='version')ui.context.expected.version='v1.18.0.2';
+    await assert.rejects(ui.evaluate('verifyApplication();'),/identity differs|version does not match|storage-layout verification/);
+    assert.match(ui.elements.get('flash-progress-stage').textContent,/startup remains unverified/,scenario);
+    assert.notEqual(ui.evaluate('state.flashResult.applicationVerified'),true,scenario);
+    assert.ok(ui.evaluate('state.verification'),scenario);assert.equal(ui.elements.get('flash-progress-dialog').open,true,scenario);
+  }
+});
+
+test('automatic same-port startup verification updates the matching DONE window without closing it',async()=>{
+  const ui=await automaticStartupWorkbench();ui.context.completed=async()=>{};
+  await ui.evaluate("withFlashProgress(pkg.name,'Writing firmware',completed,{sha256:pkg.sha256});");
+  ui.serialEvents.connect({port:ui.appPort});await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.elements.get('flash-progress-dialog').open,true);
+  assert.equal(ui.elements.get('flash-progress-stage').textContent,'Application startup verified.');
+  assert.equal(ui.evaluate('state.flashResult.applicationVerified'),true);
+  assert.deepEqual(ui.calls,['application-open','detect','ver','application-close']);
+});
+
+test('a later optional-step error does not contradict the same image’s already verified startup in DONE',async()=>{
+  const ui=await storageVerificationWorkbench('companion','int:esp32=16384K');ui.context.completed=async()=>{};
+  await ui.evaluate("withFlashProgress('exact.bin','Writing firmware',completed,{sha256:expected.sha256});");
+  await ui.evaluate("operation(async()=>{await verifyApplication();throw Error('Optional follow-up unavailable');});");
+  assert.equal(ui.elements.get('flash-progress-dialog').open,true);assert.equal(ui.elements.get('flash-progress-title').textContent,'DONE — check required');
+  assert.match(ui.elements.get('flash-progress-stage').textContent,/startup verified.*later step stopped/);
+  assert.match(ui.elements.get('flash-progress-warning').textContent,/Optional follow-up unavailable.*startup was already verified/);
+  assert.doesNotMatch(ui.elements.get('flash-progress-warning').textContent,/does not prove application startup/);
+  assert.equal(ui.evaluate('state.finishedFirmware.verified'),true);
+});
+
+test('T1000-E Bluetooth reminder appears only after the final application succeeds and survives closing DONE',async()=>{
+  const ui=workbench();await Promise.resolve();serialMock(ui);ui.context.selectedPort=ui.port;
+  ui.context.pkg=fakePackage({name:'t1000e_companion_radio_full-v1.18.0.1-keymind-cascade.zip'});
+  ui.evaluate('state.port=selectedPort;state.pkg=pkg;state.plan={generation:state.generation,port:selectedPort,sha256:pkg.sha256};');
+  let finish;ui.context.confirm=async()=>true;ui.context.flashNrf=()=>new Promise(resolve=>{finish=resolve;});
+  const pending=ui.elements.get('flash').onclick();
+  for(let i=0;i<10&&!finish;i++)await Promise.resolve();
+  assert.ok(finish);assert.equal(ui.elements.get('flash-progress-advice').hidden,true);assert.equal(ui.elements.get('post-flash-advice').hidden,true);
+  assert.match(ui.elements.get('flash-progress-warning').textContent,/Do not unplug/);
+  finish();await pending;
+  assert.equal(ui.elements.get('flash-progress-dialog').scrollTop,0);
+  for(const id of ['flash-progress-advice','post-flash-advice']){assert.equal(ui.elements.get(id).hidden,false);assert.match(ui.elements.get(id).textContent,/Finish any USB verification, then unplug USB/);}
+  assert.ok(ui.evaluate('state.verification.completionAdvice'));assert.match(ui.elements.get('log').textContent,/Bluetooth \(BLE\) stays off/);
+  ui.elements.get('flash-progress-close').onclick();assert.equal(ui.elements.get('post-flash-advice').hidden,false);
+  ui.evaluate('state.finishedFirmware={...state.finishedFirmware,verified:true};clearVerification();controls();');assert.equal(ui.elements.get('post-flash-advice').hidden,false);
+  ui.evaluate('state.finishedFirmware=null;controls();');assert.equal(ui.elements.get('post-flash-advice').hidden,true);
+  assert.deepEqual(ui.calls,['open','close']);
+});
+
+test('T1000-E completion advice is absent on failed writes and during the erase stage',async()=>{
+  for(const scenario of ['failed','erase','bootloader']){
+    const ui=workbench();await Promise.resolve();serialMock(ui);ui.context.selectedPort=ui.port;
+    ui.context.pkg=fakePackage({name:'t1000e_companion_radio_full-v1.18.0.1-keymind-cascade.zip',...(scenario==='bootloader'?{kind:'bootloader',destructive:true}:{})});
+    ui.evaluate('state.port=selectedPort;state.pkg=pkg;state.plan={generation:state.generation,port:selectedPort,sha256:pkg.sha256};');
+    if(scenario==='erase'){ui.context.erase=fakePackage({name:'erase.zip',erase:true});ui.evaluate('state.plan.erasePkg=erase;');}
+    ui.context.confirm=async()=>true;ui.context.flashNrf=async()=>{if(scenario==='failed')throw Error('Transfer interrupted');};await ui.elements.get('flash').onclick();
+    assert.equal(ui.elements.get('flash-progress-advice').hidden,true,scenario);assert.equal(ui.elements.get('post-flash-advice').hidden,true,scenario);
+    assert.doesNotMatch(ui.elements.get('log').textContent,/then unplug USB/,scenario);assert.deepEqual(ui.calls,['open','close'],scenario);
+  }
+});
+
+test('a returning startup reminder retains Bluetooth advice without changing ports or settings',async()=>{
+  const completionAdvice=postFlashBleAdvice(fakePackage({name:'t1000e_companion_radio_ble-v1.18.0.1-keymind-cascade.zip'}));
+  const ui=workbench({verification:{sha256:'a'.repeat(64),architecture:'nrf52',completionAdvice}});await Promise.resolve();
+  assert.equal(ui.elements.get('post-flash-advice').textContent,completionAdvice);assert.equal(ui.elements.get('post-flash-advice').hidden,false);assert.deepEqual(ui.calls,[]);
+  ui.context.completed=async()=>{};await ui.evaluate("withFlashProgress('new-device.bin','Writing firmware',completed);");
+  assert.equal(ui.elements.get('flash-progress-advice').hidden,true);
 });
 
 test('same-device and flash confirmations use enabled action buttons without typing',async()=>{
@@ -1244,6 +1351,42 @@ test('cancelling the first-awaited USB chooser preserves the existing board firm
   assert.equal(ui.elements.get('hardware').value,'Heltec v4');assert.equal(ui.elements.get('artifact').value,'0');assert.equal(ui.elements.get('automatic-summary').textContent,'Existing chosen V4 firmware');assert.equal(ui.evaluate('state.manualSelections.hardware'),'Heltec v4');assert.deepEqual(ui.calls,['chooser']);
 });
 
+test('explicit USB chooser cancellation is informational and preserves pending workflow without automatically resuming it',async()=>{
+  for(const message of ['No port selected by the user','No port selected by the user.',"Failed to execute 'requestPort' on 'Serial': No port selected by the user."]){
+    const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage();
+    ui.evaluate('state.port=selectedPort;state.pkg=pkg;state.device={model:"Existing radio"};state.plan={written:true};state.backupApproved={port:selectedPort};state.verification={sha256:pkg.sha256};');
+    const before=['port','pkg','device','plan','backupApproved','verification','generation'].map(field=>ui.evaluate('state.'+field));
+    ui.context.requestAutomaticVerification=()=>assert.fail('Chooser cancellation must not resume hardware work');
+    ui.context.navigator.serial.requestPort=async()=>{ui.calls.push('chooser');const error=Error(message);error.name='NotFoundError';throw error;};
+    await ui.elements.get('select-port').onclick();
+    assert.deepEqual(['port','pkg','device','plan','backupApproved','verification','generation'].map(field=>ui.evaluate('state.'+field)),before);
+    assert.match(ui.elements.get('notice').textContent,/USB selection cancelled.*unchanged/);assert.equal(ui.elements.get('notice').classList.contains('error'),false);
+    assert.match(ui.elements.get('log').textContent,/cancelled by the user/);assert.doesNotMatch(ui.elements.get('log').textContent,/Stopped:/);assert.deepEqual(ui.calls,['chooser']);
+  }
+});
+
+test('permission, transport and non-cancellation NotFound errors from USB selection remain visible errors',async()=>{
+  for(const [name,message] of [['NotAllowedError','Access denied'],['SecurityError','No port selected by the user.'],['NetworkError','Serial device disconnected'],['NotFoundError','Device no longer available'],['Error','No port selected by the user.']]){
+    const ui=workbench();await Promise.resolve();ui.context.navigator.serial.requestPort=async()=>{ui.calls.push('chooser');const error=Error(message);error.name=name;throw error;};
+    await ui.elements.get('select-port').onclick();assert.equal(ui.elements.get('notice').textContent,message,name);
+    assert.equal(ui.elements.get('notice').classList.contains('error'),true,name);assert.match(ui.elements.get('log').textContent,/Stopped:/,name);assert.deepEqual(ui.calls,['chooser'],name);
+  }
+});
+
+test('nRF52 preparation replaces stale reconnect guidance with the ready step 4 action',async()=>{
+  for(const wipe of [false,true]){
+    const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0057});ui.context.pkg=fakePackage();ui.context.erase=fakePackage({name:'erase.zip',erase:true,destructive:true});
+    ui.evaluate('state.port=selectedPort;state.pkg=pkg;$("transport-mode").value="nrf52";progress(0,"USB handoff requested. Step 1: select the same radio.");');
+    if(wipe)ui.evaluate('state.installMode="install";$("flash-action").value="wipe";');
+    ui.context.ensureBackup=async()=>ui.calls.push('backup-considered');ui.context.erasePackage=async()=>ui.context.erase;
+    await ui.elements.get('prepare').onclick();
+    assert.match(ui.elements.get('progress-label').textContent,/DFU ready\. Step 4: Review & flash/);
+    assert.doesNotMatch(ui.elements.get('progress-label').textContent,/handoff requested|Step 1/);assert.equal(ui.elements.get('progress').value,0);
+    assert.ok(ui.evaluate('state.plan'));assert.deepEqual(nextHighlight(ui),['flash']);assert.deepEqual(ui.calls,['backup-considered']);
+    if(wipe)assert.equal(ui.evaluate('state.plan.erasePkg'),ui.context.erase);
+  }
+});
+
 test('handoff recovery migration and verification re-selection retain the exact in-progress firmware image',async()=>{
   for(const mode of ['handoff','recovery','migration','espRecovery','verification']){
     const ui=workbench({productionDefaults:true});await Promise.resolve();
@@ -1617,6 +1760,27 @@ test('explicit nRF52 Enter USB bootloader uses the considered backup without a r
   ui.context.ensureBackup=async()=>ui.calls.push('backup-considered');ui.context.confirm=async()=>{throw Error('Explicit DFU action must not ask for another typed confirmation');};
   ui.context.touch1200=async(port,mode)=>{assert.equal(port,ui.port);assert.equal(mode,'nrf52');ui.calls.push('enter-dfu');};
   await ui.elements.get('touch').onclick();assert.deepEqual(ui.calls,['backup-considered','enter-dfu']);assert.equal(ui.evaluate('state.port'),null);assert.equal(ui.evaluate('state.handoff'),true);assert.equal(ui.evaluate('state.plan'),null);
+});
+
+test('an interrupted final nRF52 reset request guides DFU selection instead of reporting a flash error',async()=>{
+  for(const action of ['prepare','touch'])for(const disconnected of [false,true]){
+    const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage();
+    ui.evaluate('state.port=selectedPort;state.pkg=pkg;state.device={model:"Seeed Tracker T1000-E",role:"companion"};');ui.elements.get('transport-mode').value='nrf52';
+    ui.context.ensureBackup=async()=>ui.calls.push('backup-considered');
+    ui.context.touch1200=async(port,kind)=>{assert.equal(port,ui.port);assert.equal(kind,'nrf52');ui.calls.push('enter-dfu');if(disconnected)ui.serialEvents.disconnect({port:ui.port});throw Object.assign(Error('Failed to set control signals.'),{name:'NetworkError',nrf52HandoffPending:true});};
+    await ui.elements.get(action).onclick();
+    assert.equal(ui.evaluate('state.port'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.handoff'),true);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);
+    assert.match(ui.elements.get('notice').textContent,/SAME radio.*DFU serial port/);assert.doesNotMatch(ui.elements.get('notice').textContent,/Failed|Stopped/);
+    assert.match(ui.elements.get('progress-label').textContent,/Step 1.*same radio.*DFU/);assert.deepEqual(nextHighlight(ui),['select-port']);assert.deepEqual(ui.calls,['backup-considered','enter-dfu']);
+  }
+});
+
+test('nRF52 open, permission and early reset failures remain errors and never pretend DFU was requested',async()=>{
+  for(const action of ['prepare','touch'])for(const name of ['NotAllowedError','SecurityError','NetworkError','Error']){
+    const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage();ui.evaluate('state.port=selectedPort;state.pkg=pkg;');ui.elements.get('transport-mode').value='nrf52';
+    ui.context.ensureBackup=async()=>{};ui.context.touch1200=async()=>{ui.calls.push('reset-attempt');throw Object.assign(Error('Original failure before final DTR'),{name});};
+    await ui.elements.get(action).onclick();assert.equal(ui.evaluate('state.handoff'),false);assert.equal(ui.evaluate('state.port'),ui.port);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);assert.match(ui.elements.get('notice').textContent,/Original failure/);assert.deepEqual(ui.calls,['reset-attempt']);
+  }
 });
 
 test('uncaptured-values summary belongs to its active popup only and never leaks into a generic question',async()=>{
