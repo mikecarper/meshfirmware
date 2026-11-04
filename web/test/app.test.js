@@ -1755,6 +1755,147 @@ test('nRF52 backup Continue enters DFU once without another typed prompt and Sto
   }
 });
 
+async function queuedNrfPreparationWorkbench({action='prepare',wipe=false,disconnect=false,interrupted=false}={}){
+  const ui=await backupJsonWorkbench(),dfuPort={getInfo:()=>({usbVendorId:0x2886,usbProductId:0x0057})};
+  ui.port.getInfo=()=>({usbVendorId:0x239a,usbProductId:0x8029});ui.context.pkg=fakePackage();
+  ui.evaluate('state.pkg=pkg;state.device={role:"companion",model:"Seeed Tracker T1000-E",architecture:"nrf52",publicKey:"11".repeat(32)};');
+  ui.elements.get('auto-backup').checked=true;ui.elements.get('transport-mode').value='nrf52';
+  if(wipe)ui.evaluate('state.installMode="install";syncInstallMode();');
+  ui.context.choose=async title=>{assert.equal(title,'Backup JSON');ui.calls.push('backup-popup');return 'continue';};
+  ui.context.confirm=async(_title,_detail,_warning,token)=>{assert.equal(token,'SAME DEVICE');ui.calls.push('confirm:'+token);return true;};
+  ui.context.touch1200=async(port,kind)=>{
+    assert.equal(port,ui.port);assert.equal(kind,'nrf52');ui.calls.push('enter-dfu');
+    if(disconnect)ui.serialEvents.disconnect({port:ui.port});
+    if(interrupted)throw Object.assign(Error('Final control request interrupted'),{name:'NetworkError',nrf52HandoffPending:true});
+  };
+  ui.context.flashNrf=async()=>assert.fail('DFU selection/preparation cannot flash firmware');
+  ui.context.navigator.serial.requestPort=async()=>{ui.calls.push('chooser');return dfuPort;};
+  await ui.elements.get(action).onclick();
+  return {...ui,dfuPort};
+}
+
+test('the second DFU selection finishes a queued preparation automatically without repeating backup or starting a write',async()=>{
+  for(const options of [{},{disconnect:true},{interrupted:true},{disconnect:true,interrupted:true}]){
+    const ui=await queuedNrfPreparationWorkbench(options),queued=ui.evaluate('state.nrfPrepareResume'),approval=ui.evaluate('state.backupApproved');
+    assert.ok(queued);assert.ok(Object.isFrozen(queued));assert.equal(queued.pkg,ui.context.pkg);assert.equal(queued.sha256,ui.context.pkg.sha256);assert.equal(queued.approval,approval);assert.equal(queued.port,ui.port);assert.equal(queued.installMode,'update');
+    assert.equal(ui.elements.get('prepare').disabled,true);assert.equal(ui.elements.get('flash').disabled,true);assert.equal(ui.elements.get('prepare-label').textContent,'Backup & prepare update (DFU)');
+    assert.equal(ui.evaluate('state.plan'),null);assert.match(ui.elements.get('step-guidance').textContent,/preparation finishes automatically/i);
+    const before=[...ui.calls];await ui.elements.get('select-port').onclick();
+    assert.deepEqual(ui.calls,[...before,'chooser','confirm:SAME DEVICE']);assert.equal(ui.calls.filter(call=>call==='capture-backup').length,1);assert.equal(ui.calls.filter(call=>call==='enter-dfu').length,1);assert.equal(ui.downloads.length,1);
+    assert.equal(ui.evaluate('state.nrfPrepareResume'),null);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);assert.equal(ui.evaluate('state.plan.port'),ui.dfuPort);assert.equal(ui.evaluate('state.plan.sha256'),ui.context.pkg.sha256);assert.equal(ui.evaluate('state.plan.installMode'),'update');assert.equal(ui.evaluate('state.plan.generation'),ui.evaluate('state.generation'));
+    assert.equal(ui.evaluate('state.backupApproved.port'),ui.dfuPort);assert.equal(ui.evaluate('state.backupApproved.sha256'),ui.context.pkg.sha256);assert.equal(ui.elements.get('prepare').disabled,true);assert.equal(ui.elements.get('flash').disabled,false);assert.deepEqual(nextHighlight(ui),['flash']);
+    assert.match(ui.elements.get('progress-label').textContent,/DFU ready\. Step 4/);assert.ok(!ui.calls.includes('confirm:FLASH'));assert.ok(ui.stored.every(([key])=>!/nrf.*prepar/i.test(key)));
+  }
+});
+
+test('automatic DFU preparation still requires a new final step 4 confirmation before opening or writing DFU',async()=>{
+  const ui=await queuedNrfPreparationWorkbench();await ui.elements.get('select-port').onclick();const before=[...ui.calls];
+  ui.context.confirm=async(_title,_detail,_warning,token)=>{assert.equal(token,'FLASH');ui.calls.push('confirm:FLASH');return false;};
+  await ui.elements.get('flash').onclick();assert.deepEqual(ui.calls,[...before,'confirm:FLASH']);assert.ok(ui.evaluate('state.plan'));assert.equal(ui.evaluate('state.verification'),null);
+  ui.context.confirm=async(_title,_detail,_warning,token)=>{assert.equal(token,'FLASH');ui.calls.push('confirm:FLASH');return true;};ui.context.flashNrf=async(_link,pkg)=>{assert.equal(pkg,ui.context.pkg);ui.calls.push('write-final');};
+  await ui.elements.get('flash').onclick();assert.deepEqual(ui.calls.slice(before.length),['confirm:FLASH','confirm:FLASH','open','write-final','close']);assert.equal(ui.calls.filter(call=>call==='enter-dfu').length,1);assert.equal(ui.evaluate('state.verification.sha256'),ui.context.pkg.sha256);
+});
+
+test('manual nRF52 Touch and generic remembered handoffs cannot create automatic preparation permission',async()=>{
+  const manual=await queuedNrfPreparationWorkbench({action:'touch'});assert.equal(manual.evaluate('state.nrfPrepareResume'),null);const before=[...manual.calls];await manual.elements.get('select-port').onclick();
+  assert.equal(manual.evaluate('state.plan'),null);assert.deepEqual(manual.calls,[...before,'chooser','confirm:SAME DEVICE']);assert.equal(manual.calls.filter(call=>call==='enter-dfu').length,1);
+  const generic=workbench();await Promise.resolve();generic.context.selectedPort=generic.port;generic.context.pkg=fakePackage();generic.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0057});
+  generic.evaluate('state.pkg=pkg;state.handoff=true;state.backupApproved={sha256:pkg.sha256,port:{},publicKey:"11".repeat(32)};');generic.context.confirm=async()=>{generic.calls.push('same-device');return true;};generic.context.prepareSelectedFirmware=async()=>assert.fail('An old handoff is not queued preparation');
+  await generic.elements.get('select-port').onclick();assert.equal(generic.evaluate('state.plan'),null);assert.equal(generic.evaluate('state.nrfPrepareResume'),null);assert.deepEqual(generic.calls,['chooser','same-device']);
+});
+
+test('queued DFU preparation is bound to the exact package object, digest, mode and original backup approval',async()=>{
+  for(const change of ['package-object','digest','mode','approval-object','approval-digest','approval-port','approval-public-key','approval-skipped','approval-source']){
+    const ui=await queuedNrfPreparationWorkbench();
+    if(change==='package-object'){ui.context.replacement=fakePackage();ui.evaluate('state.pkg=replacement;');}
+    if(change==='digest')ui.evaluate('state.pkg.sha256="c".repeat(64);');
+    if(change==='mode')ui.evaluate('state.installMode="install";');
+    if(change==='approval-object')ui.evaluate('state.backupApproved={...state.backupApproved};');
+    if(change==='approval-digest')ui.evaluate('state.backupApproved.sha256="c".repeat(64);');
+    if(change==='approval-port')ui.evaluate('state.backupApproved.port={};');
+    if(change==='approval-public-key')ui.evaluate('state.backupApproved.publicKey="22".repeat(32);');
+    if(change==='approval-skipped')ui.evaluate('state.backupApproved.skipped=true;');
+    if(change==='approval-source')ui.evaluate('state.backupApproved.sourceFirmware="meshtastic";');
+    const before=[...ui.calls];await ui.elements.get('select-port').onclick();
+    assert.equal(ui.evaluate('state.nrfPrepareResume'),null,change);assert.equal(ui.evaluate('state.plan'),null,change);assert.equal(ui.evaluate('state.backupApproved'),null,change);assert.deepEqual(ui.calls,[...before,'chooser','confirm:SAME DEVICE'],change);assert.match(ui.elements.get('notice').textContent,/changed during USB handoff/i,change);
+  }
+});
+
+test('manual connection or backup overrides cancel queued DFU preparation without sending another reset',async()=>{
+  for(const id of ['transport-mode','skip-backup','already-bootloader']){
+    const ui=await queuedNrfPreparationWorkbench(),before=[...ui.calls];
+    if(id==='transport-mode')ui.elements.get(id).value='nrf52';else ui.elements.get(id).checked=true;
+    await ui.elements.get(id).onchange();
+    assert.equal(ui.evaluate('state.nrfPrepareResume'),null,id);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg,id);assert.equal(ui.evaluate('state.plan'),null,id);assert.deepEqual(ui.calls,before,id);
+  }
+});
+
+test('an unrecognized DFU interface can be explicitly marked as bootloader and then prepared manually without a second reset',async()=>{
+  const ui=await queuedNrfPreparationWorkbench(),unknownPort={getInfo:()=>({usbVendorId:0x1209,usbProductId:0x0001})};
+  ui.context.navigator.serial.requestPort=async()=>{ui.calls.push('unknown-port-chooser');return unknownPort;};await ui.elements.get('select-port').onclick();assert.ok(ui.evaluate('state.nrfPrepareResume'));
+  const before=[...ui.calls];ui.elements.get('already-bootloader').checked=true;await ui.elements.get('already-bootloader').onchange();assert.equal(ui.evaluate('state.nrfPrepareResume'),null);assert.deepEqual(ui.calls,before);assert.match(ui.elements.get('notice').textContent,/Manual bootloader selection accepted.*without another reset/);
+  ui.context.choose=async(_title,_detail,buttons)=>{assert.ok(buttons.some(([value])=>value==='skip'));ui.calls.push('explicit-backup-decision');return 'skip';};
+  await ui.elements.get('prepare').onclick();assert.equal(ui.evaluate('state.plan.port'),unknownPort);assert.equal(ui.calls.filter(call=>call==='enter-dfu').length,1);assert.equal(ui.calls.filter(call=>call==='capture-backup').length,1);assert.deepEqual(nextHighlight(ui),['flash']);assert.ok(!ui.calls.some(call=>call.startsWith('write-')));
+});
+
+test('choosing an application or unknown port during queued DFU preparation cannot send a second reset',async()=>{
+  for(const wrongPortKind of ['application','unknown']){
+    const ui=await queuedNrfPreparationWorkbench(),queued=ui.evaluate('state.nrfPrepareResume'),approval=ui.evaluate('state.backupApproved');
+    const wrongPort=wrongPortKind==='application'?ui.port:{getInfo:()=>({usbVendorId:0x1209,usbProductId:0x0001})};
+    ui.context.navigator.serial.requestPort=async()=>{ui.calls.push('wrong-port-chooser');return wrongPort;};const before=[...ui.calls];
+    await ui.elements.get('select-port').onclick();assert.equal(ui.evaluate('state.nrfPrepareResume'),queued);assert.equal(ui.evaluate('state.backupApproved'),approval);assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls,[...before,'wrong-port-chooser','confirm:SAME DEVICE']);assert.deepEqual(nextHighlight(ui),['select-port']);assert.match(ui.elements.get('notice').textContent,/not a recognized DFU port.*No second reset/);
+    ui.context.navigator.serial.requestPort=async()=>{ui.calls.push('correct-port-chooser');return ui.dfuPort;};await ui.elements.get('select-port').onclick();
+    assert.equal(ui.evaluate('state.nrfPrepareResume'),null);assert.equal(ui.evaluate('state.plan.port'),ui.dfuPort);assert.equal(ui.calls.filter(call=>call==='capture-backup').length,1);assert.equal(ui.calls.filter(call=>call==='enter-dfu').length,1);assert.deepEqual(nextHighlight(ui),['flash']);
+  }
+});
+
+test('cancelling the DFU chooser preserves its queued preparation, while declining same-radio confirmation consumes no write permission',async()=>{
+  const ui=await queuedNrfPreparationWorkbench(),queued=ui.evaluate('state.nrfPrepareResume'),approval=ui.evaluate('state.backupApproved');
+  ui.context.navigator.serial.requestPort=async()=>{ui.calls.push('cancelled-chooser');throw Object.assign(Error('No port selected by the user.'),{name:'NotFoundError'});};const before=[...ui.calls];
+  await ui.elements.get('select-port').onclick();assert.equal(ui.evaluate('state.nrfPrepareResume'),queued);assert.equal(ui.evaluate('state.backupApproved'),approval);assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls,[...before,'cancelled-chooser']);
+  ui.context.navigator.serial.requestPort=async()=>{ui.calls.push('chooser');return ui.dfuPort;};ui.context.confirm=async()=>{ui.calls.push('decline-same-device');return false;};
+  await ui.elements.get('select-port').onclick();assert.equal(ui.evaluate('state.nrfPrepareResume'),null);assert.equal(ui.evaluate('state.port'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.calls.filter(call=>call==='enter-dfu').length,1);assert.match(ui.elements.get('notice').textContent,/confirmation cancelled/);
+});
+
+test('a disconnect or newly protected flow during same-device confirmation stops queued preparation before reset or write',async()=>{
+  for(const change of ['disconnect','generation','package','verification','migration']){
+    const ui=await queuedNrfPreparationWorkbench();let finish;
+    ui.context.confirm=async()=>{ui.calls.push('pending-same-device');return new Promise(resolve=>{finish=resolve;});};
+    const pending=ui.elements.get('select-port').onclick();for(let i=0;i<10&&!finish;i++)await Promise.resolve();assert.ok(finish,change);
+    if(change==='disconnect')ui.serialEvents.disconnect({port:ui.dfuPort});
+    if(change==='generation')ui.evaluate('state.generation++;');
+    if(change==='package'){ui.context.replacement=fakePackage({sha256:'c'.repeat(64)});ui.evaluate('state.pkg=replacement;');}
+    if(change==='verification')ui.evaluate('state.verification={sha256:pkg.sha256};');
+    if(change==='migration')ui.evaluate('state.migration={};');
+    finish(true);await pending;
+    assert.equal(ui.evaluate('state.nrfPrepareResume'),null,change);assert.equal(ui.evaluate('state.plan'),null,change);assert.equal(ui.calls.filter(call=>call==='enter-dfu').length,1,change);assert.ok(ui.calls.every(call=>!call.startsWith('write')),change);
+  }
+});
+
+test('queued Install preparation validates erase files but preserves separate erase consent and final-image reselection',async()=>{
+  const ui=await queuedNrfPreparationWorkbench({wipe:true});ui.context.erase=fakePackage({name:'erase.zip',erase:true,destructive:true});ui.context.erasePackage=async()=>{ui.calls.push('validate-erase');return ui.context.erase;};
+  const before=[...ui.calls];await ui.elements.get('select-port').onclick();assert.deepEqual(ui.calls,[...before,'chooser','confirm:SAME DEVICE','validate-erase']);assert.equal(ui.evaluate('state.plan.erasePkg'),ui.context.erase);assert.equal(ui.evaluate('state.plan.installMode'),'install');assert.deepEqual(nextHighlight(ui),['flash']);
+  ui.context.confirm=async(_title,_detail,_warning,token)=>{assert.equal(token,'WIPE WITHOUT BACKUP');ui.calls.push('confirm:'+token);return false;};await ui.elements.get('flash').onclick();assert.ok(ui.evaluate('state.plan'));assert.ok(!ui.calls.some(call=>call.startsWith('write-')));
+  ui.context.confirm=async()=>true;ui.context.flashNrf=async(_link,pkg)=>{assert.equal(pkg,ui.context.erase);ui.calls.push('write-erase');};await ui.elements.get('flash').onclick();
+  assert.equal(ui.evaluate('state.recovery.phase'),'reselect-dfu');assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.port'),null);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);assert.deepEqual(ui.calls.filter(call=>call.startsWith('write-')),['write-erase']);assert.equal(ui.calls.filter(call=>call==='enter-dfu').length,1);
+});
+
+test('queued preparation is not restored from storage and invalidating firmware removes its one-time continuation',async()=>{
+  const ui=await queuedNrfPreparationWorkbench();assert.ok(ui.evaluate('state.nrfPrepareResume'));ui.evaluate('invalidateFirmwareSelection();');assert.equal(ui.evaluate('state.nrfPrepareResume'),null);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);
+  const fresh=workbench();await Promise.resolve();assert.equal(fresh.evaluate('state.nrfPrepareResume'),null);assert.deepEqual(fresh.calls,[]);
+});
+
+test('prepare labels mention DFU only for an nRF52 image or connection and retain update or install wording',async()=>{
+  for(const mode of ['update','install'])for(const connection of ['nrf52-application','nrf52-dfu','nrf52-package','esp32']){
+    const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.evaluate(`state.port=selectedPort;state.installMode='${mode}';`);
+    if(connection==='nrf52-dfu')ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0057});
+    else if(connection==='nrf52-package'){ui.context.pkg=fakePackage();ui.evaluate('state.port=null;state.pkg=pkg;');}
+    else ui.evaluate(`state.device={architecture:'${connection==='esp32'?'esp32':'nrf52'}'};`);
+    ui.evaluate('controls();');
+    const suffix=connection==='esp32'?'':' (DFU)';assert.equal(ui.elements.get('prepare-label').textContent,`Backup & prepare ${mode}${suffix}`,connection+' '+mode);assert.equal(ui.elements.get('prepare').getAttribute('aria-label'),`Step 3: Backup and prepare ${mode}${suffix}`,connection+' '+mode);assert.deepEqual(ui.calls,[]);
+  }
+});
+
 test('explicit nRF52 Enter USB bootloader uses the considered backup without a repeated typed entry prompt',async()=>{
   const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.evaluate('state.port=selectedPort;');ui.elements.get('transport-mode').value='nrf52';
   ui.context.ensureBackup=async()=>ui.calls.push('backup-considered');ui.context.confirm=async()=>{throw Error('Explicit DFU action must not ask for another typed confirmation');};
