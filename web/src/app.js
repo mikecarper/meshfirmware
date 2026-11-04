@@ -48,6 +48,9 @@ state.nextActionElement=null;state.nextDialogAction=null;state.finishedFirmware=
 state.flashProgress=null;
 state.flashResult=null;
 state.knownApplicationPort=null;state.autoVerifyAttempt=null;state.autoVerificationRunning=false;
+// This is backup intent only, never permission to reset, flash or substitute a
+// USB-ID lookalike. It deliberately does not survive a page reload.
+state.backupApplicationRequest=null;
 state.connectionTrial=null;
 state.restorePreview=null;
 state.bootloaderInfo=null;state.applicationProbeFailed=false;
@@ -321,7 +324,7 @@ async function startNewRadio(){
   const provider=state.manualSelections.provider;
   clearBootloaderInfoEvidence();state.applicationProbeFailed=false;
   state.verification=null;state.port=null;state.handoff=false;state.device=null;state.detectedHardware=null;state.boardDetected=false;state.connection=null;state.connectionTrial=null;
-  state.knownApplicationPort=null;state.autoVerifyAttempt=null;state.backup=null;state.backupApproved=null;state.recoveryManual=false;state.recoveryDetectionRequested=false;state.manualSelections=provider?{provider}:{};
+  state.knownApplicationPort=null;state.autoVerifyAttempt=null;state.backupApplicationRequest=null;state.backup=null;state.backupApproved=null;state.recoveryManual=false;state.recoveryDetectionRequested=false;state.manualSelections=provider?{provider}:{};
   clearBackupJson();invalidateFirmwareSelection();state.installMode='update';installModeSource=null;$('transport-mode').value='auto';$('already-bootloader').checked=false;$('skip-backup').checked=false;$('show-all-nrf').checked=false;
   for(const id of ['expected-sha','expert-offset','firmware-file','custom-url'])$(id).value='';
   $('device-name').textContent='No USB port selected';$('device-meta').textContent='Choose the next radio’s USB port. Board and role are detected after connecting.';$('port-status').textContent='Not connected';
@@ -342,6 +345,7 @@ function setNextAction(element=null){
 }
 function nextFlasherControl(){
   if(state.busy)return null;
+  if(state.backupApplicationRequest)return 'select-backup-application';
   if(state.migrationApproval)return !state.port&&['waiting-rom','waiting-application'].includes(state.migrationApproval.phase)?'select-port':null;
   if(state.plan?.written)return state.esp?'finish':null;
   if(canStartNewRadio())return 'start-new-radio';
@@ -377,6 +381,7 @@ function updateNextAction(){
   if(id==='load-bootloader')revealPanel('bootloader-options');
   if(id==='load-entry'||id==='archive-entry')revealPanel('archive-picker');
   const messages={hardware:'Step 2: Choose the exact hardware for this radio.',role:'Step 2: Choose the firmware role.',artifact:'Step 2.5: Choose a firmware build to continue.',finish:'Next: Reset verified ESP32 to start the firmware that was written. Keep USB and power connected.','verify-app':'Step 5: Verify running application to check startup without flashing again.','wait-migration':'Next: Wait for UART migration to verify it has settled. Do not reset an active bridge.','load-entry':'Next: Load this archive entry for the exact board, then continue preparation.','archive-entry':'Next: Choose the exact board image from this release ZIP.','expert-offset':'Next: Enter the documented flash offset for this component. No offset is guessed.','transport-mode':'Next: Choose the correct bootloader connection method; automatic detection was ambiguous.'};
+  if(id==='select-backup-application')$('step-guidance').textContent='Restart the radio, then choose its application USB port to back up. No firmware is written by this step.';
   if(messages[id])$('step-guidance').textContent=messages[id];
   if(id==='select-port'&&isBootloaderInfo()&&!state.verification)$('step-guidance').textContent='Next: select this same radio’s DFU serial port. INFO_UF2.TXT does not prove the current port is in DFU. For an unlisted bootloader, explicitly check Already in ROM/DFU.';
   if(id==='select-port'&&state.finishedFirmware?.verified&&!state.verification)$('step-guidance').textContent='Firmware startup verified. Next: Flash a new device — choose its USB port.';
@@ -395,12 +400,14 @@ function controls() {
   $('hardware-filter-status').textContent=!nrf?'':$('show-all-nrf').checked?'Showing all nRF52 boards. Confirm the physical hardware before flashing.':candidates.candidates.length?candidates.source==='identified-hardware'?'Showing the previously identified nRF52 hardware.':`Showing ${candidates.candidates.length} matching nRF52 board candidates. The USB bootloader identity may be shared; choose the physical board.`:'Showing nRF52 boards only. The exact hardware has not been identified.';
   document.querySelectorAll('[data-lock]').forEach(el => { el.disabled = state.busy; });
   $('show-all-nrf').disabled ||= continuingDeviceFlow()||!!state.plan?.written;
+  $('backup-application-help').hidden=!state.backupApplicationRequest;
   syncSelectionLink();
   updateBootloaderInfoPanel();
   $('select-port').disabled ||= !('serial' in navigator);
   $('prepare').hidden=isMeshtasticMigration();$('skip-backup-option').hidden=isMeshtasticMigration();
   $('prepare').disabled ||= !!completedFirmwareSelection() || !!state.plan?.written || directFlashSelected() || (!state.pkg&&!$('artifact').value) || (!state.port && state.pkg?.architecture !== 'uf2');
   $('flash').disabled ||= !!completedFirmwareSelection() || (!state.plan&&!canPrepareWithoutBackup()) || state.recovery?.phase==='reselect-dfu'||!!state.plan?.written;
+  if(state.backupApplicationRequest)for(const id of ['prepare','flash','touch'])$(id).disabled=true;
   $('skip-backup').disabled ||= isMeshtasticMigration()||!!completedFirmwareSelection()||!!state.verification||!!state.plan?.written||!!state.migrationApproval;
   $('skip-backup-warning').hidden=!$('skip-backup').checked;$('skip-backup-option').classList.toggle('enabled',$('skip-backup').checked);
   $('workflow-guidance').textContent=isMeshtasticMigration()?'Step 4 downloads and checks firmware before confirmation. Meshtastic settings are not backed up or converted.':'Step 3 backs up settings. Skip backup goes straight to step 4. Required partition expansion and the final firmware run together after approval.';
@@ -454,8 +461,8 @@ async function operation(callback) {
       state.port=null;state.generation++;$('transport-mode').value='no_reset';$('already-bootloader').checked=true;$('port-status').textContent='Select same ROM radio';
       const fresh=retry.attempts>=3||(retry.merged&&!retry.eraseComplete);
       notice(`${error.message} `+(fresh?'Chunked retry cannot continue: use Discard ESP retry record, then explicitly inspect and authorize a fresh write/wipe. Any partition migration remains pending.':"Select the SAME physical radio's waiting ROM port without resetting, inspect the original image, then acknowledge a bounded chunked retry."),true);
-    }else notice(error.message || String(error),true);
-    log(`Stopped: ${error.message || error}`);
+    }else notice(error.message || String(error),!error.backupApplicationRequired);
+    log(`${error.backupApplicationRequired?'Backup waiting':'Stopped'}: ${error.message || error}`);
     if(state.flashResult&&$('flash-progress-dialog').open){
       state.flashResult.failed=true;$('flash-progress-dialog').classList.toggle('flash-complete',false);$('flash-progress-dialog').classList.toggle('flash-result-error',true);
       $('flash-progress-title').textContent='DONE — check required';
@@ -769,7 +776,70 @@ for(const prefix of ['backup','question-backup']){
   $(`copy-${prefix}-json`).onclick=()=>copyBackupJson(prefix);
 }
 $('clear-backup-json').onclick=()=>{clearBackupJson();notice('Backup JSON boxes cleared. Existing downloaded files and your clipboard were not changed.');};
+const backupApplicationRebootAdvice='Unplug and reconnect USB once, or use the radio’s normal reset. Then choose the same radio’s application USB port — not DFU/ROM. If it returns to DFU, a working application must be installed before a settings backup is possible. No firmware was written by this backup attempt.';
+function requireBackupReconnectAllowed(){
+  if(state.migrationApproval||state.migration||state.recovery||state.espRecovery||state.verification||state.plan?.written||state.esp||state.flashProgress)throw Object.assign(new Error('Finish the pending write, recovery, migration or verification before returning to the application for backup. Do not reboot an active operation.'),{backupReconnectBlocked:true});
+}
+function recoverableBackupConnectionError(error){return !error.backupReconnectStale&&!error.backupReconnectBlocked&&!/permission|denied|not.?allowed|security|\b(?:EACCES|EPERM)\b/i.test(`${error.name} ${error.message}`);}
+function showBackupApplicationHelp(reason){
+  const key=state.backupApplicationRequest?.expectedPublicKey||state.knownApplicationPort?.publicKey;
+  state.backupApplicationRequest={expectedPublicKey:/^[a-f0-9]{64}$/i.test(key||'')?key:null};
+  $('backup-application-status').textContent=backupApplicationRebootAdvice;
+  $('backup-application-help').hidden=false;
+  log(`Application backup connection: ${reason}`);
+  notice('Backup needs the running application. Restart the radio, then use the highlighted application-port button.');
+}
+function backupApplicationRequired(){
+  return Object.assign(new Error('Backup is unavailable in DFU/ROM. Restart the radio, then choose its application USB port using the highlighted button. No firmware was written by this attempt.'),{backupApplicationRequired:true});
+}
+async function readBackupApplicationPort(port,{expectedPublicKey=null}={}){
+  requireBackupReconnectAllowed();
+  if(!port||dfuIds.has(portId(port)))fail('That is still a DFU port. Restart the radio and choose its application USB port for backup.');
+  const originalPort=state.port,generation=state.generation,pkg=state.pkg,request=state.backupApplicationRequest,known=state.knownApplicationPort;
+  const assertCurrent=()=>{if(state.port!==originalPort||state.generation!==generation||state.pkg!==pkg||state.backupApplicationRequest!==request||state.knownApplicationPort!==known)throw Object.assign(new Error('The selected radio or firmware changed while checking application mode. Choose the application port again.'),{backupReconnectStale:true});requireBackupReconnectAllowed();};
+  const link=new SerialLink(port);let opened=false,device;
+  try{
+    try{
+      await link.open(115200,{application:true});opened=true;assertCurrent();
+      // Read only MeshCore identity, not a DFU command or a search through all
+      // granted ports. A previously known public identity must match afresh.
+      device=await detectMeshCore(link,{timeoutMs:1000});assertCurrent();
+      if(!['companion','common-cli'].includes(device?.role)||!/^[a-f0-9]{64}$/i.test(device?.publicKey||''))fail('A running MeshCore application did not answer.');
+      if(expectedPublicKey&&device.publicKey.toLowerCase()!==expectedPublicKey.toLowerCase())fail('This application belongs to a different radio. Its settings were not backed up.');
+    }finally{if(opened)await link.close();}
+  }catch(error){assertCurrent();throw error;}
+  assertCurrent();
+  const board=applicationBoard(device),architectures=new Set(state.items.filter(item=>item.hardware===board.hardware).map(item=>item.architecture));
+  if(architectures.size===1)device.architecture=[...architectures][0];
+  device.usbMode=null;device.usbModeStatus='unavailable';device.bootloaderVersion=null;
+  state.port=port;state.generation++;state.device=device;state.portLabelEvidence={port,device};
+  state.knownApplicationPort={port,publicKey:device.publicKey,available:true};state.autoVerifyAttempt=null;
+  state.backupApplicationRequest=null;state.handoff=false;state.plan=null;state.backupApproved=null;state.bootloaderInfo=null;state.applicationProbeFailed=false;state.boardDetected=false;
+  if(!expectedPublicKey){
+    // An explicit chooser grants access, not proof that this is the old radio.
+    // A first DFU connection has no public key to bind a preselected ZIP to.
+    const provider=state.manualSelections.provider;
+    invalidateFirmwareSelection();state.detectedHardware=null;state.manualSelections=provider?{provider}:{};
+    resetAutomaticBoardSelection('Application selected for backup. Previous firmware choices were cleared because the DFU radio’s identity could not be compared. Choose firmware again before flashing.');
+  }
+  $('already-bootloader').checked=false;$('transport-mode').value='auto';state.transportModePort=port;
+  $('port-status').textContent='Application port';$('device-name').textContent=device.name||device.model||'MeshCore';$('device-meta').textContent=`${device.model||device.role} · ${device.version||'version not reported'} · identity ${device.publicKey.slice(0,12)}`;
+  $('backup-application-help').hidden=true;updateConnectionChoice();
+  notice('MeshCore application connected. Settings can now be backed up without a reset or firmware write.');
+  return true;
+}
+async function tryBackupApplication(){
+  requireBackupReconnectAllowed();
+  const known=state.knownApplicationPort;
+  if(!known||known.available===false||!/^[a-f0-9]{64}$/i.test(known.publicKey||'')||dfuIds.has(portId(known.port))){
+    showBackupApplicationHelp('There is no available, previously identified application connection to reuse. This bootloader has no supported safe USB restart command.');return false;
+  }
+  progress(0,'Checking the previously authorized application connection for backup…');
+  try{return await readBackupApplicationPort(known.port,{expectedPublicKey:known.publicKey});}
+  catch(error){if(!recoverableBackupConnectionError(error))throw error;showBackupApplicationHelp(`The application connection could not be reused: ${error.message} No DFU reset or activation command was sent.`);return false;}
+}
 async function captureBackup() {
+  if(dfuIds.has(portId(state.port))||$('already-bootloader').checked){if(!await tryBackupApplication())throw backupApplicationRequired();}
   requireMeshCoreApplication();
   clearBackupJson();state.backup=null;state.backupApproved=null;
   const port=state.port,generation=state.generation;
@@ -798,8 +868,15 @@ async function ensureBackup() {
   }
   const bootloader=dfuIds.has(portId(state.port))||$('already-bootloader').checked;
   if(bootloader) {
-    const answer=await choose('Backup cannot be done in ROM/DFU','The application is not running on this interface. Return to application firmware for a logical backup, or explicitly continue without one.',[['cancel','Cancel'],['skip','Continue without backup']]);
+    const port=state.port,generation=state.generation,pkg=state.pkg;
+    const answer=await choose('Backup needs application mode','Settings cannot be read from DFU/ROM. Try the previously authorized application connection, or continue without backup. If it stays in DFU, restart the radio and choose its application USB port. No firmware is written to attempt a backup.',[['cancel','Stop'],['application','Try application connection'],['skip','Continue without backup']]);
+    if(state.port!==port||state.generation!==generation||state.pkg!==pkg)fail('The selected radio or firmware changed while the DFU backup question was open. Prepare again; no backup approval was retained.');
+    if(answer==='application'){
+      if(!await tryBackupApplication())throw backupApplicationRequired();
+      return ensureBackup();
+    }
     if(answer!=='skip')fail('Cancelled before bootloader commands.');
+    state.backupApproved={sha256:state.pkg?.sha256||'touch',port:state.port,publicKey:null,skipped:true,sourceFirmware:'bootloader'};return;
   } else if(isBootloaderInfo()) {
     const port=state.port,generation=state.generation,pkg=state.pkg;
     const answer=await choose('Continue without an application backup?','Only INFO_UF2.TXT has been read. It identifies a bootloader hint, not running settings or a backup. '+bootloaderInfoWarning,[['cancel','Stop'],['skip','Continue without backup']]);
@@ -902,7 +979,7 @@ function completeNrfTransfer(pkg){
 }
 function requestAutomaticVerification(){
   const expected=state.verification,known=state.knownApplicationPort;
-  if(state.busy||state.flashProgress||state.migrationApproval||state.migration||state.recovery||state.espRecovery||state.esp||state.plan||!expected||!known?.available)return;
+  if(state.busy||state.flashProgress||state.backupApplicationRequest||state.migrationApproval||state.migration||state.recovery||state.espRecovery||state.esp||state.plan||!expected||!known?.available)return;
   if(!/^[a-f0-9]{64}$/i.test(expected.publicKey||'')||expected.publicKey!==known.publicKey||state.pkg?.sha256!==expected.sha256||dfuIds.has(portId(known.port)))return;
   if(state.port&&state.port!==known.port&&!dfuIds.has(portId(state.port)))return;
   if(state.autoVerifyAttempt?.expected===expected)return;
@@ -1189,6 +1266,12 @@ $('select-port').onclick = () => operation(async () => {
       return usbChooserCancelled;
     }
     throw error;
+  }
+  if(state.backupApplicationRequest){
+    const expectedPublicKey=state.backupApplicationRequest.expectedPublicKey;
+    try{await readBackupApplicationPort(port,{expectedPublicKey});}
+    catch(error){if(!recoverableBackupConnectionError(error))throw error;showBackupApplicationHelp(error.message);throw backupApplicationRequired();}
+    await captureBackup();return;
   }
   const sameModeRadio=state.port===port;
   const previousApproval=state.backupApproved,continuation=continuingDeviceFlow();
@@ -1640,6 +1723,14 @@ $('flash-stop-auto').onclick=()=>{if(state.flashProgress&&state.migrationApprova
 $('backup').onclick = () => operation(async () => {
   await captureBackup();
 });
+$('retry-backup-application').onclick=()=>operation(async()=>{if(await tryBackupApplication())await captureBackup();});
+// Forward the real click immediately: the chooser needs fresh user activation.
+$('select-backup-application').onclick=()=>state.backupApplicationRequest?$('select-port').onclick():undefined;
+$('cancel-backup-application').onclick=()=>{
+  if(state.busy)return;
+  state.backupApplicationRequest=null;
+  notice('Backup attempt cancelled. No firmware was written. You can choose another port or explicitly continue without backup.');controls();
+};
 function restoreWorkflowBlocked(){return !!(state.migrationApproval||state.migration||state.recovery||state.espRecovery||state.esp||state.plan?.written||state.handoff);}
 function quickSettingsBlocked(){return restoreWorkflowBlocked()||!!state.verification;}
 function updateQuickSettingsControls(){

@@ -196,6 +196,10 @@ input[type=file] { display: block; font-size: 11px; max-width: 100%; margin-top:
 .optional { font-weight: 400; color: #8795a3; margin-left: 6px; }
 .digest { display: block; font-size: 10px; color: #64778a; overflow-wrap: anywhere; line-height: 1.7; margin-top: 7px; }
 .backup-options { max-width: 820px; }
+.backup-application-help { margin-top: 16px; padding: 20px; border: 2px solid #a96908; border-radius: 10px; background: #fff7e8; }
+.backup-application-help h2 { margin: 0 0 12px; color: #784908; font-size: clamp(24px, 3vw, 32px); }
+.backup-application-help p { font-size: 16.8px; line-height: 1.6; }
+.backup-application-help button { min-height: 48px; font-size: 16.8px; white-space: normal; text-align: left; }
 .backup-json-view { margin-top: 14px; padding-top: 1px; }
 .backup-json-view > .hint { margin: 6px 0 10px; }
 .backup-json { display: block; width: 100%; max-width: 100%; min-width: 0; min-height: 180px; padding: 11px 12px; border: 1px solid #d5dfe5; border-radius: 7px; background: #f7fafb; color: #2d4256; font-family: Consolas, ui-monospace, monospace; font-size: 11px; line-height: 1.55; white-space: pre; overflow: auto; resize: vertical; }

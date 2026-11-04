@@ -1818,9 +1818,232 @@ test('cancelling the backup offer prevents all reset and ROM operations',async()
   const ui=workbench();ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({architecture:'esp32'});ui.evaluate('state.port=selectedPort;state.pkg=pkg;');ui.context.choose=async()=> 'cancel';
   await ui.elements.get('prepare').onclick();assert.deepEqual(ui.calls,[]);assert.match(ui.elements.get('notice').textContent,/Cancelled before reset/);
 });
+async function dfuBackupApplicationWorkbench({known=true,available=true,publicKey='11'.repeat(32),role='companion'}={}){
+  const ui=workbench();await Promise.resolve();
+  const dfuPort=ui.port,appPort={getInfo:()=>({usbVendorId:0x239a,usbProductId:0x8029})};
+  dfuPort.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0057});
+  ui.context.dfuPort=dfuPort;ui.context.appPort=appPort;ui.context.pkg=fakePackage();ui.context.expectedBackupKey=publicKey;
+  ui.context.backupApplicationDevice={role,publicKey,model:'Seeed Tracker T1000-E',name:'Fixture radio',protocol:14,architecture:'nrf52'};
+  ui.evaluate('state.port=dfuPort;state.pkg=pkg;state.handoff=true;state.device={role:"companion",model:"Previous application"};');
+  ui.elements.get('transport-mode').value='nrf52';ui.elements.get('already-bootloader').checked=true;
+  if(known)ui.evaluate(`state.knownApplicationPort={port:appPort,publicKey:expectedBackupKey,available:${available}};`);
+  ui.context.SerialLink=class{
+    constructor(port){assert.equal(port,appPort,'DFU and same-ID substitute ports must never be opened for a backup probe');}
+    async open(baudRate,options){assert.equal(baudRate,115200);assert.equal(options?.application,true);ui.calls.push('application-open');}
+    async close(){assert.notEqual(ui.evaluate('state.port'),appPort,'Adoption must wait for successful close');ui.calls.push('application-close');}
+    async command(){assert.fail('The fixture application detector must not send extra settings/reset commands');}
+  };
+  ui.context.detectMeshCore=async()=>{ui.calls.push('application-detect');return {...ui.context.backupApplicationDevice};};
+  ui.context.touch1200=async()=>assert.fail('Backup reconnect must never reset the DFU or application radio');
+  ui.context.flashNrf=async()=>assert.fail('Backup reconnect must never write firmware');
+  return {...ui,dfuPort,appPort};
+}
+
+test('DFU backup without an eligible exact known application asks for help without opening or enumerating USB',async()=>{
+  for(const mode of ['missing','unavailable','invalid-key','dfu-port']){
+    const ui=await dfuBackupApplicationWorkbench({known:mode!=='missing',available:mode!=='unavailable',publicKey:mode==='invalid-key'?'invalid':'11'.repeat(32)});
+    if(mode==='dfu-port')ui.evaluate('state.knownApplicationPort.port=dfuPort;');
+    assert.equal(await ui.evaluate('tryBackupApplication();'),false,mode);
+    assert.ok(ui.evaluate('state.backupApplicationRequest'),mode);assert.equal(ui.evaluate('state.port'),ui.dfuPort,mode);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg,mode);
+    assert.match(ui.elements.get('notice').textContent,/application|DFU|backup/i,mode);assert.deepEqual(ui.calls,[],mode);
+  }
+});
+
+test('DFU backup reuses only the exact known application, proves its key and closes before adopting it',async()=>{
+  for(const role of ['companion','common-cli']){
+    const ui=await dfuBackupApplicationWorkbench({role});ui.evaluate('state.plan={written:false};state.backupApproved={port:dfuPort,sha256:pkg.sha256};');
+    assert.equal(await ui.evaluate('tryBackupApplication();'),true,role);
+    assert.equal(ui.evaluate('state.port'),ui.appPort,role);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg,role);assert.equal(ui.evaluate('state.device.publicKey'),'11'.repeat(32),role);
+    assert.equal(ui.evaluate('state.backupApplicationRequest'),null,role);assert.equal(ui.evaluate('state.handoff'),false,role);assert.equal(ui.evaluate('state.plan'),null,role);assert.equal(ui.evaluate('state.backupApproved'),null,role);
+    assert.equal(ui.elements.get('already-bootloader').checked,false,role);assert.deepEqual(ui.calls,['application-open','application-detect','application-close'],role);
+  }
+});
+
+test('DFU backup cannot adopt a different application identity or an unsupported application role',async()=>{
+  for(const scenario of ['wrong-key','missing-key','invalid-key','meshtastic','unknown-role']){
+    const ui=await dfuBackupApplicationWorkbench();
+    if(scenario==='wrong-key')ui.context.backupApplicationDevice.publicKey='22'.repeat(32);
+    if(scenario==='missing-key')delete ui.context.backupApplicationDevice.publicKey;
+    if(scenario==='invalid-key')ui.context.backupApplicationDevice.publicKey='not-a-key';
+    if(scenario==='meshtastic')ui.context.backupApplicationDevice.role='meshtastic';
+    if(scenario==='unknown-role')ui.context.backupApplicationDevice.role='unsupported';
+    const oldDevice=ui.evaluate('state.device');
+    assert.equal(await ui.evaluate('tryBackupApplication();'),false,scenario);
+    assert.equal(ui.evaluate('state.port'),ui.dfuPort,scenario);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg,scenario);assert.equal(ui.evaluate('state.device'),oldDevice,scenario);assert.equal(ui.evaluate('state.backupApproved'),null,scenario);
+    assert.deepEqual(ui.calls,['application-open','application-detect','application-close'],scenario);
+  }
+});
+
+test('DFU backup read and close failures never adopt or reset a radio',async()=>{
+  for(const phase of ['open','detect','close']){
+    const ui=await dfuBackupApplicationWorkbench(),failure=Error('Fixture '+phase+' failure');
+    if(phase==='open')ui.context.SerialLink.prototype.open=async()=>{ui.calls.push('application-open');throw failure;};
+    if(phase==='detect')ui.context.detectMeshCore=async()=>{ui.calls.push('application-detect');throw failure;};
+    if(phase==='close')ui.context.SerialLink.prototype.close=async()=>{assert.equal(ui.evaluate('state.port'),ui.dfuPort);ui.calls.push('application-close');throw failure;};
+    assert.equal(await ui.evaluate('tryBackupApplication();'),false,phase);
+    assert.equal(ui.evaluate('state.port'),ui.dfuPort,phase);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg,phase);assert.ok(ui.evaluate('state.backupApplicationRequest'),phase);assert.equal(ui.evaluate('state.backupApproved'),null,phase);
+    assert.ok(ui.calls.every(call=>/^application-(?:open|detect|close)$/.test(call)),phase);
+  }
+});
+
+test('a late DFU backup application read rejects changed context without replacing new requests or showing stale reboot help',async()=>{
+  for(const change of ['generation','port','firmware','request','known-application','protected-flow']){
+    const ui=await dfuBackupApplicationWorkbench();let finish;
+    ui.context.detectMeshCore=()=>{ui.calls.push('application-detect');return new Promise(resolve=>{finish=resolve;});};
+    const pending=ui.evaluate('tryBackupApplication();');for(let i=0;i<10&&!finish;i++)await Promise.resolve();assert.ok(finish,change);
+    if(change==='generation')ui.evaluate('state.generation++;');
+    if(change==='port'){ui.context.nextPort={getInfo:()=>({usbVendorId:0x2886,usbProductId:0x0044})};ui.evaluate('state.port=nextPort;');}
+    if(change==='firmware'){ui.context.nextPackage=fakePackage({name:'new.zip',sha256:'c'.repeat(64)});ui.evaluate('state.pkg=nextPackage;');}
+    if(change==='request')ui.evaluate('state.backupApplicationRequest={expectedPublicKey:"22".repeat(32)};');
+    if(change==='known-application')ui.evaluate('state.knownApplicationPort={port:appPort,publicKey:"22".repeat(32),available:true};');
+    if(change==='protected-flow')ui.evaluate('state.verification={sha256:pkg.sha256};');
+    const selectedPort=ui.evaluate('state.port'),selectedPackage=ui.evaluate('state.pkg'),selectedRequest=ui.evaluate('state.backupApplicationRequest');
+    ui.elements.get('backup-application-status').textContent='Newer workflow guidance';ui.elements.get('backup-application-help').hidden=true;
+    finish({...ui.context.backupApplicationDevice});
+    await assert.rejects(pending,/changed|pending|finish|verification/i,change);assert.equal(ui.evaluate('state.port'),selectedPort,change);assert.equal(ui.evaluate('state.pkg'),selectedPackage,change);assert.notEqual(ui.evaluate('state.port'),ui.appPort,change);
+    assert.equal(ui.evaluate('state.backupApplicationRequest'),selectedRequest,change);assert.equal(ui.elements.get('backup-application-status').textContent,'Newer workflow guidance',change);assert.equal(ui.elements.get('backup-application-help').hidden,true,change);
+    assert.deepEqual(ui.calls,['application-open','application-detect','application-close'],change);
+  }
+});
+
+test('a rejected backup application read or close still propagates stale context without reopening reboot help',async()=>{
+  for(const phase of ['detect','close']){
+    const ui=await dfuBackupApplicationWorkbench();let rejectRead;
+    if(phase==='detect')ui.context.detectMeshCore=()=>{ui.calls.push('application-detect');return new Promise((_resolve,reject)=>{rejectRead=reject;});};
+    else ui.context.SerialLink.prototype.close=()=>{ui.calls.push('application-close');return new Promise((_resolve,reject)=>{rejectRead=reject;});};
+    const pending=ui.evaluate('tryBackupApplication();');for(let i=0;i<12&&!rejectRead;i++)await Promise.resolve();assert.ok(rejectRead,phase);
+    ui.evaluate('state.generation++;');ui.elements.get('backup-application-status').textContent='New state';ui.elements.get('backup-application-help').hidden=true;
+    rejectRead(Object.assign(Error('The old application disconnected'),{name:'NetworkError'}));
+    await assert.rejects(pending,/changed/i,phase);assert.equal(ui.evaluate('state.backupApplicationRequest'),null,phase);assert.equal(ui.evaluate('state.port'),ui.dfuPort,phase);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg,phase);
+    assert.equal(ui.elements.get('backup-application-status').textContent,'New state',phase);assert.equal(ui.elements.get('backup-application-help').hidden,true,phase);assert.deepEqual(ui.calls,['application-open','application-detect','application-close'],phase);
+  }
+});
+
+test('DFU backup permission, access and security failures propagate without reboot-help or informational waiting',async()=>{
+  for(const phase of ['open','detect','close'])for(const [name,message] of [['NotAllowedError','Port permission refused'],['SecurityError','USB security restriction'],['Error','Permission denied'],['NetworkError','Access is denied']]){
+    const ui=await dfuBackupApplicationWorkbench(),failure=Object.assign(Error(message),{name});
+    if(phase==='open')ui.context.SerialLink.prototype.open=async()=>{ui.calls.push('application-open');throw failure;};
+    if(phase==='detect')ui.context.detectMeshCore=async()=>{ui.calls.push('application-detect');throw failure;};
+    if(phase==='close')ui.context.SerialLink.prototype.close=async()=>{ui.calls.push('application-close');throw failure;};
+    ui.elements.get('backup-application-status').textContent='Existing guidance';ui.elements.get('backup-application-help').hidden=true;
+    await assert.rejects(ui.evaluate('tryBackupApplication();'),error=>error===failure,phase+' '+name);
+    assert.equal(ui.evaluate('state.backupApplicationRequest'),null);assert.equal(ui.evaluate('state.port'),ui.dfuPort);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);
+    assert.equal(ui.elements.get('backup-application-status').textContent,'Existing guidance');assert.equal(ui.elements.get('backup-application-help').hidden,true);
+    assert.ok(ui.calls.every(call=>/^application-(?:open|detect|close)$/.test(call)));
+  }
+  const ui=await dfuBackupApplicationWorkbench();ui.context.SerialLink.prototype.open=async()=>{ui.calls.push('application-open');throw Object.assign(Error('Access is denied'),{name:'NotAllowedError'});};
+  await ui.elements.get('backup').onclick();assert.equal(ui.elements.get('notice').classList.contains('error'),true);assert.match(ui.elements.get('log').textContent,/Stopped: Access is denied/);assert.doesNotMatch(ui.elements.get('log').textContent,/Backup waiting/);assert.equal(ui.evaluate('state.backupApplicationRequest'),null);
+});
+
+test('DFU backup application recovery is blocked by pending write, verification, migration and ROM sessions',async()=>{
+  for(const field of ['migration','migrationApproval','recovery','espRecovery','verification','written-plan','esp','flashProgress']){
+    const ui=await dfuBackupApplicationWorkbench();
+    if(field==='written-plan')ui.evaluate('state.plan={written:true};');else ui.evaluate(`state.${field}={};`);
+    let result;try{result=await ui.evaluate('tryBackupApplication();');}catch(error){assert.match(error.message,/pending|finish|migration|recovery|verification|session|write/i,field);}
+    assert.notEqual(result,true,field);assert.equal(ui.evaluate('state.port'),ui.dfuPort,field);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg,field);assert.deepEqual(ui.calls,[],field);
+  }
+});
+
+test('standalone DFU backup stops for application reconnection rather than pretending a backup or flash succeeded',async()=>{
+  const ui=await dfuBackupApplicationWorkbench({known:false});
+  await assert.rejects(ui.evaluate('captureBackup();'),/application|DFU|backup/i);
+  assert.ok(ui.evaluate('state.backupApplicationRequest'));assert.equal(ui.evaluate('state.backup'),null);assert.equal(ui.evaluate('state.backupApproved'),null);assert.deepEqual(ui.calls,[]);
+  await ui.elements.get('backup').onclick();
+  assert.equal(ui.elements.get('notice').classList.contains('error'),false);assert.match(ui.elements.get('log').textContent,/Backup waiting:/);assert.doesNotMatch(ui.elements.get('log').textContent,/Stopped:/);assert.deepEqual(ui.calls,[]);
+});
+
+test('DFU backup chooser cancellation preserves pending help and sends no automatic continuation',async()=>{
+  const ui=await dfuBackupApplicationWorkbench({available:false});assert.equal(await ui.evaluate('tryBackupApplication();'),false);
+  const pending=ui.evaluate('state.backupApplicationRequest');ui.context.requestAutomaticVerification=()=>assert.fail('Cancel must not run later device work');
+  ui.context.navigator.serial.requestPort=async()=>{ui.calls.push('chooser');throw Object.assign(Error('No port selected by the user.'),{name:'NotFoundError'});};
+  await ui.elements.get('select-backup-application').onclick();
+  assert.equal(ui.evaluate('state.backupApplicationRequest'),pending);assert.equal(ui.evaluate('state.port'),ui.dfuPort);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);assert.deepEqual(ui.calls,['chooser']);
+});
+
+test('selecting a DFU port again for backup does not send application commands or flash',async()=>{
+  const ui=await dfuBackupApplicationWorkbench({available:false});assert.equal(await ui.evaluate('tryBackupApplication();'),false);
+  ui.context.navigator.serial.requestPort=async()=>{ui.calls.push('chooser');return ui.dfuPort;};ui.context.captureBackup=async()=>assert.fail('DFU selection is not an application backup');
+  await ui.elements.get('select-backup-application').onclick();
+  assert.equal(ui.evaluate('state.port'),ui.dfuPort);assert.ok(ui.evaluate('state.backupApplicationRequest'));assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);assert.deepEqual(ui.calls,['chooser']);
+});
+
+test('explicit backup application selection reads identity then captures a backup without firmware continuation',async()=>{
+  for(const matching of [true,false]){
+    const ui=await dfuBackupApplicationWorkbench({available:false});assert.equal(await ui.evaluate('tryBackupApplication();'),false);
+    ui.context.navigator.serial.requestPort=async()=>{ui.calls.push('chooser');return ui.appPort;};
+    if(!matching)ui.context.backupApplicationDevice.publicKey='22'.repeat(32);
+    ui.context.captureBackup=async()=>{assert.equal(ui.evaluate('state.port'),ui.appPort);ui.calls.push('capture-backup');};
+    await ui.elements.get('select-backup-application').onclick();
+    assert.equal(ui.evaluate('state.port'),matching?ui.appPort:ui.dfuPort);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);
+    assert.deepEqual(ui.calls,['chooser','application-open','application-detect','application-close',...(matching?['capture-backup']:[])],String(matching));
+  }
+});
+
+test('an explicitly chosen application without previous identity is backup-only and discards old firmware and board choices',async()=>{
+  const ui=await dfuBackupApplicationWorkbench({known:false});assert.equal(await ui.evaluate('tryBackupApplication();'),false);
+  ui.evaluate('state.manualSelections={provider:"Keymind Cascade",hardware:"Heltec v4",role:"repeater",version:"v1.18.0.1"};state.item={hardware:"Heltec v4",role:"repeater",name:pkg.name};');
+  for(const [id,value] of [['hardware','Heltec v4'],['role','repeater'],['version','v1.18.0.1'],['artifact','0']])ui.elements.get(id).value=value;
+  ui.context.navigator.serial.requestPort=async()=>{ui.calls.push('chooser');return ui.appPort;};
+  ui.context.captureBackup=async()=>{assert.equal(ui.evaluate('state.port'),ui.appPort);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.item'),null);ui.calls.push('capture-backup');};
+  await ui.elements.get('select-backup-application').onclick();
+  assert.equal(ui.evaluate('state.port'),ui.appPort);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.item'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.evaluate('state.backupApplicationRequest'),null);
+  for(const id of ['hardware','role','version','artifact'])assert.equal(ui.elements.get(id).value,'',id);
+  for(const key of ['hardware','role','version'])assert.equal(ui.evaluate('state.manualSelections.'+key),undefined,key);
+  assert.deepEqual(ui.calls,['chooser','application-open','application-detect','application-close','capture-backup']);
+});
+
+test('retry and cancel backup application help are explicit and never reset or write firmware',async()=>{
+  const ui=await dfuBackupApplicationWorkbench({available:false});assert.equal(await ui.evaluate('tryBackupApplication();'),false);
+  ui.evaluate('state.knownApplicationPort.available=true;');ui.context.captureBackup=async()=>ui.calls.push('capture-backup');
+  await ui.elements.get('retry-backup-application').onclick();
+  assert.equal(ui.evaluate('state.port'),ui.appPort);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);assert.deepEqual(ui.calls,['application-open','application-detect','application-close','capture-backup']);
+  const fresh=await dfuBackupApplicationWorkbench({known:false});assert.equal(await fresh.evaluate('tryBackupApplication();'),false);
+  await fresh.elements.get('cancel-backup-application').onclick();assert.equal(fresh.evaluate('state.backupApplicationRequest'),null);assert.equal(fresh.evaluate('state.port'),fresh.dfuPort);assert.equal(fresh.evaluate('state.pkg'),fresh.context.pkg);assert.deepEqual(fresh.calls,[]);
+});
+
+test('choosing application backup from DFU completes normal backup before any reset or write',async()=>{
+  const ui=await dfuBackupApplicationWorkbench();ui.elements.get('auto-backup').checked=true;
+  ui.context.choose=async(title,_detail,buttons)=>{
+    if(buttons.some(([value])=>value==='application')){ui.calls.push('offer-application');assert.ok(buttons.some(([value])=>value==='cancel'));assert.ok(buttons.some(([value])=>value==='skip'));return 'application';}
+    assert.equal(title,'Backup JSON');ui.calls.push('backup-continue');return 'continue';
+  };
+  ui.context.captureBackup=async()=>{assert.equal(ui.evaluate('state.port'),ui.appPort);ui.calls.push('capture-backup');ui.context.savedBackup={json:'{}',archive:{},port:ui.appPort};ui.evaluate('state.backup=savedBackup;');return ui.context.savedBackup;};
+  await ui.evaluate('ensureBackup();');
+  assert.equal(ui.evaluate('state.port'),ui.appPort);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);assert.equal(ui.evaluate('state.backupApproved.port'),ui.appPort);assert.equal(ui.evaluate('state.backupApproved.sha256'),ui.context.pkg.sha256);
+  assert.deepEqual(ui.calls,['offer-application','application-open','application-detect','application-close','capture-backup','backup-continue']);
+});
+
+test('DFU application-backup request without an available application stops preparation before reset',async()=>{
+  const ui=await dfuBackupApplicationWorkbench({known:false});ui.context.choose=async(_title,_detail,buttons)=>{assert.ok(buttons.some(([value])=>value==='application'));ui.calls.push('offer-application');return 'application';};
+  await ui.elements.get('prepare').onclick();
+  assert.ok(ui.evaluate('state.backupApplicationRequest'));assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.evaluate('state.port'),ui.dfuPort);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);assert.deepEqual(ui.calls,['offer-application']);
+});
+
+test('DFU backup skip remains an explicit choice and cancel never creates backup approval',async()=>{
+  for(const answer of ['cancel','skip']){
+    const ui=await dfuBackupApplicationWorkbench({known:false});ui.context.choose=async(_title,_detail,buttons)=>{assert.ok(buttons.some(([value])=>value==='application'));assert.ok(buttons.some(([value])=>value==='skip'));ui.calls.push('offer');return answer;};
+    if(answer==='cancel')await assert.rejects(ui.evaluate('ensureBackup();'),/cancel/i);else await ui.evaluate('ensureBackup();');
+    assert.equal(!!ui.evaluate('state.backupApproved'),answer==='skip');assert.equal(ui.evaluate('state.port'),ui.dfuPort);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);assert.deepEqual(ui.calls,['offer']);
+  }
+});
+
+test('a stale DFU backup prompt cannot authorize skipping or probe an application for changed radio context',async()=>{
+  for(const answer of ['skip','application'])for(const change of ['port','generation','firmware']){
+    const ui=await dfuBackupApplicationWorkbench();let finish;
+    ui.context.choose=async()=>{ui.calls.push('offer');return new Promise(resolve=>{finish=resolve;});};
+    const pending=ui.evaluate('ensureBackup();');for(let i=0;i<10&&!finish;i++)await Promise.resolve();assert.ok(finish);
+    if(change==='generation')ui.evaluate('state.generation++;');
+    if(change==='port'){ui.context.nextPort={getInfo:()=>({usbVendorId:0x2886,usbProductId:0x0044})};ui.evaluate('state.port=nextPort;');}
+    if(change==='firmware'){ui.context.nextPackage=fakePackage({name:'replacement.zip',sha256:'c'.repeat(64)});ui.evaluate('state.pkg=nextPackage;');}
+    const selectedPort=ui.evaluate('state.port'),selectedPackage=ui.evaluate('state.pkg');finish(answer);
+    await assert.rejects(pending,/changed|prepare again|selected.*radio|selected.*firmware/i,answer+' '+change);
+    assert.equal(ui.evaluate('state.port'),selectedPort);assert.equal(ui.evaluate('state.pkg'),selectedPackage);assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.evaluate('state.backupApplicationRequest'),null);assert.deepEqual(ui.calls,['offer']);
+  }
+});
+
 test('explicit ROM/DFU skips application backup without probing the port',async()=>{
   const ui=workbench();ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage();ui.evaluate('state.port=selectedPort;state.pkg=pkg;');ui.elements.get('transport-mode').value='nrf52';ui.elements.get('already-bootloader').checked=true;
-  ui.context.choose=async title=>{assert.match(title,/cannot be done/);return 'skip';};
+  ui.context.choose=async title=>{assert.match(title,/application mode/);return 'skip';};
   await ui.elements.get('prepare').onclick();assert.deepEqual(ui.calls,[]);assert.equal(ui.evaluate('state.plan.sha256'),ui.context.pkg.sha256);
 });
 test('nRF52 wipe retains final image, requires separate overrides, and cannot write final before a new chooser acknowledgement',async()=>{
