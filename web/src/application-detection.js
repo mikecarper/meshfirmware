@@ -23,6 +23,6 @@ export async function detectApplication(link,{assertCurrent=()=>{},meshCoreTimeo
   }
   const device=await detectMeshtastic(guarded,{timeoutMs:meshtasticTimeoutMs,assertCurrent,onProgress});assertCurrent();
   if(device)return device;
-  const error=Error('No supported MeshCore or Meshtastic application answered. Check the selected port; a ROM/DFU port cannot identify the running application. Read INFO_UF2.TXT from the same radio’s bootloader drive, or choose hardware manually.');
+  const error=Error('No supported MeshCore or Meshtastic application answered. If this USB port opens, its serial driver is available. The installed firmware may not provide a USB API, for example a BLE-only Companion build. Check the selected application port; a ROM/DFU port cannot identify the running application. Choose the exact hardware manually and matching USB-enabled firmware. No reset or firmware write was sent.');
   error.code='APPLICATION_UNIDENTIFIED';throw error;
 }

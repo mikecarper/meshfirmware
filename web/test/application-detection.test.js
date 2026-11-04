@@ -52,5 +52,16 @@ test('context changes stop detection before a fallback query or before accepting
 });
 
 test('an unidentified application remains manual with a useful error rather than an assumed board',async()=>{
-  const link=radio();link.write=async value=>{link.writes.push([...value]);};await assert.rejects(detectApplication(link,options),error=>error.code==='APPLICATION_UNIDENTIFIED'&&/No supported MeshCore or Meshtastic application/.test(error.message));
+  const link=radio();link.write=async value=>{link.writes.push([...value]);};
+  await assert.rejects(detectApplication(link,options),error=>{
+    assert.equal(error.code,'APPLICATION_UNIDENTIFIED');
+    assert.match(error.message,/No supported MeshCore or Meshtastic application/);
+    assert.match(error.message,/USB port opens, its serial driver is available/);
+    assert.match(error.message,/may not provide a USB API.*BLE-only Companion/);
+    assert.match(error.message,/exact hardware manually.*matching USB-enabled firmware/);
+    assert.match(error.message,/No reset or firmware write was sent/);
+    assert.doesNotMatch(error.message,/INFO_UF2|bootloader drive|install.*driver/i);
+    return true;
+  });
+  assert.ok(!link.commands.some(command=>/^set |reboot/.test(command)));
 });

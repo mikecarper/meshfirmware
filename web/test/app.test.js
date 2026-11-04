@@ -403,8 +403,8 @@ test('a changed port during Meshtastic detection cannot select its board or gran
 });
 
 const bootloaderInfoText=(version='0.11.0-OTAFIX2.4.12')=>`UF2 Bootloader ${version}\r\nModel: HT-n5262\r\nBoard-ID: HT-n5262\r\nSoftDevice: S140 6.1.1\r\n`;
-async function bootloaderInfoWorkbench({dfu=false,code='APPLICATION_UNIDENTIFIED'}={}){
-  const ui=await meshtasticWorkbench();ui.port.getInfo=()=>dfu?{usbVendorId:0x239a,usbProductId:0x0071}:{};
+async function bootloaderInfoWorkbench({dfu=false,code='APPLICATION_UNIDENTIFIED',usbInfo}={}){
+  const ui=await meshtasticWorkbench();ui.port.getInfo=()=>usbInfo||(dfu?{usbVendorId:0x239a,usbProductId:0x0071}:{});
   ui.context.detectApplication=async()=>{throw Object.assign(Error('Application was not identified'),{code});};await ui.elements.get('select-port').onclick();return ui;
 }
 
@@ -413,6 +413,30 @@ test('an unidentified or DFU port highlights Hardware and offers drive info only
     const ui=await bootloaderInfoWorkbench({dfu});assert.equal(ui.elements.get('bootloader-info-fallback').hidden,false);assert.equal(ui.elements.get('read-bootloader-info').disabled,false);assert.ok(!ui.elements.get('bootloader-info-fallback').open);assert.deepEqual(nextHighlight(ui),['hardware']);assert.match(ui.elements.get('step-guidance').textContent,/exact hardware/);assert.ok(!ui.calls.includes('file-picker'));assert.equal(ui.evaluate('state.bootloaderInfo'),null);
   }
   const normal=await meshtasticWorkbench();await normal.elements.get('select-port').onclick();assert.equal(normal.elements.get('bootloader-info-fallback').hidden,true);assert.ok(!normal.calls.includes('file-picker'));
+});
+
+test('an unidentified UART application keeps manual hardware and guarded ESP entry without offering UF2 drive info',async()=>{
+  for(const [usbVendorId,usbProductId] of [[0x10c4,0xea60],[0x1a86,0x7523],[0x0403,0x6001]]){
+    const ui=await bootloaderInfoWorkbench({usbInfo:{usbVendorId,usbProductId}});
+    assert.equal(ui.elements.get('bootloader-info-fallback').hidden,true);
+    assert.equal(ui.elements.get('read-bootloader-info').disabled,true);
+    assert.deepEqual(nextHighlight(ui),['hardware']);
+    assert.match(ui.elements.get('step-guidance').textContent,/exact hardware/);
+    assert.equal(ui.evaluate('state.connection.mode'),'default_reset');
+    assert.equal(ui.evaluate('state.connection.source'),'uart-usb');
+    assert.equal(ui.elements.get('already-bootloader').checked,false);
+    assert.equal(ui.evaluate('state.applicationProbeFailed'),true);
+    assert.equal(ui.evaluate('state.device'),null);
+    assert.equal(ui.evaluate('state.detectedHardware'),null);
+    assert.equal(ui.evaluate('state.bootloaderInfo'),null);
+    assert.equal(ui.evaluate('state.backupApproved'),null);
+    assert.equal(ui.evaluate('state.plan'),null);
+    assert.equal(ui.evaluate('state.pkg'),null);
+    assert.equal(ui.elements.get('artifact').value,'');
+    assert.equal(ui.elements.get('flash').disabled,true);
+    await ui.elements.get('read-bootloader-info').onclick();
+    assert.deepEqual(ui.calls,['chooser','open','close']);
+  }
 });
 
 const rak3401Hardware='RAK WisMesh 1W Booster (3401 + 13302)',rak4631Hardware='RAK WisBlock / WisMesh (RAK 4631)';
