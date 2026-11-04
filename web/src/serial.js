@@ -44,8 +44,9 @@ export function parseAck(frame) {
   if (frame.length !== 4 + (hasCrc ? 2 : 0) || (hasCrc && crc16(frame.subarray(0,4)) !== (frame[4] | frame[5] << 8))) fail('Invalid DFU acknowledgement CRC/length.');
   return (frame[0] >> 3) & 7;
 }
-export async function flashNrf(link, pkg, onProgress, {delay = sleep, now = Date.now, ackTimeoutMs = 10000} = {}) {
+export async function flashNrf(link, pkg, onProgress, {delay = sleep, now = Date.now, ackTimeoutMs = 10000, activationCheck = null} = {}) {
   if(!Number.isInteger(ackTimeoutMs)||ackTimeoutMs<1||ackTimeoutMs>60000)fail('DFU acknowledgement timeout must be 1–60000 ms.');
+  if(activationCheck!==null&&typeof activationCheck!=='function')fail('DFU activation check must be a function or null.');
   if (hash(pkg.payload) !== pkg.payloadHash || hash(pkg.init) !== pkg.initHash || nrfMetadataHash(pkg)!==pkg.metadataHash) fail('DFU bytes or component metadata changed after validation.');
   let sequence = 0, receive = [];
   await link.port.setSignals({ dataTerminalReady: true, requestToSend: false });
@@ -70,8 +71,8 @@ export async function flashNrf(link, pkg, onProgress, {delay = sleep, now = Date
     fail(`DFU did not acknowledge packet ${sequence}. No reset will be attempted.`);
   }
   async function waitWithProgress(milliseconds,fraction,phase){
-    // Preserve the full bootloader safety wait. Only split it for feedback;
-    // elapsed time, USB reconnection and acknowledgements cannot shorten it.
+    // Unknown bootloaders/components retain the full conservative wait.
+    // Neither transport acknowledgements nor USB disappearance prove startup.
     for(let remaining=milliseconds;remaining>0;){
       onProgress(fraction,`${phase} · about ${Math.ceil(remaining/1000)}s remaining. Keep USB and power connected.`);
       const interval=Math.min(1000,remaining);await delay(interval);remaining-=interval;
@@ -86,7 +87,21 @@ export async function flashNrf(link, pkg, onProgress, {delay = sleep, now = Date
     onProgress(end / pkg.payload.length * .95,'Writing DFU'); if ((offset / 512 + 1) % 8 === 0) await delay(205);
   }
   await delay(205); await send(words(5));
-  await waitWithProgress(eraseWait + Math.ceil(pages * 204.8),.96,'Activating firmware'); onProgress(1,'DFU transfer completed. Application / installed bootloader remains unverified.');
+  const activationWait=eraseWait+Math.ceil(pages*204.8);
+  const applicationOnly=pkg.kind==='application'&&pkg.mode===4&&!pkg.erase&&!pkg.expert&&pkg.sdSize===0&&pkg.blSize===0&&pkg.appSize===pkg.payload.length&&!/(?:with[-_]bootloader|bootloader[-_]updater|^R_)/i.test(pkg.name||'');
+  if(activationCheck&&applicationOnly){
+    const started=now();let ready=false;
+    // Native USB readiness checks may close the owned DFU link only after a
+    // settings-page guard. The callback must prove the exact returning app;
+    // it cannot infer completion from STOP's early transport acknowledgement.
+    onProgress(.96,'Waiting for the application to restart. Keep USB and power connected.');
+    await delay(250);
+    const elapsed=()=>{const value=now()-started;return Number.isFinite(value)&&value>=0?value:0;};
+    try{ready=await activationCheck({link,pkg,maxWaitMs:Math.max(0,activationWait-elapsed()),onProgress:(value,message)=>onProgress(.96,String(message??value))})===true;}
+    catch{/* A failed optional readiness check never removes the safety wait. */}
+    if(!ready)await waitWithProgress(Math.max(0,activationWait-elapsed()),.96,'Activating firmware');
+  }else await waitWithProgress(activationWait,.96,'Activating firmware');
+  onProgress(1,'DFU transfer completed. Application / installed bootloader remains unverified.');
 }
 
 // Arduino TinyUSB's native-CDC reboot state machine is 2 -> 3 -> 1 -> 0

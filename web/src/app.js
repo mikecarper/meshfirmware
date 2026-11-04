@@ -33,6 +33,7 @@ import { nrfDfuUsbIds } from './nrf-usb-ids.js';
 import { nrfBoardCandidates } from './nrf-board-candidates.js';
 import { xiaoInstalledStatus, xiaoInfoProfile, xiaoBootloaderItem } from './xiao-bootloader.js';
 import { postFlashBleAdvice } from './post-flash-advice.js';
+import { createNrfActivationCheck } from './nrf-activation.js';
 
 const $ = id => document.getElementById(id);
 const usbChooserCancelled=Symbol('usb-chooser-cancelled');
@@ -124,7 +125,7 @@ function renderFlashProgress(value,message,{complete=false}={}){
   // A transport can report every byte sent before its final readback/ACK.
   // Reserve completion for the successful write promise, not that callback.
   $('flash-progress-percent').textContent=(complete?100:Math.min(99,Math.floor(fraction*100)))+'%';
-  const stage=complete?'Transfer stage finished. Application startup remains unverified.':fraction>=1?'Finishing the transfer and final checks…':String(message||'Preparing firmware transfer…');
+  const stage=complete?(state.flashProgress?.completionPhase==='erase'?'Erase utility transfer finished. MeshCore has NOT been installed yet.':'Transfer stage finished. Application startup remains unverified.'):fraction>=1?'Finishing the transfer and final checks…':String(message||'Preparing firmware transfer…');
   if($('flash-progress-stage').textContent!==stage){$('flash-progress-stage').textContent=stage;log(stage);}
   syncFlashStop();
 }
@@ -137,35 +138,47 @@ function closeFlashResult(){
 function updatePostFlashAdvice(){
   const result=state.flashResult;
   const message=!state.flashProgress&&!state.recovery&&!state.migration&&!state.espRecovery
-    ?(result?.failed?'':result?.completionAdvice||state.verification?.completionAdvice||state.finishedFirmware?.completionAdvice||''):'';
+    ?flashCompletionAdvice(result||state.verification||state.finishedFirmware):'';
   $('post-flash-advice').textContent=message;$('post-flash-advice').hidden=!message;
+}
+function flashCompletionAdvice(result){
+  if(!result||result.failed||result.completionPhase==='erase')return '';
+  return [!result.verified&&!result.applicationVerified?result.startupAdvice:'',result.completionAdvice].filter(Boolean).join(' ');
+}
+function firstStartupAdvice(pkg){
+  if(!pkg||pkg.expert||pkg.erase)return '';
+  const erasedNrf=pkg.architecture==='nrf52'&&pkg.kind==='application'&&state.recovery?.phase==='final'&&state.recovery.eraseComplete===true&&state.recovery.sha256===pkg.sha256;
+  const erasedEsp=pkg.architecture==='esp32'&&pkg.merged===true&&state.plan?.merged===true&&state.plan.sha256===pkg.sha256;
+  return erasedNrf||erasedEsp?'First startup may create a new private identity and initialize storage. Give the radio time to start, then reconnect its application USB port to verify.':'';
 }
 function markFlashResultStartupVerified(expected){
   const result=state.flashResult,dialog=$('flash-progress-dialog');
-  if(state.flashProgress||!dialog.open||!result||result.failed||!result.sha256||result.sha256!==expected.sha256)return;
+  if(state.flashProgress||!dialog.open||!result||result.failed||result.completionPhase==='erase'||!result.sha256||result.sha256!==expected.sha256)return;
   result.applicationVerified=true;
   $('flash-progress-title').textContent='DONE';
   $('flash-progress-stage').textContent='Application startup verified.';
   $('flash-progress-warning').textContent='Firmware transfer and application startup verified. Close this window to continue.';
+  const advice=flashCompletionAdvice(result);$('flash-progress-advice').textContent=advice;$('flash-progress-advice').hidden=!advice;
 }
-async function withFlashProgress(name,initialStage,callback,{keepOpen=true,completionAdvice='',sha256=null}={}){
+async function withFlashProgress(name,initialStage,callback,{keepOpen=true,completionAdvice='',startupAdvice='',completionPhase='transfer',nextFirmwareName='',sha256=null}={}){
   if(state.flashProgress)fail('Another firmware transfer is already active.');
-  const transfer={name,completionAdvice,sha256:typeof sha256==='string'&&/^[a-f0-9]{64}$/.test(sha256)?sha256:null},dialog=$('flash-progress-dialog');state.flashProgress=transfer;state.flashResult=null;let complete=false;
+  const transfer={name,completionAdvice,startupAdvice,completionPhase:completionPhase==='erase'?'erase':'transfer',sha256:typeof sha256==='string'&&/^[a-f0-9]{64}$/.test(sha256)?sha256:null},dialog=$('flash-progress-dialog');state.flashProgress=transfer;state.flashResult=null;let complete=false;
   try{
     dialog.classList.toggle('flash-complete',false);dialog.classList.toggle('flash-result-error',false);dialog.setAttribute('closedby','none');
     $('flash-progress-title').textContent='Flashing firmware';$('flash-progress-warning').textContent='Keep this tab open. Do not unplug the radio or turn off power.';
     $('flash-progress-advice').hidden=true;$('flash-progress-advice').textContent='';updatePostFlashAdvice();
-    $('flash-progress-close').hidden=true;$('flash-progress-close').disabled=true;
+    $('flash-progress-close').textContent='Close';$('flash-progress-close').hidden=true;$('flash-progress-close').disabled=true;
     $('flash-progress-file').textContent=name;progress(0,initialStage);setNextAction(null);
     if(!dialog.open)dialog.showModal();syncFlashConsole({follow:true});
     const result=await callback();
     $('progress').value=1;renderFlashProgress(1,'',{complete:true});complete=true;
     if(keepOpen){
       state.flashResult=transfer;dialog.classList.toggle('flash-complete',true);dialog.setAttribute('closedby','closerequest');
-      $('flash-progress-title').textContent='DONE';
-      $('flash-progress-warning').textContent='Firmware transfer completed. Close this window to return to the flasher. Application startup is checked separately; keep the radio powered for any remaining steps.';
-      $('flash-progress-advice').textContent=completionAdvice;$('flash-progress-advice').hidden=!completionAdvice;
-      if(completionAdvice)log(completionAdvice);
+      $('flash-progress-title').textContent=transfer.completionPhase==='erase'?'DONE — ERASE STEP ONLY':'DONE';
+      $('flash-progress-warning').textContent=transfer.completionPhase==='erase'?`Keep USB connected. Close this window, choose the SAME radio’s DFU USB port, then follow the highlighted button to install the retained firmware${nextFirmwareName?': '+nextFirmwareName:'.'}`:'Firmware transfer completed. Close this window to return to the flasher. Application startup is checked separately; keep the radio powered for any remaining steps.';
+      if(transfer.completionPhase==='erase')$('flash-progress-close').textContent='Close — continue installation';
+      const advice=flashCompletionAdvice(transfer);$('flash-progress-advice').textContent=advice;$('flash-progress-advice').hidden=!advice;
+      if(advice)log(advice);
       $('flash-progress-close').hidden=false;$('flash-progress-close').disabled=false;
       dialog.scrollTop=0;
     }
@@ -294,6 +307,7 @@ function updateReconnectCallout(){
     if(verified)$('reconnect-detail').textContent='The running application answered and passed its startup checks. No further flashing step is required.';
     if(checking)$('reconnect-detail').textContent='Reading the previously authorized application port and checking the expected node identity and firmware. No flash or reset is being sent.';
   }
+  if(state.verification?.startupAdvice&&(ready||needed&&application||checking))$('reconnect-detail').textContent+=' '+state.verification.startupAdvice;
 }
 function canPrepareWithoutBackup(){
   const selected=$('artifact').value,hasImage=!!state.pkg||!!(selected&&state.items[Number(selected)]);
@@ -955,8 +969,8 @@ function refreshFirmwareWarnings() {
 function verificationRecord(pkg) {
   const identity=payloadFirmwareIdentity(pkg);
   const family=pkg.architecture==='nrf52'?boardAssessment(pkg).payloadFamily:'unknown',model=isNonMeshCore()?null:state.device?.model||state.recovery?.deviceModel||null,roleText=state.item?.role||pkg.name,role=/companion/i.test(roleText)?'companion':/repeater|room|sensor/i.test(roleText)?'common-cli':null;
-  const completionAdvice=postFlashBleAdvice(pkg,state.item);
-  return {sha256:pkg.sha256,name:pkg.name,architecture:pkg.architecture,hardware:canonicalHardware(state.item?.hardware||selectedHardware())||null,publicKey:!pkg.destructive&&!state.recovery?state.device?.publicKey||null:null,model:['rak4631','rak3401'].includes(family)&&rakFamily(model)!==family?null:model,family,role,version:identity?.versionText||null,...(completionAdvice?{completionAdvice}:{})};
+  const completionAdvice=postFlashBleAdvice(pkg,state.item),startupAdvice=firstStartupAdvice(pkg);
+  return {sha256:pkg.sha256,name:pkg.name,architecture:pkg.architecture,hardware:canonicalHardware(state.item?.hardware||selectedHardware())||null,publicKey:!pkg.destructive&&!state.recovery?state.device?.publicKey||null:null,model:['rak4631','rak3401'].includes(family)&&rakFamily(model)!==family?null:model,family,role,version:identity?.versionText||null,...(completionAdvice?{completionAdvice}:{}),...(startupAdvice?{startupAdvice}:{})};
 }
 function verificationModelMatches(expected,device){
   if(!expected.model||!device.model||expected.model.toLowerCase()===device.model.toLowerCase())return true;
@@ -970,8 +984,8 @@ function verificationModelMatches(expected,device){
 }
 function queueVerification(pkg){state.verification=verificationRecord(pkg);persistFlow('verification','meshfirmware.verifyApplication');}
 function completeNrfTransfer(pkg){
-  const completionAdvice=postFlashBleAdvice(pkg,state.item);
-  state.finishedFirmware={sha256:pkg.sha256,verified:false,kind:pkg.erase?'erase':selectedRecovery(pkg)?'temporary-recovery':pkg.kind,...(completionAdvice?{completionAdvice}:{})};
+  const completionAdvice=postFlashBleAdvice(pkg,state.item),startupAdvice=firstStartupAdvice(pkg);
+  state.finishedFirmware={sha256:pkg.sha256,verified:false,kind:pkg.erase?'erase':selectedRecovery(pkg)?'temporary-recovery':pkg.kind,...(completionAdvice?{completionAdvice}:{}),...(startupAdvice?{startupAdvice}:{})};
   if(pkg.erase){notice('Erase transfer completed; no application startup is claimed. Select the intended final firmware.');return;}
   const applicationIndex=$('artifact').value?Number($('artifact').value):-1,application=state.items[applicationIndex],normalBootloader=selectedBootloader(pkg);
   const returnToApplication=normalBootloader&&application?.architecture==='nrf52'&&application.hardware===state.item?.hardware&&matchesCatalogInstallMode(application,state.installMode);
@@ -1021,6 +1035,7 @@ async function verifyApplication({automaticApproval=null,automaticReconnect=fals
   if($('already-bootloader').checked)fail('Choose the running application interface, not ROM/DFU, before verifying startup.');
   state.autoVerifyAttempt={expected,port:state.knownApplicationPort?.port||null};
   if(state.migration||state.recovery||state.espRecovery||dfuIds.has(portId(state.port)))fail('Finish any pending write recovery and choose the running application interface, not ROM/DFU.');
+  if(expected.startupAdvice)notice('Checking the new application. '+expected.startupAdvice);
   await closeEsp();const port=state.port,generation=state.generation,link=new SerialLink(port);let device,version,layout;
   try {
     try{await link.open(115200,{application:true});device=await readApplication(link);}
@@ -1562,6 +1577,43 @@ async function prepareSelectedFirmware({waitForRom=false}={}) {
   catch (error) { try{await closeEsp();}catch(closeError){log(`Serial close: ${closeError.message}`);}if(testingConnection){progress(0,`Automatic connection testing stopped: ${error.message||String(error)}`);if(state.port===trialPort&&state.generation===trialGeneration){state.connectionTrial={port:trialPort,generation:trialGeneration,failed:true};state.handoff=false;updateConnectionChoice();}}throw error; }
 }
 $('prepare').onclick = () => operation(prepareSelectedFirmware);
+function nrfApplicationActivationCheck(pkg){
+  const port=state.port,generation=state.generation,plan=state.plan,device=state.device,item=state.item,known=state.knownApplicationPort,installMode=state.installMode,sha256=pkg?.sha256,publicKey=known?.publicKey;
+  if(pkg?.architecture!=='nrf52'||pkg.kind!=='application'||pkg.destructive||pkg.erase||pkg.expert||installMode!=='update'||!port||!plan||plan.port!==port||plan.generation!==generation||plan.sha256!==sha256||plan.erasePkg||state.recovery||state.migration||state.migrationApproval||state.espRecovery||state.verification||state.backupApplicationRequest||state.esp||state.nrfPrepareResume||!known?.port||!/^[a-f0-9]{64}$/i.test(publicKey||'')||device?.publicKey!==publicKey)return null;
+  const isCurrent=()=>{
+    const expectedDisconnect=state.port===null&&state.generation===generation+1;
+    return state.pkg===pkg&&pkg.sha256===sha256&&state.installMode===installMode&&state.item===item&&state.knownApplicationPort===known&&known.publicKey===publicKey&&device.publicKey===publicKey
+      &&(state.port===port&&state.generation===generation||expectedDisconnect)&&(state.device===device||expectedDisconnect&&state.device===null)&&(state.plan===plan||expectedDisconnect&&state.plan===null)
+      &&!state.recovery&&!state.migration&&!state.migrationApproval&&!state.espRecovery&&!state.verification&&!state.backupApplicationRequest&&!state.esp&&!state.nrfPrepareResume
+      &&(!state.flashProgress||state.flashProgress.sha256===sha256&&state.flashProgress.name===pkg.name);
+  };
+  const expectedRole=['companionFull','companionUsb','companionBle'].includes(item?.role)?'companion':'common-cli';
+  const check=createNrfActivationCheck({pkg,device,knownApplicationPort:known,hardware:canonicalHardware(item?.hardware||applicationBoard(device).hardware||selectedHardware()),expectedRole,isCurrent,log:message=>log('Activation check: '+message),
+    readApplication:async(applicationPort,{timeoutMs=700,signal}={})=>{
+      if(applicationPort!==known.port||!isCurrent())fail('The application activation-check context changed.');
+      const aborted=()=>Object.assign(new Error('Application activation check was cancelled.'),{name:'AbortError'});
+      if(signal?.aborted)throw aborted();
+      const link=new SerialLink(applicationPort);let opened=false,closing=null;
+      const closeOwned=()=>{if(opened){opened=false;closing=link.close();}return closing;};
+      const onAbort=()=>{void closeOwned()?.catch(()=>{});};signal?.addEventListener?.('abort',onAbort,{once:true});
+      try{
+        await link.open(115200,{application:true});opened=true;
+        if(signal?.aborted)throw aborted();if(!isCurrent())fail('The application activation-check context changed.');
+        const fresh=await detectMeshCore(link,{timeoutMs:Math.min(700,Math.max(1,Number(timeoutMs)||700))});
+        if(signal?.aborted)throw aborted();if(!isCurrent())fail('The application activation-check context changed.');
+        return fresh;
+      }finally{signal?.removeEventListener?.('abort',onAbort);await closeOwned();}
+    },
+  });
+  if(typeof check!=='function')return null;
+  return async args=>{
+    if(await check(args)!==true||!isCurrent())return false;
+    // A fresh reply proves this exact previously authorized app port is
+    // available again. Full startup verification still runs only after the
+    // transfer finishes, through the normal identity/version checks.
+    known.available=true;return true;
+  };
+}
 async function flashPreparedFirmware() {
   assertFirmwareNotCompleted();
   const plan = state.plan, pkg = state.pkg;
@@ -1597,8 +1649,9 @@ async function flashPreparedFirmware() {
   state.finishedFirmware=null;
   if(plan.erasePkg){
     state.recovery={sha256:pkg.sha256,name:pkg.name,hardware:selectedHardware(),deviceModel:isBootloaderInfo()?null:state.device?.model||null,eraseUrls:state.item?.erase||state.recovery?.eraseUrls||[],phase:'erasing',eraseComplete:false,...(isMeshtasticMigration()?{sourceFirmware:'meshtastic'}:{})};persistFlow('recovery','meshfirmware.nrfRecovery');
-    const link=new SerialLink(state.port);try{await link.open();await withFlashProgress(plan.erasePkg.name,'Preparing erase DFU…',()=>flashNrf(link,plan.erasePkg,progress),{sha256:plan.erasePkg.sha256});state.recovery.eraseComplete=true;}finally{await link.close();state.recovery.phase='reselect-dfu';persistFlow('recovery','meshfirmware.nrfRecovery');state.port=null;state.plan=null;state.generation++;$('port-status').textContent='Select same DFU radio';}
-    notice('Erase transfer completed. The original final ZIP remains loaded. Choose the SAME radio’s new DFU serial interface, inspect, then confirm its final firmware write.');return;
+    const link=new SerialLink(state.port);try{await link.open();await withFlashProgress(plan.erasePkg.name,'Preparing erase DFU…',()=>flashNrf(link,plan.erasePkg,progress),{sha256:plan.erasePkg.sha256,completionPhase:'erase',nextFirmwareName:pkg.name});state.recovery.eraseComplete=true;}finally{await link.close();state.recovery.phase='reselect-dfu';persistFlow('recovery','meshfirmware.nrfRecovery');state.port=null;state.plan=null;state.generation++;$('port-status').textContent='Select same DFU radio';}
+    progress(1,'Erase step finished — MeshCore has not been installed yet. Choose the same radio’s DFU port and follow the highlighted button to install the retained firmware.');
+    notice('Erase transfer completed. MeshCore has NOT been installed yet. The original final ZIP remains loaded. Choose the SAME radio’s new DFU serial interface, then follow the highlighted button to install it.');return;
   }
   if (pkg.architecture === 'uf2') {
     if (hash(pkg.payload)!==pkg.payloadHash) fail('UF2 changed after validation.');
@@ -1610,7 +1663,7 @@ async function flashPreparedFirmware() {
     progress(1,'UF2 copy completed. Bootloader activation and application startup remain unverified.'); state.plan=null;state.finishedFirmware={sha256:pkg.sha256,verified:false}; notice('UF2 copy completed. A disappearing drive can indicate reboot; it is not proof the intended firmware started.');
   } else if (pkg.architecture === 'esp32') {
     if(plan.needed && !plan.verified) { state.migration={mac:plan.mac,sha256:pkg.sha256,uart:!!plan.uart_completion_status,settled:false,phase:'writing'}; localStorage.setItem('meshfirmware.pendingMigration',JSON.stringify(state.migration)); }
-    await withFlashProgress(bridge?'USB expansion bridge for '+pkg.name:pkg.name,plan.merged?'Erasing and writing ESP32 firmware…':'Preparing ESP32 transfer and readback…',()=>state.esp.flash(pkg,progress,{allowRevisionMismatch,chunkedRecovery:!!plan.chunkedRecovery}),{keepOpen:!bridge,sha256:bridge?null:pkg.sha256}); plan.written = true;
+    await withFlashProgress(bridge?'USB expansion bridge for '+pkg.name:pkg.name,plan.merged?'Erasing and writing ESP32 firmware…':'Preparing ESP32 transfer and readback…',()=>state.esp.flash(pkg,progress,{allowRevisionMismatch,chunkedRecovery:!!plan.chunkedRecovery}),{keepOpen:!bridge,sha256:bridge?null:pkg.sha256,startupAdvice:bridge?'':firstStartupAdvice(pkg)}); plan.written = true;
     if(approval&&state.migrationApproval===approval){if(bridge)approval.bridgeVerified(pkg,plan);else approval.finalVerified(pkg,plan);}
     state.espRecovery=null;persistEspRecovery();
     if(plan.needed && !plan.verified) {state.migration.phase='written';localStorage.setItem('meshfirmware.pendingMigration',JSON.stringify(state.migration));}
@@ -1620,7 +1673,7 @@ async function flashPreparedFirmware() {
     if(approval&&state.migrationApproval!==approval){notice('Verified write completed. Automatic continuation was stopped; no next reset or write was sent. Use the manual verification/recovery controls to continue.');return;}
     if((approval||$('auto-finish').checked)&&!pkg.expert)await finishVerifiedEsp();
   }
-  else { const link = new SerialLink(state.port); try { await link.open(); await withFlashProgress(pkg.name,'Preparing DFU…',()=>flashNrf(link,pkg,progress),{completionAdvice:postFlashBleAdvice(pkg,state.item),sha256:pkg.sha256});completeNrfTransfer(pkg); } finally { await link.close(); state.plan = null; } }
+  else { const activationCheck=nrfApplicationActivationCheck(pkg),link = new SerialLink(state.port); try { await link.open(); await withFlashProgress(pkg.name,'Preparing DFU…',()=>activationCheck?flashNrf(link,pkg,progress,{activationCheck}):flashNrf(link,pkg,progress),{completionAdvice:postFlashBleAdvice(pkg,state.item),startupAdvice:firstStartupAdvice(pkg),sha256:pkg.sha256});completeNrfTransfer(pkg); } finally { await link.close(); state.plan = null; } }
 }
 async function reviewAndFlashSelectedFirmware(){
   if(state.plan?.written)fail('Firmware has already been transferred. Finish the pending reset before starting another update.');

@@ -53,7 +53,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
     fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,parseUsbMode,MigrationApproval,cleanCliReply,assessBootloaderVersion,firmwareFilesLinks,fetch:async()=>{throw Error('Unexpected network request');},fetchFirmwareBytes:(url,options)=>verifiedDownload(url,{...options,mirrorBase:'https://mirror.example.test/firmware/',pageOrigin:'https://mirror.example.test',fetchImpl:(target,init)=>target==='https://mirror.example.test/firmware/index.json'?Promise.resolve({ok:false,status:404}):options.fetchImpl(target,init)}),assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),commonCliRestorePreview:()=>({operations:[],skipped:[],warnings:[]}),restoreCommonCli:async()=>{throw Error('Unexpected CommonCLI restore');},
     backupCoverage,createNextStepScroller,tryNativeUsbFallback,SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
   });
-  context.quickHotspotUrl=quickHotspotUrl;context.postFlashBleAdvice=postFlashBleAdvice;
+  context.quickHotspotUrl=quickHotspotUrl;context.postFlashBleAdvice=postFlashBleAdvice;context.createNrfActivationCheck=()=>null;
   context.detectApplication=(...args)=>context.detectMeshCore(...args);context.detectMeshtasticBoard=detectMeshtasticBoard;
   context.parseBootloaderInfo=parseBootloaderInfo;context.detectBootloaderBoard=detectBootloaderBoard;context.xiaoInstalledStatus=xiaoInstalledStatus;context.xiaoInfoProfile=xiaoInfoProfile;context.xiaoBootloaderItem=xiaoBootloaderItem;context.chooseBootloaderInfoFile=async()=>{calls.push('file-picker');throw Error('Unexpected file chooser');};
   context.selectionLink=selectionLink;context.nrfBoardCandidates=nrfBoardCandidates;
@@ -489,11 +489,177 @@ test('all final firmware-write paths keep DONE open while subsequent workflow st
     if(kind==='esp32')ui.evaluate('state.esp={flash:async()=>onWrite()};');
     if(kind==='esp32')ui.context.onWrite=onWrite;
     if(kind==='uf2'){ui.context.hash=()=>ui.context.pkg.payloadHash;ui.context.drive={getFileHandle:async(name)=>name==='INFO_UF2.TXT'?{getFile:async()=>({text:async()=>'UF2 Bootloader Test'})}:{createWritable:async()=>({write:async()=>onWrite(),close:async()=>assert.equal(dialog.open,true),abort:async()=>{}})}};ui.evaluate('state.directory=drive;state.plan.uf2Info="UF2 Bootloader Test";');}
-    await ui.elements.get('flash').onclick();assert.equal(ui.calls.filter(call=>call==='write').length,1,kind);assert.equal(dialog.open,true,kind);assert.equal(ui.elements.get('flash-progress-title').textContent,'DONE',kind);assert.equal(ui.evaluate('state.flashProgress'),null,kind);
+    await ui.elements.get('flash').onclick();assert.equal(ui.calls.filter(call=>call==='write').length,1,kind);assert.equal(dialog.open,true,kind);assert.equal(ui.elements.get('flash-progress-title').textContent,kind==='erase'?'DONE — ERASE STEP ONLY':'DONE',kind);assert.equal(ui.evaluate('state.flashProgress'),null,kind);
     assert.equal(ui.evaluate('state.flashResult.sha256'),kind==='erase'?ui.context.erase.sha256:ui.context.pkg.sha256,kind);
     if(kind==='erase')assert.equal(ui.evaluate('state.recovery.phase'),'reselect-dfu');
     if(kind==='esp32'||kind==='nrf52')assert.ok(ui.evaluate('state.verification'),kind);
     ui.elements.get('flash-progress-close').onclick();assert.equal(dialog.open,false,kind);
+  }
+});
+
+async function eraseCompletionWorkbench(){
+  const ui=workbench();await Promise.resolve();serialMock(ui);ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0057});
+  ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({name:'t1000e_companion_radio_full-v1.18.0.1-keymind-cascade.zip'});ui.context.erase=fakePackage({name:'reviewed-utility.zip',sha256:'e'.repeat(64),erase:true,destructive:true});
+  ui.evaluate('state.port=selectedPort;state.pkg=pkg;state.plan={generation:state.generation,port:selectedPort,sha256:pkg.sha256,erasePkg:erase};');
+  ui.context.confirm=async(_title,_detail,_warning,token)=>{assert.equal(token,'WIPE WITHOUT BACKUP');ui.calls.push('confirm-wipe');return true;};
+  return ui;
+}
+
+test('erase DONE explicitly says MeshCore is not installed and directs the same DFU radio to its retained final firmware',async()=>{
+  const ui=await eraseCompletionWorkbench();let finish;
+  ui.context.flashNrf=async(_link,pkg)=>{assert.equal(pkg,ui.context.erase);ui.calls.push('write-erase');return new Promise(resolve=>{finish=resolve;});};
+  const pending=ui.elements.get('flash').onclick();for(let i=0;i<10&&!finish;i++)await Promise.resolve();assert.ok(finish);
+  assert.equal(ui.elements.get('flash-progress-title').textContent,'Flashing firmware');assert.match(ui.elements.get('flash-progress-warning').textContent,/Do not unplug/);assert.equal(ui.elements.get('flash-progress-close').hidden,true);assert.notEqual(ui.elements.get('flash-progress-percent').textContent,'100%');
+  finish();await pending;
+  assert.equal(ui.elements.get('flash-progress-dialog').open,true);assert.equal(ui.elements.get('flash-progress-title').textContent,'DONE — ERASE STEP ONLY');assert.equal(ui.elements.get('flash-progress-percent').textContent,'100%');
+  assert.match(ui.elements.get('flash-progress-stage').textContent,/Erase utility transfer finished.*MeshCore has NOT been installed yet/);
+  assert.match(ui.elements.get('flash-progress-warning').textContent,/Keep USB connected.*SAME radio.*DFU USB port.*highlighted button/);assert.ok(ui.elements.get('flash-progress-warning').textContent.includes(ui.context.pkg.name));
+  assert.match(ui.elements.get('flash-progress-close').textContent,/Close.*continue installation/);assert.equal(ui.elements.get('flash-progress-advice').hidden,true);assert.equal(ui.evaluate('state.flashResult.sha256'),ui.context.erase.sha256);
+  assert.equal(ui.evaluate('state.recovery.eraseComplete'),true);assert.equal(ui.evaluate('state.recovery.phase'),'reselect-dfu');assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);assert.equal(ui.evaluate('state.verification'),null);
+  assert.deepEqual(ui.calls,['confirm-wipe','open','write-erase','close']);assert.match(ui.elements.get('progress-label').textContent,/MeshCore has not been installed yet/);
+  ui.context.expected={sha256:ui.context.erase.sha256};ui.evaluate('markFlashResultStartupVerified(expected);');assert.equal(ui.elements.get('flash-progress-title').textContent,'DONE — ERASE STEP ONLY');assert.notEqual(ui.evaluate('state.flashResult.applicationVerified'),true);
+  ui.elements.get('flash-progress-close').onclick();assert.equal(ui.elements.get('flash-progress-dialog').open,false);assert.deepEqual(nextHighlight(ui),['select-port']);assert.deepEqual(ui.calls,['confirm-wipe','open','write-erase','close']);
+  ui.context.completed=async()=>{};await ui.evaluate("withFlashProgress('final.zip','Writing final firmware',completed,{sha256:pkg.sha256});");
+  assert.equal(ui.elements.get('flash-progress-title').textContent,'DONE');assert.match(ui.elements.get('flash-progress-stage').textContent,/startup remains unverified/);assert.doesNotMatch(ui.elements.get('flash-progress-warning').textContent,/NOT been installed|erase step|retained firmware/i);assert.equal(ui.elements.get('flash-progress-close').textContent,'Close');
+});
+
+test('an interrupted erase transfer never shows erase-step DONE or first-startup identity claims',async()=>{
+  const ui=await eraseCompletionWorkbench();ui.context.flashNrf=async()=>{ui.calls.push('write-erase');throw Error('Erase utility transfer interrupted');};
+  await ui.elements.get('flash').onclick();assert.equal(ui.elements.get('flash-progress-dialog').open,false);assert.notEqual(ui.elements.get('flash-progress-percent').textContent,'100%');assert.notEqual(ui.elements.get('flash-progress-title').textContent,'DONE — ERASE STEP ONLY');
+  assert.equal(ui.evaluate('state.recovery.eraseComplete'),false);assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);assert.doesNotMatch(ui.elements.get('notice').textContent,/First startup|create a new private identity/);assert.deepEqual(ui.calls,['confirm-wipe','open','write-erase','close']);
+});
+
+test('first-startup identity guidance requires a matching completed erase or a matching merged ESP install plan',async()=>{
+  for(const scenario of ['nrf-erased','nrf-update','mode-only','incomplete-erase','wrong-erase-image','erase-still-running','component','erase-utility','esp-merged','esp-update','esp-wrong-plan','esp-expert']){
+    const ui=workbench();await Promise.resolve();ui.context.pkg=fakePackage({...(scenario.startsWith('esp')?{architecture:'esp32',merged:scenario!=='esp-update',expert:scenario==='esp-expert'}:{}),...(scenario==='component'?{kind:'bootloader'}:{}),...(scenario==='erase-utility'?{erase:true}:{})});
+    ui.evaluate('state.pkg=pkg;');
+    if(!['nrf-update','mode-only'].includes(scenario)&&!scenario.startsWith('esp'))ui.evaluate(`state.recovery={sha256:${scenario==='wrong-erase-image'?"'c'.repeat(64)":'pkg.sha256'},phase:${scenario==='erase-still-running'?"'erasing'":"'final'"},eraseComplete:${scenario!=='incomplete-erase'}};`);
+    if(scenario==='mode-only')ui.evaluate('state.installMode="install";');
+    if(scenario.startsWith('esp'))ui.evaluate(`state.plan={merged:${scenario!=='esp-update'},sha256:${scenario==='esp-wrong-plan'?"'c'.repeat(64)":'pkg.sha256'}};`);
+    const advice=ui.evaluate('firstStartupAdvice(pkg)'),record=ui.evaluate('verificationRecord(pkg)'),expected=['nrf-erased','esp-merged'].includes(scenario);
+    assert.equal(!!advice,expected,scenario);assert.equal(!!record.startupAdvice,expected,scenario);
+    if(expected){assert.match(advice,/First startup may create a new private identity and initialize storage/);assert.doesNotMatch(advice,/generating|generated|\d+%/i);}
+    assert.deepEqual(ui.calls,[],scenario);
+  }
+});
+
+test('a final fresh T1000-E install keeps startup guidance and BLE advice until actual startup verification',async()=>{
+  const ui=workbench();await Promise.resolve();serialMock(ui);ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0057});ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({name:'t1000e_companion_radio_full-v1.18.0.1-keymind-cascade.zip'});
+  ui.evaluate('state.port=selectedPort;state.pkg=pkg;state.device={role:"companion",model:"Seeed Tracker T1000-E",publicKey:"11".repeat(32)};state.recovery={sha256:pkg.sha256,name:pkg.name,phase:"final",eraseComplete:true,deviceModel:"Seeed Tracker T1000-E"};state.plan={generation:state.generation,port:selectedPort,sha256:pkg.sha256,erasePkg:null};');
+  ui.context.confirm=async()=>true;ui.context.flashNrf=async()=>ui.calls.push('write-final');await ui.elements.get('flash').onclick();
+  assert.equal(ui.elements.get('flash-progress-title').textContent,'DONE');assert.match(ui.elements.get('flash-progress-stage').textContent,/startup remains unverified/);
+  for(const id of ['flash-progress-advice','post-flash-advice']){assert.equal(ui.elements.get(id).hidden,false);assert.match(ui.elements.get(id).textContent,/First startup may create a new private identity and initialize storage/);assert.match(ui.elements.get(id).textContent,/Bluetooth \(BLE\) stays off/);}
+  assert.equal(ui.evaluate('state.verification.publicKey'),null);assert.ok(ui.evaluate('state.verification.startupAdvice'));assert.match(ui.elements.get('reconnect-detail').textContent,/First startup may create a new private identity/);assert.equal(ui.evaluate('state.recovery'),null);
+  const stored=JSON.parse(ui.context.localStorage.getItem('meshfirmware.verifyApplication'));assert.ok(stored.startupAdvice);const fresh=workbench({verification:stored});await Promise.resolve();assert.match(fresh.elements.get('reconnect-detail').textContent,/First startup may create a new private identity/);assert.deepEqual(fresh.calls,[]);
+  ui.context.freshApplication={role:'companion',model:'Seeed Tracker T1000-E',name:'Fresh fixture',protocol:14,publicKey:'22'.repeat(32)};ui.context.appPort={getInfo:()=>({usbVendorId:0x239a,usbProductId:0x8029})};ui.evaluate('state.port=appPort;state.generation++;$("already-bootloader").checked=false;');
+  ui.context.readApplication=async()=>{ui.calls.push('application-read');ui.evaluate('state.device=freshApplication;');return ui.context.freshApplication;};ui.context.MeshCore=class{async cli(command){assert.equal(command,'version');return 'Companion v1.18.0.1';}};
+  await ui.evaluate('verifyApplication();');assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.elements.get('flash-progress-dialog').open,true);assert.equal(ui.elements.get('flash-progress-stage').textContent,'Application startup verified.');assert.equal(ui.evaluate('state.flashResult.applicationVerified'),true);
+  assert.match(ui.elements.get('flash-progress-advice').textContent,/Bluetooth \(BLE\) stays off/);assert.doesNotMatch(ui.elements.get('flash-progress-advice').textContent,/First startup|create a new private identity/);ui.evaluate('controls();');assert.doesNotMatch(ui.elements.get('post-flash-advice').textContent,/First startup/);assert.doesNotMatch(ui.elements.get('reconnect-detail').textContent,/First startup/);
+});
+
+async function nrfActivationWorkbench(){
+  const ui=workbench();await Promise.resolve();
+  ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0057});const appPort={getInfo:()=>({usbVendorId:0x239a,usbProductId:0x8029})};
+  ui.context.dfuPort=ui.port;ui.context.appPort=appPort;ui.context.pkg=fakePackage({name:'t1000e_companion_radio_full-v1.18.0.1-keymind-cascade.zip',firmwareIdentity:{versionText:'v1.18.0.1-keymind-cascade'}});
+  ui.context.activationItem={name:ui.context.pkg.name,hardware:'Seeed Studio SenseCAP T1000-E',role:'companionFull'};
+  ui.context.activationDevice={role:'companion',model:'Seeed Tracker T1000-E',publicKey:'11'.repeat(32),architecture:'nrf52',bootloaderVersion:'0.11.0-OTAFIX2.4.12',version:'Companion v1.18.0.0-keymind-cascade'};
+  ui.evaluate('state.port=dfuPort;state.pkg=pkg;state.item=activationItem;state.device=activationDevice;state.knownApplicationPort={port:appPort,publicKey:activationDevice.publicKey,available:false};state.handoff=true;state.plan={generation:state.generation,port:dfuPort,sha256:pkg.sha256,installMode:"update"};');
+  ui.context.SerialLink=class{
+    constructor(port){assert.ok(port===ui.port||port===appPort);this.port=port;}
+    async open(baudRate,options){if(this.port===appPort){assert.equal(baudRate,115200);assert.equal(options?.application,true);}ui.calls.push(this.port===appPort?'application-open':'dfu-open');}
+    async close(){ui.calls.push(this.port===appPort?'application-close':'dfu-close');}
+  };
+  ui.context.readApplication=async()=>assert.fail('Activation optimization cannot use the state-mutating application reader');
+  ui.context.detectMeshCore=async(link,options)=>{assert.equal(link.port,appPort);assert.ok(options.timeoutMs>0&&options.timeoutMs<=700);ui.calls.push('application-detect');return {...ui.context.activationDevice,version:'Companion v1.18.0.1-keymind-cascade'};};
+  ui.context.confirm=async()=>true;ui.context.createNrfActivationCheck=options=>{ui.activationOptions=options;return ui.activationCallback||null;};
+  ui.appPort=appPort;return ui;
+}
+
+test('a qualified nRF update passes only its read-only activation callback without prematurely marking startup verified',async()=>{
+  const ui=await nrfActivationWorkbench();
+  ui.context.requestAutomaticVerification=()=>{assert.equal(ui.evaluate('state.knownApplicationPort.available'),true);assert.ok(ui.evaluate('state.verification'));assert.notEqual(ui.evaluate('state.finishedFirmware.verified'),true);ui.calls.push('normal-verification-requested');};
+  ui.activationCallback=async()=>{assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.evaluate('state.flashResult'),null);assert.equal(ui.evaluate('state.finishedFirmware'),null);ui.calls.push('activation-proof');const fresh=await ui.activationOptions.readApplication(ui.appPort,{timeoutMs:3000});assert.equal(fresh.publicKey,ui.context.activationDevice.publicKey);return true;};
+  ui.context.flashNrf=async(link,pkg,_progress,options)=>{assert.equal(link.port,ui.port);assert.equal(pkg,ui.context.pkg);assert.equal(typeof options.activationCheck,'function');ui.calls.push('write-final');assert.equal(await options.activationCheck({link,pkg,maxWaitMs:5000}),true);assert.equal(ui.evaluate('state.knownApplicationPort.available'),true);assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.evaluate('state.flashResult'),null);};
+  const beforeDevice=ui.evaluate('state.device');await ui.elements.get('flash').onclick();
+  assert.equal(ui.activationOptions.expectedRole,'companion');assert.equal(ui.activationOptions.hardware,'Seeed Studio SenseCAP T1000-E');assert.equal(ui.activationOptions.pkg,ui.context.pkg);assert.equal(ui.activationOptions.knownApplicationPort.port,ui.appPort);
+  assert.deepEqual(ui.calls,['dfu-open','write-final','activation-proof','application-open','application-detect','application-close','dfu-close','normal-verification-requested']);assert.equal(ui.evaluate('state.device'),beforeDevice);assert.equal(ui.evaluate('state.port'),ui.port);
+  assert.ok(ui.evaluate('state.verification'));assert.notEqual(ui.evaluate('state.finishedFirmware.verified'),true);assert.equal(ui.elements.get('flash-progress-title').textContent,'DONE');assert.match(ui.elements.get('flash-progress-stage').textContent,/startup remains unverified/);assert.doesNotMatch(ui.elements.get('flash-progress-advice').textContent,/First startup|new private identity/);
+});
+
+test('only a strict fresh activation result in unchanged context marks the captured app port available',async()=>{
+  for(const scenario of ['true','false','truthy','stale-package','stale-port','stale-key','protected']){
+    const ui=await nrfActivationWorkbench(),known=ui.evaluate('state.knownApplicationPort');
+    ui.activationCallback=async()=>{
+      assert.equal(ui.evaluate('state.knownApplicationPort.available'),false);assert.equal(ui.evaluate('state.verification'),null);
+      if(scenario==='stale-package')ui.evaluate('state.pkg={...pkg};');
+      if(scenario==='stale-port')ui.evaluate('state.port=appPort;');
+      if(scenario==='stale-key')ui.evaluate('state.knownApplicationPort.publicKey="22".repeat(32);');
+      if(scenario==='protected')ui.evaluate('state.recovery={};');
+      return scenario==='false'?false:scenario==='truthy'?1:true;
+    };
+    const check=ui.evaluate('nrfApplicationActivationCheck(pkg);');assert.equal(typeof check,'function');
+    assert.equal(await check({}),scenario==='true',scenario);assert.equal(known.available,scenario==='true',scenario);assert.equal(ui.evaluate('state.verification'),null,scenario);assert.equal(ui.evaluate('state.flashResult'),null,scenario);assert.equal(ui.evaluate('state.finishedFirmware'),null,scenario);assert.deepEqual(ui.calls,[],scenario);
+  }
+});
+
+test('a proven app-port availability hint lets normal post-transfer startup verification finish without another chooser',async()=>{
+  const ui=await nrfActivationWorkbench();ui.context.pkg.firmwareIdentity.versionText='v1.18.0.1';
+  ui.activationCallback=async()=>{assert.equal(ui.evaluate('state.verification'),null);ui.calls.push('activation-proof');return true;};
+  ui.context.flashNrf=async(link,pkg,_progress,options)=>{ui.calls.push('write-final');assert.equal(await options.activationCheck({link,pkg,maxWaitMs:5000}),true);assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.evaluate('state.flashResult'),null);};
+  ui.context.readApplication=async link=>{assert.equal(link.port,ui.appPort);assert.ok(ui.evaluate('state.verification'));assert.notEqual(ui.evaluate('state.finishedFirmware.verified'),true);ui.calls.push('normal-startup-read');ui.context.freshDevice={...ui.context.activationDevice,version:'Companion v1.18.0.1-keymind-cascade'};ui.evaluate('state.device=freshDevice;');return ui.context.freshDevice;};
+  ui.context.MeshCore=class{async cli(command){assert.equal(command,'version');ui.calls.push('version');return 'Companion v1.18.0.1-keymind-cascade';}};
+  await ui.elements.get('flash').onclick();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.evaluate('state.finishedFirmware.verified'),true);assert.equal(ui.evaluate('state.port'),ui.appPort);assert.equal(ui.elements.get('flash-progress-dialog').open,true);assert.equal(ui.elements.get('flash-progress-stage').textContent,'Application startup verified.');assert.equal(ui.evaluate('state.flashResult.applicationVerified'),true);
+  assert.deepEqual(ui.calls,['dfu-open','write-final','activation-proof','dfu-close','application-open','normal-startup-read','version','application-close']);assert.ok(!ui.calls.includes('chooser'));
+});
+
+test('fast nRF activation is unavailable for installs, erase recovery, components or another protected flow',async()=>{
+  for(const scenario of ['install','erase-plan','recovery','migration','migrationApproval','espRecovery','verification','backupApplicationRequest','esp','nrfPrepareResume','component','erase','expert','destructive','missing-key','wrong-key','wrong-plan']){
+    const ui=await nrfActivationWorkbench();ui.context.createNrfActivationCheck=()=>assert.fail('Unqualified context cannot construct a fast activation probe');
+    if(scenario==='install')ui.evaluate('state.installMode="install";');
+    else if(scenario==='erase-plan')ui.evaluate('state.plan.erasePkg={};');
+    else if(scenario==='component')ui.evaluate('state.pkg.kind="bootloader";');
+    else if(['erase','expert','destructive'].includes(scenario))ui.evaluate(`state.pkg.${scenario}=true;`);
+    else if(scenario==='missing-key')ui.evaluate('state.knownApplicationPort.publicKey=null;');
+    else if(scenario==='wrong-key')ui.evaluate('state.device.publicKey="22".repeat(32);');
+    else if(scenario==='wrong-plan')ui.evaluate('state.plan.sha256="c".repeat(64);');
+    else ui.evaluate(`state.${scenario}={};`);
+    assert.equal(ui.evaluate('nrfApplicationActivationCheck(pkg);'),null,scenario);assert.deepEqual(ui.calls,[],scenario);
+  }
+});
+
+test('the activation scope permits only its own DFU disconnect and rejects foreign selections or changed proofs',async()=>{
+  for(const change of ['own-disconnect','extra-generation','foreign-port','package-object','digest','mode','known-object','known-key','device-key','item','plan','recovery','verification']){
+    const ui=await nrfActivationWorkbench();ui.evaluate('nrfApplicationActivationCheck(pkg);');assert.equal(ui.activationOptions.isCurrent(),true,change);
+    if(change==='own-disconnect'){ui.serialEvents.disconnect({port:ui.port});ui.evaluate('state.knownApplicationPort.available=true;');}
+    if(change==='extra-generation')ui.evaluate('state.port=null;state.plan=null;state.generation+=2;');
+    if(change==='foreign-port')ui.evaluate('state.port=appPort;');
+    if(change==='package-object')ui.evaluate('state.pkg={...pkg};');
+    if(change==='digest')ui.evaluate('state.pkg.sha256="c".repeat(64);');
+    if(change==='mode')ui.evaluate('state.installMode="install";');
+    if(change==='known-object')ui.evaluate('state.knownApplicationPort={...state.knownApplicationPort};');
+    if(change==='known-key')ui.evaluate('state.knownApplicationPort.publicKey="22".repeat(32);');
+    if(change==='device-key')ui.evaluate('state.device.publicKey="22".repeat(32);');
+    if(change==='item')ui.evaluate('state.item={...state.item};');
+    if(change==='plan')ui.evaluate('state.plan={...state.plan};');
+    if(['recovery','verification'].includes(change))ui.evaluate(`state.${change}={};`);
+    assert.equal(ui.activationOptions.isCurrent(),change==='own-disconnect',change);assert.deepEqual(ui.calls,[],change);
+  }
+});
+
+test('the activation application adapter owns only its exact app link and aborts without resets or state adoption',async()=>{
+  for(const phase of ['pre-aborted','after-open','during-read','open-denied','foreign-port']){
+    const ui=await nrfActivationWorkbench();ui.evaluate('nrfApplicationActivationCheck(pkg);');const controller=new AbortController(),options=ui.activationOptions;
+    const beforeDevice=ui.evaluate('state.device'),beforePort=ui.evaluate('state.port');let finish;
+    if(phase==='pre-aborted')controller.abort();
+    if(phase==='after-open')ui.context.SerialLink.prototype.open=async()=>{ui.calls.push('application-open');controller.abort();};
+    if(phase==='during-read')ui.context.detectMeshCore=()=>{ui.calls.push('application-detect');return new Promise(resolve=>{finish=resolve;});};
+    if(phase==='open-denied')ui.context.SerialLink.prototype.open=async()=>{ui.calls.push('application-open');throw Object.assign(Error('Port is in use'),{name:'NotAllowedError'});};
+    const pending=options.readApplication(phase==='foreign-port'?ui.port:ui.appPort,{timeoutMs:3000,signal:controller.signal});
+    if(phase==='during-read'){for(let i=0;i<10&&!finish;i++)await Promise.resolve();assert.ok(finish);controller.abort();finish({...ui.context.activationDevice});}
+    await assert.rejects(pending,/cancelled|Port is in use|context changed/);
+    assert.equal(ui.evaluate('state.device'),beforeDevice,phase);assert.equal(ui.evaluate('state.port'),beforePort,phase);assert.equal(ui.evaluate('state.verification'),null,phase);
+    assert.deepEqual(ui.calls,phase==='pre-aborted'||phase==='foreign-port'?[]:phase==='open-denied'?['application-open']:phase==='during-read'?['application-open','application-detect','application-close']:['application-open','application-close'],phase);
   }
 });
 
@@ -3473,7 +3639,7 @@ test('Meshtastic keeps step 4 across nRF52 runtime-to-DFU handoff without automa
 test('Meshtastic erase and final application writes each retain consent, with a UI-only recovery-source marker',async()=>{
   const ui=await meshtasticDirectWorkbench();ui.evaluate("state.installMode='install';syncInstallMode();");ui.context.erase=fakePackage({name:'erase.zip',erase:true,destructive:true});ui.context.erasePackage=async()=>ui.context.erase;
   await ui.elements.get('flash').onclick();assert.deepEqual(ui.calls.filter(call=>call.startsWith('write-')),['write-erase']);assert.equal(ui.evaluate('state.recovery.sourceFirmware'),'meshtastic');assert.equal(JSON.parse(ui.context.localStorage.getItem('meshfirmware.nrfRecovery')).sourceFirmware,'meshtastic');assert.equal(ui.elements.get('prepare').hidden,true);assert.equal(ui.elements.get('flash').disabled,true);
-  assert.equal(ui.elements.get('flash-progress-title').textContent,'DONE');ui.elements.get('flash-progress-close').onclick();
+  assert.equal(ui.elements.get('flash-progress-title').textContent,'DONE — ERASE STEP ONLY');ui.elements.get('flash-progress-close').onclick();
   await ui.elements.get('select-port').onclick();assert.deepEqual(nextHighlight(ui),['flash']);assert.equal(ui.elements.get('flash').disabled,false);assert.deepEqual(ui.calls.filter(call=>call.startsWith('write-')),['write-erase']);await ui.elements.get('flash').onclick();assert.deepEqual(ui.calls.filter(call=>call.startsWith('write-')),['write-erase','write-final']);assert.equal(ui.calls.filter(call=>call==='confirm:WIPE WITHOUT BACKUP').length,1);assert.equal(ui.calls.filter(call=>call==='confirm:FLASH').length,1);assert.equal(ui.elements.get('skip-backup').checked,false);
 });
 

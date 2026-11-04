@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {zipSync} from 'fflate';
-import {crc16,nrfPackage} from '../src/firmware.js';
+import {crc16,nrfPackage,nrfMetadataHash} from '../src/firmware.js';
 import {flashNrf,slipDecode,slipEncode} from '../src/serial.js';
 
 function firmware(length){
@@ -68,4 +68,53 @@ test('an interrupted activation wait preserves the failure without repeating wri
   assert.deepEqual(io.events.filter(event=>event.type==='write').map(event=>event.command),[3,1,...Array(chunks).fill(4),5]);
   assert.equal(io.events.some(event=>event.type==='progress'&&event.value===1),false);
   assert.equal(io.events.filter(event=>event.type==='progress'&&event.phase==='activate').length,2);
+});
+
+test('qualified application readiness can end only the post-transfer wait, after the settings guard',async()=>{
+  const pkg=firmware(600*1024),io=transport(),pages=Math.ceil(pkg.payload.length/4096)+1;
+  const eraseWait=Math.min(30000,Math.ceil(pages*89.7)),activationWait=eraseWait+Math.ceil(pages*204.8);
+  let checked=0,stopAt;
+  await flashNrf(io.link,pkg,io.onProgress,{delay:io.delay,now:io.waited,activationCheck:async args=>{
+    checked++;stopAt=io.events.findLast(event=>event.type==='write').at;
+    assert.equal(args.link,io.link);assert.equal(args.pkg,pkg);assert.equal(args.maxWaitMs,activationWait-250);
+    assert.equal(io.waited()-stopAt,250);assert.equal(io.events.some(event=>event.type==='progress'&&event.value===1),false);
+    args.onProgress('Checking the same returning application…');await io.delay(1500);return true;
+  }});
+  assert.equal(checked,1);assert.equal(io.waited()-stopAt,1750);
+  assert.deepEqual(io.events.filter(event=>event.type==='write').map(event=>event.command),[3,1,...Array(Math.ceil(pkg.payload.length/512)).fill(4),5]);
+  assert.equal(io.events.filter(event=>event.type==='progress'&&event.value===1).length,1);
+  assert.equal(io.events.at(-1).at,stopAt+1750);assert.match(io.events.at(-1).label,/remains unverified/);
+});
+
+test('unproven or failed optional readiness retains the remaining conservative activation budget',async()=>{
+  for(const outcome of ['false','throw','truthy']){
+    const pkg=firmware(128*1024),io=transport(),pages=Math.ceil(pkg.payload.length/4096)+1;
+    const activationWait=Math.max(500,Math.ceil(pages*89.7))+Math.ceil(pages*204.8);let stopAt;
+    await flashNrf(io.link,pkg,io.onProgress,{delay:io.delay,now:io.waited,activationCheck:async()=>{
+      stopAt=io.events.findLast(event=>event.type==='write').at;await io.delay(1200);
+      if(outcome==='throw')throw Error('Application readiness unavailable');return outcome==='truthy'?{connected:true}:false;
+    }});
+    assert.equal(io.waited()-stopAt,activationWait,outcome);assert.equal(io.events.filter(event=>event.type==='progress'&&event.value===1).length,1,outcome);
+    assert.equal(io.events.filter(event=>event.type==='write'&&event.command===5).length,1,outcome);
+  }
+});
+
+test('components, erase utilities and updater wrappers never invoke the optional fast readiness path',async()=>{
+  for(const variant of ['bootloader','softdevice','softdevice_bootloader','erase','expert','wrapper','recovery']){
+    const pkg=firmware(64*1024),io=transport();
+    if(['bootloader','softdevice','softdevice_bootloader'].includes(variant)){
+      pkg.kind=variant;pkg.appSize=0;pkg.sdSize=variant==='bootloader'?0:variant==='softdevice'?pkg.payload.length:pkg.payload.length/2;pkg.blSize=pkg.payload.length-pkg.sdSize;pkg.mode={bootloader:2,softdevice:1,softdevice_bootloader:3}[variant];
+    }
+    if(variant==='erase')pkg.erase=true;if(variant==='expert')pkg.expert=true;
+    if(variant==='wrapper')pkg.name='t1000e-with-bootloader-2.4.12.zip';if(variant==='recovery')pkg.name='R_t1000e.zip';
+    pkg.metadataHash=nrfMetadataHash(pkg);
+    await flashNrf(io.link,pkg,io.onProgress,{delay:io.delay,now:io.waited,activationCheck:async()=>assert.fail('No fast path for '+variant)});
+    assert.ok(io.events.some(event=>event.type==='progress'&&event.phase==='activate'),variant);
+  }
+});
+
+test('invalid activation callbacks fail before signals, erases or writes',async()=>{
+  for(const activationCheck of [true,123,{},'ready']){
+    const io=transport();await assert.rejects(flashNrf(io.link,firmware(256),io.onProgress,{delay:io.delay,activationCheck}),/activation check/);assert.deepEqual(io.events,[]);
+  }
 });
