@@ -1,0 +1,37 @@
+{
+  "source": "https://api.meshcore.nz/api/v1/config",
+  "snapshotDate": "2026-11-04",
+  "config": {
+    "suggested_radio_settings": {
+      "entries": [
+        {"title":"Australia","frequency":"915.800","bandwidth":"250","spreading_factor":"10","coding_rate":"5"},
+        {"title":"Australia (Narrow)","frequency":"916.575","bandwidth":"62.5","spreading_factor":"7","coding_rate":"7"},
+        {"title":"Australia (Mid)","frequency":"915.075","bandwidth":"125","spreading_factor":"9","coding_rate":"5"},
+        {"title":"Australia: SA, WA","frequency":"923.125","bandwidth":"62.5","spreading_factor":"8","coding_rate":"8"},
+        {"title":"Australia: QLD","frequency":"923.125","bandwidth":"62.5","spreading_factor":"8","coding_rate":"5"},
+        {"title":"Brazil","frequency":"923.125","bandwidth":"62.5","spreading_factor":"8","coding_rate":"8"},
+        {"title":"Canada","frequency":"910.525","bandwidth":"62.5","spreading_factor":"7","coding_rate":"5","network_settings":{"path_hash_size":3}},
+        {"title":"Costa Rica","frequency":"910.525","bandwidth":"125","spreading_factor":"11","coding_rate":"5"},
+        {"title":"EU/UK (Narrow)","frequency":"869.618","bandwidth":"62.5","spreading_factor":"8","coding_rate":"8"},
+        {"title":"EU/UK (Deprecated)","frequency":"869.525","bandwidth":"250","spreading_factor":"11","coding_rate":"5"},
+        {"title":"Czech Republic (Narrow)","frequency":"869.432","bandwidth":"62.5","spreading_factor":"7","coding_rate":"5","network_settings":{"path_hash_size":2}},
+        {"title":"EU 433MHz (Long Range)","frequency":"433.650","bandwidth":"250","spreading_factor":"11","coding_rate":"5"},
+        {"title":"EU 433MHz (Narrow)","frequency":"433.650","bandwidth":"62.5","spreading_factor":"8","coding_rate":"8"},
+        {"title":"Hungary","frequency":"869.618","bandwidth":"62.5","spreading_factor":"7","coding_rate":"5","network_settings":{"path_hash_size":2}},
+        {"title":"Netherlands","frequency":"869.618","bandwidth":"62.5","spreading_factor":"7","coding_rate":"5"},
+        {"title":"Netherlands (Limburg)","frequency":"869.618","bandwidth":"62.5","spreading_factor":"8","coding_rate":"8","network_settings":{"path_hash_size":2}},
+        {"title":"New Zealand (Narrow)","frequency":"917.375","bandwidth":"62.5","spreading_factor":"7","coding_rate":"5","network_settings":{"path_hash_size":2}},
+        {"title":"New Zealand (Gisborne)","frequency":"917.375","bandwidth":"250","spreading_factor":"11","coding_rate":"5","network_settings":{"path_hash_size":1}},
+        {"title":"Portugal 433","frequency":"433.375","bandwidth":"62.5","spreading_factor":"9","coding_rate":"6"},
+        {"title":"Portugal 868","frequency":"869.618","bandwidth":"62.5","spreading_factor":"7","coding_rate":"6"},
+        {"title":"Slovakia","frequency":"869.618","bandwidth":"62.5","spreading_factor":"7","coding_rate":"5","network_settings":{"path_hash_size":2}},
+        {"title":"Switzerland","frequency":"869.618","bandwidth":"62.5","spreading_factor":"8","coding_rate":"8"},
+        {"title":"Thailand","frequency":"921","bandwidth":"62.5","spreading_factor":"7","coding_rate":"5"},
+        {"title":"USA","frequency":"910.525","bandwidth":"62.5","spreading_factor":"7","coding_rate":"5"},
+        {"title":"USA - Southern California","frequency":"927.875","bandwidth":"62.5","spreading_factor":"7","coding_rate":"5","network_settings":{"path_hash_size":3}},
+        {"title":"Vietnam (Narrow)","frequency":"920.250","bandwidth":"62.5","spreading_factor":"8","coding_rate":"5"},
+        {"title":"Vietnam (Deprecated)","frequency":"920.250","bandwidth":"250","spreading_factor":"11","coding_rate":"5"}
+      ]
+    }
+  }
+}

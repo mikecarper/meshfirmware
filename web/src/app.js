@@ -34,6 +34,10 @@ import { nrfBoardCandidates } from './nrf-board-candidates.js';
 import { xiaoInstalledStatus, xiaoInfoProfile, xiaoBootloaderItem } from './xiao-bootloader.js';
 import { postFlashBleAdvice } from './post-flash-advice.js';
 import { createNrfActivationCheck } from './nrf-activation.js';
+import { inspectRadioDefaults, customizeRadioDefaults } from './radio-defaults.js';
+import { createPostFlashSettingsPlan, applyPostFlashSettings } from './post-flash-settings.js';
+import { createPostFlashCompanionRequest } from './post-flash-companion.js';
+import { loadRadioPresets } from './radio-presets.js';
 
 const $ = id => document.getElementById(id);
 const usbChooserCancelled=Symbol('usb-chooser-cancelled');
@@ -67,6 +71,137 @@ state.applicationDetection=null;
 // A previously detected board must not label a newly selected DFU interface.
 state.portLabelEvidence=null;
 state.quickSettingsMessage=null;
+// Original verified download + customization stay in this tab only. Never
+// reuse a previous radio's defaults draft or treat a local hash as published.
+state.radioDefaults=null;
+state.postFlashSettingsApproval=null;state.postFlashSettingsResult=null;
+state.radioPresets=null;
+const radioDefaultsFields=['radio-defaults-frequency','radio-defaults-bandwidth','radio-defaults-sf','radio-defaults-cr','radio-defaults-preamble','radio-defaults-power'];
+const mediaMeshFields=['media-mesh-frequency','media-mesh-bandwidth','media-mesh-sf','media-mesh-cr','media-mesh-mode','media-mesh-preamble'];
+function radioSettingsAvailable(){const pkg=state.pkg;return !!state.radioDefaults?.inspection&&!!pkg&&((pkg.architecture==='nrf52'&&pkg.kind==='application'&&!pkg.erase&&!pkg.destructive&&!/bootloader|^R_/i.test(pkg.name))||(pkg.architecture==='esp32'&&!pkg.expert));}
+function radioDefaultsLocked(){return continuingDeviceFlow()||!!state.plan?.written||!!state.flashProgress||!!state.finishedFirmware;}
+function assertRadioDefaultsReady(){if(state.radioDefaults?.dirty)fail('Apply the edited radio defaults before preparing or flashing.');}
+function radioDefaultsSummary(){
+  const draft=state.radioDefaults,s=draft?.appliedSettings;
+  const embedded=draft?.provenance&&s?.enabled?`Custom factory radio defaults: ${s.frequencyHz/1e6} MHz / ${s.bandwidthHz/1000} kHz / SF${s.spreadingFactor} / CR4/${s.codingRate}; preamble ${s.preambleSymbols||'auto'}${s.txPowerDbm===null?'':`; TX ${s.txPowerDbm} dBm`}. Existing saved settings take precedence.`:'';
+  return [embedded,draft?.postFlashPlan?`After startup verification, apply over USB: ${draft.postFlashPlan.summary}. These explicitly selected settings replace their saved values; all other settings are left unchanged.`:''].filter(Boolean).join(' ');
+}
+function postFlashSettingsStatus(){
+  const result=state.postFlashSettingsResult;
+  if(!result)return '';
+  return result.complete?'Selected radio/MediaMesh settings applied and read back.':`Some selected radio/MediaMesh settings were not applied or verified: ${[...(result.result?.skipped||[]),...(result.result?.errors||[])].map(row=>typeof row==='string'?row:row.reason||row.message||row.setting||row.id||'unsupported setting').join('; ')||'check the operation log'}. No settings writes will be retried automatically.`;
+}
+async function applyQueuedRadioSettings(link,device,expected,port,generation,mc,automaticApproval=null){
+  const ticket=state.postFlashSettingsApproval;
+  if(!ticket||ticket.sha256!==expected.sha256||ticket.attempted)return;
+  const isCurrent=()=>state.postFlashSettingsApproval===ticket&&state.verification===expected&&state.port===port&&state.generation===generation&&(!automaticApproval||state.migrationApproval===automaticApproval)&&/^[a-f0-9]{64}$/i.test(device.publicKey||'');
+  if(!isCurrent())fail('Radio changed before applying the selected post-flash settings.');
+  if(!expected.version){ticket.attempted=true;state.postFlashSettingsResult={sha256:expected.sha256,complete:false,result:{skipped:[{reason:'The target firmware version could not be established from validated image/release metadata. No post-flash settings were written.'}]}};log(postFlashSettingsStatus());return;}
+  const request=mc?createPostFlashCompanionRequest(mc,device,{isCurrent}):async command=>{if(!isCurrent())fail('Radio changed before a settings command.');const reply=await link.command(command,1200);if(!isCurrent())fail('Radio changed while applying settings.');return reply;};
+  // A failed/partially applied operation is never automatically replayed by a
+  // verification retry. The final flash confirmation authorized this one run.
+  ticket.attempted=true;
+  notice('Firmware started. Applying the selected radio/MediaMesh settings over USB…');
+  let result;
+  try{result=await applyPostFlashSettings(ticket.plan,{request,isCurrent,log});}
+  catch(error){if(isCurrent())state.postFlashSettingsResult={sha256:expected.sha256,complete:false,result:{errors:[{reason:error.message||String(error)}]}};throw error;}
+  if(!isCurrent())fail('Radio changed before the settings result could be verified.');
+  state.postFlashSettingsResult={sha256:expected.sha256,complete:result.complete===true,result};
+  log(postFlashSettingsStatus());
+  if($('flash-progress-dialog').open){$('flash-progress-advice').textContent=postFlashSettingsStatus();$('flash-progress-advice').hidden=false;}
+}
+function syncRadioDefaultsControls(){
+  const draft=state.radioDefaults,locked=radioDefaultsLocked(),supported=radioSettingsAvailable(),editable=draft?.inspection?.supported===true;
+  $('radio-defaults-load').disabled=state.busy||locked||(!state.pkg&&!$('artifact').value);
+  $('radio-defaults-editor').hidden=!supported;
+  $('radio-defaults-load').textContent=draft?.inspection?'Check selected build':'Load & check selected build';
+  $('radio-preset').disabled=state.busy||locked||!supported;
+  for(const id of ['radio-defaults-enabled','radio-defaults-apply',...radioDefaultsFields])$(id).disabled=state.busy||locked||!supported||(radioDefaultsFields.includes(id)&&!$('radio-defaults-enabled').checked);
+  for(const id of ['media-mesh-preset','media-mesh-cross',...mediaMeshFields])$(id).disabled=state.busy||locked||!supported||(mediaMeshFields.includes(id)&&$('media-mesh-preset').value!=='custom');
+  $('media-mesh-custom').hidden=$('media-mesh-preset').value!=='custom';
+  $('radio-defaults-enable-label').textContent=editable?'Customize factory defaults inside this firmware':'Set primary radio after flashing';
+  $('radio-defaults-preamble-label').textContent=editable?'Preamble symbols (0 = auto)':'Preamble symbols (blank = firmware default, 0 = auto)';
+  $('radio-defaults-apply').disabled ||= !draft?.dirty;
+  $('radio-defaults').classList.toggle('pending',!!draft?.dirty);
+  if(draft?.dirty){$('radio-defaults-status').textContent='Settings changed. Click Use these settings before continuing.';for(const id of ['prepare','flash'])$(id).disabled=true;}
+  else if(!draft)$('radio-defaults-status').textContent='Load a build to choose primary radio and MediaMesh settings. No radio is accessed by this check.';
+  $('radio-defaults-provenance').hidden=!draft?.provenance;
+  $('radio-defaults-provenance').textContent=draft?.provenance?`Original/source SHA-256: ${draft.sourceSha256}\nCustomized image SHA-256: ${state.pkg?.sha256}`:'';
+  $('radio-defaults-download').hidden=!draft?.provenance;$('radio-defaults-recovery-hint').hidden=!draft?.provenance;
+  $('radio-defaults-download').disabled=state.busy||!!draft?.dirty||!draft?.customizedBytes;
+}
+function fillRadioDefaults(settings){
+  $('radio-defaults-enabled').checked=settings?.enabled===true;
+  $('radio-defaults-frequency').value=settings?.enabled?String(settings.frequencyHz/1e6):'';
+  $('radio-defaults-bandwidth').value=String(settings?.enabled?settings.bandwidthHz:125000);
+  $('radio-defaults-sf').value=String(settings?.enabled?settings.spreadingFactor:7);
+  $('radio-defaults-cr').value=String(settings?.enabled?settings.codingRate:5);
+  $('radio-defaults-preamble').value=settings?.enabled?(settings.preambleSymbols===null?'':String(settings.preambleSymbols)):'0';
+  $('radio-defaults-power').value=settings?.enabled&&settings.txPowerDbm!==null?String(settings.txPowerDbm):'';
+}
+async function inspectSelectedRadioDefaults(){
+  if(radioDefaultsLocked())fail('Finish the current device operation before changing firmware defaults.');
+  if(!state.pkg&&$('artifact').value)await fetchSelectedFirmware();
+  const draft=state.radioDefaults;if(!draft||!state.pkg)fail('Load an exact firmware build first.');
+  if(draft.dirty)fail('Apply the edited defaults before checking another build.');
+  const inspection=inspectRadioDefaults(draft.name,draft.bytes);draft.inspection=inspection;
+  fillRadioDefaults(draft.appliedSettings||inspection.settings);
+  if(!inspection.supported&&!draft.appliedSettings)$('radio-defaults-preamble').value='';
+  $('radio-defaults-status').textContent=inspection.supported?(draft.provenance?'Custom defaults are included. Saved settings still take precedence.':'This build supports editable factory defaults. MediaMesh settings are applied after flashing.'):radioSettingsAvailable()?'This image stays unchanged. Selected settings will be applied over USB after startup verification.':(inspection.reason||'This component cannot configure application radio settings.');
+  if(radioSettingsAvailable()&&!state.radioPresets){
+    $('radio-preset-status').textContent='Loading community radio presets… (up to 5 seconds)';
+    const loaded=await loadRadioPresets();
+    state.radioPresets=loaded.presets;
+    $('radio-preset').replaceChildren(new Option('Custom','custom'),...loaded.presets.map(p=>new Option(`${p.title} · ${p.frequencyHz/1e6} MHz / ${p.bandwidthHz/1000} kHz / SF${p.spreadingFactor} / CR4/${p.codingRate}`,p.id)));
+    $('radio-preset-status').textContent=loaded.warning||'Community presets from api.meshcore.nz. Confirm the correct settings for your radio and region.';
+  }
+}
+function editRadioDefaults(){
+  const draft=state.radioDefaults;
+  if(state.busy||radioDefaultsLocked()||!radioSettingsAvailable())return;
+  draft.dirty=true;state.postFlashSettingsApproval=null;state.postFlashSettingsResult=null;state.plan=null;state.backupApproved=null;state.nrfPrepareResume=null;state.generation++;
+  controls();
+}
+function chooseRadioPreset(){
+  if(state.busy||radioDefaultsLocked()||!radioSettingsAvailable())return;
+  const preset=state.radioPresets?.find(p=>p.id===$('radio-preset').value);
+  if(preset){
+    $('radio-defaults-enabled').checked=true;
+    for(const [id,value]of [['frequency',preset.frequencyHz/1e6],['bandwidth',preset.bandwidthHz],['sf',preset.spreadingFactor],['cr',preset.codingRate]])$('radio-defaults-'+id).value=String(value);
+    $('radio-preset-status').textContent=[`${preset.title}: radio values filled for review.`,preset.notes].filter(Boolean).join(' ');
+  }
+  editRadioDefaults();
+}
+async function applyRadioDefaults(){
+  if(radioDefaultsLocked())fail('Finish the current device operation before changing firmware defaults.');
+  const draft=state.radioDefaults;if(!radioSettingsAvailable()||!draft.dirty)fail('Check this firmware and choose its settings first.');
+  const number=id=>{const value=$(id).value.trim();if(!value)fail('Enter a radio frequency and all required settings.');return Number(value);};
+  const enabled=$('radio-defaults-enabled').checked;
+  const frequencyMHz=enabled?number('radio-defaults-frequency'):0,frequencyHz=Math.round(frequencyMHz*1e6);
+  if(enabled&&(!Number.isFinite(frequencyMHz)||Math.abs(frequencyHz/1e6-frequencyMHz)>1e-9))fail('Frequency supports a whole number of Hz (up to six decimal places in MHz).');
+  const editable=draft.inspection.supported;
+  const settings={enabled,frequencyHz,bandwidthHz:enabled?number('radio-defaults-bandwidth'):0,spreadingFactor:enabled?number('radio-defaults-sf'):0,codingRate:enabled?number('radio-defaults-cr'):0,preambleSymbols:enabled?(!editable&&$('radio-defaults-preamble').value.trim()===''?null:number('radio-defaults-preamble')):0,txPowerDbm:enabled&&$('radio-defaults-power').value.trim()!==''?number('radio-defaults-power'):null};
+  const preset=$('media-mesh-preset').value,cross=$('media-mesh-cross').value;
+  const mediaMesh=preset==='custom'?{preset,cross,frequencyHz:Math.round(number('media-mesh-frequency')*1e6),bandwidthHz:number('media-mesh-bandwidth'),spreadingFactor:number('media-mesh-sf'),codingRate:number('media-mesh-cr'),mode:$('media-mesh-mode').value,preambleSymbols:number('media-mesh-preamble')}:{preset,cross};
+  const postFlashPlan=createPostFlashSettingsPlan({primary:enabled&&!editable?settings:null,mediaMesh});
+  const originalHash=hash(draft.bytes);if(originalHash!==draft.sourceSha256)fail('Original firmware changed. Load it again before customizing.');
+  const customized=enabled&&editable?customizeRadioDefaults(draft.name,draft.bytes,settings,{expectedSourceSha256:draft.sourceSha256}):null;
+  const bytes=customized?.bytes||draft.bytes,pkg=inspectFirmware(draft.name,bytes);
+  if(state.radioDefaults!==draft||radioDefaultsLocked())fail('Firmware selection changed. No defaults were applied.');
+  await closeEsp();
+  if(state.radioDefaults!==draft||radioDefaultsLocked())fail('Firmware selection changed. No defaults were applied.');
+  state.pkg=pkg;state.plan=null;state.backupApproved=null;state.finishedFirmware=null;state.generation++;
+  draft.appliedSettings=enabled?(customized?.settings||settings):draft.inspection.settings;draft.dirty=false;
+  draft.postFlashPlan=postFlashPlan.primary||postFlashPlan.mediaMesh.preset!=='unchanged'||postFlashPlan.mediaMesh.cross!=='unchanged'?postFlashPlan:null;
+  draft.provenance=pkg.sha256!==draft.sourceSha256?customized.provenance:null;
+  draft.customizedBytes=draft.provenance?bytes.slice():null;
+  setAutomaticSha(pkg.sha256,pkg.name);
+  $('image-sha').textContent=pkg.sha256;$('image-size').textContent=size(bytes.length);
+  refreshFirmwareWarnings();
+  $('radio-defaults-status').textContent=draft.postFlashPlan?'Settings queued for after flashing and startup verification. Keep this tab open and reconnect the application port when asked.':draft.provenance?'Custom defaults are included. Saved settings still take precedence.':'Original firmware restored. No browser customization is included.';
+  log(draft.provenance?`Customized radio defaults locally. Source SHA-256 ${draft.sourceSha256}; image SHA-256 ${pkg.sha256}. Saved settings are not overwritten.`:'Original firmware bytes restored.');
+  notice('Radio settings ready. Nothing has been written to the radio.');
+}
 const quickSettingButtons=['quick-logging-on','quick-logging-off','quick-wifi-status','quick-wifi-on','quick-wifi-off','quick-wifi-ota-ap','quick-name-save','quick-password-save','quick-wifi-save'];
 const quickSettingFields=['quick-name','quick-admin-password','quick-wifi-ssid','quick-wifi-password'];
 const quickPasswordControls=[['quick-admin-password','quick-admin-password-toggle','admin password'],['quick-wifi-password','quick-wifi-password-toggle','Wi-Fi password']];
@@ -308,6 +443,10 @@ function updateReconnectCallout(){
     if(checking)$('reconnect-detail').textContent='Reading the previously authorized application port and checking the expected node identity and firmware. No flash or reset is being sent.';
   }
   if(state.verification?.startupAdvice&&(ready||needed&&application||checking))$('reconnect-detail').textContent+=' '+state.verification.startupAdvice;
+  if(state.verification?.postFlashSettingsSummary&&state.postFlashSettingsApproval&&!state.postFlashSettingsApproval.attempted&&!state.busy){
+    $('reconnect-callout').hidden=false;$('reconnect-title').textContent='Reconnect to finish radio settings';$('reconnect-detail').textContent='Choose this same radio’s application USB port. The page checks startup, applies your selected radio/MediaMesh settings, and reads them back. No further flashing is needed.';
+    if(!state.port||dfuIds.has(portId(state.port)))$('select-port-label').textContent='Reconnect to apply settings';
+  }
 }
 function canPrepareWithoutBackup(){
   const selected=$('artifact').value,hasImage=!!state.pkg||!!(selected&&state.items[Number(selected)]);
@@ -370,6 +509,8 @@ function nextFlasherControl(){
   if(state.nrfPrepareResume&&(!state.port||!dfuIds.has(portId(state.port))))return 'select-port';
   if(state.migrationApproval)return !state.port&&['waiting-rom','waiting-application'].includes(state.migrationApproval.phase)?'select-port':null;
   if(state.plan?.written)return state.esp?'finish':null;
+  if(state.radioDefaults?.dirty)return 'radio-defaults-apply';
+  if(state.verification?.postFlashSettingsSummary&&state.postFlashSettingsApproval&&!state.postFlashSettingsApproval.attempted)return !state.port||dfuIds.has(portId(state.port))||$('already-bootloader').checked?'select-port':'verify-app';
   if(canStartNewRadio())return 'start-new-radio';
   if(state.verification)return !state.port||dfuIds.has(portId(state.port))||$('already-bootloader').checked?'select-port':'verify-app';
   if(state.finishedFirmware?.verified&&(!state.pkg||state.finishedFirmware.sha256===state.pkg.sha256)&&!continuingDeviceFlow()&&!state.esp)return 'select-port';
@@ -400,6 +541,7 @@ function updateNextAction(){
   if(['hardware','role','artifact'].includes(id))$('firmware-choices').open=true;
   if(['finish','wait-migration'].includes(id))revealPanel('verification-options');
   if(id==='transport-mode')revealPanel('connection-options');
+  if(id==='radio-defaults-apply'){$('radio-defaults').open=true;$('step-guidance').textContent='Apply the edited radio defaults, then continue with backup or flashing.';}
   if(id==='load-bootloader')revealPanel('bootloader-options');
   if(id==='load-entry'||id==='archive-entry')revealPanel('archive-picker');
   const messages={hardware:'Step 2: Choose the exact hardware for this radio.',role:'Step 2: Choose the firmware role.',artifact:'Step 2.5: Choose a firmware build to continue.',finish:'Next: Reset verified ESP32 to start the firmware that was written. Keep USB and power connected.','verify-app':'Step 5: Verify running application to check startup without flashing again.','wait-migration':'Next: Wait for UART migration to verify it has settled. Do not reset an active bridge.','load-entry':'Next: Load this archive entry for the exact board, then continue preparation.','archive-entry':'Next: Choose the exact board image from this release ZIP.','expert-offset':'Next: Enter the documented flash offset for this component. No offset is guessed.','transport-mode':'Next: Choose the correct bootloader connection method; automatic detection was ambiguous.'};
@@ -444,6 +586,7 @@ function controls() {
   for (const id of ['touch','probe','backup','send-command','binary-mode','verify-app']) $(id).disabled ||= !state.port;
   if(isNonMeshCore())for(const id of ['backup','restore','send-command','binary-mode'])$(id).disabled=true;
   updateQuickSettingsControls();
+  syncRadioDefaultsControls();
   $('verify-app').disabled ||= !state.verification||!!state.esp||!!state.plan?.written||$('already-bootloader').checked||dfuIds.has(portId(state.port))||!!state.migration||!!state.recovery||!!state.espRecovery;
   $('fetch-firmware').disabled ||= !$('artifact').value;
   $('load-bootloader').disabled ||= !$('bootloader-source').value;
@@ -964,13 +1107,17 @@ function firmwareDowngradeWarning(pkg=state.pkg,item=state.item) {
 }
 function refreshFirmwareWarnings() {
   const pkg=state.pkg;
-  $('image-warning').textContent=pkg&&!completedFirmwareSelection()?.verified?[...pkg.warnings,firmwareDowngradeWarning(pkg),...(selectedBootloader(pkg)?[bootloaderReinstallWarning]:[]),...(selectedRecovery(pkg)?[recoveryWarning]:[])].filter(Boolean).join(' '):'';
+  $('image-warning').textContent=pkg&&!completedFirmwareSelection()?.verified?[...pkg.warnings,radioDefaultsSummary(),firmwareDowngradeWarning(pkg),...(selectedBootloader(pkg)?[bootloaderReinstallWarning]:[]),...(selectedRecovery(pkg)?[recoveryWarning]:[])].filter(Boolean).join(' '):'';
 }
 function verificationRecord(pkg) {
   const identity=payloadFirmwareIdentity(pkg);
   const family=pkg.architecture==='nrf52'?boardAssessment(pkg).payloadFamily:'unknown',model=isNonMeshCore()?null:state.device?.model||state.recovery?.deviceModel||null,roleText=state.item?.role||pkg.name,role=/companion/i.test(roleText)?'companion':/repeater|room|sensor/i.test(roleText)?'common-cli':null;
+  const sourceHash=state.radioDefaults?.sourceSha256||pkg.sha256;
+  const verifiedSource=state.item?.sha256===sourceHash||state.radioDefaults?.verifiedSourceSha256===sourceHash;
+  const catalogVersion=verifiedSource&&state.item?.name===(state.radioDefaults?.name||pkg.name)&&/^v?\d+\.\d+\.\d+(?:\.\d+)?(?:[-+].*)?$/.test(state.item?.version||'')?state.item.version:null;
   const completionAdvice=postFlashBleAdvice(pkg,state.item),startupAdvice=firstStartupAdvice(pkg);
-  return {sha256:pkg.sha256,name:pkg.name,architecture:pkg.architecture,hardware:canonicalHardware(state.item?.hardware||selectedHardware())||null,publicKey:!pkg.destructive&&!state.recovery?state.device?.publicKey||null:null,model:['rak4631','rak3401'].includes(family)&&rakFamily(model)!==family?null:model,family,role,version:identity?.versionText||null,...(completionAdvice?{completionAdvice}:{}),...(startupAdvice?{startupAdvice}:{})};
+  const settingsSummary=state.postFlashSettingsApproval?.sha256===pkg.sha256?state.postFlashSettingsApproval.plan.summary:null;
+  return {sha256:pkg.sha256,name:pkg.name,architecture:pkg.architecture,hardware:canonicalHardware(state.item?.hardware||selectedHardware())||null,publicKey:!pkg.destructive&&!state.recovery?state.device?.publicKey||null:null,model:['rak4631','rak3401'].includes(family)&&rakFamily(model)!==family?null:model,family,role,version:identity?.versionText||catalogVersion||null,...(completionAdvice?{completionAdvice}:{}),...(startupAdvice?{startupAdvice}:{}),...(settingsSummary?{postFlashSettingsSummary:settingsSummary}:{})};
 }
 function verificationModelMatches(expected,device){
   if(!expected.model||!device.model||expected.model.toLowerCase()===device.model.toLowerCase())return true;
@@ -1036,7 +1183,7 @@ async function verifyApplication({automaticApproval=null,automaticReconnect=fals
   state.autoVerifyAttempt={expected,port:state.knownApplicationPort?.port||null};
   if(state.migration||state.recovery||state.espRecovery||dfuIds.has(portId(state.port)))fail('Finish any pending write recovery and choose the running application interface, not ROM/DFU.');
   if(expected.startupAdvice)notice('Checking the new application. '+expected.startupAdvice);
-  await closeEsp();const port=state.port,generation=state.generation,link=new SerialLink(port);let device,version,layout;
+  await closeEsp();const port=state.port,generation=state.generation,link=new SerialLink(port);let device,version,layout,legacyLayout=false;
   try {
     try{await link.open(115200,{application:true});device=await readApplication(link);}
     catch(error){
@@ -1051,18 +1198,25 @@ async function verifyApplication({automaticApproval=null,automaticReconnect=fals
     if(!verificationModelMatches(expected,device))fail('Running application model differs from the pre-flash device.');
     if(['rak4631','rak3401'].includes(expected.family)&&rakFamily(device.model)!==expected.family)fail('Running protected board family does not match the flashed payload.');
     const mc=device.role==='companion'?new MeshCore(link):null;
-    version=mc?await mc.cli('version'):await link.command('ver',700);
-    if(expected.version){const actual=/\bv?(\d+\.\d+\.\d+(?:\.\d+)?)/i.exec(version)?.[1],normalize=s=>s.replace(/^v/,'').replace(/(?:\.0)+$/,'');if(!actual||normalize(actual)!==normalize(expected.version))fail('Running firmware version does not match the verified payload.');}
-    if(expected.architecture==='esp32'){layout=mc?await mc.cli('get storage.layout'):await link.command('get storage.layout',700);if(!/\bint:esp32=\d+K\b/i.test(layout))fail('Application answered, but storage-layout verification is unavailable or invalid. Flash transfer is verified; application verification remains incomplete.');}
+    version=mc?(Number.isInteger(device.protocol)&&device.protocol<14?device.version:await mc.cli('version')):await link.command('ver',700);
+    if(expected.version){const numeric=value=>/\bv?(\d+\.\d+\.\d+(?:\.\d+)?)/i.exec(value||'')?.[1]?.replace(/(?:\.0)+$/,''),actual=numeric(version),wanted=numeric(expected.version);if(!actual||!wanted||actual!==wanted)fail('Running firmware version does not match the verified payload.');}
+    if(state.port!==port||state.generation!==generation||state.verification!==expected)fail('Application port changed during verification.');
+    await applyQueuedRadioSettings(link,device,expected,port,generation,mc,automaticApproval);
+    if(expected.architecture==='esp32'){
+      legacyLayout=!!mc&&Number.isInteger(device.protocol)&&device.protocol<14;
+      if(!legacyLayout){layout=mc?await mc.cli('get storage.layout'):await link.command('get storage.layout',700);if(!/\bint:esp32=\d+K\b/i.test(layout))fail('Application answered, but storage-layout verification is unavailable or invalid. Flash transfer is verified; application verification remains incomplete.'+(postFlashSettingsStatus()?' '+postFlashSettingsStatus():''));}
+    }
     if(state.port!==port||state.generation!==generation||state.verification!==expected)fail('Application port changed during verification.');
   }finally{await link.close();}
   if(automaticApproval&&state.migrationApproval!==automaticApproval)fail('Automatic continuation was stopped; startup verification remains available manually.');
   state.verification=null;state.handoff=false;state.backupApproved=null;persistFlow('verification','meshfirmware.verifyApplication');$('already-bootloader').checked=false;
-  const finished=state.finishedFirmware={sha256:expected.sha256,name:expected.name||state.pkg?.name,verified:true,...(expected.completionAdvice?{completionAdvice:expected.completionAdvice}:{})};
+  const finished=state.finishedFirmware={sha256:expected.sha256,name:expected.name||state.pkg?.name,verified:true,...(legacyLayout?{layoutVerified:false}:{}),...(expected.completionAdvice?{completionAdvice:expected.completionAdvice}:{})};
   markFlashResultStartupVerified(expected);
-  progress(1,`Application startup verified.${layout?' Storage layout confirmed.':''} No further flashing is required.`);
+  if(state.postFlashSettingsResult?.sha256===expected.sha256&&$('flash-progress-dialog').open){$('flash-progress-advice').textContent=[postFlashSettingsStatus(),expected.completionAdvice].filter(Boolean).join(' ');$('flash-progress-advice').hidden=false;}
+  if(state.postFlashSettingsResult?.sha256===expected.sha256&&!state.postFlashSettingsResult.complete&&$('flash-progress-dialog').open){$('flash-progress-title').textContent='DONE — settings need attention';$('flash-progress-stage').textContent='Firmware startup verified. Some selected settings were not applied or verified.';}
+  progress(1,`Application startup verified.${layout?' Storage layout confirmed.':legacyLayout?' Legacy firmware does not expose storage-layout verification.':''} No further flashing is required.`);
   refreshFirmwareWarnings();updateFirmwareSelectionSummary();
-  notice(`Application startup verified: ${device.name||device.model||device.role}. ${layout?'Storage layout answered. ':''}${automaticApproval?(expected.publicKey?'Pre-flash public identity matches.':'No pre-flash public identity was available; physical device identity could not be independently verified.'):automaticReconnect?'Previously authorized application port reused; the expected public identity matches.':'Physical USB serial is not exposed by Web Serial; the port was explicitly reselected.'}`);log(version);
+  notice(`Application startup verified: ${device.name||device.model||device.role}. ${layout?'Storage layout answered. ':''}${postFlashSettingsStatus()} ${expected.postFlashSettingsSummary&&!state.postFlashSettingsResult&&!state.postFlashSettingsApproval?'The page was reloaded; no post-flash settings were authorized or applied. Choose settings again for a new operation. ':''}${automaticApproval?(expected.publicKey?'Pre-flash public identity matches.':'No pre-flash public identity was available; physical device identity could not be independently verified.'):automaticReconnect?'Previously authorized application port reused; the expected public identity matches.':'Physical USB serial is not exposed by Web Serial; the port was explicitly reselected.'}`);log(version);
   if(expected.architecture==='nrf52')try{await offerBootloaderAfterStartup();}catch(error){
     // A separate component download can invalidate its selection before it
     // fails. Preserve the already proven application, but never repaint a
@@ -1078,6 +1232,9 @@ function invalidateFirmwareSelection() {
   // to replace an image must never leave the preceding write plan usable.
   revokeMigrationAutomation('Automatic migration approval revoked because the selected firmware changed.');
   state.finishedFirmware=null;
+  state.radioDefaults=null;state.postFlashSettingsApproval=null;state.postFlashSettingsResult=null;fillRadioDefaults(null);
+  $('radio-preset').value='custom';
+  for(const [id,value]of [['preset','unchanged'],['cross','unchanged'],['frequency','911.150'],['bandwidth','250000'],['sf','7'],['cr','5'],['mode','rxtx'],['preamble','0']])$('media-mesh-'+id).value=value;
   state.nrfPrepareResume=null;
   if(!state.skipBackupForOperation)$('skip-backup').checked=false;
   state.pkg=null;state.plan=null;state.item=null;state.archive=null;state.archiveContext=null;state.loadedRecovery=null;state.directory=null;state.backupApproved=null;state.generation++;
@@ -1110,6 +1267,7 @@ async function loadFirmware(name, bytes, item = null) {
     }
   }
   const pkg = inspectFirmware(name,bytes);
+  state.radioDefaults={name,bytes:bytes.slice(),sourceSha256:hash(bytes),verifiedSourceSha256:expected||null,inspection:null,appliedSettings:null,dirty:false,provenance:null};
   state.pkg = pkg;state.item=item;state.backupApproved=null; $('image-name').textContent = pkg.name; $('image-kind').textContent = pkg.kind; $('image-size').textContent = size(bytes.length); $('image-sha').textContent = pkg.sha256;refreshFirmwareWarnings();
   $('nrf-actions').hidden=pkg.architecture!=='nrf52';$('erase-source').replaceChildren(...(item?.erase||state.recovery?.eraseUrls||[]).map(url=>new Option(new URL(url).pathname.split('/').pop(),url)));
   if(pkg.architecture==='nrf52'&&$('transport-mode').value!=='auto')$('transport-mode').value='nrf52';
@@ -1270,12 +1428,13 @@ function updateDownload() {
   else{$('download-selected-build').removeAttribute('href');$('download-selected-build').setAttribute('aria-disabled','true');}
   syncSelectionLink();
 }
-async function boundedFetch(url,{expectedSha256=''}={}) {
-  return fetchFirmwareBytes(httpsUrl(url),{expectedSha256,fetchImpl:fetch});
+async function boundedFetch(url,{expectedSha256='',onVerified}={}) {
+  return fetchFirmwareBytes(httpsUrl(url),{expectedSha256,fetchImpl:fetch,onVerified});
 }
 async function downloadFirmwareBytes(url,name,expectedSha256=''){
   const source=httpsUrl(url);
-  try{return await boundedFetch(source,{expectedSha256});}
+  const generation=state.generation;
+  try{return await boundedFetch(source,{expectedSha256,onVerified:proof=>{if(state.generation===generation&&proof.sourceUrl===source&&/^[a-f0-9]{64}$/.test(proof.sha256))setAutomaticSha(proof.sha256,name);}});}
   catch(error){
     $('download-firmware').href=source;revealPanel('firmware-choices');revealPanel('image-details');revealPanel('custom-firmware');
     const reason=error.downloadKind?'':' Browser or network restrictions, including CORS, can block access; this page cannot determine which from a failed fetch.';
@@ -1377,6 +1536,11 @@ $('firmware-file').onchange = () => operation(async () => { const file = $('firm
 $('load-entry').onclick = () => operation(async () => { const entry=$('archive-entry').value,archive=state.archive,item=state.archiveContext;await clearFirmwareSelection();if(!archive || !entry) fail('Select an archive entry.');const expected=$('expected-sha').value.trim().toLowerCase();if(expected&&(!/^[a-f0-9]{64}$/.test(expected)||hash(archive)!==expected))fail('Release ZIP SHA-256 does not match.');const files=checkedZip(archive,{maxEntries:8192,maxExpanded:512<<20,select:name=>name===entry});$('expected-sha').value='';await loadFirmware(entry.split('/').pop(),files[entry],item); });
 $('fetch-custom').onclick = () => operation(async () => { clearAutomaticSha();await clearFirmwareSelection();const url=httpsUrl($('custom-url').value),name=new URL(url).pathname.split('/').pop();$('download-firmware').href=url;const bytes=await downloadFirmwareBytes(url,name);await loadFirmware(name,bytes); });
 $('artifact').onchange = () => operation(async()=>{await clearFirmwareSelection();updateDownload();updateFirmwareSelectionSummary();controls();});
+$('radio-defaults-load').onclick=()=>operation(inspectSelectedRadioDefaults);
+$('radio-defaults-apply').onclick=()=>operation(applyRadioDefaults);
+$('radio-preset').onchange=chooseRadioPreset;
+$('radio-defaults-download').onclick=()=>operation(async()=>{const draft=state.radioDefaults;if(!draft?.provenance||!draft.customizedBytes||draft.dirty||hash(draft.customizedBytes)!==state.pkg?.sha256)fail('Apply valid defaults before saving the customized firmware.');download('custom-defaults-'+draft.name,draft.customizedBytes);notice('Customized firmware download started. This does not flash the radio.');});
+for(const id of ['radio-defaults-enabled',...radioDefaultsFields,'media-mesh-preset','media-mesh-cross',...mediaMeshFields]){const edited=()=>{if(radioDefaultsFields.includes(id))$('radio-preset').value='custom';editRadioDefaults();};$(id).onchange=edited;$(id).oninput=edited;}
 $('bootloader-source').onchange=controls;
 async function loadBootloaderFirmware(){
   const url=$('bootloader-source').value,source=bootloaderItem(),item=source?{...source,bootloader:[...(source.bootloader||[])],...(source.bootloaderInfo?{bootloaderInfo:{...source.bootloaderInfo}}:{})}:null,info=item?.bootloaderInfo;
@@ -1463,6 +1627,7 @@ $('binary-mode').onclick=()=>operation(async()=>{
   notice('Binary mode confirmed. USB logging is off; it will not be re-enabled automatically. Read the running node or create a backup.');
 });
 async function prepareSelectedFirmware({waitForRom=false}={}) {
+  assertRadioDefaultsReady();
   assertFirmwareNotCompleted();
   if(!state.pkg&&$('artifact').value)await fetchSelectedFirmware();
   const pkg = state.pkg; if (!pkg) fail('Select an exact firmware build first.'); await closeEsp();
@@ -1556,7 +1721,7 @@ async function prepareSelectedFirmware({waitForRom=false}={}) {
     for(let attempt=0;attempt<5;attempt++) {
       try { prepared=await esp.prepare(pkg,args);break; }
       catch(error) {
-        if(!error.download) throw error;
+        if(!error.download){if(state.radioDefaults?.provenance&&!pkg.merged)throw new Error(`${error.message} Customized defaults cannot use a partition-expansion package tied to the unmodified release. If expansion is required, restore the original firmware defaults and expand first, or use an explicitly approved merged erase/new install. No write was performed.`);throw error;}
         const {url}=error.download;
         let bytes;
         try { bytes=await boundedFetch(url); }
@@ -1565,6 +1730,7 @@ async function prepareSelectedFirmware({waitForRom=false}={}) {
       }
     }
     if(!prepared) fail('Could not resolve all exact migration artifacts.');
+    if(prepared.needed&&state.radioDefaults?.provenance)fail('Partition expansion requires the original published application. Restore original firmware defaults and expand first, or choose a merged erase/new install. No write was performed.');
     if(state.port!==trialPort||state.generation!==trialGeneration||state.pkg!==pkg||state.installMode!==trialInstallMode||state.esp!==esp)fail('The selected radio, image or session changed during preparation. Discarding the stale plan; no write was performed.');
     if(prepared.recoveryResolved){state.espRecovery=null;persistEspRecovery();}
     state.plan = { ...prepared,installMode:trialInstallMode,generation:trialGeneration,port:trialPort,transportMode:mode };
@@ -1615,8 +1781,10 @@ function nrfApplicationActivationCheck(pkg){
   };
 }
 async function flashPreparedFirmware() {
+  assertRadioDefaultsReady();
   assertFirmwareNotCompleted();
   const plan = state.plan, pkg = state.pkg;
+  const settingsPlan=state.radioDefaults?.postFlashPlan||null;
   if (!pkg || !plan || plan.generation !== state.generation || plan.port !== state.port || plan.sha256 !== pkg.sha256) fail('Selection changed; inspect again.');
   if(plan.installMode!==undefined&&plan.installMode!==state.installMode)fail('Installation mode changed; prepare the selected build again before writing.');
   assertInstallModePackage(pkg);
@@ -1625,7 +1793,7 @@ async function flashPreparedFirmware() {
   if(pkg.architecture==='nrf52')await acknowledgeBoard(pkg);
   if(plan.erasePkg)await acknowledgeBoard(plan.erasePkg);
   const token = pkg.expert ? `WRITE 0x${plan.addresses[0].toString(16)}` : pkg.destructive||plan.erasePkg ? 'WIPE WITHOUT BACKUP' : 'FLASH';
-  const detail = `${pkg.name}\nSHA-256 ${pkg.sha256}\n${plan.mac ? 'Verified chip MAC ' + plan.mac : plan.uf2Info || 'Board identity unknown to this browser. Confirm the selected nRF52 board yourself.'}${selectedBootloader(pkg)?'\nOur OTAFIX '+selectedBootloader(pkg).version+' · '+selectedBootloader(pkg).profile+'\n'+bootloaderReinstallWarning:''}${plan.erasePkg?'\nERASE FIRST: '+plan.erasePkg.name+'\nSHA-256 '+plan.erasePkg.sha256+'\n'+plan.erasePkg.warnings.join(' '):''}`;
+  const detail = `${pkg.name}\nSHA-256 ${pkg.sha256}\n${radioDefaultsSummary() ? radioDefaultsSummary()+'\nSource SHA-256 '+state.radioDefaults.sourceSha256+'\n':''}${plan.mac ? 'Verified chip MAC ' + plan.mac : plan.uf2Info || 'Board identity unknown to this browser. Confirm the selected nRF52 board yourself.'}${selectedBootloader(pkg)?'\nOur OTAFIX '+selectedBootloader(pkg).version+' · '+selectedBootloader(pkg).profile+'\n'+bootloaderReinstallWarning:''}${plan.erasePkg?'\nERASE FIRST: '+plan.erasePkg.name+'\nSHA-256 '+plan.erasePkg.sha256+'\n'+plan.erasePkg.warnings.join(' '):''}`;
   const backupWarning=isMeshtasticMigration()?'Meshtastic will be replaced. Its settings, channels and identity are not backed up or converted to MeshCore. ':$('skip-backup').checked?'You chose to skip backup. No new logical backup was created. ':'';
   if(state.migrationApproval&&(plan.requiresRevisionOverride||plan.chunkedRecovery))fail('The new plan needs an unapproved compatibility override or interrupted-write recovery. Automatic continuation stopped. Inspect and acknowledge it manually.');
   let allowRevisionMismatch=false;
@@ -1644,8 +1812,10 @@ async function flashPreparedFirmware() {
     if(!await confirm('Write this firmware?',detail,backupWarning+[firmwareDowngradeWarning(pkg),...pkg.warnings,...(plan.compatibilityWarnings||[])].filter(Boolean).join(' ')+' Settings backups exclude firmware/bootloader images, stored messages and runtime logs. Keep power connected. Wrong bootloader firmware may require SWD recovery.',token))return;
   }
   if (plan.generation !== state.generation || plan.port !== state.port) fail('Device disconnected or selection changed during confirmation.');
+  if((state.radioDefaults?.postFlashPlan||null)!==settingsPlan)fail('Post-flash settings changed during confirmation. Review the operation again.');
   if(approval){if(approval!==state.migrationApproval)fail('Automatic migration approval was stopped.');if(bridge)approval.beginBridge(pkg,plan);else approval.beginFinal(pkg,plan);}
   clearVerification();
+  if(settingsPlan&&(!state.postFlashSettingsApproval||state.postFlashSettingsApproval.sha256!==pkg.sha256||state.postFlashSettingsApproval.plan!==settingsPlan))state.postFlashSettingsApproval={sha256:pkg.sha256,plan:settingsPlan,attempted:false};
   state.finishedFirmware=null;
   if(plan.erasePkg){
     state.recovery={sha256:pkg.sha256,name:pkg.name,hardware:selectedHardware(),deviceModel:isBootloaderInfo()?null:state.device?.model||null,eraseUrls:state.item?.erase||state.recovery?.eraseUrls||[],phase:'erasing',eraseComplete:false,...(isMeshtasticMigration()?{sourceFirmware:'meshtastic'}:{})};persistFlow('recovery','meshfirmware.nrfRecovery');

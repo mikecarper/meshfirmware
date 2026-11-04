@@ -142,12 +142,16 @@ function unpackMirror(gzip,entry){
 
 // Mirrored bytes still pass through the ordinary firmware/container/board
 // validators. This helper never opens USB, authorizes a write or uses a proxy.
-export async function fetchFirmwareBytes(url,{expectedSha256='',fetchImpl=fetch,mirrorBase=defaultMirrorBase,pageOrigin=globalThis.location?.origin}={}){
+export async function fetchFirmwareBytes(url,{expectedSha256='',fetchImpl=fetch,mirrorBase=defaultMirrorBase,pageOrigin=globalThis.location?.origin,onVerified}={}){
   const source=https(url).href,utility=publicEraseUtility(source);
   if(typeof fetchImpl!=='function')throw error('A firmware download fetch function is required.','url');
+  if(onVerified!=null&&typeof onVerified!=='function')throw error('The verified-download callback must be a function.','url');
   if(typeof expectedSha256!=='string'||expectedSha256&&!/^[a-f0-9]{64}$/i.test(expectedSha256))throw error('Invalid expected firmware SHA-256.','hash');
   if(utility&&expectedSha256&&expectedSha256.toLowerCase()!==utility.sha256)throw error('Selected erase utility SHA-256 differs from its pinned public ZIP.','hash');
   const expected=utility?.sha256||expectedSha256.toLowerCase(),base=mirrorBaseUrl(mirrorBase,pageOrigin);let index;
+  // Report provenance only after complete original bytes match a known digest,
+  // never from an unhashed direct download or an independently verified part.
+  const verified=async(bytes,sha256)=>{await onVerified?.(Object.freeze({sha256,sourceUrl:source}));return bytes;};
   try{index=await loadIndex(base,fetchImpl);}catch(cause){if(!cause.mirrorUnavailable)throw cause;}
   const entry=index?.get(source);
   if(entry){
@@ -163,14 +167,14 @@ export async function fetchFirmwareBytes(url,{expectedSha256='',fetchImpl=fetch,
       if(httpGzip&&(bytes.length!==piece.gzipSize||hash(bytes)!==piece.gzipSha256))throw error('HTTP-decoded firmware mirror raw size or SHA-256 does not match the selected release asset.');
       return unpackMirror(bytes,piece);
     }
-    if(!entry.parts)return fetchPart(entry);
+    if(!entry.parts)return verified(await fetchPart(entry),entry.sha256);
     const result=new Uint8Array(entry.size);let at=0;
     // Sequential requests bound memory even for a hostile multipart index.
     for(const piece of entry.parts){const bytes=await fetchPart(piece);result.set(bytes,at);at+=bytes.length;}
     if(at!==entry.size||hash(result)!==entry.sha256)throw error('Reassembled firmware mirror SHA-256 does not match the complete release asset.');
-    return result;
+    return verified(result,entry.sha256);
   }
   const bytes=await boundedDownload(source,{fetchImpl,...(utility?{maxBytes:utility.size,expectedSize:utility.size}:{})});
   if(expected&&hash(bytes)!==expected)throw error('Published SHA-256 does not match the downloaded firmware.','hash');
-  return bytes;
+  return expected?verified(bytes,expected):bytes;
 }

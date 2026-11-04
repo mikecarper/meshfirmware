@@ -18,7 +18,10 @@ import {lookupUsbConnectionMap} from '../src/usb-connection-map.js';
 import {createNextStepScroller} from '../src/next-step-scroll.js';
 import {tryNativeUsbFallback} from '../src/connection-fallback.js';
 import {catalogProvider,catalogItemKey} from '../src/catalog.js';
-import {hash as firmwareHash,md5hex,partitionTable as parsePartitionTable} from '../src/firmware.js';
+import {hash as firmwareHash,md5hex,partitionTable as parsePartitionTable,crc32,inspectFirmware as inspectFirmwareBytes} from '../src/firmware.js';
+import {inspectRadioDefaults,customizeRadioDefaults} from '../src/radio-defaults.js';
+import {createPostFlashSettingsPlan,applyPostFlashSettings} from '../src/post-flash-settings.js';
+import {createPostFlashCompanionRequest} from '../src/post-flash-companion.js';
 import {MigrationApproval} from '../src/migration-approval.js';
 import {cleanCliReply} from '../src/meshcore.js';
 import {assessBootloaderVersion} from '../src/bootloader-version.js';
@@ -54,6 +57,8 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
     backupCoverage,createNextStepScroller,tryNativeUsbFallback,SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
   });
   context.quickHotspotUrl=quickHotspotUrl;context.postFlashBleAdvice=postFlashBleAdvice;context.createNrfActivationCheck=()=>null;
+  context.inspectRadioDefaults=inspectRadioDefaults;context.customizeRadioDefaults=customizeRadioDefaults;
+  context.createPostFlashSettingsPlan=createPostFlashSettingsPlan;context.applyPostFlashSettings=applyPostFlashSettings;context.createPostFlashCompanionRequest=createPostFlashCompanionRequest;context.loadRadioPresets=async()=>({presets:[],source:'bundled',warning:'Test preset inventory.'});
   context.detectApplication=(...args)=>context.detectMeshCore(...args);context.detectMeshtasticBoard=detectMeshtasticBoard;
   context.parseBootloaderInfo=parseBootloaderInfo;context.detectBootloaderBoard=detectBootloaderBoard;context.xiaoInstalledStatus=xiaoInstalledStatus;context.xiaoInfoProfile=xiaoInfoProfile;context.xiaoBootloaderItem=xiaoBootloaderItem;context.chooseBootloaderInfoFile=async()=>{calls.push('file-picker');throw Error('Unexpected file chooser');};
   context.selectionLink=selectionLink;context.nrfBoardCandidates=nrfBoardCandidates;
@@ -62,6 +67,107 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
 }
 
 const t114MeshtasticItem=(more={})=>({project:'MeshCore',provider:'Keymind Cascade',hardware:'Heltec T114',architecture:'nrf52',role:'companionFull',version:'v1.18.0.1',name:'Heltec_t114_companion_radio_full-v1.18.0.1.zip',action:'flash',url:'https://example.test/t114.zip',...more});
+function radioDefaultsImage(){
+  const bytes=new Uint8Array(240),view=new DataView(bytes.buffer);bytes[0]=0xe9;bytes[1]=1;bytes[12]=9;view.setUint32(28,192,true);view.setUint32(32,0xabcd5432,true);
+  const block=bytes.subarray(96,160),fields=new DataView(block.buffer,block.byteOffset,64);block.set(new TextEncoder().encode('MCRDEFAULTS0001\0'));fields.setUint16(16,1,true);fields.setUint16(18,64,true);fields.setUint32(60,crc32(block.subarray(0,60)),true);
+  bytes[239]=bytes.subarray(32,224).reduce((checksum,byte)=>checksum^byte,0xef);return bytes;
+}
+async function radioDefaultsWorkbench(){
+  const ui=workbench();await Promise.resolve();ui.context.hash=firmwareHash;ui.context.inspectFirmware=inspectFirmwareBytes;ui.context.originalImage=radioDefaultsImage();ui.context.originalItem={hardware:'Heltec v4',architecture:'esp32',role:'companionFull',name:'board.bin',sha256:firmwareHash(ui.context.originalImage)};
+  ui.elements.get('expected-sha').value=ui.context.originalItem.sha256;await ui.evaluate('loadFirmware("board.bin",originalImage,originalItem)');await ui.elements.get('radio-defaults-load').onclick();return ui;
+}
+function chooseRadioDefaults(ui){
+  ui.elements.get('radio-defaults-enabled').checked=true;
+  for(const [id,value]of [['frequency','910.525'],['bandwidth','125000'],['sf','6'],['cr','5'],['preamble','32'],['power','']])ui.elements.get('radio-defaults-'+id).value=value;
+  ui.elements.get('radio-defaults-frequency').oninput();
+}
+test('editable firmware defaults are inspected without opening USB or changing the validated source',async()=>{
+  const ui=await radioDefaultsWorkbench();assert.equal(ui.elements.get('radio-defaults-editor').hidden,false);assert.equal(ui.elements.get('radio-defaults-enabled').checked,false);
+  assert.equal(ui.evaluate('state.radioDefaults.sourceSha256'),firmwareHash(ui.context.originalImage));assert.equal(ui.evaluate('state.pkg.sha256'),firmwareHash(ui.context.originalImage));assert.deepEqual(ui.calls,[]);assert.match(ui.elements.get('radio-defaults-status').textContent,/supports editable/);
+});
+test('applying defaults derives a new fully checked image with separate source provenance and invalidates earlier approvals',async()=>{
+  const ui=await radioDefaultsWorkbench(),source=ui.context.originalImage.slice();ui.evaluate('state.plan={sha256:state.pkg.sha256};state.backupApproved={sha256:state.pkg.sha256};');chooseRadioDefaults(ui);
+  assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.elements.get('prepare').disabled,true);assert.equal(ui.elements.get('flash').disabled,true);assert.equal(ui.evaluate('nextFlasherControl()'),'radio-defaults-apply');
+  await ui.elements.get('radio-defaults-apply').onclick();const pkg=ui.evaluate('state.pkg'),inspection=inspectRadioDefaults('board.bin',pkg.payload);
+  assert.notEqual(pkg.sha256,firmwareHash(source));assert.equal(inspection.settings.frequencyHz,910525000);assert.equal(inspection.settings.spreadingFactor,6);assert.equal(inspection.settings.preambleSymbols,32);assert.equal(inspection.settings.txPowerDbm,null);
+  assert.equal(ui.elements.get('expected-sha').value,pkg.sha256);assert.equal(ui.evaluate('state.item.sha256'),firmwareHash(source));assert.equal(ui.evaluate('state.radioDefaults.sourceSha256'),firmwareHash(source));assert.equal(ui.evaluate('state.radioDefaults.dirty'),false);assert.deepEqual(ui.context.originalImage,source);
+  assert.match(ui.elements.get('radio-defaults-provenance').textContent,new RegExp(firmwareHash(source)));assert.match(ui.evaluate('radioDefaultsSummary()'),/910.525 MHz.*125 kHz.*SF6.*saved settings/);assert.deepEqual(ui.calls,[]);
+});
+test('turning customization off restores exact original bytes and their hash without another download',async()=>{
+  const ui=await radioDefaultsWorkbench();chooseRadioDefaults(ui);await ui.elements.get('radio-defaults-apply').onclick();ui.elements.get('radio-defaults-enabled').checked=false;ui.elements.get('radio-defaults-enabled').onchange();await ui.elements.get('radio-defaults-apply').onclick();
+  assert.deepEqual(ui.evaluate('state.pkg.payload'),ui.context.originalImage);assert.equal(ui.elements.get('expected-sha').value,firmwareHash(ui.context.originalImage));assert.equal(ui.evaluate('state.radioDefaults.provenance'),null);assert.equal(ui.elements.get('radio-defaults-provenance').hidden,true);assert.deepEqual(ui.calls,[]);
+});
+test('an optional saved customized image retains the exact recovery hash and never touches the radio',async()=>{
+  const ui=await radioDefaultsWorkbench();chooseRadioDefaults(ui);await ui.elements.get('radio-defaults-apply').onclick();let saved;
+  ui.context.download=(name,bytes)=>{saved={name,bytes};};await ui.elements.get('radio-defaults-download').onclick();assert.equal(saved.name,'custom-defaults-board.bin');assert.equal(firmwareHash(saved.bytes),ui.evaluate('state.pkg.sha256'));assert.deepEqual(saved.bytes,ui.evaluate('state.pkg.payload'));assert.deepEqual(ui.calls,[]);
+  ui.elements.get('radio-defaults-frequency').value='911.3';ui.elements.get('radio-defaults-frequency').oninput();saved=null;await ui.elements.get('radio-defaults-download').onclick();assert.equal(saved,null);assert.match(ui.elements.get('notice').textContent,/Apply valid defaults/);
+});
+test('unapplied or invalid defaults cannot prepare or flash, even through direct handlers',async()=>{
+  const ui=await radioDefaultsWorkbench(),sha=ui.evaluate('state.pkg.sha256');chooseRadioDefaults(ui);ui.elements.get('radio-defaults-frequency').value='';await ui.elements.get('radio-defaults-apply').onclick();assert.match(ui.elements.get('notice').textContent,/frequency/);assert.equal(ui.evaluate('state.radioDefaults.dirty'),true);assert.equal(ui.evaluate('state.pkg.sha256'),sha);
+  await assert.rejects(ui.evaluate('prepareSelectedFirmware()'),/Apply the edited/);await assert.rejects(ui.evaluate('flashPreparedFirmware()'),/Apply the edited/);assert.deepEqual(ui.calls,[]);
+});
+test('firmware replacement and validation failure discard defaults drafts rather than carrying them to the next board',async()=>{
+  const ui=await radioDefaultsWorkbench();chooseRadioDefaults(ui);await ui.elements.get('radio-defaults-apply').onclick();
+  ui.context.inspectFirmware=()=>{throw Error('Invalid new image');};ui.elements.get('expected-sha').value='';await assert.rejects(ui.evaluate('loadFirmware("other.bin",originalImage)'),/Invalid new image/);ui.evaluate('controls()');assert.equal(ui.evaluate('state.radioDefaults'),null);assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.elements.get('radio-defaults-enabled').checked,false);assert.equal(ui.elements.get('radio-defaults-frequency').value,'');assert.equal(ui.elements.get('radio-defaults-editor').hidden,true);
+});
+test('defaults editor is locked during handoff, migration, recovery and verification without cancelling or modifying them',async()=>{
+  for(const mode of ['handoff','recovery','migration','verification','espRecovery','finishedFirmware']){
+    const ui=await radioDefaultsWorkbench();chooseRadioDefaults(ui);const before=ui.evaluate('state.pkg.sha256');ui.context.lockedMode=mode;ui.evaluate('state[lockedMode]=lockedMode==="handoff"?true:{sha256:state.pkg.sha256};controls()');
+    assert.equal(ui.elements.get('radio-defaults-apply').disabled,true,mode);assert.equal(ui.elements.get('radio-defaults-load').disabled,true,mode);assert.equal(ui.elements.get('radio-defaults-frequency').disabled,true,mode);await ui.elements.get('radio-defaults-apply').onclick();assert.match(ui.elements.get('notice').textContent,/Finish the current/);assert.equal(ui.evaluate('state.pkg.sha256'),before);assert.ok(ui.evaluate('state[lockedMode]'));assert.deepEqual(ui.calls,[]);
+  }
+});
+test('changed source bytes cannot be customized or pass as their previously verified release',async()=>{
+  const ui=await radioDefaultsWorkbench();chooseRadioDefaults(ui);const sha=ui.evaluate('state.pkg.sha256');ui.evaluate('state.radioDefaults.bytes[100]^=1');await ui.elements.get('radio-defaults-apply').onclick();assert.match(ui.elements.get('notice').textContent,/Original firmware changed/);assert.equal(ui.evaluate('state.pkg.sha256'),sha);assert.equal(ui.evaluate('state.radioDefaults.dirty'),true);assert.deepEqual(ui.calls,[]);
+});
+test('uneditable application builds stay unchanged and expose the post-flash settings fallback',async()=>{
+  const ui=await radioDefaultsWorkbench();ui.context.inspectRadioDefaults=()=>({supported:false,settings:null,reason:'No editable block in this older build.'});await ui.elements.get('radio-defaults-load').onclick();assert.equal(ui.elements.get('radio-defaults-editor').hidden,false);assert.equal(ui.evaluate('state.radioDefaults.dirty'),false);assert.match(ui.elements.get('radio-defaults-status').textContent,/image stays unchanged.*over USB/);assert.equal(ui.evaluate('state.pkg.sha256'),firmwareHash(ui.context.originalImage));assert.deepEqual(ui.calls,[]);
+});
+test('uneditable primary and custom MediaMesh values queue without changing the firmware or sending USB commands',async()=>{
+  const ui=await radioDefaultsWorkbench();ui.context.inspectRadioDefaults=()=>({supported:false,settings:null,reason:'Older release'});await ui.elements.get('radio-defaults-load').onclick();chooseRadioDefaults(ui);ui.elements.get('radio-defaults-preamble').value='';
+  ui.elements.get('media-mesh-preset').value='custom';ui.elements.get('media-mesh-frequency').value='911.3';ui.elements.get('media-mesh-cross').value='off';ui.elements.get('media-mesh-preset').onchange();await ui.elements.get('radio-defaults-apply').onclick();
+  assert.equal(ui.evaluate('state.pkg.sha256'),firmwareHash(ui.context.originalImage));assert.equal(ui.evaluate('state.radioDefaults.postFlashPlan.primary.preambleSymbols'),null);assert.equal(ui.evaluate('state.radioDefaults.postFlashPlan.mediaMesh.frequencyHz'),911300000);assert.equal(ui.evaluate('state.postFlashSettingsApproval'),null);assert.match(ui.evaluate('radioDefaultsSummary()'),/After startup verification.*MediaMesh/);assert.match(ui.elements.get('radio-defaults-status').textContent,/queued/);assert.deepEqual(ui.calls,[]);
+});
+test('post-flash settings gain one-run approval only from the final firmware confirmation',async()=>{
+  for(const accepted of [false,true]){
+    const ui=await skipBackupWorkbench();ui.context.postPlan=createPostFlashSettingsPlan({mediaMesh:{preset:'mediamesh-range',cross:'off'}});ui.evaluate('state.radioDefaults={name:pkg.name,sourceSha256:pkg.sha256,postFlashPlan:postPlan};');let shown;
+    ui.context.confirm=async(title,detail)=>{if(title==='Write this firmware?'){shown=detail;return accepted;}return true;};await ui.elements.get('flash').onclick();assert.match(shown,/After startup verification.*MediaMesh radio2/);
+    assert.equal(!!ui.evaluate('state.postFlashSettingsApproval'),accepted);assert.equal(ui.calls.includes('write-final'),accepted);if(accepted){assert.equal(ui.evaluate('state.postFlashSettingsApproval.sha256'),ui.context.pkg.sha256);assert.equal(ui.evaluate('state.postFlashSettingsApproval.attempted'),false);assert.match(ui.evaluate('state.verification.postFlashSettingsSummary'),/MediaMesh/);}
+  }
+});
+test('catalog version fallback is bound to the exact verified original source, never a custom filename alone',async()=>{
+  const ui=await radioDefaultsWorkbench();ui.evaluate('state.item={...state.item,version:"v1.18.0.1-halo-keymind-cascade-dev-03214a16",sha256:null};');assert.equal(ui.evaluate('verificationRecord(state.pkg).version'),'v1.18.0.1-halo-keymind-cascade-dev-03214a16');ui.evaluate('state.radioDefaults.verifiedSourceSha256=null;');assert.equal(ui.evaluate('verificationRecord(state.pkg).version'),null);ui.evaluate('state.radioDefaults.verifiedSourceSha256="0".repeat(64);');assert.equal(ui.evaluate('verificationRecord(state.pkg).version'),null);
+});
+test('community presets fill only radio values for review and custom edits retain manual control',async()=>{
+  const ui=await radioDefaultsWorkbench();ui.context.presetRows=[{id:'usa',title:'USA',frequencyHz:910525000,bandwidthHz:62500,spreadingFactor:7,codingRate:5,notes:'Additional network settings are not changed.'}];ui.evaluate('state.radioPresets=presetRows;');ui.elements.get('radio-preset').value='usa';ui.elements.get('radio-preset').onchange();
+  assert.equal(ui.elements.get('radio-defaults-frequency').value,'910.525');assert.equal(ui.elements.get('radio-defaults-bandwidth').value,'62500');assert.equal(ui.elements.get('radio-defaults-enabled').checked,true);assert.equal(ui.evaluate('state.radioDefaults.dirty'),true);assert.match(ui.elements.get('radio-preset-status').textContent,/Additional network settings/);assert.equal(ui.evaluate('state.pkg.sha256'),firmwareHash(ui.context.originalImage));
+  ui.elements.get('radio-defaults-sf').value='9';ui.elements.get('radio-defaults-sf').oninput();assert.equal(ui.elements.get('radio-preset').value,'custom');assert.equal(ui.elements.get('radio-defaults-sf').value,'9');assert.deepEqual(ui.calls,[]);
+});
+async function queuedSettingsVerificationWorkbench(){
+  const ui=await storageVerificationWorkbench('common-cli','int:esp32=8192K'),radio={frequency:869.618,bw:125,sf:8,cr:5,preamble:'auto'};
+  ui.context.postPlan=createPostFlashSettingsPlan({primary:{enabled:true,frequencyHz:910525000,bandwidthHz:62500,spreadingFactor:7,codingRate:5,preambleSymbols:32,txPowerDbm:null}});
+  ui.evaluate('state.postFlashSettingsApproval={sha256:expected.sha256,plan:postPlan,attempted:false};state.verification.postFlashSettingsSummary=postPlan.summary;');
+  ui.context.SerialLink.prototype.command=async command=>{ui.calls.push(command);if(command==='ver')return 'v1.18.0.1';if(command==='get storage.layout')return 'int:esp32=8192K';if(command==='get radio')return `${radio.frequency},${radio.bw},${radio.sf},${radio.cr}`;if(command==='get radio.preamble')return String(radio.preamble);if(command.startsWith('set radio ')){const [f,b,s,c,p]=command.slice(10).split(',');Object.assign(radio,{frequency:Number(f),bw:Number(b),sf:Number(s),cr:Number(c),preamble:p});return '> OK';}return '> Error: unsupported setting';};return {...ui,radio};
+}
+test('post-flash settings run once through the verified owned application link and are read back before completion',async()=>{
+  const ui=await queuedSettingsVerificationWorkbench();await ui.evaluate('verifyApplication()');assert.equal(ui.radio.frequency,910.525);assert.equal(ui.radio.preamble,'32');assert.equal(ui.evaluate('state.postFlashSettingsResult.complete'),true);assert.equal(ui.evaluate('state.postFlashSettingsApproval.attempted'),true);assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.calls.filter(c=>c.startsWith('set radio ')).length,1);assert.ok(ui.calls.indexOf('ver')<ui.calls.indexOf('get radio'));assert.match(ui.elements.get('notice').textContent,/settings applied and read back/);
+  ui.evaluate('state.verification=expected;');await ui.evaluate('verifyApplication()');assert.equal(ui.calls.filter(c=>c.startsWith('set radio ')).length,1);assert.equal(ui.calls.filter(c=>c==='application-open').length,2);
+});
+test('a verified source catalog version with a release suffix matches the running numeric firmware before settings apply',async()=>{
+  const ui=await queuedSettingsVerificationWorkbench();ui.context.expected.version='v1.18.0.1-halo-keymind-cascade-dev-03214a16';await ui.evaluate('verifyApplication()');assert.equal(ui.evaluate('state.postFlashSettingsResult.complete'),true);assert.equal(ui.evaluate('state.finishedFirmware.verified'),true);
+});
+test('wrong identity, wrong firmware and changed application context cannot apply queued settings to another radio',async()=>{
+  for(const fault of ['identity','version','stale']){const ui=await queuedSettingsVerificationWorkbench();if(fault==='identity')ui.context.detectMeshCore=async()=>({role:'common-cli',publicKey:'22'.repeat(32),model:ui.context.expected.model,version:'v1.18.0.1'});if(fault==='version')ui.context.expected.version='v1.18.0.2';if(fault==='stale'){const original=ui.context.SerialLink.prototype.command;ui.context.SerialLink.prototype.command=async function(command){const result=await original.call(this,command);if(command==='get radio')ui.evaluate('state.generation++');return result;};}
+    await assert.rejects(ui.evaluate('verifyApplication()'));assert.equal(ui.calls.filter(c=>c.startsWith('set ')).length,0,fault);assert.ok(ui.evaluate('state.verification'));}
+});
+test('unknown target versions and reloaded verification reminders cannot silently authorize settings writes',async()=>{
+  for(const fault of ['unknown-version','no-memory-approval']){const ui=await queuedSettingsVerificationWorkbench();if(fault==='unknown-version')ui.context.expected.version=null;else ui.evaluate('state.postFlashSettingsApproval=null;');await ui.evaluate('verifyApplication()');assert.equal(ui.calls.filter(c=>c.startsWith('set ')).length,0);assert.match(ui.elements.get('notice').textContent,fault==='unknown-version'?/target firmware version could not be established/:/reloaded.*no post-flash settings/);}
+});
+test('unsupported post-flash settings stay explicit and do not turn a successful firmware startup into a settings-success claim',async()=>{
+  const ui=await queuedSettingsVerificationWorkbench(),original=ui.context.SerialLink.prototype.command;ui.context.SerialLink.prototype.command=async function(command){if(command==='get radio'){ui.calls.push(command);return '> Error: unsupported setting';}return original.call(this,command);};await ui.evaluate('verifyApplication()');assert.equal(ui.evaluate('state.finishedFirmware.verified'),true);assert.equal(ui.evaluate('state.postFlashSettingsResult.complete'),false);assert.equal(ui.calls.filter(c=>c.startsWith('set ')).length,0);assert.match(ui.elements.get('notice').textContent,/not applied or verified/);assert.doesNotMatch(ui.elements.get('notice').textContent,/settings applied and read back/);
+});
+test('legacy binary companion startup can complete without claiming a storage-layout query it cannot support',async()=>{
+  const ui=await storageVerificationWorkbench('companion','');ui.context.detectMeshCore=async()=>({role:'companion',protocol:13,model:ui.context.expected.model,publicKey:ui.context.expected.publicKey,version:'v1.18.0.1'});ui.context.MeshCore=class{async cli(){throw Error('Legacy firmware must never receive CMD66');}};await ui.evaluate('verifyApplication()');assert.equal(ui.evaluate('state.finishedFirmware.verified'),true);assert.equal(ui.evaluate('state.finishedFirmware.layoutVerified'),false);assert.ok(!ui.calls.includes('get storage.layout'));assert.match(ui.elements.get('progress-label').textContent,/does not expose storage-layout/);
+});
 const meshtasticDevice=(more={})=>({firmwareFamily:'meshtastic',role:'meshtastic',meshtasticHardware:69,model:'Meshtastic hardware 69',nodeNum:1234,name:'H2T test',version:'2.7.4',catalogRole:null,publicKey:null,...more});
 async function meshtasticWorkbench({device=meshtasticDevice()}={}){
   const ui=workbench({productionDefaults:true});await Promise.resolve();serialMock(ui);ui.context.selectedPort=ui.port;ui.port.getInfo=()=>({usbVendorId:0x239a,usbProductId:0x4405});

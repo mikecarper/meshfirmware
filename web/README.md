@@ -30,6 +30,82 @@ not a remote USB-only node.
 
 ## Use
 
+### Optional radio and MediaMesh settings
+
+Open **Radio & MediaMesh settings · optional**, then **Load & check selected build**. On
+Keymind builds containing the versioned editable-defaults block, enable
+customization, choose frequency, bandwidth, SF, coding rate, preamble and
+optionally TX power, then click **Use these settings** before step 3 or 4.
+This changes the downloaded image in browser memory; it does not send a radio
+command or require a separate compilation for each settings combination.
+
+These are **factory defaults**, used on a fresh install or factory reset.
+Normal updates keep existing saved settings when using the embedded block.
+If the application image cannot be edited, the same controls queue the selected
+primary-radio settings for USB application after flashing instead. This
+explicit post-flash choice replaces those saved radio values, not every setting.
+Values must match the radio and
+region; firmware validates the tuple against its radio capabilities. A blank
+TX power uses the compiled power default for embedded factory settings and
+leaves saved power unchanged for the USB fallback. Preamble 0 means automatic.
+Disabling browser customization and applying again restores the exact original
+download, not a newly generated approximation. Drafts are not stored across
+reloads or copied to a new firmware selection.
+Keep the tab open until the transfer finishes. **Save customized firmware**
+optionally downloads the exact derived ZIP/BIN so an interrupted session can be
+resumed by selecting those same bytes, without trying to recreate an old hash.
+
+The original download is validated before customization. The editor retains
+its source SHA-256 separately from the derived image SHA-256, repairs the
+relevant DFU/ESP/EndF checksums, and validates the complete output again.
+Changing a value invalidates earlier preparation and backup approval; device
+handoff, active write, recovery and startup verification lock the editor.
+Final flash confirmation lists the customized defaults and source hash.
+
+**Primary radio preset** offers community radio tuples from
+https://api.meshcore.nz/api/v1/config and **Custom**. The feed is fetched only
+when opening the editor; a validated bundled snapshot works offline. Selecting
+a preset fills frequency, bandwidth, SF and CR for review. No location is
+guessed, and upstream path-hash/network settings, TX power and preamble are not
+silently imported. Additional upstream network settings are explicitly noted.
+
+**MediaMesh (radio2)** offers unchanged, off, normal/range presets and a custom
+tuple, receive-only/receive-transmit mode, preamble and optional crossing change.
+These are always applied over USB after startup checks. Presets use the
+firmware's own commands so its public MediaMesh forwarding permission is
+enabled where required; custom tuples follow that preset setup. Unselected
+crossing and other settings are retained.
+
+The final flash confirmation covers these queued writes. After transfer,
+reconnect the same application's USB port if requested: the page checks
+identity, board, role and known target version before sending settings through
+that owned link. It preflights getters and reads values back after setters.
+Unsupported values/features are reported rather than marked applied. Failed or
+partial settings writes never retry automatically. Older companions use their
+binary primary-radio API without sending unsupported CLI commands; protocols
+9–13 retain their existing repeat flag. A blank fallback preamble selects
+firmware-default behavior when that older API cannot report it; an explicitly
+selected preamble is never silently discarded. MediaMesh needs radio2 support.
+Legacy companions can verify startup without claiming unavailable storage-layout
+verification. Unidentifiable target versions do not authorize queued writes.
+
+Queued settings approval is memory-only. Keep the tab open through reconnect
+and readback; reloading cannot silently resume settings writes. A successful
+firmware transfer/startup and settings success are reported separately.
+
+Older/unmarked builds remain flashable unchanged, with the post-flash USB
+settings fallback when their protocol supports the chosen values. Bootloader, SoftDevice,
+embedded bootloader updater, erase/recovery, signed, ambiguous and unsupported
+images are not customizable. Supported containers are ordinary nRF52 serial
+DFU application ZIPs, ESP32 application BINs and reviewed single-application
+merged BINs. Existing partition-expansion bundles are tied to the exact
+published application: if expansion is required, use the unmodified update
+first, or explicitly choose a merged erase/new install. The editor never
+weakens the migration bundle's published-image check.
+
+The matching firmware support must be built into a new Keymind release;
+previously published images do not gain an editable block retroactively.
+
 The USB button, firmware/hardware/role/version/build selectors, and Prepare/Flash
 actions are at the top. Buttons and user actions are left-aligned, including
 advanced tools, backup/restore, console commands and confirmation dialogs.

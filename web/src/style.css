@@ -368,6 +368,12 @@ dialog p { font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
 #backups .backup-json, #backups .restore-report { line-height: 1.6; }
 .capability-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 footer { font-size: 15.4px; line-height: 1.6; overflow-wrap: anywhere; }
+.radio-defaults { margin: 16px 0; border-top: 1px solid var(--border, #d8e2eb); padding-top: 14px; }
+.workflow .radio-defaults summary { font-size: 16.8px; }
+.radio-defaults-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 12px; margin: 14px 0; }
+.radio-defaults-fields input, .radio-defaults-fields select { width: 100%; }
+.radio-defaults .digest { overflow-wrap: anywhere; }
+.radio-defaults.pending { border-left: 3px solid #b57500; padding-left: 12px; }
 
 @media (max-width: 900px) {
   .sidebar { flex-wrap: wrap; }
