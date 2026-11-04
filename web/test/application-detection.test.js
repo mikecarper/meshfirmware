@@ -65,3 +65,136 @@ test('an unidentified application remains manual with a useful error rather than
   });
   assert.ok(!link.commands.some(command=>/^set |reboot/.test(command)));
 });
+
+function bootingRadio({observedRomBoot=true,meshCoreAt=Infinity,meshtasticAt=Infinity,conflictingKeys=false,failure=null,failureStage=null}={}){
+  let elapsed=0;
+  const calls=[],commands=[],writes=[],queue=[],events=[],buffer=[];
+  const advance=ms=>{assert.ok(Number.isFinite(ms)&&ms>=0,`invalid fake wait ${ms}`);elapsed+=ms;};
+  const link={buffer,startupEvidence:Object.freeze({observedRomBoot}),
+    command:async(command,ms)=>{
+      calls.push({kind:'command',command,at:elapsed,ms});commands.push(command);advance(ms);
+      if(failureStage==='command')throw failure;
+      if(elapsed<meshCoreAt)return '';
+      if(command==='get public.key')return '11'.repeat(32)+(conflictingKeys?'\r\n'+'22'.repeat(32):'');
+      return {'get name':'Booted radio',ver:'v1.18.0',board:'Heltec V3','get role':'repeater'}[command]||'Unknown command';
+    },
+    write:async bytes=>{
+      const kind=bytes[0]===0x3c?'meshcore':bytes[0]===0x94?'meshtastic-request':bytes.length===32&&bytes.every(byte=>byte===0xc3)?'meshtastic-wake':'full-terminal';
+      calls.push({kind,at:elapsed,bytes:[...bytes]});writes.push([...bytes]);
+      if(failureStage==='write')throw failure;
+      if(kind==='meshtastic-request'&&elapsed>=meshtasticAt)queue.push(identity);
+    },
+    read:async ms=>{
+      calls.push({kind:'read',at:elapsed,ms});advance(ms);
+      if(failureStage==='read')throw failure;
+      return queue.shift()||new Uint8Array();
+    },
+  };
+  return {link,calls,commands,writes,events,now:()=>elapsed,delay:async ms=>{calls.push({kind:'delay',at:elapsed,ms});advance(ms);},progress:event=>events.push({...event})};
+}
+const bootOptions=f=>({now:f.now,delay:f.delay,onProgress:f.progress});
+const mtRequests=f=>f.calls.filter(call=>call.kind==='meshtastic-request');
+function assertStartupOnly(events){
+  assert.ok(events.length>0);
+  assert.ok(events.every(event=>event.stage==='startup'&&event.timeoutSeconds===25));
+  assert.equal(events[0].elapsedSeconds,0);
+  assert.ok(events.every((event,index)=>Number.isInteger(event.elapsedSeconds)&&event.elapsedSeconds>=0&&event.elapsedSeconds<=25&&(!index||event.elapsedSeconds>events[index-1].elapsedSeconds)));
+}
+
+test('observed-ROM detection tries Meshtastic early on the same link rather than sleeping through its startup',async()=>{
+  const f=bootingRadio({meshtasticAt:0}),result=await detectApplication(f.link,bootOptions(f));
+  assert.equal(result.firmwareFamily,'meshtastic');assert.equal(result.meshtasticHardware,69);
+  assert.equal(mtRequests(f).length,1);assert.ok(f.now()<4000,`ready Meshtastic took ${f.now()}ms`);
+  assert.equal(f.commands.filter(command=>command==='get public.key').length,1);
+  assertStartupOnly(f.events);
+  assert.ok(!f.commands.some(command=>/^set |reboot|erase/.test(command)));
+});
+
+test('an immediate MeshCore identity with ROM evidence wins without sending Meshtastic packets',async()=>{
+  const f=bootingRadio({meshCoreAt:0}),result=await detectApplication(f.link,bootOptions(f));
+  assert.equal(result.firmwareFamily,'meshcore');assert.equal(result.model,'Heltec V3');assert.equal(result.publicKey,'11'.repeat(32));
+  assert.equal(result.catalogRole,'repeater');assert.deepEqual(f.writes,[]);
+  assert.deepEqual(f.commands,['get public.key','get name','ver','board','get role']);assertStartupOnly(f.events);
+});
+
+test('a late MeshCore application can identify within the one ROM-startup budget without another port open',async()=>{
+  const f=bootingRadio({meshCoreAt:15000}),result=await detectApplication(f.link,bootOptions(f));
+  assert.equal(result.firmwareFamily,'meshcore');assert.equal(result.model,'Heltec V3');
+  assert.ok(f.commands.filter(command=>command==='get public.key').length>1);
+  assert.ok(mtRequests(f).length>0);assert.ok(f.now()>=15000&&f.now()<=25000);
+  const metadata=f.calls.find(call=>call.kind==='command'&&call.command==='get name');
+  assert.ok(metadata);assert.ok(mtRequests(f).every(call=>call.at<metadata.at));assertStartupOnly(f.events);
+});
+
+test('ROM silence has one 25-second total deadline with bounded MeshCore, Full-terminal and Meshtastic phases',async()=>{
+  const f=bootingRadio();
+  await assert.rejects(detectApplication(f.link,bootOptions(f)),error=>error.code==='APPLICATION_UNIDENTIFIED');
+  assert.ok(f.now()<=25000,`startup exceeded its total budget: ${f.now()}ms`);
+  assert.ok(f.now()>=24000,`startup stopped unexpectedly early: ${f.now()}ms`);
+  assert.ok(mtRequests(f).length>1,'the same budget should alternate read-only protocols');
+  assertStartupOnly(f.events);assert.equal(f.events.at(-1).elapsedSeconds,25);
+  const transfers=f.calls.filter(call=>['meshcore','full-terminal','meshtastic-wake','meshtastic-request'].includes(call.kind));
+  for(let index=1;index<transfers.length;index++){
+    const previous=transfers[index-1],current=transfers[index];
+    if(previous.kind==='meshcore'&&current.kind==='full-terminal')assert.ok(current.at-previous.at<=1500,'a MeshCore request exceeded 1500ms');
+    if(previous.kind==='full-terminal'&&current.kind==='meshtastic-wake')assert.ok(current.at-previous.at<=700,'raw Full-terminal recovery exceeded 700ms');
+    if(previous.kind==='meshtastic-request'&&current.kind==='meshcore')assert.ok(current.at-previous.at<=1500,'Meshtastic acquired a second long wait');
+  }
+  for(let index=0;index<f.calls.length;index++)if(f.calls[index].kind==='meshtastic-wake'){
+    const nextMeshCore=f.calls.slice(index+1).find(call=>call.kind==='command'&&call.command==='get public.key');
+    if(nextMeshCore)assert.ok(nextMeshCore.at-f.calls[index].at<=1100,'Meshtastic wake and read phases exceeded their 1000ms budget plus the inter-probe 100ms pause');
+  }
+  assert.ok(f.calls.filter(call=>call.kind==='read').every(call=>call.ms<=1500));
+});
+
+test('without observed ROM evidence normal detection remains one MeshCore attempt then its normal Meshtastic fallback',async()=>{
+  for(const evidence of [undefined,Object.freeze({observedRomBoot:false})]){
+    const link=radio(),events=[];link.startupEvidence=evidence;let elapsed=0;
+    const result=await detectApplication(link,{meshCoreTimeoutMs:1,now:()=>elapsed,delay:async ms=>{elapsed+=ms;},onProgress:event=>events.push(event)});
+    assert.equal(result.firmwareFamily,'meshtastic');assert.equal(link.commands.filter(command=>command==='get public.key').length,1);
+    assert.equal(link.writes.filter(bytes=>bytes[0]===0x94).length,1);
+    assert.deepEqual(events.map(event=>event.stage),['meshcore','meshtastic']);
+    assert.equal(events.at(-1).timeoutSeconds,25,'a non-ROM port retains the normal Meshtastic wait window');
+    assert.ok(!events.some(event=>event.stage==='startup'));
+  }
+});
+
+test('an identified MeshCore identity conflict never retries or launches Meshtastic during startup',async()=>{
+  const f=bootingRadio({meshCoreAt:0,conflictingKeys:true});
+  await assert.rejects(detectApplication(f.link,bootOptions(f)),error=>error.meshcoreApplicationIdentified===true&&error.code==='MESHCORE_IDENTITY_CONFLICT');
+  assert.deepEqual(f.commands,['get public.key']);assert.deepEqual(f.writes,[]);assertStartupOnly(f.events);
+});
+
+test('fatal command, read and write errors preserve the original failure and never acquire adaptive retry authority',async()=>{
+  for(const failureStage of ['command','read','write'])for(const name of ['NotAllowedError','SecurityError','NetworkError','NotFoundError','Error']){
+    const original=Object.assign(new Error('Synthetic port unavailable'),{name}),f=bootingRadio({failure:original,failureStage});
+    await assert.rejects(detectApplication(f.link,bootOptions(f)),error=>error===original);
+    assert.equal(f.commands.filter(command=>command==='get public.key').length,1);
+    assert.equal(mtRequests(f).length,0);assert.ok(f.writes.length<=1,`${failureStage}/${name} allowed a later write`);assertStartupOnly(f.events);
+  }
+});
+
+test('stale selection or a startup progress failure stops the adaptive run without issuing another operation',async()=>{
+  const stale=bootingRadio(),original=Error('Selection changed');let current=true;
+  const command=stale.link.command;stale.link.command=async(...args)=>{const result=await command(...args);current=false;return result;};
+  await assert.rejects(detectApplication(stale.link,{...bootOptions(stale),assertCurrent:()=>{if(!current)throw original;}}),error=>error===original);
+  assert.deepEqual(stale.commands,['get public.key']);assert.deepEqual(stale.writes,[]);
+  for(const failureAt of [0,1]){
+    const f=bootingRadio(),progressError=Error('Startup display stopped');let callsAtFailure=-1;
+    await assert.rejects(detectApplication(f.link,{...bootOptions(f),onProgress:event=>{
+      f.progress(event);if(event.elapsedSeconds>=failureAt){callsAtFailure=f.calls.length;throw progressError;}
+    }}),error=>error===progressError);
+    assert.ok(callsAtFailure>=0);assert.equal(f.calls.length,callsAtFailure);assert.equal(mtRequests(f).length,0);
+  }
+});
+
+test('MeshCore-only detection never sends Meshtastic and only observed ROM permits bounded repeated MeshCore attempts',async()=>{
+  const boot=bootingRadio();
+  await assert.rejects(detectApplication(boot.link,{...bootOptions(boot),meshCoreOnly:true}),error=>error.code==='APPLICATION_UNIDENTIFIED');
+  assert.ok(boot.commands.filter(command=>command==='get public.key').length>1);assert.ok(boot.now()<=25000);
+  assert.equal(mtRequests(boot).length,0);assertStartupOnly(boot.events);
+  const awake=radio();awake.startupEvidence={observedRomBoot:false};awake.write=async bytes=>awake.writes.push([...bytes]);
+  await assert.rejects(detectApplication(awake,{...options,meshCoreOnly:true}),/MeshCore|companion|response|timed out/i);
+  assert.equal(awake.commands.filter(command=>command==='get public.key').length,1);
+  assert.ok(!awake.writes.some(bytes=>bytes[0]===0x94||bytes.length===32&&bytes.every(byte=>byte===0xc3)));
+});

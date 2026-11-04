@@ -42,11 +42,26 @@ test('the GitHub route parser accepts only complete public HTTPS release assets'
   for(const value of ['http://github.com/a/b/releases/download/t/x.zip','https://u:p@github.com/a/b/releases/download/t/x.zip','https://github.com:444/a/b/releases/download/t/x.zip','https://github.com/a/b/releases/download/t/x.zip?q=secret','https://github.com/a/b/releases/download/t/x.zip#hash','https://raw.githubusercontent.com/a/b/main/x.zip','https://api.github.com/repos/a/b/releases/1','https://github.com/a/b/releases/download/t/subtag/file.zip','https://github.com/a/b/releases/download/t/a%2fb.zip','https://github.com/a/b/releases/download/t/a%5cb.zip','C:\\backups\\node.json'])assert.equal(githubAsset(value),null,value);
 });
 
-test('selection keeps newest exact profiles and both modes while excluding embedded bootloader apps',()=>{
+test('selection keeps newest exact profiles plus optional previous stable and both modes while excluding embedded bootloader apps',()=>{
   const old=application({name:'board_repeater-full-v1.17.0-abcdef0.bin',version:'v1.17.0'}),current=application({name:'board_repeater-full-v1.18.0-abcdef1.bin'}),reduced=application({name:'board_repeater-reduced-v1.18.0-abcdef1.bin'}),merged=application({name:'board_repeater-full-v1.18.0-abcdef1-merged.bin',action:'flash-wipe'}),other=application({hardware:'Other',name:'other_repeater-full-v1.18.0-abcdef1.bin'}),nrf=application({architecture:'nrf52',action:'flash',name:'nrf_repeater-v1.18.0.zip'}),embedded={...nrf,name:'nrf_repeater-with-bootloader-2.4.12-v1.18.0.zip'};
   const result=selectMirrorSources({items:[old,current,reduced,merged,other,nrf,embedded]});
-  assert.equal(result.selectedApplications,5);assert.deepEqual(new Set(result.sources.map(source=>source.url)),new Set([current,reduced,merged,other,nrf].map(item=>item.url)));
-  assert.ok(result.sources.every(source=>source.priority===1));
+  assert.equal(result.selectedApplications,5);assert.equal(result.selectedHistoryApplications,1);assert.deepEqual(new Set(result.sources.map(source=>source.url)),new Set([current,reduced,merged,other,nrf,old].map(item=>item.url)));
+  assert.ok(result.sources.slice(0,5).every(source=>source.priority===1));assert.equal(result.sources.at(-1).url,old.url);assert.equal(result.sources.at(-1).priority,2);
+});
+
+test('previous stable means only the nearest older numeric version of each exact profile, retaining same-version aliases',()=>{
+  const item=(version,hash='abcdef0',patch={})=>application({version,name:`board_repeater-full-${version}-${hash}.bin`,...patch});
+  const latest=item('v1.18.0'),older=item('v1.17.1'),alias=item('v1.17.1','abcdef1'),ancient=item('v1.17.0'),preview=item('v1.17.2-preview1'),other=item('v1.17.0','abcdef2',{hardware:'Another board'}),merged=item('v1.17.0','abcdef0',{action:'flash-wipe',name:'board_repeater-full-v1.17.0-abcdef0-merged.bin'});
+  const result=selectMirrorSources({items:[ancient,alias,preview,latest,older,other,merged]});
+  assert.deepEqual(new Set(result.sources.filter(source=>source.priority===2).map(source=>source.url)),new Set([older.url,alias.url]));
+  assert.deepEqual(new Set(result.sources.filter(source=>source.priority===1).map(source=>source.url)),new Set([latest.url,other.url,merged.url]));
+  assert.ok(!result.sources.some(source=>source.url===ancient.url||source.url===preview.url));
+});
+
+test('optional history cannot fill source slots before current profiles or expand historical utility discovery',()=>{
+  const items=[];for(let index=0;index<2050;index++)for(const version of ['v1.18.0','v1.17.1'])items.push(application({version,name:`board_${index}_repeater-${version}.bin`,bootloader:version==='v1.17.1'?[releaseUrl('old-utility','obsolete_bootloader.zip')]:[]}));
+  const result=selectMirrorSources({items});assert.equal(result.sources.length,4096);assert.equal(result.sources.filter(source=>source.priority===1).length,2050);assert.equal(result.sources.filter(source=>source.priority===2).length,2046);assert.equal(result.skippedHistorySources,4);
+  assert.ok(!result.sources.some(source=>source.name==='obsolete_bootloader.zip'));assert.equal(result.utilityReleases.length,0);
 });
 
 test('explicit separate utility references survive without guessing a board or profile',()=>{
@@ -151,6 +166,52 @@ test('budget selection is deterministic even when higher-priority asset fetches 
   fixture.fetchImpl=async(url,options)=>{if(url===a.url)await new Promise(resolve=>setTimeout(resolve,10));return original(url,options);};
   const result=await build([b,a],directory,fixture,{maxBytes:firstSize,concurrency:2});
   assert.deepEqual(result.index.entries.map(entry=>entry.url),[a.url]);assert.equal(result.skipped,1);assert.match(result.index.warnings.at(-1),/did not fit.*budget/);
+});
+
+test('latest application wins the budget before optional history regardless of URL ordering or fetch completion',async t=>{
+  const latest=application(),old=application({version:'v1.17.1',name:'board_repeater-v1.17.1.bin'}),fixture=inventory([latest,old]),original=fixture.fetchImpl,directory=await output(t);
+  fixture.fetchImpl=async(url,options)=>{if(url===latest.url)await new Promise(resolve=>setTimeout(resolve,10));return original(url,options);};
+  const budget=gzipSync(fixture.contents.get(latest.url),{level:9,mtime:0}).length,result=await build([old,latest],directory,fixture,{maxBytes:budget,requireApplications:true,minimumApplicationRatio:1});
+  assert.deepEqual(result.index.entries.map(entry=>entry.url),[latest.url]);assert.equal(result.appRequested,1);assert.equal(result.appResolved,1);assert.equal(result.appMirrored,1);assert.equal(result.historyRequested,1);assert.equal(result.historyResolved,1);assert.equal(result.historyMirrored,0);assert.equal(result.skipped,1);
+});
+
+test('missing optional history metadata or downloads cannot lower required latest application coverage',async t=>{
+  for(const failure of ['missing','digest','metadata-network','download-network']){
+    const latest=application(),old=application({version:'v1.17.1',name:'board_repeater-v1.17.1.bin'}),fixture=inventory([latest,old]),original=fixture.fetchImpl,directory=await output(t),oldRelease=[...fixture.releases.values()].find(release=>release.tag_name==='v1.17.1');
+    if(failure==='missing')oldRelease.assets=[];if(failure==='digest')oldRelease.assets[0].digest=null;
+    fixture.fetchImpl=async(url,options)=>{if(failure==='metadata-network'&&url.includes('/tags/v1.17.1')||failure==='download-network'&&url===old.url)throw Error('PRIVATE_HISTORY_TRANSPORT_DETAIL');return original(url,options);};
+    const result=await build([latest,old],directory,fixture,{requireApplications:true,minimumApplicationRatio:1});
+    assert.deepEqual(result.index.entries.map(entry=>entry.url),[latest.url],failure);assert.equal(result.appRequested,1);assert.equal(result.appResolved,1);assert.equal(result.appMirrored,1);assert.equal(result.historyRequested,1);assert.equal(result.historyMirrored,0);assert.ok(result.index.warnings.length>0);assert.ok(!JSON.stringify(result.index).includes('PRIVATE_HISTORY_TRANSPORT_DETAIL'));
+  }
+});
+
+test('adding previous stable reuses verified latest payload cache and downloads only the added history',async t=>{
+  const latest=application(),old=application({version:'v1.17.1',name:'board_repeater-v1.17.1.bin'}),fixture=inventory([latest,old]),directory=await output(t);
+  await build([latest],directory,fixture);fixture.assetRequests.length=0;
+  const result=await build([old,latest],directory,fixture,{requireApplications:true,minimumApplicationRatio:1});
+  assert.deepEqual(fixture.assetRequests.map(request=>request.url),[old.url]);assert.equal(result.appMirrored,1);assert.equal(result.historyMirrored,1);assert.equal(result.index.entries.length,2);
+});
+
+test('optional history still fails closed on authoritative or downloaded integrity conflicts',async t=>{
+  for(const failure of ['catalog-hash','download-hash','private-repository']){
+    const latest=application(),old=application({version:'v1.17.1',name:'board_repeater-v1.17.1.bin',...(failure==='private-repository'?{url:releaseUrl('v1.17.1','board_repeater-v1.17.1.bin','other-owner')}: {})}),fixture=inventory([latest,old]),directory=await output(t);
+    await build([latest],directory,fixture);const previous=await readFile(join(directory,'index.json'),'utf8');
+    if(failure==='catalog-hash')old.sha256='f'.repeat(64);
+    if(failure==='download-hash')fixture.contents.set(old.url,new Uint8Array(fixture.contents.get(old.url).length).fill(42));
+    if(failure==='private-repository')Object.assign(fixture.repositories.get('https://api.github.com/repos/other-owner/MeshCore'),{private:true,visibility:'private'});
+    await assert.rejects(build([latest,old],directory,fixture,{requireApplications:true,minimumApplicationRatio:1}),/SHA-256|repository is private/);assert.equal(await readFile(join(directory,'index.json'),'utf8'),previous);
+  }
+});
+
+test('all latest release metadata is resolved before optional history can use the hard release request allowance',async t=>{
+  const latest=[],history=[],contents=new Map(),raw=bytes('shared public bytes');
+  for(let index=0;index<127;index++){
+    const current=application({version:`v9.0.${index}`,name:`board_${index}_repeater-v9.0.${index}.bin`}),old=application({version:`v8.0.${index}`,name:`board_${index}_repeater-v8.0.${index}.bin`});
+    latest.push(current);history.push(old);contents.set(current.url,raw);contents.set(old.url,raw);
+  }
+  const fixture=inventory([...history,...latest],contents),result=await build([...history,...latest],await output(t),fixture,{requireApplications:true,minimumApplicationRatio:1});
+  assert.equal(result.appRequested,127);assert.equal(result.appResolved,127);assert.equal(result.appMirrored,127);assert.equal(result.historyRequested,127);assert.equal(result.historyResolved,1);assert.equal(result.historyMirrored,1);
+  const releases=fixture.apiRequests.filter(request=>request.url.includes('/releases/tags/'));assert.equal(releases.length,128);assert.ok(releases.slice(0,127).every(request=>request.url.includes('/tags/v9.0.')));assert.match(releases.at(-1).url,/\/tags\/v8\.0\./);
 });
 
 test('Keymind utility discovery uses its exact tag and migration asset inventory only',async t=>{

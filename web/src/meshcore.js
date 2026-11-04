@@ -441,8 +441,9 @@ export function backupSummary(archive) {
 }
 
 // Probe only the selected port, without consuming unread messages, resetting,
-// entering text mode, or changing logging. Native CommonCLI and binary API
-// detection share the same public-key evidence; VID/PID alone is not a role.
+// entering text mode, or changing logging. An identified Companion terminal
+// may make its transient binary handoff only after logging is confirmed off.
+// VID/PID alone is never a role or public-identity hint.
 export function cleanCliReply(reply,command='') {
   if(typeof reply!=='string'||reply.length>8192)return '';
   return reply.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').split(/[\r\n]+/).map(line=>line.trim().replace(/^(?:(?:->|>)\s*)+/,''))
@@ -452,30 +453,115 @@ function reportedCatalogRole(value){
   const roles=new Map([['repeater','repeater'],['room server','roomServer'],['room-server','roomServer'],['roomserver','roomServer'],['sensor','sensor'],['companionble','companionBle'],['companionusb','companionUsb'],['companionfull','companionFull']]);
   return roles.get(value.trim().toLowerCase())||null;
 }
+const companionVersionPattern=/^Companion\s+v?\d+\.\d+\.\d+[^\r\n]*\s+\(protocol\s+\d+,\s*build\s+[^\r\n]+\)$/i;
+function companionDetectionError(message,code='MESHCORE_COMPANION_MODE'){
+  return Object.assign(new Error(message),{code,meshcoreApplicationIdentified:true});
+}
+function companionProbeChallenge(){
+  const nonce=new Uint8Array(16);globalThis.crypto.getRandomValues(nonce);
+  return `get __meshfirmware_probe_${bytesToHex(nonce)}`;
+}
+function rawMarkerOffset(bytes,marker){
+  outer:for(let offset=0;offset+marker.length<=bytes.length;offset++){
+    for(let index=0;index<marker.length;index++)if(bytes[offset+index]!==marker[index])continue outer;
+    return offset;
+  }
+  return -1;
+}
+async function readCompanionBoundary(link,marker,timeoutMs){
+  const bytes=[],until=Date.now()+Math.min(timeoutMs,700);
+  while(Date.now()<until){
+    const chunk=await link.read(Math.max(1,Math.min(100,until-Date.now())));
+    if(!(chunk instanceof Uint8Array)||bytes.length+chunk.length>65536)throw Error('Companion terminal boundary receive limit exceeded.');
+    bytes.push(...chunk);
+    const offset=rawMarkerOffset(bytes,marker);
+    if(offset>=0)return {before:Uint8Array.from(bytes.slice(0,offset)),after:Uint8Array.from(bytes.slice(offset+marker.length))};
+  }
+  throw Error('Companion terminal boundary was not confirmed before the timeout.');
+}
+async function recoverFullCompanionTerminal(link,timeoutMs){
+  const challenge=companionProbeChallenge();
+  // A first read can begin inside an opaque packet-log frame. Neither a banner
+  // nor a framed SELF_INFO found inside those bytes establishes a boundary.
+  // This unpredictable, read-only unknown getter must be echoed by the live
+  // terminal before any of its following replies can be trusted as ASCII.
+  await link.write(encode(`+++MESHCORE-TERM-START\r\n${challenge}\r\n`));
+  const marker=encode(`${challenge}\r\n  ERROR: unknown command: ${challenge}\r\n> `);
+  const result=await readCompanionBoundary(link,marker,timeoutMs);
+  if(rawMarkerOffset(result.before,encode('===== MeshCore Full Companion Terminal =====\r\n'))<0)throw Error('No nonce-bound Full Companion terminal banner was received.');
+}
+async function handoffCompanionTerminal(link,timeoutMs){
+  const challenge=companionProbeChallenge();
+  // The fresh challenge and STOP share one write. The exact echoed challenge,
+  // error, prompt, echoed STOP and acknowledgment bind the new binary boundary
+  // to this host request, not to an ACK/header embedded in old radio payload.
+  await link.write(encode(`${challenge}\r\n+++MESHCORE-TERM-STOP\r\n`));
+  const marker=encode(`${challenge}\r\n  ERROR: unknown command: ${challenge}\r\n> +++MESHCORE-TERM-STOP\r\nOK - Binary mode\r\n`);
+  try{return (await readCompanionBoundary(link,marker,timeoutMs)).after;}
+  catch(error){
+    if(error&&typeof error==='object'){error.meshcoreApplicationIdentified=true;error.code??='MESHCORE_COMPANION_MODE';}
+    throw error;
+  }
+}
 export async function detectMeshCore(link,{timeoutMs=1500}={}) {
-  const reply=await link.command('get public.key',Math.min(timeoutMs,450));
-  // Meshtastic debug output can mention a 64-hex public key too. Only accept
-  // one complete getter-response line, not a key embedded in an unrelated log.
-  const keys=cleanCliReply(reply,'get public.key').split('\n').filter(line=>/^[a-f0-9]{64}$/i.test(line));
-  const publicKey=keys.length===1?keys[0].toLowerCase():null;
-  if(publicKey) {
-    const name=cleanCliReply(await link.command('get name',350),'get name'),version=cleanCliReply(await link.command('ver',350),'ver'),board=cleanCliReply(await link.command('board',350),'board');
-    let catalogRole=null;
-    try{catalogRole=reportedCatalogRole(cleanCliReply(await link.command('get role',350),'get role'));}catch{/* Optional role hints never replace the independently read public identity. */}
-    return {role:'common-cli',publicKey,name,version,model:!board||board.includes('\n')||/unknown command|unsupported|error/i.test(board)?null:board,catalogRole};
-  }
-  if(link.buffer)link.buffer.length=0;
-  const core=new MeshCore(link,{timeoutMs}),self=await core.self(),info=await core.info();
-  if(self[1]!==1)fail('This binary interface is not a companion. Select the primary CommonCLI port.');
-  const shortVersion=text(info.subarray(60,80)).split('\0')[0];let version=shortVersion;
-  // Protocol 14 exposes read-only role CLI. DEVICE_INFO's version field is only
-  // 20 bytes; use its full response for provider/version selection when present.
-  // Older companions must not receive unsupported CLI commands during probing.
-  if(info[1]>=14){
+  async function binaryDevice({publicKey=null,terminalVersion=null,initialBytes=null}={}){
+    const core=new MeshCore(link,{timeoutMs});if(initialBytes)core.bytes.push(...initialBytes);
+    let self,info,companionIdentified=false;
     try{
-      const optional=new MeshCore(link,{timeoutMs:Math.min(timeoutMs,700)}),reply=cleanCliReply(await optional.cli('version'),'version');
-      if(/^Companion\s+v?\d+\.\d+\.\d+[^\r\n]*\s+\(protocol\s+\d+,\s*build\s+[^\r\n]+\)$/i.test(reply))version=reply;
-    }catch{/* Core companion identity remains usable without the optional full version. */}
+      self=await core.self();
+      if(terminalVersion&&bytesToHex(self.subarray(4,36))!==publicKey)throw companionDetectionError('The Companion public identity changed during the terminal-to-binary handoff. No settings were changed.','MESHCORE_IDENTITY_MISMATCH');
+      if(self[1]!==1)fail('This binary interface is not a companion. Select the primary CommonCLI port.');
+      companionIdentified=true;
+      info=await core.info();
+    }catch(error){
+      if((terminalVersion||companionIdentified)&&error&&typeof error==='object'){error.meshcoreApplicationIdentified=true;error.code??='MESHCORE_COMPANION_MODE';}
+      throw error;
+    }
+    const shortVersion=text(info.subarray(60,80)).split('\0')[0];let version=terminalVersion||shortVersion;
+    // Older companions must not receive unsupported optional CLI commands.
+    if(info[1]>=14&&!terminalVersion){
+      try{
+        const optional=new MeshCore(link,{timeoutMs:Math.min(timeoutMs,700)}),reply=cleanCliReply(await optional.cli('version'),'version');
+        if(companionVersionPattern.test(reply))version=reply;
+      }catch{/* Core identity remains usable without the optional full version. */}
+    }
+    return {role:'companion',publicKey:bytesToHex(self.subarray(4,36)),name:text(self.subarray(58)).split('\0')[0],model:text(info.subarray(20,60)).split('\0')[0],version,shortVersion,protocol:info[1],...(terminalVersion?{catalogRole:'companionFull'}:{})};
   }
-  return {role:'companion',publicKey:bytesToHex(self.subarray(4,36)),name:text(self.subarray(58)).split('\0')[0],model:text(info.subarray(20,60)).split('\0')[0],version,shortVersion,protocol:info[1]};
+  async function textDevice(reply,{fullTerminalProven=false}={}){
+    // A quiet Companion prints the same key in its banner and its getter.
+    // Embedded log text is not evidence; conflicting complete keys fail closed.
+    const keys=[...new Set(cleanCliReply(reply,'get public.key').split('\n').filter(line=>/^[a-f0-9]{64}$/i.test(line)).map(key=>key.toLowerCase()))];
+    if(keys.length>1)throw companionDetectionError('Conflicting public identities were reported on the selected serial port. Choose the intended application port again.','MESHCORE_IDENTITY_CONFLICT');
+    const publicKey=keys.length===1?keys[0]:null;
+    if(!publicKey){if(fullTerminalProven)throw companionDetectionError('The proven Full Companion terminal did not report one public identity.');return null;}
+    const name=cleanCliReply(await link.command('get name',350),'get name'),version=cleanCliReply(await link.command('ver',350),'ver'),board=cleanCliReply(await link.command('board',350),'board');
+    let catalogRole=null,reportedRole='';
+    try{reportedRole=cleanCliReply(await link.command('get role',350),'get role');catalogRole=reportedCatalogRole(reportedRole);}catch{/* Optional role hints never replace the independently read public identity. */}
+    const asciiDevice={role:'common-cli',publicKey,name,version,model:!board||board.includes('\n')||/unknown command|unsupported|error/i.test(board)?null:board,catalogRole};
+    if(!/^companion(?:full)?$/i.test(reportedRole)||!companionVersionPattern.test(version)){
+      if(fullTerminalProven)throw companionDetectionError('The proven Full Companion terminal did not confirm its role and complete version.');
+      return asciiDevice;
+    }
+    const loggingReply=cleanCliReply(await link.command('get usb.logging',Math.min(timeoutMs,700)),'get usb.logging');
+    const logging=/^usb\.logging\s+(on|off|stream)(?:;[^\r\n]*)?$/i.exec(loggingReply)?.[1].toLowerCase()??null;
+    if(logging!=='off')return {...asciiDevice,catalogRole:'companionFull',companionTerminal:true,usbLogging:logging,companionModeReason:logging===null?'The Companion terminal did not confirm USB logging is off. Binary access was not requested.':`USB logging is ${logging}. Binary access requires explicitly turning logging off; detection did not change it.`};
+    const initialBytes=await handoffCompanionTerminal(link,timeoutMs);
+    // Retain every byte after the proven ACK, including a partial opaque push.
+    // Subsequent serial bytes remain in link.buffer; neither is cleared here.
+    return binaryDevice({publicKey,terminalVersion:version,initialBytes});
+  }
+  const reply=await link.command('get public.key',Math.min(timeoutMs,450));
+  const ascii=await textDevice(reply);if(ascii)return ascii;
+  if(link.buffer)link.buffer.length=0;
+  try{return await binaryDevice();}
+  catch(binaryError){
+    // A valid SELF_INFO already identifies a Companion. A later DEVICE_INFO
+    // failure must not authorize another protocol or a terminal-mode retry.
+    if(binaryError?.meshcoreApplicationIdentified)throw binaryError;
+    // One bounded, transient Full-only recovery attempt. Unknown firmware must
+    // prove the live nonce response plus Full banner before ASCII is accepted.
+    try{await recoverFullCompanionTerminal(link,timeoutMs);}
+    catch(error){if(error?.meshcoreApplicationIdentified)throw error;throw binaryError;}
+    return textDevice(await link.command('get public.key',Math.min(timeoutMs,450)),{fullTerminalProven:true});
+  }
 }

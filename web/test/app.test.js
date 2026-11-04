@@ -325,6 +325,54 @@ test('a detected MeshCore node never shows the Meshtastic seconds counter',async
   await ui.elements.get('select-port').onclick();assert.equal(ui.elements.get('detection-status').hidden,true);assert.equal(ui.elements.get('detection-timer').textContent,'');assert.equal(ui.evaluate('state.applicationDetection'),null);
 });
 
+test('observed restart readiness remains adaptive beyond five seconds and finishes as soon as the API answers',async()=>{
+  for(const readyAt of [5.6,15.715]){
+    const ui=await meshtasticWorkbench();let release,report;
+    ui.context.SerialLink.prototype.open=async function(_baud,options){assert.equal(options.application,true);assert.equal(options.onStartupProgress,undefined);this.startupEvidence={observedRomBoot:true};ui.calls.push('open');};
+    ui.context.detectApplication=(_link,{onProgress})=>{report=onProgress;assert.equal(ui.elements.get('detection-stage').textContent,'Waiting for radio startup…');return new Promise(resolve=>{release=resolve;});};
+    const connecting=ui.elements.get('select-port').onclick();for(let tick=0;!release&&tick<30;tick++)await Promise.resolve();assert.equal(typeof release,'function');
+    report({stage:'startup',elapsedSeconds:5,timeoutSeconds:25});assert.equal(ui.evaluate('state.busy'),true);assert.equal(ui.evaluate('state.device'),null);assert.equal(ui.elements.get('detection-timer').textContent,'5s / 25s');
+    report({stage:'startup',elapsedSeconds:Math.floor(readyAt),timeoutSeconds:25});assert.equal(ui.elements.get('detection-stage').textContent,'Waiting for radio startup…');assert.match(ui.elements.get('notice').textContent,/Opening USB restarted the radio.*Read-only checks stop as soon as it answers/);assert.doesNotMatch(ui.elements.get('detection-stage').textContent,/Meshtastic/);
+    release({firmwareFamily:'meshcore',role:'common-cli',model:'Heltec T114',publicKey:'11'.repeat(32),version:'v1.18.0.2'});await connecting;assert.equal(ui.elements.get('detection-status').hidden,true);assert.equal(ui.elements.get('detection-timer').textContent,'');assert.match(ui.elements.get('progress-label').textContent,/USB API answered/);
+    report({stage:'startup',elapsedSeconds:25,timeoutSeconds:25});assert.equal(ui.elements.get('detection-status').hidden,true);assert.deepEqual(ui.calls,['chooser','open','get bootloader.ver','close']);
+  }
+});
+
+test('stale or failed adaptive startup readiness cannot repaint another selected radio',async()=>{
+  for(const fault of ['generation','disconnect','timeout']){
+    const ui=await meshtasticWorkbench();let release,report;
+    ui.context.SerialLink.prototype.open=async function(){this.startupEvidence={observedRomBoot:true};ui.calls.push('open');};
+    ui.context.detectApplication=(_link,{onProgress})=>{report=onProgress;return new Promise((_resolve,reject)=>{release=reject;});};
+    const connecting=ui.elements.get('select-port').onclick();for(let tick=0;!release&&tick<30;tick++)await Promise.resolve();assert.equal(typeof release,'function');
+    if(fault==='generation')ui.evaluate('state.generation++;controls();');
+    if(fault==='disconnect')ui.serialEvents.disconnect({port:ui.port});
+    if(fault!=='timeout')assert.equal(ui.elements.get('detection-status').hidden,true);else report({stage:'startup',elapsedSeconds:25,timeoutSeconds:25});
+    release(Error(fault==='timeout'?'Radio startup readiness timed out.':'Selected radio changed.'));await connecting;assert.equal(ui.evaluate('state.device'),null);assert.equal(ui.elements.get('detection-status').hidden,true);assert.equal(ui.evaluate('state.applicationDetection'),null);
+    const notice=ui.elements.get('notice').textContent;report({stage:'startup',elapsedSeconds:25,timeoutSeconds:25});assert.equal(ui.elements.get('notice').textContent,notice);assert.equal(ui.elements.get('detection-status').hidden,true);assert.deepEqual(ui.calls,['chooser','open','close']);
+  }
+});
+
+test('backup reconnect and verification share adaptive readiness progress without changing transfer progress or proof checks',async()=>{
+  for(const workflow of ['backup','verify']){
+    const ui=workflow==='backup'?await dfuBackupApplicationWorkbench():await storageVerificationWorkbench('common-cli','> int:esp32=8192K ext:none');
+    let report;ui.elements.get('progress').value=.96;ui.elements.get('flash-progress-dialog').open=true;
+    ui.context.SerialLink.prototype.open=async function(baud,options){assert.equal(baud,115200);assert.equal(options.application,true);assert.equal(options.onStartupProgress,undefined);this.startupEvidence={observedRomBoot:true};ui.calls.push('application-open');};
+    const original=ui.context.detectApplication;ui.context.detectApplication=async(link,options)=>{report=options.onProgress;if(workflow==='backup')assert.equal(options.meshCoreOnly,true);for(const elapsedSeconds of [0,5,15]){report({stage:'startup',elapsedSeconds,timeoutSeconds:25});assert.equal(ui.elements.get('detection-timer').textContent,`${elapsedSeconds}s / 25s`);assert.match(ui.elements.get('flash-progress-stage').textContent,/Opening USB restarted the radio/);assert.equal(ui.elements.get('progress').value,.96);}return original(link,options);};
+    if(workflow==='backup')assert.equal(await ui.evaluate('readBackupApplicationPort(appPort,{expectedPublicKey:expectedBackupKey});'),true);
+    else await ui.evaluate('verifyApplication();');
+    assert.equal(ui.elements.get('detection-status').hidden,true,workflow);assert.equal(ui.elements.get('detection-timer').textContent,'',workflow);const notice=ui.elements.get('notice').textContent;report({stage:'startup',elapsedSeconds:25,timeoutSeconds:25});assert.equal(ui.elements.get('notice').textContent,notice,workflow);
+    assert.ok(!ui.calls.some(call=>/reset|write-final|set /.test(call)),workflow);assert.equal(ui.calls.filter(call=>call==='application-open').length,1,workflow);
+  }
+});
+
+test('changed verification proof stops adaptive readiness while nRF activation retains its unchanged direct probe',async()=>{
+  const ui=await storageVerificationWorkbench('common-cli','> int:esp32=8192K ext:none');let report;
+  ui.context.SerialLink.prototype.open=async function(){this.startupEvidence={observedRomBoot:true};ui.calls.push('application-open');};
+  ui.context.detectApplication=async(_link,options)=>{report=options.onProgress;report({stage:'startup',elapsedSeconds:0,timeoutSeconds:25});ui.evaluate('state.verification={sha256:"new"};');options.assertCurrent();return ui.context.detectMeshCore();};
+  await assert.rejects(ui.evaluate('verifyApplication();'),/port changed/);assert.equal(ui.elements.get('detection-status').hidden,true);assert.equal(ui.evaluate('state.applicationDetection'),null);report({stage:'startup',elapsedSeconds:25,timeoutSeconds:25});assert.equal(ui.elements.get('detection-status').hidden,true);
+  const activation=await nrfActivationWorkbench();activation.context.detectApplication=async()=>assert.fail('Native nRF activation must not start adaptive UART retries');activation.evaluate('nrfApplicationActivationCheck(pkg);');const fresh=await activation.activationOptions.readApplication(activation.appPort);assert.equal(fresh.publicKey,activation.context.activationDevice.publicKey);assert.deepEqual(activation.calls,['application-open','application-detect','application-close']);
+});
+
 test('unknown Meshtastic hardware does not inherit an old MeshCore board or use the shared USB ID to guess',async()=>{
   const ui=await meshtasticWorkbench({device:meshtasticDevice({meshtasticHardware:99999,model:'Heltec v2'})});ui.context.pkg=fakePackage();ui.evaluate('state.pkg=pkg;state.item=inventory[0];state.detectedHardware="Heltec T114";state.device={model:"Heltec T114",catalogRole:"companionFull"};');
   await ui.elements.get('select-port').onclick();assert.equal(ui.elements.get('hardware').value,'');assert.equal(ui.elements.get('artifact').value,'');assert.equal(ui.evaluate('state.detectedHardware'),null);assert.equal(ui.evaluate('state.pkg'),null);assert.match(ui.elements.get('board-detection').textContent,/manual|unknown|reviewed/i);assert.deepEqual(ui.calls,['chooser','open','close']);
@@ -827,7 +875,7 @@ test('startup proof cannot repaint another image, a failed result, an active wri
 
 test('failed identity, version and storage checks leave the matching DONE startup state unverified',async()=>{
   for(const scenario of ['identity','version','storage']){
-    const ui=await storageVerificationWorkbench('companion',scenario==='storage'?'Unknown command':'int:esp32=16384K');
+    const ui=await storageVerificationWorkbench('companion',scenario==='storage'?'Error: unavailable':'int:esp32=16384K');
     ui.context.completed=async()=>{};await ui.evaluate("withFlashProgress('exact.bin','Writing firmware',completed,{sha256:expected.sha256});");
     if(scenario==='identity')ui.context.detectMeshCore=async()=>({role:'companion',model:ui.context.expected.model,publicKey:'22'.repeat(32),protocol:14});
     if(scenario==='version')ui.context.expected.version='v1.18.0.2';
@@ -1107,8 +1155,8 @@ test('a still-connected application port is reused only after the verified ESP w
   await ui.elements.get('finish').onclick();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));assert.equal(ui.calls[0],'finish');assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.evaluate('state.finishedFirmware.verified'),true);assert.ok(ui.calls.includes('get storage.layout'));assert.equal(ui.calls.filter(call=>call==='application-open').length,1);assert.ok(!ui.calls.includes('chooser'));
 });
 
-async function storageVerificationWorkbench(role,layout){
-  const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.expected={sha256:'a'.repeat(64),architecture:'esp32',role,model:'Heltec V4.3 OLED',publicKey:'11'.repeat(32),version:'v1.18.0.1'};
+async function storageVerificationWorkbench(role,layout,{verification=null}={}){
+  const ui=workbench({verification});await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.expected=verification?ui.evaluate('state.verification'):{sha256:'a'.repeat(64),architecture:'esp32',role,model:'Heltec V4.3 OLED',publicKey:'11'.repeat(32),version:'v1.18.0.1'};
   const reply=command=>{ui.calls.push(command);if(command==='get storage.layout')return layout;if(command==='ver'||command==='version')return 'MeshCore v1.18.0.1';throw Error('Unexpected command '+command);};
   ui.context.detectMeshCore=async()=>({role,model:ui.context.expected.model,publicKey:ui.context.expected.publicKey,protocol:14,version:'v1.18.0.1'});ui.context.SerialLink=class{async open(){ui.calls.push('application-open');}async close(){ui.calls.push('application-close');}async command(command){return reply(command);}};ui.context.MeshCore=class{async cli(command){return reply(command);}};
   ui.evaluate('state.port=selectedPort;state.verification=expected;');return ui;
@@ -1199,9 +1247,74 @@ test('explicitly loading a new image or selecting another radio clears completio
   }
 });
 
-test('unsupported and malformed storage replies still retain pending startup verification instead of claiming success',async()=>{
-  for(const role of ['common-cli','companion'])for(const layout of ['', 'Unknown command', 'int:esp32-16384K', 'int:esp32=unknown']){
+test('errors and malformed storage replies still retain pending startup verification instead of claiming success',async()=>{
+  for(const role of ['common-cli','companion'])for(const layout of ['', 'Unknown command\nextra reply', 'Error: unavailable', 'Error: int:esp32=16384K', 'int:esp32-16384K', 'int:esp32=unknown']){
     const ui=await storageVerificationWorkbench(role,layout);await assert.rejects(ui.evaluate('verifyApplication();'),/storage-layout verification is unavailable or invalid/);ui.evaluate('controls();');assert.equal(ui.evaluate('state.verification'),ui.context.expected);assert.equal(ui.evaluate('state.finishedFirmware'),null);assert.equal(ui.calls.at(-1),'application-close');assert.notEqual(ui.elements.get('reconnect-title').textContent,'Firmware verified');assert.doesNotMatch(ui.elements.get('progress-label').textContent,/startup verified/);
+  }
+});
+
+test('explicit unsupported storage capability completes ordinary startup without claiming verified layout',async()=>{
+  for(const role of ['common-cli','companion'])for(const layout of ['Unknown command','> get storage.layout\r\n> Unknown command\r\n> ']){
+    const ui=await storageVerificationWorkbench(role,layout);await ui.evaluate('verifyApplication();');
+    assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.evaluate('state.finishedFirmware.verified'),true);assert.equal(ui.evaluate('state.finishedFirmware.layoutVerified'),false);
+    assert.match(ui.elements.get('notice').textContent,/not supported.*not verified/);assert.doesNotMatch(ui.elements.get('notice').textContent,/Storage layout answered|Storage layout confirmed/);assert.doesNotMatch(ui.elements.get('progress-label').textContent,/Storage layout confirmed/);
+  }
+});
+
+test('protocol-14 Companion uses the read-only ver fallback only after an exact unsupported version reply',async()=>{
+  const ui=await storageVerificationWorkbench('companion','Unknown command');ui.context.expected.version='v1.18.0';
+  ui.context.MeshCore=class{async cli(command){ui.calls.push(command);if(command==='version')return '> version\r\n> Unknown command\r\n> ';if(command==='ver')return 'v1.18.0-81dbae5 (Build: 15-Oct-2026)';if(command==='get storage.layout')return 'Unknown command';throw Error('Unexpected command '+command);}};
+  await ui.evaluate('verifyApplication();');assert.equal(ui.evaluate('state.finishedFirmware.verified'),true);assert.equal(ui.evaluate('state.finishedFirmware.layoutVerified'),false);assert.deepEqual(ui.calls,['application-open','version','ver','get storage.layout','application-close']);
+});
+
+test('stale version replies stop before any fallback, layout query or settings write',async()=>{
+  for(const phase of ['version','ver'])for(const change of ['port','generation','verification','cleared-verification']){
+    const ui=await storageVerificationWorkbench('companion','int:esp32=8192K');ui.context.applyQueuedRadioSettings=async()=>ui.calls.push('settings-write');
+    ui.context.MeshCore=class{async cli(command){
+      ui.calls.push(command);
+      if(command===phase){
+        await Promise.resolve();
+        ui.evaluate({port:'state.port={getInfo:()=>({usbVendorId:0x303a,usbProductId:0x1001})};',generation:'state.generation++;',verification:'state.verification={...expected};','cleared-verification':'state.verification=null;'}[change]);
+      }
+      if(command==='version')return 'Unknown command';if(command==='ver')return 'v1.18.0.1';throw Error('Unexpected command '+command);
+    }};
+    await assert.rejects(ui.evaluate('verifyApplication();'),/Application port changed during verification/);
+    assert.equal(ui.evaluate('state.finishedFirmware'),null,`${phase}: ${change}`);
+    assert.deepEqual(ui.calls,['application-open','version',...(phase==='ver'?['ver']:[]),'application-close'],`${phase}: ${change}`);
+  }
+});
+
+test('version fallback never hides I/O, malformed replies, mismatched versions or changed public identity',async()=>{
+  for(const fault of ['timeout','io','empty','error','multiline','identity','wrong-fallback','malformed-fallback','unknown-expected']){
+    const ui=await storageVerificationWorkbench('companion','int:esp32=8192K');ui.context.applyQueuedRadioSettings=async()=>ui.calls.push('settings-write');
+    if(fault==='identity')ui.context.detectMeshCore=async()=>({role:'companion',model:ui.context.expected.model,publicKey:'22'.repeat(32),protocol:14});
+    if(fault==='unknown-expected')ui.context.expected.version=null;
+    ui.context.MeshCore=class{async cli(command){ui.calls.push(command);if(command==='version'){if(fault==='timeout')throw Error('Timed out waiting for version');if(fault==='io')throw new DOMException('Access denied','NotAllowedError');return {empty:'',error:'Error: unknown command',multiline:'Unknown command\nMeshCore v1.18.0.1'}[fault]??'Unknown command';}if(command==='ver')return fault==='malformed-fallback'?'Error: v1.18.0.1':'v1.17.1 (Build: 09-Oct-2026)';throw Error('Unexpected command '+command);}};
+    await assert.rejects(ui.evaluate('verifyApplication();'),/identity differs|version does not match|Timed out|Access denied/);assert.ok(ui.evaluate('state.verification'));assert.equal(ui.evaluate('state.finishedFirmware'),null);assert.ok(!ui.calls.includes('settings-write'));assert.ok(!ui.calls.includes('get storage.layout'));
+    assert.equal(ui.calls.includes('ver'),['wrong-fallback','malformed-fallback','unknown-expected'].includes(fault),fault);if(fault==='identity')assert.deepEqual(ui.calls,['application-open','application-close']);
+  }
+});
+
+test('storage proof is required before settings writes for migration reminders and legacy Companion',async()=>{
+  for(const protocol of [13,14])for(const requiredBy of ['persisted','approval']){
+    const ui=await storageVerificationWorkbench('companion','Unknown command');ui.context.detectMeshCore=async()=>({role:'companion',model:ui.context.expected.model,publicKey:ui.context.expected.publicKey,protocol,version:'v1.18.0.1'});ui.context.applyQueuedRadioSettings=async()=>ui.calls.push('settings-write');
+    ui.evaluate(requiredBy==='persisted'?'state.verification.requiresStorageLayout=true;':'state.migrationApproval={phase:"waiting-application"};');
+    await assert.rejects(ui.evaluate('verifyApplication();'),/storage-layout verification is unavailable or invalid/);assert.ok(ui.evaluate('state.verification'));assert.equal(ui.evaluate('state.finishedFirmware'),null);assert.ok(!ui.calls.includes('settings-write'));assert.equal(ui.calls.includes('get storage.layout'),protocol===14);
+  }
+  for(const failure of ['Timed out waiting for storage','Storage I/O failed']){
+    const ui=await storageVerificationWorkbench('companion','');ui.context.MeshCore=class{async cli(command){ui.calls.push(command);if(command==='version')return 'v1.18.0.1';throw Error(failure);}};
+    await assert.rejects(ui.evaluate('verifyApplication();'),new RegExp(failure));assert.ok(ui.evaluate('state.verification'));assert.equal(ui.evaluate('state.finishedFirmware'),null);
+  }
+});
+
+test('migration storage requirements are persisted from every proof source and survive a page reload',async()=>{
+  for(const source of ['migration','approval','needed-plan','verified-plan','captured-option','ordinary']){
+    const ui=await storageVerificationWorkbench('companion','');ui.context.pkg=fakePackage({architecture:'esp32',name:'heltec_v4_companion-v1.18.0.1.bin'});ui.evaluate('state.device={model:expected.model,publicKey:expected.publicKey};');
+    if(source==='migration')ui.evaluate('state.migration={};');if(source==='approval')ui.evaluate('state.migrationApproval={};');if(source==='needed-plan')ui.evaluate('state.plan={needed:true};');if(source==='verified-plan')ui.evaluate('state.plan={verified:true};');
+    ui.evaluate(`queueVerification(pkg,{requiresStorageLayout:${source==='captured-option'}});`);const saved=JSON.parse(ui.context.localStorage.getItem('meshfirmware.verifyApplication'));assert.equal(saved.requiresStorageLayout,source==='ordinary'?undefined:true,source);
+    if(source==='ordinary')continue;
+    const fresh=await storageVerificationWorkbench('companion','Unknown command',{verification:saved});assert.equal(fresh.evaluate('state.verification.requiresStorageLayout'),true);assert.equal(fresh.evaluate('state.migration'),null);assert.equal(fresh.evaluate('state.migrationApproval'),null);
+    await assert.rejects(fresh.evaluate('verifyApplication();'),/storage-layout verification is unavailable or invalid/);assert.ok(fresh.evaluate('state.verification'));assert.equal(fresh.evaluate('state.finishedFirmware'),null);assert.equal(JSON.parse(fresh.context.localStorage.getItem('meshfirmware.verifyApplication')).requiresStorageLayout,true);
   }
 });
 
@@ -3092,6 +3205,112 @@ test('erase download diagnostics preserve integrity failures and cannot approve 
 
 const mergedItem=item=>({...item,action:'flash-wipe',name:item.name.replace(/\.bin$/i,'-merged.bin'),url:item.url.replace(/\.bin$/i,'-merged.bin'),sha256:'d'.repeat(64)});
 const artifactChoices=ui=>ui.elements.get('artifact').options.filter(option=>option.value).map(option=>option.value);
+function customEspImage({merged=false,expert=false}={}){
+  const app=radioDefaultsImage();
+  if(expert){app.fill(0,32,36);app[239]=app.subarray(32,224).reduce((checksum,byte)=>checksum^byte,0xef);}
+  if(!merged)return app;
+  const bytes=new Uint8Array(0x10000+app.length).fill(255),table=Uint8Array.from(migrationFlowFixture().bridgePlan.targetTable);
+  bytes.set(app);bytes.set(table,0x8000);bytes.set(app,0x10000);return bytes;
+}
+async function customEspWorkbench(mode='update'){
+  const ui=workbench();await Promise.resolve();ui.context.hash=firmwareHash;ui.context.inspectFirmware=inspectFirmwareBytes;ui.context.inventory=[v4Item,mergedItem(v4Item)];ui.context.initialMode=mode;
+  ui.evaluate('state.items=inventory;state.installMode=initialMode;syncInstallMode();filterCatalog();');ui.elements.get('hardware').value=v4Item.hardware;return ui;
+}
+
+test('validated custom ESP32 bytes select their installation mode without discarding the image or authorizing a write',async()=>{
+  for(const [initial,merged,expected]of [['update',true,'install'],['install',false,'update']]){
+    const ui=await customEspWorkbench(initial),image=customEspImage({merged});ui.context.image=image;
+    await ui.evaluate('loadFirmware("custom.bin",image);');ui.evaluate('controls();');
+    assert.equal(ui.evaluate('state.installMode'),expected);assert.equal(ui.elements.get('install-mode-install').checked,merged);assert.equal(ui.elements.get('install-mode-update').checked,!merged);assert.equal(ui.elements.get('flash-action').value,merged?'wipe':'update');
+    assert.equal(ui.evaluate('state.pkg.payload'),image);assert.equal(ui.evaluate('state.pkg.sha256'),firmwareHash(image));assert.equal(ui.evaluate('state.radioDefaults.sourceSha256'),firmwareHash(image));assert.equal(ui.elements.get('image-name').textContent,'custom.bin');
+    assert.equal(ui.evaluate('state.item.hardware'),v4Item.hardware);assert.equal(ui.evaluate('state.item.role'),undefined);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.elements.get('skip-backup').checked,false);assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(ui.calls,[]);
+    assert.deepEqual(artifactChoices(ui),[merged?'1':'0']);assert.equal(ui.evaluate('installModeSource.kind'),'manual');
+    if(!merged)assert.match(ui.elements.get('notice').textContent,/Application-only update.*no whole-chip erase/i);
+    ui.elements.get('flash-action').value=merged?'update':'wipe';ui.evaluate('controls();assertInstallModePackage(state.pkg);');assert.equal(ui.elements.get('flash-action').value,merged?'wipe':'update');
+  }
+});
+
+test('a custom merged image still needs the final destructive-write confirmation after automatic mode selection',async()=>{
+  const ui=await customEspWorkbench();ui.context.image=customEspImage({merged:true});ui.context.selectedPort=ui.port;
+  await ui.evaluate('loadFirmware("custom.bin",image);');ui.evaluate('state.port=selectedPort;state.plan={generation:state.generation,port:state.port,sha256:state.pkg.sha256,installMode:state.installMode,addresses:[0],mac:"aa:bb:cc:dd:ee:ff"};');
+  ui.context.confirm=async(_title,_detail,warning,token)=>{ui.calls.push(token);assert.match(warning,/whole-chip erase|identity|settings/i);return false;};
+  await ui.evaluate('flashPreparedFirmware();');assert.deepEqual(ui.calls,['WIPE WITHOUT BACKUP']);assert.equal(ui.evaluate('state.plan.written'),undefined);assert.equal(ui.evaluate('state.pkg.payload'),ui.context.image);
+});
+
+test('custom mode inference excludes catalog selections, components, UF2, nRF52 and pending device flows',async()=>{
+  for(const catalogSource of ['explicit','local-name']){
+    const ui=await customEspWorkbench();ui.context.image=customEspImage({merged:true});ui.context.exact={...mergedItem(v4Item),name:'exact.bin'};ui.evaluate('state.items.push(exact);');
+    await ui.evaluate(`loadFirmware(exact.name,image,${catalogSource==='explicit'?'exact':'null'});`);
+    assert.equal(ui.evaluate('state.installMode'),'update',catalogSource);assert.equal(ui.evaluate('state.item'),ui.context.exact);assert.throws(()=>ui.evaluate('assertInstallModePackage(state.pkg);'),/merged erase\/new install/);assert.deepEqual(ui.calls,[]);
+  }
+  for(const pkg of [inspectFirmwareBytes('component.bin',customEspImage({expert:true})),fakePackage({name:'firmware.uf2',architecture:'uf2',kind:'UF2 drive copy',destructive:true}),fakePackage({name:'application.zip'})]){
+    const ui=await customEspWorkbench('install');ui.context.selected=pkg;ui.context.inspectFirmware=()=>pkg;ui.context.checkedZip=()=>[{name:'manifest.json'},{name:'app.bin'},{name:'app.dat'}];
+    await ui.evaluate('loadFirmware(selected.name,new Uint8Array(64));');assert.equal(ui.evaluate('state.installMode'),'install',pkg.architecture);assert.equal(ui.evaluate('state.pkg'),pkg);assert.deepEqual(ui.calls,[]);
+  }
+  for(const field of ['handoff','migration','migrationApproval','recovery','espRecovery','verification','plan','flashProgress']){
+    const ui=await customEspWorkbench();ui.context.image=customEspImage({merged:true});ui.context.pendingField=field;
+    ui.evaluate('state[pendingField]=pendingField==="handoff"?true:pendingField==="plan"?{written:true}:pendingField==="migrationApproval"?{revoke(){}}:{};');
+    await ui.evaluate('loadFirmware("custom.bin",image);');assert.equal(ui.evaluate('state.installMode'),'update',field);assert.equal(ui.evaluate('state.pkg.payload'),ui.context.image,field);assert.equal(ui.elements.get('skip-backup').checked,false,field);assert.deepEqual(ui.calls,[],field);
+  }
+});
+
+test('invalid custom bytes or a published hash mismatch cannot change installation mode',async()=>{
+  for(const fault of ['image','hash']){
+    const ui=await customEspWorkbench();ui.context.image=fault==='image'?new Uint8Array(64):customEspImage({merged:true});if(fault==='hash')ui.elements.get('expected-sha').value='a'.repeat(64);
+    await assert.rejects(ui.evaluate('loadFirmware("custom.bin",image);'),fault==='image'?/validated ESP32 image/:/SHA-256 does not match/);assert.equal(ui.evaluate('state.installMode'),'update');assert.equal(ui.evaluate('state.pkg'),null);assert.deepEqual(ui.calls,[]);
+  }
+});
+
+test('custom application-only selection cannot silently undo the Meshtastic erase policy',async()=>{
+  for(const source of ['device','mode-source']){
+    const ui=await customEspWorkbench('install');ui.context.image=customEspImage();
+    ui.evaluate(source==='device'?'state.device={firmwareFamily:"meshtastic",role:"meshtastic"};':'installModeSource={kind:"meshtastic",port:state.port};');
+    await ui.evaluate('loadFirmware("custom.bin",image);');assert.equal(ui.evaluate('state.installMode'),'install',source);assert.equal(ui.evaluate('state.pkg.payload'),ui.context.image);assert.throws(()=>ui.evaluate('assertInstallModePackage(state.pkg);'),/validated merged ESP32 image/);assert.deepEqual(ui.calls,[]);
+  }
+  const ui=await customEspWorkbench('update');ui.context.image=customEspImage();ui.evaluate('state.device={firmwareFamily:"meshtastic",role:"meshtastic"};installModeSource={kind:"manual",port:state.port};');
+  await ui.evaluate('loadFirmware("custom.bin",image);');assert.equal(ui.evaluate('state.installMode'),'update');ui.evaluate('assertInstallModePackage(state.pkg);');assert.deepEqual(ui.calls,[]);
+});
+
+test('custom source handlers retain pre-invalidation mode locks and never let an allowance override a new pending flow',async()=>{
+  for(const source of ['file','url'])for(const phase of ['written-plan','approval','new-migration']){
+    const ui=await customEspWorkbench(),image=customEspImage({merged:true});ui.context.image=image;
+    if(phase==='written-plan')ui.evaluate('state.plan={written:true};');if(phase==='approval')ui.evaluate('state.migrationApproval={revoke(){}};');
+    const read=async()=>{if(phase==='new-migration')ui.evaluate('state.migration={phase:"pending"};');return image;};
+    if(source==='file'){ui.elements.get('firmware-file').files=[{name:'custom.bin',size:image.length,arrayBuffer:async()=>(await read()).buffer}];await ui.elements.get('firmware-file').onchange();}
+    else{ui.elements.get('custom-url').value='https://example.test/custom.bin';ui.context.downloadFirmwareBytes=read;await ui.elements.get('fetch-custom').onclick();}
+    assert.equal(ui.evaluate('state.installMode'),'update',`${source}: ${phase}`);assert.equal(ui.evaluate('state.pkg.sha256'),firmwareHash(image));assert.deepEqual(ui.calls,[]);
+  }
+  for(const blockedBy of ['original-flow','new-flow','explicit-false']){
+    const ui=await customEspWorkbench();ui.context.image=customEspImage({merged:true});
+    ui.context.checkedZip=(_bytes,options)=>options.directoryOnly?[{name:'nested/custom.bin',length:ui.context.image.length}]:{'nested/custom.bin':ui.context.image};
+    if(blockedBy==='original-flow')ui.evaluate('state.plan={written:true};');
+    await ui.evaluate(`loadFirmware("bundle.zip",new Uint8Array(64),null,{allowModeSync:${blockedBy!=='explicit-false'}});`);
+    assert.equal(ui.evaluate('state.archiveContext.allowModeSync'),blockedBy==='new-flow',blockedBy);
+    if(blockedBy==='new-flow')ui.evaluate('state.migration={phase:"pending"};');
+    ui.elements.get('archive-entry').value='nested/custom.bin';await ui.elements.get('load-entry').onclick();
+    assert.equal(ui.evaluate('state.installMode'),'update',blockedBy);assert.equal(ui.evaluate('state.pkg.payload'),ui.context.image);assert.deepEqual(ui.calls,[]);
+  }
+});
+
+test('anonymous release archives retain selected-board erase and bootloader hints when an entry is loaded',async()=>{
+  const ui=workbench();await Promise.resolve();const entry='nested/custom-app.zip',outer=new Uint8Array(8),inner=new Uint8Array(64),board=xiaoRepeaterItem({erase:['https://example.test/board-erase.zip'],bootloader:['https://example.test/board-bootloader.zip']});
+  ui.context.inventory=[board];ui.context.outer=outer;ui.context.selected=fakePackage({name:'custom-app.zip'});ui.context.inspectFirmware=()=>ui.context.selected;
+  ui.context.checkedZip=(bytes,options)=>options.directoryOnly?bytes===outer?[{name:entry,length:inner.length}]:[{name:'manifest.json'},{name:'app.bin'},{name:'app.dat'}]:{[entry]:inner};
+  ui.evaluate('state.items=inventory;filterCatalog();');await ui.evaluate('loadFirmware("release.zip",outer);');assert.equal(ui.evaluate('state.archiveContext.hardware'),undefined);
+  ui.elements.get('hardware').value=board.hardware;ui.elements.get('archive-entry').value=entry;await ui.elements.get('load-entry').onclick();
+  assert.equal(ui.evaluate('state.pkg'),ui.context.selected);assert.equal(ui.evaluate('state.item.hardware'),board.hardware);assert.deepEqual(Array.from(ui.evaluate('state.item.erase')),board.erase);assert.deepEqual(Array.from(ui.evaluate('state.item.bootloader')),board.bootloader);assert.equal(ui.evaluate('state.item.role'),undefined);assert.deepEqual(ui.calls,[]);
+});
+
+test('local file input resets immediately while its captured file remains readable and can be selected again',async()=>{
+  const ui=await customEspWorkbench(),image=customEspImage({merged:true}),input=ui.elements.get('firmware-file');let reads=0;
+  const file={name:'custom.bin',size:image.length,arrayBuffer:async()=>{assert.equal(input.value,'');reads++;return image.buffer.slice(0);}};
+  for(let attempt=0;attempt<2;attempt++){
+    input.files=[file];input.value='C:\\fakepath\\custom.bin';await input.onchange();assert.equal(input.value,'');assert.equal(ui.evaluate('state.pkg.sha256'),firmwareHash(image));assert.equal(ui.evaluate('state.installMode'),'install');
+    if(attempt===0)await ui.evaluate("setInstallMode('update');");
+  }
+  assert.equal(reads,2);assert.deepEqual(ui.calls,[]);
+  input.files=[];await input.onchange();assert.equal(ui.evaluate('state.pkg.sha256'),firmwareHash(image));
+});
 
 test('Update is the initial mode and an old saved install preference cannot re-enable erasing on a new page',async()=>{
   let resolveCatalog;const catalogPromise=new Promise(resolve=>resolveCatalog=resolve),ui=workbench({productionDefaults:true,catalogPromise});
@@ -4100,6 +4319,18 @@ test('an unexpected disconnect during a write revokes future automation without 
 test('closing a migration session retains scope but replacing firmware revokes it without device commands',async()=>{
   const ui=await migrationWorkbench({uart:false});await ui.elements.get('prepare').onclick();await ui.elements.get('flash').onclick();const approval=ui.evaluate('state.migrationApproval');
   const before=ui.calls.length;await ui.evaluate('closeEsp()');assert.equal(ui.evaluate('state.migrationApproval'),approval);assert.equal(approval.phase,'waiting-rom');ui.evaluate('invalidateFirmwareSelection();');assert.equal(approval.phase,'revoked');assert.equal(ui.evaluate('state.migrationApproval'),null);assert.ok(ui.evaluate('state.migration'));assert.deepEqual(ui.calls.slice(before),[]);
+});
+
+test('automatic migration retains required storage proof when firmware explicitly lacks the capability',async()=>{
+  const ui=await migrationWorkbench();ui.faults.layout='Unknown command';await ui.elements.get('prepare').onclick();await ui.elements.get('flash').onclick();
+  assert.equal(ui.calls.filter(call=>call==='application-open').length,1);assert.equal(ui.evaluate('state.migrationApproval'),null);assert.equal(ui.evaluate('state.migration'),null);assert.equal(ui.evaluate('state.verification.requiresStorageLayout'),true);assert.equal(JSON.parse(ui.context.localStorage.getItem('meshfirmware.verifyApplication')).requiresStorageLayout,true);assert.equal(ui.evaluate('state.finishedFirmware'),null);assert.match(ui.elements.get('notice').textContent,/storage-layout verification is unavailable or invalid/);
+});
+
+test('manual final migration captures layout requirements before clearing its migration marker',async()=>{
+  const ui=await migrationWorkbench();ui.evaluate('continueApprovedMigration=async()=>{};');await ui.elements.get('prepare').onclick();await ui.elements.get('flash').onclick();ui.elements.get('stop-migration-auto').onclick();
+  assert.ok(ui.evaluate('state.migration'));assert.equal(ui.evaluate('state.migrationApproval'),null);ui.elements.get('already-bootloader').checked=true;ui.elements.get('transport-mode').value='no_reset';await ui.elements.get('prepare').onclick();assert.ok(ui.evaluate('state.plan'),ui.elements.get('notice').textContent);assert.equal(ui.evaluate('state.plan.verified'),true);await ui.elements.get('flash').onclick();
+  assert.equal(ui.evaluate('state.migration'),null);assert.equal(ui.evaluate('state.verification.requiresStorageLayout'),true);assert.equal(JSON.parse(ui.context.localStorage.getItem('meshfirmware.verifyApplication')).requiresStorageLayout,true);
+  await ui.elements.get('finish').onclick();ui.faults.layout='Unknown command';await ui.elements.get('verify-app').onclick();assert.equal(ui.evaluate('state.verification.requiresStorageLayout'),true);assert.equal(ui.evaluate('state.finishedFirmware'),null);assert.match(ui.elements.get('notice').textContent,/storage-layout verification is unavailable or invalid/);
 });
 
 test('read-only startup readiness can retry, but permission failures and failed proofs never do',async()=>{

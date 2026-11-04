@@ -1,4 +1,5 @@
 import { fail, sleep, words, crc16, hash, nrfMetadataHash } from './firmware.js';
+import {chooseConnection} from './connection-choice.js';
 
 // Software USB-CDC applications can require DTR before they will answer. These
 // are reviewed native USB interfaces, not UART bridges whose DTR may drive EN.
@@ -13,16 +14,35 @@ function applicationDtr(port,baudRate,application){
   if(!application||baudRate!==115200||![info.usbVendorId,info.usbProductId].every(n=>Number.isInteger(n)&&n>=0&&n<=65535))return false;
   return applicationDtrIds.has([info.usbVendorId,info.usbProductId].map(n=>n.toString(16).padStart(4,'0')).join(':'));
 }
+function hasEspStartupBanner(buffer){
+  // Inspect without consuming bytes. Match ROM line prefixes, not a log or
+  // model name merely mentioning an ESP, and allow fragmented serial input.
+  return /(?:^|[\r\n])(?:ESP-ROM:|ets (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s)/.test(new TextDecoder().decode(Uint8Array.from(buffer.slice(0,4096))));
+}
 
 export class SerialLink {
-  constructor(port) { this.port = port; this.buffer = []; this.error = null; this.reader = null; this.readTask = null; }
-  async open(baudRate = 115200,{application=false}={}) {
-    this.buffer.length=0; this.error=null;
+  constructor(port) { this.port = port; this.buffer = []; this.error = null; this.reader = null; this.readTask = null; this.startupEvidence = null; }
+  async open(baudRate = 115200,{application=false,delay=sleep}={}) {
+    if(typeof delay!=='function')fail('Invalid serial startup delay.');
+    const uartApplication=application&&chooseConnection({usbInfo:this.port?.getInfo?.()||{}}).source==='uart-usb';
+    this.buffer.length=0; this.error=null;this.startupEvidence=null;
     await this.port.open({ baudRate, flowControl: 'none', bufferSize: 65536 });
-    try { await this.port.setSignals({ dataTerminalReady: applicationDtr(this.port,baudRate,application), requestToSend: false }); }
-    catch (e) { await this.port.close(); throw e; }
-    this.reader = this.port.readable.getReader();
-    this.readTask = (async () => { try { while (true) { const { value, done } = await this.reader.read(); if (done) { this.error=new Error('Serial device disconnected.'); break; } if (this.buffer.length + value.length > (1 << 20)) fail('Serial receive limit exceeded.'); for(const byte of value) this.buffer.push(byte); } } catch (e) { this.error = e; } finally { this.reader.releaseLock(); this.reader = null; } })();
+    try {
+      await this.port.setSignals({ dataTerminalReady: applicationDtr(this.port,baudRate,application), requestToSend: false });
+      this.reader = this.port.readable.getReader();
+      this.readTask = (async () => { try { while (true) { const { value, done } = await this.reader.read(); if (done) { this.error=new Error('Serial device disconnected.'); break; } if (this.buffer.length + value.length > (1 << 20)) fail('Serial receive limit exceeded.'); for(const byte of value) this.buffer.push(byte); } } catch (e) { this.error = e; } finally { this.reader.releaseLock(); this.reader = null; } })();
+      if(uartApplication) {
+        // Some USB-UART drivers reset the MCU when the application port opens,
+        // even with DTR/RTS deasserted. Observe only the passive initial guard;
+        // application detection owns any bounded readiness probes afterwards.
+        await delay(100);if(this.error)throw this.error;
+        if(hasEspStartupBanner(this.buffer))this.startupEvidence=Object.freeze({observedRomBoot:true});
+      }
+    } catch(error) {
+      // open() has not returned, so its caller may not yet consider this link
+      // owned. Release our reader and port if passive startup observation fails.
+      await this.close().catch(()=>{});throw error;
+    }
   }
   async write(data) { const writer = this.port.writable.getWriter(); try { await writer.write(data); } finally { writer.releaseLock(); } }
   async read(ms = 500) { const until = Date.now() + ms; while (!this.buffer.length && !this.error && Date.now() < until) await sleep(10); if (this.error && !this.buffer.length) throw this.error; return Uint8Array.from(this.buffer.splice(0)); }

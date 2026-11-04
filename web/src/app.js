@@ -246,6 +246,25 @@ function clearApplicationDetection(detection=state.applicationDetection){
   if(state.applicationDetection!==detection)return;
   state.applicationDetection=null;$('detection-status').hidden=true;$('detection-stage').textContent='';$('detection-timer').hidden=true;$('detection-timer').textContent='';$('detection-timer').removeAttribute('aria-label');
 }
+function applicationDetectionProgress(assertCurrent){
+  const detection={port:state.port,generation:state.generation};state.applicationDetection=detection;let observedStartup=false;
+  const showMessage=message=>{notice(message);$('progress-label').textContent=message;if($('flash-progress-dialog').open)$('flash-progress-stage').textContent=message;};
+  const onProgress=({stage,elapsedSeconds=0,timeoutSeconds=25})=>{
+    if(state.applicationDetection!==detection)return;assertCurrent();
+    const startup=stage==='startup',meshtastic=stage==='meshtastic',timed=startup||meshtastic;
+    $('detection-status').hidden=false;$('detection-stage').textContent=startup?'Waiting for radio startup…':meshtastic?'Checking Meshtastic…':'Checking MeshCore…';
+    $('detection-timer').hidden=!timed;$('detection-timer').textContent=timed?`${elapsedSeconds}s / ${timeoutSeconds}s`:'';
+    if(timed)$('detection-timer').setAttribute('aria-label',`${elapsedSeconds} seconds elapsed; ${timeoutSeconds} second ${startup?'startup readiness ':''}limit`);
+    else $('detection-timer').removeAttribute('aria-label');
+    if(startup){observedStartup=true;showMessage(`Opening USB restarted the radio. Waiting for its USB API: ${elapsedSeconds}s / ${timeoutSeconds}s. Read-only checks stop as soon as it answers; no additional reset or firmware write is sent.`);}
+  };
+  return {onProgress,finish(answered=false){
+    if(state.applicationDetection!==detection)return;
+    try{assertCurrent();}catch{clearApplicationDetection(detection);return;}
+    if(observedStartup)showMessage(answered?'The radio USB API answered. Checking the running application…':'Radio startup readiness check stopped.');
+    clearApplicationDetection(detection);
+  }};
+}
 function progress(value, message) {
   $('progress').value = value; $('progress-label').textContent = message;
   if(state.flashProgress)renderFlashProgress(value,message);
@@ -654,8 +673,9 @@ async function linkOperation(callback) {
   if(state.espRecovery) fail('An ESP32 write retry is pending. Re-select the same ROM radio and finish or explicitly discard its retry record before application commands.');
   if (!state.port) fail('Choose a USB port first.');
   if (dfuIds.has(portId(state.port)) || $('already-bootloader').checked) fail('Backup/application commands cannot run in DFU/ROM. Select the application port and clear Already in bootloader.');
-  await closeEsp(); const link = new SerialLink(state.port);
-  try { await link.open(115200,{application:true}); return await callback(link); } finally { await link.close(); }
+  const port=state.port,generation=state.generation,assertCurrent=()=>{if(state.port!==port||state.generation!==generation)fail('Selected port changed or disconnected while opening the application. Re-select and detect again.');};
+  await closeEsp();assertCurrent();const link = new SerialLink(port);
+  try { await link.open(115200,{application:true});assertCurrent();return await callback(link); } finally { await link.close(); }
 }
 function confirmationActionLabel(action,pkg=null,plan=null) {
   if(action==='WIPE WITHOUT BACKUP'&&pkg?.architecture==='nrf52'&&!pkg.erase&&!plan?.erasePkg){
@@ -743,21 +763,10 @@ async function readSelectedBootloaderInfo(){
 }
 async function readApplication(link) {
   const port=state.port,generation=state.generation,assertCurrent=()=>{if(state.port!==port||state.generation!==generation)fail('Selected port changed or disconnected while reading the node. Re-select and detect again.');};
-  const detection={port,generation};state.applicationDetection=detection;
-  const onProgress=({stage,elapsedSeconds=0,timeoutSeconds=25})=>{
-    if(state.applicationDetection!==detection)return;assertCurrent();
-    $('detection-status').hidden=false;
-    const meshtastic=stage==='meshtastic';
-    const label=meshtastic?'Checking Meshtastic…':'Checking MeshCore…';
-    if($('detection-stage').textContent!==label)$('detection-stage').textContent=label;
-    $('detection-timer').hidden=!meshtastic;
-    $('detection-timer').textContent=meshtastic?`${elapsedSeconds}s / ${timeoutSeconds}s`:'';
-    if(meshtastic)$('detection-timer').setAttribute('aria-label',`${elapsedSeconds} seconds elapsed; ${timeoutSeconds} second limit`);
-    else $('detection-timer').removeAttribute('aria-label');
-  };
+  const detection=applicationDetectionProgress(assertCurrent),onProgress=detection.onProgress;
   let device;
-  try{onProgress({stage:'meshcore'});device=await detectApplication(link,{assertCurrent,onProgress});}
-  finally{clearApplicationDetection(detection);}
+  try{onProgress({stage:link.startupEvidence?.observedRomBoot?'startup':'meshcore'});device=await detectApplication(link,{assertCurrent,onProgress});}
+  finally{detection.finish(!!device);}
   if(state.port!==port||state.generation!==generation)fail('Selected port changed or disconnected while reading the node. Re-select and detect again.');
   const board=applicationBoard(device);
   if(isMeshtastic(device)){
@@ -976,7 +985,10 @@ async function readBackupApplicationPort(port,{expectedPublicKey=null}={}){
       await link.open(115200,{application:true});opened=true;assertCurrent();
       // Read only MeshCore identity, not a DFU command or a search through all
       // granted ports. A previously known public identity must match afresh.
-      device=await detectMeshCore(link,{timeoutMs:1000});assertCurrent();
+      const detection=applicationDetectionProgress(assertCurrent);
+      try{detection.onProgress({stage:link.startupEvidence?.observedRomBoot?'startup':'meshcore'});device=await detectApplication(link,{meshCoreOnly:true,meshCoreTimeoutMs:1000,assertCurrent,onProgress:detection.onProgress});}
+      finally{detection.finish(!!device);}
+      assertCurrent();
       if(!['companion','common-cli'].includes(device?.role)||!/^[a-f0-9]{64}$/i.test(device?.publicKey||''))fail('A running MeshCore application did not answer.');
       if(expectedPublicKey&&device.publicKey.toLowerCase()!==expectedPublicKey.toLowerCase())fail('This application belongs to a different radio. Its settings were not backed up.');
     }finally{if(opened)await link.close();}
@@ -1114,7 +1126,7 @@ function refreshFirmwareWarnings() {
   const pkg=state.pkg;
   $('image-warning').textContent=pkg&&!completedFirmwareSelection()?.verified?[...pkg.warnings,radioDefaultsSummary(),firmwareDowngradeWarning(pkg),...(selectedBootloader(pkg)?[bootloaderReinstallWarning]:[]),...(selectedRecovery(pkg)?[recoveryWarning]:[])].filter(Boolean).join(' '):'';
 }
-function verificationRecord(pkg) {
+function verificationRecord(pkg,{requiresStorageLayout=false}={}) {
   const identity=payloadFirmwareIdentity(pkg);
   const family=pkg.architecture==='nrf52'?boardAssessment(pkg).payloadFamily:'unknown',model=isNonMeshCore()?null:state.device?.model||state.recovery?.deviceModel||null,roleText=state.item?.role||pkg.name,role=/companion/i.test(roleText)?'companion':/repeater|room|sensor/i.test(roleText)?'common-cli':null;
   const sourceHash=state.radioDefaults?.sourceSha256||pkg.sha256;
@@ -1122,7 +1134,8 @@ function verificationRecord(pkg) {
   const catalogVersion=verifiedSource&&state.item?.name===(state.radioDefaults?.name||pkg.name)&&/^v?\d+\.\d+\.\d+(?:\.\d+)?(?:[-+].*)?$/.test(state.item?.version||'')?state.item.version:null;
   const completionAdvice=postFlashBleAdvice(pkg,state.item),startupAdvice=firstStartupAdvice(pkg);
   const settingsSummary=state.postFlashSettingsApproval?.sha256===pkg.sha256?state.postFlashSettingsApproval.plan.summary:null;
-  return {sha256:pkg.sha256,name:pkg.name,architecture:pkg.architecture,hardware:canonicalHardware(state.item?.hardware||selectedHardware())||null,publicKey:!pkg.destructive&&!state.recovery?state.device?.publicKey||null:null,model:['rak4631','rak3401'].includes(family)&&rakFamily(model)!==family?null:model,family,role,version:identity?.versionText||catalogVersion||null,...(completionAdvice?{completionAdvice}:{}),...(startupAdvice?{startupAdvice}:{}),...(settingsSummary?{postFlashSettingsSummary:settingsSummary}:{})};
+  const layoutRequired=pkg.architecture==='esp32'&&!!(requiresStorageLayout||state.migration||state.migrationApproval||state.plan?.needed||state.plan?.verified);
+  return {sha256:pkg.sha256,name:pkg.name,architecture:pkg.architecture,hardware:canonicalHardware(state.item?.hardware||selectedHardware())||null,publicKey:!pkg.destructive&&!state.recovery?state.device?.publicKey||null:null,model:['rak4631','rak3401'].includes(family)&&rakFamily(model)!==family?null:model,family,role,version:identity?.versionText||catalogVersion||null,...(layoutRequired?{requiresStorageLayout:true}:{}),...(completionAdvice?{completionAdvice}:{}),...(startupAdvice?{startupAdvice}:{}),...(settingsSummary?{postFlashSettingsSummary:settingsSummary}:{})};
 }
 function verificationModelMatches(expected,device){
   if(!expected.model||!device.model||expected.model.toLowerCase()===device.model.toLowerCase())return true;
@@ -1134,7 +1147,7 @@ function verificationModelMatches(expected,device){
   const legacy=['Seeed Wio Tracker L1','Seeed SenseCAP Indicator'].includes(expected.model),target=canonicalHardware(expected.hardware||'');
   return !!(legacy&&target&&/^[a-f0-9]{64}$/i.test(expected.publicKey||'')&&device.publicKey===expected.publicKey&&after.hardware===target&&before.candidates.includes(target));
 }
-function queueVerification(pkg){state.verification=verificationRecord(pkg);persistFlow('verification','meshfirmware.verifyApplication');}
+function queueVerification(pkg,options){state.verification=verificationRecord(pkg,options);persistFlow('verification','meshfirmware.verifyApplication');}
 function completeNrfTransfer(pkg){
   const completionAdvice=postFlashBleAdvice(pkg,state.item),startupAdvice=firstStartupAdvice(pkg);
   state.finishedFirmware={sha256:pkg.sha256,verified:false,kind:pkg.erase?'erase':selectedRecovery(pkg)?'temporary-recovery':pkg.kind,...(completionAdvice?{completionAdvice}:{}),...(startupAdvice?{startupAdvice}:{})};
@@ -1189,8 +1202,9 @@ async function verifyApplication({automaticApproval=null,automaticReconnect=fals
   if(state.migration||state.recovery||state.espRecovery||dfuIds.has(portId(state.port)))fail('Finish any pending write recovery and choose the running application interface, not ROM/DFU.');
   if(expected.startupAdvice)notice('Checking the new application. '+expected.startupAdvice);
   await closeEsp();const port=state.port,generation=state.generation,link=new SerialLink(port);let device,version,layout,legacyLayout=false;
+  const assertCurrent=()=>{if(state.port!==port||state.generation!==generation||state.verification!==expected)fail('Application port changed during verification.');};
   try {
-    try{await link.open(115200,{application:true});device=await readApplication(link);}
+    try{await link.open(115200,{application:true});assertCurrent();device=await readApplication(link);}
     catch(error){
       // Only read-only startup readiness may be retried. Never retry an access
       // denial, a reset/write, or a responding application's failed proof.
@@ -1202,15 +1216,22 @@ async function verifyApplication({automaticApproval=null,automaticReconnect=fals
     if(expected.role&&expected.role!==device.role)fail('Running MeshCore interface does not match the selected firmware role.');if(expected.publicKey&&device.publicKey!==expected.publicKey)fail('Running application public identity differs from the pre-flash node. Startup verification failed.');
     if(!verificationModelMatches(expected,device))fail('Running application model differs from the pre-flash device.');
     if(['rak4631','rak3401'].includes(expected.family)&&rakFamily(device.model)!==expected.family)fail('Running protected board family does not match the flashed payload.');
-    const mc=device.role==='companion'?new MeshCore(link):null;
-    version=mc?(Number.isInteger(device.protocol)&&device.protocol<14?device.version:await mc.cli('version')):await link.command('ver',700);
-    if(expected.version){const numeric=value=>/\bv?(\d+\.\d+\.\d+(?:\.\d+)?)/i.exec(value||'')?.[1]?.replace(/(?:\.0)+$/,''),actual=numeric(version),wanted=numeric(expected.version);if(!actual||!wanted||actual!==wanted)fail('Running firmware version does not match the verified payload.');}
+    const mc=device.role==='companion'?new MeshCore(link):null,legacyCompanion=!!mc&&Number.isInteger(device.protocol)&&device.protocol<14;
+    const unsupported=(reply,command)=>cleanCliReply(reply,command)==='Unknown command';
+    let versionFallback=false;
+    version=mc?(legacyCompanion?device.version:await mc.cli('version')):await link.command('ver',700);
+    assertCurrent();
+    if(mc&&!legacyCompanion&&unsupported(version,'version')){versionFallback=true;version=await mc.cli('ver');assertCurrent();}
+    if(mc&&!legacyCompanion&&!/^(?:(?:Companion|MeshCore)[ \t]+)?v?\d+\.\d+\.\d+(?:\.\d+)?(?:[-+][A-Za-z0-9._+-]+)?(?:[ \t]+\([^\r\n]*\))?$/i.test(cleanCliReply(version,versionFallback?'ver':'version')))fail('Running firmware version does not match the verified payload.');
+    if(expected.version||versionFallback){const numeric=value=>/\bv?(\d+\.\d+\.\d+(?:\.\d+)?)/i.exec(value||'')?.[1]?.replace(/(?:\.0)+$/,''),actual=numeric(version),wanted=numeric(expected.version);if(!actual||!wanted||actual!==wanted)fail('Running firmware version does not match the verified payload.');}
     if(state.port!==port||state.generation!==generation||state.verification!==expected)fail('Application port changed during verification.');
-    await applyQueuedRadioSettings(link,device,expected,port,generation,mc,automaticApproval);
     if(expected.architecture==='esp32'){
-      legacyLayout=!!mc&&Number.isInteger(device.protocol)&&device.protocol<14;
-      if(!legacyLayout){layout=mc?await mc.cli('get storage.layout'):await link.command('get storage.layout',700);if(!/\bint:esp32=\d+K\b/i.test(layout))fail('Application answered, but storage-layout verification is unavailable or invalid. Flash transfer is verified; application verification remains incomplete.'+(postFlashSettingsStatus()?' '+postFlashSettingsStatus():''));}
+      const required=expected.requiresStorageLayout===true||!!automaticApproval||!!state.migrationApproval||!!state.migration;
+      legacyLayout=legacyCompanion;
+      if(!legacyLayout){const reply=mc?await mc.cli('get storage.layout'):await link.command('get storage.layout',700);if(unsupported(reply,'get storage.layout'))legacyLayout=true;else layout=reply;}
+      if((required&&legacyLayout)||(!legacyLayout&&(!/\bint:esp32=\d+K\b/i.test(layout)||commonCliReplyState(layout,'get storage.layout').state!=='complete')))fail('Application answered, but storage-layout verification is unavailable or invalid. Flash transfer is verified; application verification remains incomplete.'+(postFlashSettingsStatus()?' '+postFlashSettingsStatus():''));
     }
+    await applyQueuedRadioSettings(link,device,expected,port,generation,mc,automaticApproval);
     if(state.port!==port||state.generation!==generation||state.verification!==expected)fail('Application port changed during verification.');
   }finally{await link.close();}
   if(automaticApproval&&state.migrationApproval!==automaticApproval)fail('Automatic continuation was stopped; startup verification remains available manually.');
@@ -1221,7 +1242,7 @@ async function verifyApplication({automaticApproval=null,automaticReconnect=fals
   if(state.postFlashSettingsResult?.sha256===expected.sha256&&!state.postFlashSettingsResult.complete&&$('flash-progress-dialog').open){$('flash-progress-title').textContent='DONE — settings need attention';$('flash-progress-stage').textContent='Firmware startup verified. Some selected settings were not applied or verified.';}
   progress(1,`Application startup verified.${layout?' Storage layout confirmed.':legacyLayout?' Legacy firmware does not expose storage-layout verification.':''} No further flashing is required.`);
   refreshFirmwareWarnings();updateFirmwareSelectionSummary();
-  notice(`Application startup verified: ${device.name||device.model||device.role}. ${layout?'Storage layout answered. ':''}${postFlashSettingsStatus()} ${expected.postFlashSettingsSummary&&!state.postFlashSettingsResult&&!state.postFlashSettingsApproval?'The page was reloaded; no post-flash settings were authorized or applied. Choose settings again for a new operation. ':''}${automaticApproval?(expected.publicKey?'Pre-flash public identity matches.':'No pre-flash public identity was available; physical device identity could not be independently verified.'):automaticReconnect?'Previously authorized application port reused; the expected public identity matches.':'Physical USB serial is not exposed by Web Serial; the port was explicitly reselected.'}`);log(version);
+  notice(`Application startup verified: ${device.name||device.model||device.role}. ${layout?'Storage layout answered. ':legacyLayout?'Storage layout is not supported by this firmware and was not verified. ':''}${postFlashSettingsStatus()} ${expected.postFlashSettingsSummary&&!state.postFlashSettingsResult&&!state.postFlashSettingsApproval?'The page was reloaded; no post-flash settings were authorized or applied. Choose settings again for a new operation. ':''}${automaticApproval?(expected.publicKey?'Pre-flash public identity matches.':'No pre-flash public identity was available; physical device identity could not be independently verified.'):automaticReconnect?'Previously authorized application port reused; the expected public identity matches.':'Physical USB serial is not exposed by Web Serial; the port was explicitly reselected.'}`);log(version);
   if(expected.architecture==='nrf52')try{await offerBootloaderAfterStartup();}catch(error){
     // A separate component download can invalidate its selection before it
     // fails. Preserve the already proven application, but never repaint a
@@ -1251,7 +1272,12 @@ async function clearFirmwareSelection() {
   invalidateFirmwareSelection();
   await closeEsp();
 }
-async function loadFirmware(name, bytes, item = null) {
+function customInstallModeSyncAllowed(){return !installModeLocked()&&!continuingDeviceFlow()&&!state.flashProgress;}
+async function loadFirmware(name, bytes, item = null,{allowModeSync=true}={}) {
+  // Capture before invalidation clears a written plan or revokes automation.
+  // Reloading a pending flow's original image must not reinterpret its mode.
+  const syncCustomMode=allowModeSync!==false&&customInstallModeSyncAllowed();
+  const preserveMeshtasticInstall=state.installMode==='install'&&(isMeshtasticMigration()||installModeSource?.kind==='meshtastic');
   await clearFirmwareSelection();
   const exact=item?.name===name?item:state.items.find(i=>i.hardware===$('hardware').value&&i.name===name),hints=item||exact||state.items.find(i=>i.hardware===$('hardware').value);
   // Board-wide erase/bootloader hints may be reused for a custom file, never
@@ -1266,7 +1292,7 @@ async function loadFirmware(name, bytes, item = null) {
     if (!entries.some(e=>e.name==='manifest.json') || entries.length!==3) {
       const candidates=entries.filter(e=>/\.(?:bin|zip|uf2)$/i.test(e.name) && e.length>0 && e.length<(32<<20));
       if (!candidates.length) fail('No firmware images in this release archive.');
-      state.archive=bytes;state.archiveContext=item?{hardware:item.hardware,erase:item.erase||[],bootloader:item.bootloader||[]}:null; $('archive-entry').replaceChildren(...candidates.map(e=>new Option(e.name,e.name))); $('archive-picker').hidden=false;
+      state.archive=bytes;state.archiveContext={...(item?{hardware:item.hardware,erase:item.erase||[],bootloader:item.bootloader||[]}:{}),allowModeSync:syncCustomMode}; $('archive-entry').replaceChildren(...candidates.map(e=>new Option(e.name,e.name))); $('archive-picker').hidden=false;
       revealPanel('custom-firmware');
       notice('Release ZIP indexed without expanding every board. Select the exact image for your board.'); return;
     }
@@ -1274,11 +1300,18 @@ async function loadFirmware(name, bytes, item = null) {
   const pkg = inspectFirmware(name,bytes);
   state.radioDefaults={name,bytes:bytes.slice(),sourceSha256:hash(bytes),verifiedSourceSha256:expected||null,inspection:null,appliedSettings:null,dirty:false,provenance:null};
   state.pkg = pkg;state.item=item;state.backupApproved=null; $('image-name').textContent = pkg.name; $('image-kind').textContent = pkg.kind; $('image-size').textContent = size(bytes.length); $('image-sha').textContent = pkg.sha256;refreshFirmwareWarnings();
+  let customModeNotice='';
+  if(syncCustomMode&&!exact&&customInstallModeSyncAllowed()&&pkg.architecture==='esp32'&&!pkg.expert&&((pkg.merged===true&&pkg.kind==='Merged install')||(pkg.merged===false&&pkg.kind==='Application update'&&!preserveMeshtasticInstall))){
+    // Validated bytes, not the filename, decide a fresh custom image's mode.
+    // This changes only the display/filter; final erase/write consent remains.
+    state.installMode=pkg.merged?'install':'update';installModeSource={kind:'manual',port:state.port};syncInstallMode();filterCatalog();
+    customModeNotice=pkg.merged?'Merged install loaded. Erase & new install selected; identity and settings are erased only after confirmation. No device data has been written.':'Application-only update loaded. Update selected; no whole-chip erase will be performed. No device data has been written.';
+  }
   $('nrf-actions').hidden=pkg.architecture!=='nrf52';$('erase-source').replaceChildren(...(item?.erase||state.recovery?.eraseUrls||[]).map(url=>new Option(new URL(url).pathname.split('/').pop(),url)));
   if(pkg.architecture==='nrf52'&&$('transport-mode').value!=='auto')$('transport-mode').value='nrf52';
   $('expert-fields').hidden = !pkg.expert;
   updateFirmwareSelectionSummary({item});
-  progress(0,'Image validated locally. Inspect the device before confirmation.'); notice('Firmware loaded. No device data has been written.');
+  progress(0,'Image validated locally. Inspect the device before confirmation.'); notice(customModeNotice||'Firmware loaded. No device data has been written.');
 }
 function options(id, values, placeholder) {
   const select = $(id), prior = select.value;
@@ -1537,9 +1570,9 @@ $('skip-backup').onchange=()=>operation(async()=>{
   if(state.verification||state.plan?.written||state.migrationApproval)fail(canStartNewRadio()?'Use Flash a new device to begin another update, or optionally verify the previous device.':'Finish the current transfer, reset or migration before changing the backup choice.');
   state.nrfPrepareResume=null;state.backupApproved=null;await closeEsp();
 });
-$('firmware-file').onchange = () => operation(async () => { const file = $('firmware-file').files[0]; if (!file) return; clearAutomaticSha(file.name);await clearFirmwareSelection();if (file.size > 64 << 20) fail('Firmware exceeds 64 MiB.'); await loadFirmware(file.name,new Uint8Array(await file.arrayBuffer())); });
-$('load-entry').onclick = () => operation(async () => { const entry=$('archive-entry').value,archive=state.archive,item=state.archiveContext;await clearFirmwareSelection();if(!archive || !entry) fail('Select an archive entry.');const expected=$('expected-sha').value.trim().toLowerCase();if(expected&&(!/^[a-f0-9]{64}$/.test(expected)||hash(archive)!==expected))fail('Release ZIP SHA-256 does not match.');const files=checkedZip(archive,{maxEntries:8192,maxExpanded:512<<20,select:name=>name===entry});$('expected-sha').value='';await loadFirmware(entry.split('/').pop(),files[entry],item); });
-$('fetch-custom').onclick = () => operation(async () => { clearAutomaticSha();await clearFirmwareSelection();const url=httpsUrl($('custom-url').value),name=new URL(url).pathname.split('/').pop();$('download-firmware').href=url;const bytes=await downloadFirmwareBytes(url,name);await loadFirmware(name,bytes); });
+$('firmware-file').onchange = () => operation(async () => { const file = $('firmware-file').files[0]; if (!file) return; const allowModeSync=customInstallModeSyncAllowed();$('firmware-file').value='';clearAutomaticSha(file.name);await clearFirmwareSelection();if (file.size > 64 << 20) fail('Firmware exceeds 64 MiB.'); await loadFirmware(file.name,new Uint8Array(await file.arrayBuffer()),null,{allowModeSync}); });
+$('load-entry').onclick = () => operation(async () => { const entry=$('archive-entry').value,archive=state.archive,context=state.archiveContext,item=context?.hardware?context:null,allowModeSync=customInstallModeSyncAllowed()&&context?.allowModeSync!==false;await clearFirmwareSelection();if(!archive || !entry) fail('Select an archive entry.');const expected=$('expected-sha').value.trim().toLowerCase();if(expected&&(!/^[a-f0-9]{64}$/.test(expected)||hash(archive)!==expected))fail('Release ZIP SHA-256 does not match.');const files=checkedZip(archive,{maxEntries:8192,maxExpanded:512<<20,select:name=>name===entry});$('expected-sha').value='';await loadFirmware(entry.split('/').pop(),files[entry],item,{allowModeSync}); });
+$('fetch-custom').onclick = () => operation(async () => { const allowModeSync=customInstallModeSyncAllowed();clearAutomaticSha();await clearFirmwareSelection();const url=httpsUrl($('custom-url').value),name=new URL(url).pathname.split('/').pop();$('download-firmware').href=url;const bytes=await downloadFirmwareBytes(url,name);await loadFirmware(name,bytes,null,{allowModeSync}); });
 $('artifact').onchange = () => operation(async()=>{await clearFirmwareSelection();updateDownload();updateFirmwareSelectionSummary();controls();});
 $('radio-defaults-load').onclick=()=>operation(inspectSelectedRadioDefaults);
 $('radio-defaults-apply').onclick=()=>operation(applyRadioDefaults);
@@ -1843,8 +1876,9 @@ async function flashPreparedFirmware() {
     state.espRecovery=null;persistEspRecovery();
     if(plan.needed && !plan.verified) {state.migration.phase='written';localStorage.setItem('meshfirmware.pendingMigration',JSON.stringify(state.migration));}
     notice(plan.needed && !plan.verified?'USB bridge write verified. Reset verified ESP32 to run the migration, wait for automatic ROM return, select the same device, then inspect again before the final firmware write.':'Target flash MD5 verified. Use Reset verified ESP32, then check application startup.');
+    const requiresStorageLayout=!!(state.migration||approval||plan.needed||plan.verified);
     if(plan.verified) { state.migration=null; localStorage.removeItem('meshfirmware.pendingMigration'); }
-    if(!plan.needed||plan.verified){queueVerification(pkg);if(approval?.identity){state.verification.publicKey=approval.identity.publicKey||null;state.verification.model=approval.identity.model||null;persistFlow('verification','meshfirmware.verifyApplication');}}
+    if(!plan.needed||plan.verified){queueVerification(pkg,{requiresStorageLayout});if(approval?.identity){state.verification.publicKey=approval.identity.publicKey||null;state.verification.model=approval.identity.model||null;persistFlow('verification','meshfirmware.verifyApplication');}}
     if(approval&&state.migrationApproval!==approval){notice('Verified write completed. Automatic continuation was stopped; no next reset or write was sent. Use the manual verification/recovery controls to continue.');return;}
     if((approval||$('auto-finish').checked)&&!pkg.expert)await finishVerifiedEsp();
   }

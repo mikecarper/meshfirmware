@@ -70,7 +70,19 @@ export function selectMirrorSources(catalog){
     const key=profileKey(item),previous=newest.get(key),order=previous?compareVersions(item.version,previous[0].version):-1;
     if(!previous||order<0)newest.set(key,[item]);else if(order===0)previous.push(item);
   }
-  const selected=[...newest.values()].flat(),sources=new Map(),utilityReleases=new Map();
+  // Keep one optional previous stable generation, not an archive walk. The
+  // exact profile key still separates provider/hardware/radio/storage/mode.
+  // Published development suffixes are not stable numeric release versions.
+  const older=new Map();
+  for(const item of catalog.items){
+    if(!matchesCatalogInstallMode(item,'update')&&!matchesCatalogInstallMode(item,'install'))continue;
+    if(!/^v?\d+(?:\.\d+){2,3}$/i.test(item.version))continue;
+    const key=profileKey(item),latest=newest.get(key);
+    if(!latest||compareVersions(item.version,latest[0].version)<=0)continue;
+    const previous=older.get(key),order=previous?compareVersions(item.version,previous[0].version):-1;
+    if(!previous||order<0)older.set(key,[item]);else if(order===0)previous.push(item);
+  }
+  const selected=[...newest.values()].flat(),history=[...older.values()].flat(),sources=new Map(),utilityReleases=new Map();
   function add(source){
     if(!source)return;
     const previous=sources.get(source.url);
@@ -94,7 +106,15 @@ export function selectMirrorSources(catalog){
   const bundle=catalog.recoveryCatalog?.bundle;if(bundle)add(reference(bundle.url,'recovery',0,bundle));
   // This exact shared set is needed by reviewed older migration archives.
   if(utilityReleases.size)add(reference('https://github.com/mikecarper/MeshCore/releases/download/utility-usb-partition-v1-3d3d5827/meshcore-usb-partition-bridges.zip','usb-bridge',0,{sha256:'187cac4f3f716d5df50e123a03ba51da637356874a434a72a60d9eb99d988ed8'}));
-  return {sources:[...sources.values()].sort((a,b)=>a.priority-b.priority||a.url.localeCompare(b.url)),utilityReleases:[...utilityReleases.values()].sort((a,b)=>a.tag.localeCompare(b.tag)),selectedApplications:selected.length};
+  let skippedHistorySources=0;
+  for(const item of history.sort((a,b)=>a.url.localeCompare(b.url))){
+    // Older application bytes are optional. Do not expand historical utility
+    // discovery or let them displace the latest profiles' required utilities.
+    const source=reference(item.url,item.action==='flash-wipe'?'merged-install':'application',2,{sha256:item.sha256});
+    if(source&&!sources.has(source.url)&&sources.size>=MAX_SOURCES){skippedHistorySources++;continue;}
+    add(source);
+  }
+  return {sources:[...sources.values()].sort((a,b)=>a.priority-b.priority||a.url.localeCompare(b.url)),utilityReleases:[...utilityReleases.values()].sort((a,b)=>a.tag.localeCompare(b.tag)),selectedApplications:selected.length,selectedHistoryApplications:history.length,skippedHistorySources};
 }
 async function bodyBytes(response,limit,expected){
   if(!response?.ok){try{await response?.body?.cancel?.();}catch{}throw Object.assign(new Unavailable(`HTTP ${response?.status||'unavailable'}`),{status:response?.status});}
@@ -144,6 +164,7 @@ export async function buildMirror({catalog,outputDir,fetchImpl=fetch,token,maxBy
   invariant(typeof minimumApplicationRatio==='number'&&Number.isFinite(minimumApplicationRatio)&&minimumApplicationRatio>=0&&minimumApplicationRatio<=1&&typeof requireApplications==='boolean','Invalid minimum public application coverage.');
   const chosen=selectMirrorSources(catalog),{output,owned,previous}=await outputDirectory(outputDir),warnings=[],releases=new Map(),releaseBytes=new Map(),repositories=new Map();
   const warn=message=>{if(warnings.length<256)warnings.push(message.slice(0,500));};
+  if(chosen.skippedHistorySources)warn(`${chosen.skippedHistorySources} optional previous-stable public assets exceeded the source limit; latest profiles and required utilities retain priority.`);
   async function fetchResponse(url,api=false,exactUtility=false){
     try{const response=await fetchImpl(url,{signal:AbortSignal.timeout(api?45000:120000),credentials:'omit',...(api||exactUtility?{redirect:'error'}:{}),headers:{'User-Agent':'meshfirmware-pages-mirror',...(api&&token?{Authorization:`Bearer ${token}`}:{})}});if(api&&response.url&&response.url!==url)throw new IntegrityError('Authoritative GitHub API metadata redirected away from its exact URL.');if(exactUtility&&response.url&&response.url!==url)throw new IntegrityError('Pinned erase utility redirected away from its exact URL.');return response;}
     catch(error){if(error instanceof IntegrityError)throw error;throw new Unavailable('Network request unavailable');}
@@ -196,8 +217,12 @@ export async function buildMirror({catalog,outputDir,fetchImpl=fetch,token,maxBy
       }
     }catch(error){if(!(error instanceof Unavailable))throw error;invariant(error.status===404,`Partition migration discovery for ${utility.tag} is unavailable: ${error.message}. Keep the existing deployment.`);warn(`Utility release ${utility.tag}: ${error.message}.`);}
   }
-  invariant(candidates.size<=MAX_SOURCES,'Public mirror source limit exceeded.');
-  const sources=[...candidates.values()].sort((a,b)=>a.priority-b.priority||a.url.localeCompare(b.url)),resolved=[];
+  const orderedSources=[...candidates.values()].sort((a,b)=>a.priority-b.priority||a.url.localeCompare(b.url));
+  invariant(orderedSources.filter(source=>source.priority<2).length<=MAX_SOURCES,'Public mirror source limit exceeded.');
+  // Exact utility discovery can add required sources after initial selection.
+  // Trim only optional history if those additions fill the hard source bound.
+  const sources=orderedSources.slice(0,MAX_SOURCES),resolved=[];
+  if(sources.length<orderedSources.length)warn(`${orderedSources.length-sources.length} optional previous-stable public assets exceeded the source limit after required utility discovery.`);
   for(const source of sources){
     try{
       const utility=source.kind==='erase'?publicEraseUtility(source.url):null;
@@ -218,7 +243,9 @@ export async function buildMirror({catalog,outputDir,fetchImpl=fetch,token,maxBy
       resolved.push({...source,size:asset.size,sha256:actualHash});
     }catch(error){if(!(error instanceof Unavailable))throw error;invariant(!requiredMigration(source),`Required partition migration asset ${source.name} is unavailable: ${error.message}.`);warn(`${source.owner}/${source.repository}: ${source.name}: ${error.message}.`);}
   }
-  const applicationUrls=new Set(chosen.sources.filter(source=>['application','merged-install'].includes(source.kind)).map(source=>source.url)),appRequested=applicationUrls.size,appResolved=resolved.filter(source=>applicationUrls.has(source.url)).length;
+  // Deployment coverage remains about current profiles. Missing optional
+  // history must not lower the latest release's required coverage ratio.
+  const applicationUrls=new Set(chosen.sources.filter(source=>source.priority===1&&['application','merged-install'].includes(source.kind)).map(source=>source.url)),historyUrls=new Set(chosen.sources.filter(source=>source.priority===2&&['application','merged-install'].includes(source.kind)).map(source=>source.url)),appRequested=applicationUrls.size,appResolved=resolved.filter(source=>applicationUrls.has(source.url)).length,historyRequested=historyUrls.size,historyResolved=resolved.filter(source=>historyUrls.has(source.url)).length;
   invariant(!requireApplications||appRequested>0&&appResolved>0,'No verified public application assets are available; existing deployment must be retained.');
   invariant(!appRequested||appResolved/appRequested>=minimumApplicationRatio,'Verified application metadata coverage is below the required deployment threshold.');
   async function download(source){
@@ -273,6 +300,7 @@ export async function buildMirror({catalog,outputDir,fetchImpl=fetch,token,maxBy
     entries.push({url:source.url,sha256:source.sha256,size:source.size,...(parts.length===1?references[0]:{parts:references})});
   }
   const appMirrored=entries.filter(entry=>applicationUrls.has(entry.url)).length;
+  const historyMirrored=entries.filter(entry=>historyUrls.has(entry.url)).length;
   invariant(!requireApplications||appMirrored>0,'No verified public application payloads were mirrored; existing deployment must be retained.');
   invariant(!appRequested||appMirrored/appRequested>=minimumApplicationRatio,'Mirrored application coverage is below the required deployment threshold.');
   if(skipped)warn(`${skipped} optional public assets did not fit the ${maxBytes} byte mirror budget; direct/manual download remains available for those exact files.`);
@@ -286,12 +314,12 @@ export async function buildMirror({catalog,outputDir,fetchImpl=fetch,token,maxBy
   const temporary=join(output,'index.json.pending');
   try{await writeFile(temporary,serialized,{flag:'wx'});await rename(temporary,join(output,'index.json'));}
   finally{try{await unlink(temporary);}catch(error){if(error.code!=='ENOENT')throw error;}}
-  return {index,bytes:total,files:files.size,selectedApplications:chosen.selectedApplications,requestedSources:sources.length,skipped,appRequested,appResolved,appMirrored};
+  return {index,bytes:total,files:files.size,selectedApplications:chosen.selectedApplications,selectedHistoryApplications:chosen.selectedHistoryApplications,requestedSources:sources.length,skipped,appRequested,appResolved,appMirrored,historyRequested,historyResolved,historyMirrored};
 }
 
 if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href){
   const catalog=JSON.parse(await readFile(new URL('../public/catalog.json',import.meta.url),'utf8'));
   const result=await buildMirror({catalog,outputDir:fileURLToPath(new URL('../public/firmware/',import.meta.url)),token:process.env.GITHUB_TOKEN,requireApplications:true,minimumApplicationRatio:0.9,onProgress:({completed,total,bytes})=>{if(completed%25===0||completed===total)console.log(`Mirroring public assets: ${completed}/${total}; ${(bytes/(1<<20)).toFixed(1)} MiB.`);}});
-  console.log(`Public firmware mirror: ${result.index.entries.length} URLs, ${result.files} hash-addressed files, ${(result.bytes/(1<<20)).toFixed(1)} MiB; applications ${result.appMirrored}/${result.appRequested}; ${result.index.warnings.length} warnings.`);
+  console.log(`Public firmware mirror: ${result.index.entries.length} URLs, ${result.files} hash-addressed files, ${(result.bytes/(1<<20)).toFixed(1)} MiB; current applications ${result.appMirrored}/${result.appRequested}; optional previous stable ${result.historyMirrored}/${result.historyRequested}; ${result.index.warnings.length} warnings.`);
   for(const warning of result.index.warnings.slice(0,12))console.warn(warning);
 }

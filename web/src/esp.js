@@ -1,5 +1,5 @@
 import { ESPLoader, Transport, ESPError } from 'esptool-js';
-import { fail, hash, md5hex, partitionTable, activeOta, text, sleep, validateEspImage } from './firmware.js';
+import { fail, hash, md5hex, partitionTable, activeOta, text, sleep, validateEspImage, words } from './firmware.js';
 import { assessEspCompatibility } from './esp-compatibility.js';
 
 const RECOVERY_FORMAT='meshfirmware-esp-write-recovery-v1';
@@ -159,6 +159,32 @@ export function mergedMirrorSegments(pkg, parts, populated) {
   return missing.map(part=>({address:part.offset,sourceOffset:source.offset,length:app.length,payloadHash:hash(app)}));
 }
 
+export async function readVerifiedFlash(loader,address,size,onPacketReceived=null) {
+  if(loader.IS_STUB!==true)fail('Verified flash reads require a running ESP flasher stub.');
+  if(!Number.isInteger(address)||address<0||address>0xffffffff||!Number.isInteger(size)||size<0||size>(128<<20)||address+size>0x100000000)fail('Invalid ESP flash read range.');
+  if(onPacketReceived!==null&&typeof onPacketReceived!=='function')fail('Invalid ESP flash read progress callback.');
+  // Match native esptool's stub READ_FLASH exchange, including the final MD5
+  // frame. esptool-js 0.7.0 returns before that frame, leaving stale protocol
+  // bytes for the next operation and returning data without verifying it.
+  const blockSize=4096,data=new Uint8Array(size);
+  const result=await loader.checkCommand('read flash',loader.ESP_READ_FLASH,words(address,size,blockSize,64));
+  if(result!==0)fail('ESP flash read command was not acknowledged.');
+  let received=0;
+  while(received<size) {
+    const packet=await loader.transport.read(loader.FLASH_READ_TIMEOUT);
+    if(!(packet instanceof Uint8Array)||received+packet.length>size)fail('ESP flash read returned more data than requested or an invalid data frame.');
+    if(received+packet.length<size&&packet.length<blockSize)fail('ESP flash read returned a truncated data block.');
+    data.set(packet,received);received+=packet.length;
+    await loader.transport.write(words(received));
+    if(onPacketReceived)onPacketReceived(packet,received,size);
+  }
+  const digest=await loader.transport.read(loader.FLASH_READ_TIMEOUT);
+  if(!(digest instanceof Uint8Array)||digest.length!==16)fail('ESP flash read did not return its 16-byte MD5 digest.');
+  const expected=Array.from(digest,byte=>byte.toString(16).padStart(2,'0')).join('');
+  if(md5hex(data)!==expected)fail('ESP flash read MD5 digest differs from the received bytes.');
+  return data;
+}
+
 export class EspSession {
   #planProof = null;
   #written = false;
@@ -166,6 +192,7 @@ export class EspSession {
   constructor(port, log) {
     this.transport = new Transport(port);
     this.loader = new ESPLoader({ transport: this.transport, baudrate: 115200, romBaudrate: 115200, terminal: { clean() {}, writeLine: log, write: log } });
+    this.loader.readFlash=readVerifiedFlash.bind(null,this.loader);
     this.port = port; this.mac = null; this.flashBytes = 0; this.plan = null; this.connectMode=null;
   }
   async connect(mode,{singleReset=false}={}) {
@@ -184,9 +211,16 @@ export class EspSession {
     await stabilizeS3Jtag(this.loader);
     await this.assertMac();
     await this.loader.runStub();
-    const id = await this.loader.readFlashId(), exponent = (id >>> 16) & 255;
-    if (exponent < 18 || exponent > 27) fail('Physical flash capacity could not be verified.');
-    this.flashBytes = 2 ** exponent;
+    try {
+      const id = await this.loader.readFlashId(), exponent = (id >>> 16) & 255;
+      if (exponent < 18 || exponent > 27) fail('Physical flash capacity could not be verified.');
+      this.flashBytes = 2 ** exponent;
+    } catch(error) {
+      // Keep the original error and its flags intact; diagnostics must never
+      // turn a post-sync failure into permission for another reset or retry.
+      try { this.loader.info(`ESP32 connection stage: physical flash-ID inspection failed after ${this.loader.syncStubDetected?'reusing the running':'starting the'} stub. No additional reset or flash write was sent.`); } catch {}
+      throw error;
+    }
     this.connectMode=mode;
     return { chip: this.loader.chip.CHIP_NAME, mac: this.mac, flashBytes: this.flashBytes };
   }
