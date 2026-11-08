@@ -8,7 +8,8 @@ or [Meshtastic](https://github.com/meshtastic/firmware) firmware over USB.
 See [browser features and limits](web/README.md).
 
 Station G2/G3 stuck after an update? Choose **Recover boot-looping Station G2/G3**
-at the first Linux/Windows flasher menu, or use the [standalone recovery scripts](STATION-RECOVERY.md).
+at the first Linux/Windows flasher menu, or [download the standalone recovery ZIP](https://github.com/mikecarper/MeshCore/releases/download/station-v1.18.0.2-alpha2/Station-G2-G3-USB-Recovery-v1.zip).
+See the [recovery guide](STATION-RECOVERY.md).
 
 ## Windows
 
