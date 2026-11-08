@@ -7,6 +7,8 @@ or [Meshtastic](https://github.com/meshtastic/firmware) firmware over USB.
 (hardware preview; desktop Chrome/Edge, no local helper).
 See [browser features and limits](web/README.md).
 
+Station G2/G3 stuck after an update? Use the [USB recovery scripts](STATION-RECOVERY.md).
+
 ## Windows
 
 1. [Download firmware.cmd](https://github.com/mikecarper/meshfirmware/blob/main/firmware.cmd?raw=true).

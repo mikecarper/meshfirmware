@@ -1,0 +1,49 @@
+name: Station USB recovery
+on:
+  push:
+    branches: [main]
+    paths: ['recover-station.*', 'tools/station_recovery.py', 'tools/build_station_recovery_bundle.py', 'tools/meshcore_partition_expansion.py', 'tests/test_station_recovery.py', '.github/workflows/station-recovery.yml']
+  pull_request:
+    paths: ['recover-station.*', 'tools/station_recovery.py', 'tools/build_station_recovery_bundle.py', 'tools/meshcore_partition_expansion.py', 'tests/test_station_recovery.py', '.github/workflows/station-recovery.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  recovery:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.11'
+      - run: python -m unittest discover -s tests -p test_station_recovery.py -v
+      - name: Windows launcher, including a path with spaces
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $copy = Join-Path $env:RUNNER_TEMP 'Station Recovery Smoke'
+          New-Item -ItemType Directory -Force "$copy/tools" | Out-Null
+          Copy-Item recover-station.cmd $copy
+          Copy-Item tools/station_recovery.py, tools/meshcore_partition_expansion.py "$copy/tools"
+          & "$copy/recover-station.cmd" --help
+          if ($LASTEXITCODE -ne 0) { throw 'CMD launcher failed' }
+          & "$copy/recover-station.cmd" --factory-reset --reset-only
+          if ($LASTEXITCODE -ne 2) { throw 'CMD launcher lost the failure exit status' }
+      - name: POSIX launcher, including a path with spaces
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          sh -n recover-station.sh
+          copy="$RUNNER_TEMP/Station Recovery Smoke"
+          mkdir -p "$copy/tools"
+          cp recover-station.sh "$copy/"
+          cp tools/station_recovery.py tools/meshcore_partition_expansion.py "$copy/tools/"
+          sh "$copy/recover-station.sh" --help
+          set +e
+          sh "$copy/recover-station.sh" --factory-reset --reset-only
+          status=$?
+          test "$status" -eq 2
