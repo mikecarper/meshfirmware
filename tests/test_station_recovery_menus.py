@@ -63,7 +63,9 @@ class Menus(unittest.TestCase):
         self.assertEqual(self.run_bootstrap(self.archive(), '0' * 64), (1, 0))
 
     def test_bad_paths_cannot_execute_recovery(self):
-        for name in ('../escape.py', '/escape.py', 'a\\escape.py'):
+        # On Windows zipfile normalizes backslashes to forward slashes when
+        # constructing a ZipInfo; retain the traversal after normalization.
+        for name in ('../escape.py', '/escape.py', '..\\escape.py'):
             data = self.archive(name)
             self.assertEqual(self.run_bootstrap(data, hashlib.sha256(data).hexdigest()), (1, 0))
 
