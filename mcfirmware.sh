@@ -71,8 +71,8 @@ run_esp32_recovery() {
     local bootstrap
     bootstrap="$(cat <<'PY_ESP32_RECOVERY'
 import hashlib, io, pathlib, subprocess, sys, tempfile, urllib.request, zipfile
-URL = "https://github.com/mikecarper/meshfirmware/releases/download/esp32-recovery-v1/ESP32-USB-Recovery-v1.zip"
-SHA256 = "2aad7a86bf0564907c393e170b1efc966ff2e0b2b9174c93f157d416f37585b2"
+URL = "https://github.com/mikecarper/meshfirmware/releases/download/esp32-recovery-v1.1/ESP32-USB-Recovery-v1.1.zip"
+SHA256 = "5b33ec48a8d0712c9995f17d8b2eb4363b9173015c1d9bec86309d3ef3cfc41e"
 try:
     if sys.version_info < (3, 10):
         raise RuntimeError("Recovery requires Python 3.10 or newer.")

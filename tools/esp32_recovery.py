@@ -221,7 +221,16 @@ def write_plan(image, table, capacity, factory):
     if image.flash_bytes > capacity or len(image.data) + image.base > capacity:
         raise RuntimeError('Selected firmware requires more flash than the physical chip has. Nothing flashed.')
     if factory:
-        return [(image.base, image.data)]
+        plan = [(image.base, image.data)]
+        # A merged image/full-flash input may carry an OTA record selecting a
+        # different app. Boot the application validated above, even after erase.
+        for part in image.parts:
+            if part['type'] == 1 and part['subtype'] == 0:
+                start = part['offset'] - image.base
+                erased = b'\xff' * part['size']
+                if image.data[start:start+part['size']] != erased:
+                    plan.append((part['offset'], erased))
+        return plan
     try:
         matches = parse_table(table, capacity) == image.parts
     except ExpansionError:

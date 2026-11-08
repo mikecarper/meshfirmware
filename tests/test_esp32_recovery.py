@@ -160,6 +160,16 @@ class Recovery(unittest.TestCase):
         self.assertEqual(flash.events, [('erase',), ('write', 0x1000), ('verify', 0x1000)])
         self.assertEqual(flash.memory[:0x1000], b'\xff'*4096)
 
+    def test_factory_does_not_trust_old_boot_selection_in_merged_input(self):
+        data = bytearray(merged())
+        data[0xc000:0xe000] = b'\x12' * 8192
+        image = recovery.inspect_firmware(bytes(data))
+        flash = Flash(image)
+        recovery.perform_recovery(flash, flash, image, True)
+        self.assertEqual(flash.events, [('erase',), ('write', 0), ('verify', 0),
+                                       ('write', 0xc000), ('verify', 0xc000)])
+        self.assertEqual(flash.memory[0xc000:0xe000], b'\xff'*8192)
+
     def test_too_small_flash_refuses_before_any_write_or_erase(self):
         image = recovery.inspect_firmware(merged())
         for factory in (True, False):

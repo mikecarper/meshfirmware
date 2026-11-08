@@ -43,6 +43,8 @@ A replacement firmware version may interpret saved settings differently.
 
 **Factory reset** erases all flash, including identity, passwords, WiFi/radio
 settings and files, then installs the complete merged image and its layout.
+It clears any old boot-slot selection after verification so the checked
+first-boot application starts.
 Reconfigure the node for your network before deployment.
 
 **Reset only** exits ROM download mode without installing or erasing firmware.
@@ -51,7 +53,7 @@ chip-specific reset implementation. No eFuses are changed.
 
 ## Standalone scripts and command-line use
 
-Extract the complete [recovery ZIP](https://github.com/mikecarper/meshfirmware/releases/download/esp32-recovery-v1/ESP32-USB-Recovery-v1.zip).
+Extract the complete [recovery ZIP](https://github.com/mikecarper/meshfirmware/releases/download/esp32-recovery-v1.1/ESP32-USB-Recovery-v1.1.zip).
 Windows: double-click `recover-esp32.cmd`. Linux/macOS: `sh recover-esp32.sh`.
 Keep the `tools` folder. Python 3.10 or newer is required; Linux may also need
 its `python3-venv` package. USB tools are installed in a separate user cache.
