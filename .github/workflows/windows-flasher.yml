@@ -34,6 +34,7 @@ jobs:
           foreach ($test in @(
             'tests/test_firmware_esp32_reboot.ps1',
             'tests/test_firmware_nrfutil_progress.ps1',
+            'tests/test_firmware_station_recovery.ps1',
             'tests/test_firmware_bluetooth_usb_notice.ps1',
             'tests/test_firmware_esp32_bootloader.ps1',
             'tests/test_firmware_usb_identity.ps1',

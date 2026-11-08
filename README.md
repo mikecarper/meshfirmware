@@ -7,7 +7,8 @@ or [Meshtastic](https://github.com/meshtastic/firmware) firmware over USB.
 (hardware preview; desktop Chrome/Edge, no local helper).
 See [browser features and limits](web/README.md).
 
-Station G2/G3 stuck after an update? Use the [USB recovery scripts](STATION-RECOVERY.md).
+Station G2/G3 stuck after an update? Choose **Recover boot-looping Station G2/G3**
+at the first Linux/Windows flasher menu, or use the [standalone recovery scripts](STATION-RECOVERY.md).
 
 ## Windows
 

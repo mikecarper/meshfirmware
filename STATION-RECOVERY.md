@@ -4,11 +4,19 @@ Use this when a Station reboots repeatedly or will not start after an update.
 It restores the published **1.18.0.1 Full firmware**, rather than reinstalling
 alpha2. Repeater is the default; Room Server is also supported.
 
+In the normal Linux `mcfirmware.sh` or Windows `firmware.cmd` flasher, select
+**Recover boot-looping Station G2/G3** at the first menu. This skips normal
+device probing and opens the recovery wizard. It downloads and checks the
+recovery package automatically. Linux also supports `bash mcfirmware.sh --recover-station`.
+
+For the standalone scripts:
+
 1. Extract the entire recovery ZIP. Keep its `tools` and `firmware` folders.
 2. Connect the Station with a USB **data** cable. Close other flashers and serial apps.
 3. Windows: double-click **recover-station.cmd**. Linux/macOS: run
    **`sh recover-station.sh`** from the extracted folder.
-4. Select the physical board and its USB/COM port. Review the selection and type
+4. Choose the recovery operation, role, BOOT mode, physical board and USB/COM port.
+   Keeping settings is the default. Review the selection and type
    `RECOVER`. Leave the power connected until the script finishes.
 
 Python 3.10 or newer is required ([download](https://www.python.org/downloads/)).
@@ -22,7 +30,8 @@ checked against pinned SHA256 hashes. No administrator access is requested.
 Hold **BOOT / GPIO0**, press and release **RESET**, then release BOOT.
 Alternatively, hold BOOT while connecting USB, then release it.
 This enters the ESP32's ROM downloader without running the broken application.
-Rerun with `--manual-boot`; the USB/COM port may have changed.
+Answer yes to the wizard's BOOT-mode question, or rerun with `--manual-boot`;
+the USB/COM port may have changed.
 
 Windows examples (Command Prompt in the extracted folder):
 

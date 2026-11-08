@@ -61,6 +61,68 @@ else
 	PWD_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
 
+# Recovery must be selected before sudo, tool upgrades, or application probes.
+# Keep the bootstrap identical to firmware.cmd; its package hash covers every file.
+run_station_recovery() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "Install Python 3.10 or newer to use Station recovery." >&2
+        return 1
+    fi
+    local bootstrap
+    bootstrap="$(cat <<'PY_STATION_RECOVERY'
+import hashlib, io, pathlib, subprocess, sys, tempfile, urllib.request, zipfile
+URL = "https://github.com/mikecarper/MeshCore/releases/download/station-v1.18.0.2-alpha2/Station-G2-G3-USB-Recovery-v1.zip"
+SHA256 = "a4452ef0e23aa7c940da243cd3f8935a83895afc6496640fd20f11935179d936"
+try:
+    if sys.version_info < (3, 10):
+        raise RuntimeError("Recovery requires Python 3.10 or newer.")
+    print("Downloading and checking the Station recovery package...", flush=True)
+    request = urllib.request.Request(URL, headers={"User-Agent": "meshfirmware-station-recovery"})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        data = response.read(20 * 1024 * 1024 + 1)
+    if hashlib.sha256(data).hexdigest() != SHA256:
+        raise RuntimeError("Recovery package checksum mismatch. No device was opened.")
+    with tempfile.TemporaryDirectory(prefix="Station-Recovery-") as folder:
+        with zipfile.ZipFile(io.BytesIO(data)) as bundle:
+            for entry in bundle.infolist():
+                path = pathlib.PurePosixPath(entry.filename)
+                if path.is_absolute() or ".." in path.parts or "\\" in entry.filename:
+                    raise RuntimeError("Invalid recovery package path.")
+            bundle.extractall(folder)
+        script = pathlib.Path(folder) / "Station-Recovery/tools/station_recovery.py"
+        result = subprocess.call([sys.executable, str(script), *sys.argv[1:]])
+    raise SystemExit(result)
+except (Exception, KeyboardInterrupt) as error:
+    print("Recovery could not finish: " + (str(error) or "cancelled"), file=sys.stderr)
+    raise SystemExit(1)
+PY_STATION_RECOVERY
+)"
+    python3 -c "$bootstrap" --guided "$@" < /dev/tty
+}
+
+station_recovery_early_menu() {
+    local choice status
+    if [[ "${1:-}" == --recover-station ]]; then
+        shift
+        if run_station_recovery "$@"; then status=0; else status=$?; fi
+        exit "$status"
+    fi
+    while true; do
+        printf '\nMesh firmware updater\n1) Install/update firmware (default)\n2) Recover boot-looping Station G2/G3\n'
+        read -r -p 'Choice [1]: ' choice < /dev/tty || return 1
+        case "$choice" in
+            ''|1) return 0 ;;
+            2)
+                if run_station_recovery; then status=0; else status=$?; fi
+                exit "$status"
+                ;;
+            *) echo 'Choose 1 or 2.' ;;
+        esac
+    done
+}
+
+station_recovery_early_menu "$@"
+
 # Global argument variables.
 DEBUG_JQ="0"
 PACKAGE_MANAGER=""

@@ -8580,6 +8580,67 @@ function InvokeFlash {
 }
 
 
+function Invoke-StationRecovery {
+    # Only Python is needed here. Do not query a crashing application or prepare
+    # unrelated flasher tools before entering the recovery engine.
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    $recoveryPython = if ($python) { $python.Source } else { '' }
+    if ($recoveryPython) {
+        $null = & $recoveryPython --version 2>$null
+        if ($LASTEXITCODE -ne 0) { $recoveryPython = '' }
+    }
+    if (-not $recoveryPython) {
+        $recoveryPython = "$PORTABLE_PYTHON_DIR\python\python.exe"
+        if (-not (Test-Path -LiteralPath $recoveryPython -PathType Leaf)) { GetPortablePython }
+    }
+    $bootstrap = @'
+import hashlib, io, pathlib, subprocess, sys, tempfile, urllib.request, zipfile
+URL = "https://github.com/mikecarper/MeshCore/releases/download/station-v1.18.0.2-alpha2/Station-G2-G3-USB-Recovery-v1.zip"
+SHA256 = "a4452ef0e23aa7c940da243cd3f8935a83895afc6496640fd20f11935179d936"
+try:
+    if sys.version_info < (3, 10):
+        raise RuntimeError("Recovery requires Python 3.10 or newer.")
+    print("Downloading and checking the Station recovery package...", flush=True)
+    request = urllib.request.Request(URL, headers={"User-Agent": "meshfirmware-station-recovery"})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        data = response.read(20 * 1024 * 1024 + 1)
+    if hashlib.sha256(data).hexdigest() != SHA256:
+        raise RuntimeError("Recovery package checksum mismatch. No device was opened.")
+    with tempfile.TemporaryDirectory(prefix="Station-Recovery-") as folder:
+        with zipfile.ZipFile(io.BytesIO(data)) as bundle:
+            for entry in bundle.infolist():
+                path = pathlib.PurePosixPath(entry.filename)
+                if path.is_absolute() or ".." in path.parts or "\\" in entry.filename:
+                    raise RuntimeError("Invalid recovery package path.")
+            bundle.extractall(folder)
+        script = pathlib.Path(folder) / "Station-Recovery/tools/station_recovery.py"
+        result = subprocess.call([sys.executable, str(script), *sys.argv[1:]])
+    raise SystemExit(result)
+except (Exception, KeyboardInterrupt) as error:
+    print("Recovery could not finish: " + (str(error) or "cancelled"), file=sys.stderr)
+    raise SystemExit(1)
+'@
+    # A file also avoids PowerShell 5.1's native -c quote stripping.
+    $launcher = [IO.Path]::GetTempFileName()
+    try {
+        [IO.File]::WriteAllText($launcher, $bootstrap, (New-Object Text.UTF8Encoding($false)))
+        & $recoveryPython $launcher --guided | Out-Host
+        $status = $LASTEXITCODE
+    }
+    finally { Remove-Item -LiteralPath $launcher -Force -ErrorAction SilentlyContinue }
+    return $status
+}
+
+$operation = Prompt-Menu -Title 'Mesh firmware updater' -Options @(
+    'Install/update firmware', 'Recover boot-looping Station G2/G3'
+) -DefaultIndex 1
+if ($operation.Index -eq 2) {
+    $recoveryStatus = Invoke-StationRecovery
+    $scriptOver = $true
+    Read-Host 'Press Enter to exit'
+    exit $recoveryStatus
+}
+
 # Get release info
 try {
 Cleanup-ScriptTempArtifacts -Quiet

@@ -176,5 +176,38 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(recovery.boot_confirmed(valid.replace('03214a16', 'deadbeef'), 'g3', True))
 
 
+class Wizard(unittest.TestCase):
+    def options(self, answers):
+        args = SimpleNamespace(factory_reset=False, reset_only=False, role=None, manual_boot=False)
+        with patch('builtins.input', side_effect=answers):
+            recovery.guided_options(args)
+        return args
+
+    def test_defaults_keep_settings(self):
+        args = self.options(['', '', ''])
+        self.assertFalse(args.factory_reset or args.reset_only or args.manual_boot)
+        self.assertEqual(args.role, 'repeater')
+
+    def test_factory_room_manual_boot(self):
+        args = self.options(['2', 'room', 'yes'])
+        self.assertTrue(args.factory_reset and args.manual_boot)
+        self.assertFalse(args.reset_only)
+        self.assertEqual(args.role, 'room')
+
+    def test_reset_only_and_invalid_input(self):
+        self.assertTrue(self.options(['3', 'y']).reset_only)
+        for answers in (['9'], ['1', 'wrong'], ['1', 'room', 'wrong']):
+            with self.assertRaises(RuntimeError):
+                self.options(answers)
+
+    def test_bootstrap_before_any_prompt(self):
+        with patch.object(sys, 'argv', ['recovery', '--guided']), \
+                patch.object(recovery, 'ensure_runtime', side_effect=SystemExit(0)), \
+                patch('builtins.input') as prompt:
+            with self.assertRaises(SystemExit):
+                recovery.main()
+            prompt.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()

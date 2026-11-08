@@ -276,11 +276,33 @@ def boot_confirmed(text, board, reset_only):
     return bool(re.search(version, text) and re.search(r'->\s*Station ' + board.upper() + r'\b', text))
 
 
+def guided_options(args):
+    if not args.factory_reset and not args.reset_only:
+        print('1. Recover, keeping settings (default)\n2. Factory reset (erase everything)\n3. Reset only, no flash writes')
+        choice = input('Operation [1]: ').strip() or '1'
+        if choice not in ('1', '2', '3'):
+            raise RuntimeError('Invalid operation. Nothing flashed.')
+        args.factory_reset = choice == '2'
+        args.reset_only = choice == '3'
+    if not args.reset_only and not args.role:
+        choice = input('Firmware role: repeater or room [repeater]: ').strip().lower() or 'repeater'
+        if choice not in ('repeater', 'room'):
+            raise RuntimeError('Invalid role. Nothing flashed.')
+        args.role = choice
+    if not args.manual_boot:
+        print(BOOT_HELP)
+        choice = input('Already entered BOOT mode using the buttons? [y/N]: ').strip().lower()
+        if choice not in ('', 'n', 'no', 'y', 'yes'):
+            raise RuntimeError('Answer yes or no. Nothing flashed.')
+        args.manual_boot = choice in ('y', 'yes')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, epilog=BOOT_HELP,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--board', choices=['g2', 'g3'])
-    parser.add_argument('--role', choices=['repeater', 'room'], default='repeater')
+    parser.add_argument('--role', choices=['repeater', 'room'])
+    parser.add_argument('--guided', action='store_true', help='Ask for operation, firmware role and BOOT mode')
     parser.add_argument('--port', help='Exact USB serial port, such as COM5 or /dev/ttyACM0')
     parser.add_argument('--factory-reset', action='store_true', help='Erase ALL flash, identity, passwords and settings')
     parser.add_argument('--reset-only', action='store_true', help='Leave USB download mode without flashing')
@@ -293,6 +315,15 @@ def main():
         parser.error('--factory-reset and --reset-only cannot be combined')
     if args.yes and (not args.board or not args.port):
         parser.error('--yes requires explicit --board and --port')
+    if args.guided and args.yes:
+        parser.error('--guided cannot be combined with --yes')
+    # Bootstrap before prompting: the isolated-runtime relaunch must not ask
+    # the user to choose the board/operation twice on their first run.
+    if not args.prepare_only:
+        ensure_runtime()
+    if args.guided or len(sys.argv) == 1:
+        guided_options(args)
+    args.role = args.role or 'repeater'
     if not args.board and not args.list_ports:
         args.board = input("Which physical board? Type g2 or g3: ").strip().lower()
         if args.board not in ('g2', 'g3'):
@@ -301,7 +332,6 @@ def main():
     if args.prepare_only:
         print('Recovery image checksum and layout verified; no device opened.')
         return 0
-    ensure_runtime()
     if args.list_ports:
         print_ports(available_ports())
         return 0

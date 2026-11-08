@@ -2,9 +2,9 @@ name: Station USB recovery
 on:
   push:
     branches: [main]
-    paths: ['recover-station.*', 'tools/station_recovery.py', 'tools/build_station_recovery_bundle.py', 'tools/meshcore_partition_expansion.py', 'tests/test_station_recovery.py', '.github/workflows/station-recovery.yml']
+    paths: ['recover-station.*', 'mcfirmware.sh', 'firmware.cmd', 'tools/station_recovery.py', 'tools/build_station_recovery_bundle.py', 'tools/meshcore_partition_expansion.py', 'tests/test_station_recovery*.py', 'tests/test_mcfirmware_station_recovery.sh', '.github/workflows/station-recovery.yml']
   pull_request:
-    paths: ['recover-station.*', 'tools/station_recovery.py', 'tools/build_station_recovery_bundle.py', 'tools/meshcore_partition_expansion.py', 'tests/test_station_recovery.py', '.github/workflows/station-recovery.yml']
+    paths: ['recover-station.*', 'mcfirmware.sh', 'firmware.cmd', 'tools/station_recovery.py', 'tools/build_station_recovery_bundle.py', 'tools/meshcore_partition_expansion.py', 'tests/test_station_recovery*.py', 'tests/test_mcfirmware_station_recovery.sh', '.github/workflows/station-recovery.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -20,7 +20,7 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.11'
-      - run: python -m unittest discover -s tests -p test_station_recovery.py -v
+      - run: python -m unittest discover -s tests -p 'test_station_recovery*.py' -v
       - name: Windows launcher, including a path with spaces
         if: runner.os == 'Windows'
         shell: pwsh
@@ -33,11 +33,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'CMD launcher failed' }
           & "$copy/recover-station.cmd" --factory-reset --reset-only
           if ($LASTEXITCODE -ne 2) { throw 'CMD launcher lost the failure exit status' }
+          # The previous native exit 2 was expected, not a failed CI step.
+          exit 0
       - name: POSIX launcher, including a path with spaces
         if: runner.os != 'Windows'
         shell: bash
         run: |
           sh -n recover-station.sh
+          bash -n mcfirmware.sh
+          bash tests/test_mcfirmware_station_recovery.sh
           copy="$RUNNER_TEMP/Station Recovery Smoke"
           mkdir -p "$copy/tools"
           cp recover-station.sh "$copy/"
