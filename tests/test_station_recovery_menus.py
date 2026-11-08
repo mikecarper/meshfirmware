@@ -12,19 +12,19 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 SHELL = (ROOT / 'mcfirmware.sh').read_text()
 WINDOWS = (ROOT / 'firmware.cmd').read_text()
-BOOTSTRAP = SHELL.split("<<'PY_STATION_RECOVERY'\n", 1)[1].split('PY_STATION_RECOVERY\n', 1)[0]
+BOOTSTRAP = SHELL.split("<<'PY_ESP32_RECOVERY'\n", 1)[1].split('PY_ESP32_RECOVERY\n', 1)[0]
 
 
 class Menus(unittest.TestCase):
     def test_platforms_use_identical_verified_bootstrap(self):
-        windows = WINDOWS.split('function Invoke-StationRecovery {', 1)[1]
+        windows = WINDOWS.split('function Invoke-Esp32Recovery {', 1)[1]
         windows = windows.split("$bootstrap = @'\n", 1)[1].split("'@\n", 1)[0]
         self.assertEqual(BOOTSTRAP, windows)
         self.assertRegex(BOOTSTRAP, r'SHA256 = "[0-9a-f]{64}"')
         compile(BOOTSTRAP, '<bootstrap>', 'exec')
 
     def test_recovery_branches_before_normal_probes_and_tool_setup(self):
-        self.assertLess(SHELL.index('\nstation_recovery_early_menu "$@"'), SHELL.index('\ninitialize_privilege_mode\n'))
+        self.assertLess(SHELL.index('\nesp32_recovery_early_menu "$@"'), SHELL.index('\ninitialize_privilege_mode\n'))
         self.assertLess(WINDOWS.index('\n$operation = Prompt-Menu'), WINDOWS.index('\ncheck_requirements\n'))
         branch = WINDOWS.split('if ($operation.Index -eq 2) {', 1)[1].split('\n}', 1)[0]
         self.assertIn('exit $recoveryStatus', branch)
@@ -48,7 +48,7 @@ class Menus(unittest.TestCase):
             self.assertFalse(path.exists(), 'Temporary scripts/firmware must be cleaned up')
         return stopped.exception.code, called.call_count
 
-    def archive(self, name='Station-Recovery/tools/station_recovery.py'):
+    def archive(self, name='ESP32-Recovery/tools/esp32_recovery.py'):
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, 'w') as bundle:
             bundle.writestr(name, b'# fixture, never executed\n')

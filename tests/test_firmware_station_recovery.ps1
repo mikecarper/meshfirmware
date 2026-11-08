@@ -6,7 +6,7 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile(
     (Join-Path (Split-Path $PSScriptRoot -Parent) 'firmware.cmd'), [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw "firmware.cmd parse failed: $parseErrors" }
 $definition = $ast.Find({ param($node)
-    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-StationRecovery'
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-Esp32Recovery'
 }, $true)
 if (-not $definition) { throw 'Missing recovery entry' }
 Invoke-Expression $definition.Extent.Text
@@ -25,7 +25,7 @@ function Invoke-RecoveryPythonFixture {
     $global:LASTEXITCODE = $script:backendStatus
 }
 foreach ($script:backendStatus in @(0, 1, 2, 7)) {
-    $result = Invoke-StationRecovery
+    $result = Invoke-Esp32Recovery
     if ($result -ne $script:backendStatus) { throw "Lost backend exit code: $result" }
     if (Test-Path -LiteralPath $script:launcherPath) { throw 'Temporary launcher leaked' }
 }

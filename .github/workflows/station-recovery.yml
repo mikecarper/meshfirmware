@@ -1,10 +1,10 @@
-name: Station USB recovery
+name: ESP32 USB recovery
 on:
   push:
     branches: [main]
-    paths: ['recover-station.*', 'mcfirmware.sh', 'firmware.cmd', 'tools/station_recovery.py', 'tools/build_station_recovery_bundle.py', 'tools/meshcore_partition_expansion.py', 'tests/test_station_recovery*.py', 'tests/test_mcfirmware_station_recovery.sh', '.github/workflows/station-recovery.yml']
+    paths: ['recover-*.sh', 'recover-*.cmd', 'mcfirmware.sh', 'firmware.cmd', 'tools/*recovery*.py', 'tools/meshcore_partition_expansion.py', 'tests/*recovery*.py', 'tests/test_mcfirmware_station_recovery.sh', '.github/workflows/station-recovery.yml']
   pull_request:
-    paths: ['recover-station.*', 'mcfirmware.sh', 'firmware.cmd', 'tools/station_recovery.py', 'tools/build_station_recovery_bundle.py', 'tools/meshcore_partition_expansion.py', 'tests/test_station_recovery*.py', 'tests/test_mcfirmware_station_recovery.sh', '.github/workflows/station-recovery.yml']
+    paths: ['recover-*.sh', 'recover-*.cmd', 'mcfirmware.sh', 'firmware.cmd', 'tools/*recovery*.py', 'tools/meshcore_partition_expansion.py', 'tests/*recovery*.py', 'tests/test_mcfirmware_station_recovery.sh', '.github/workflows/station-recovery.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -20,7 +20,8 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.11'
-      - run: python -m unittest discover -s tests -p 'test_station_recovery*.py' -v
+      - run: python -m pip install esptool==5.1.0
+      - run: python -m unittest discover -s tests -p '*recovery*.py' -v
       - name: Windows launcher, including a path with spaces
         if: runner.os == 'Windows'
         shell: pwsh
@@ -29,6 +30,12 @@ jobs:
           New-Item -ItemType Directory -Force "$copy/tools" | Out-Null
           Copy-Item recover-station.cmd $copy
           Copy-Item tools/station_recovery.py, tools/meshcore_partition_expansion.py "$copy/tools"
+          Copy-Item recover-esp32.cmd $copy
+          Copy-Item tools/esp32_recovery.py "$copy/tools"
+          & "$copy/recover-esp32.cmd" --help
+          if ($LASTEXITCODE -ne 0) { throw 'ESP32 CMD launcher failed' }
+          & "$copy/recover-esp32.cmd" --factory-reset --reset-only
+          if ($LASTEXITCODE -ne 2) { throw 'ESP32 CMD launcher lost the failure exit status' }
           & "$copy/recover-station.cmd" --help
           if ($LASTEXITCODE -ne 0) { throw 'CMD launcher failed' }
           & "$copy/recover-station.cmd" --factory-reset --reset-only
@@ -46,6 +53,15 @@ jobs:
           mkdir -p "$copy/tools"
           cp recover-station.sh "$copy/"
           cp tools/station_recovery.py tools/meshcore_partition_expansion.py "$copy/tools/"
+          cp recover-esp32.sh "$copy/"
+          cp tools/esp32_recovery.py "$copy/tools/"
+          sh -n recover-esp32.sh
+          sh "$copy/recover-esp32.sh" --help
+          set +e
+          sh "$copy/recover-esp32.sh" --factory-reset --reset-only
+          status=$?
+          test "$status" -eq 2 || exit 1
+          set -e
           sh "$copy/recover-station.sh" --help
           set +e
           sh "$copy/recover-station.sh" --factory-reset --reset-only

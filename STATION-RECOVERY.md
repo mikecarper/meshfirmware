@@ -1,13 +1,16 @@
 # Recover a Station G2 or G3 over USB
 
+For other boards, use [generic ESP32 recovery](ESP32-RECOVERY.md). The main
+flasher's **Recover boot-looping ESP32** menu now covers all ESP32 families;
+these standalone Station scripts retain the pinned rollback described below.
+
 Use this when a Station reboots repeatedly or will not start after an update.
 It restores the published **1.18.0.1 Full firmware**, rather than reinstalling
 alpha2. Repeater is the default; Room Server is also supported.
 
-In the normal Linux `mcfirmware.sh` or Windows `firmware.cmd` flasher, select
-**Recover boot-looping Station G2/G3** at the first menu. This skips normal
-device probing and opens the recovery wizard. It downloads and checks the
-recovery package automatically. Linux also supports `bash mcfirmware.sh --recover-station`.
+Linux also supports `bash mcfirmware.sh --recover-station` for this pinned
+rollback wizard. It skips normal device probing and downloads the recovery
+scripts automatically.
 
 For the standalone scripts:
 

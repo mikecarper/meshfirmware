@@ -41,7 +41,7 @@ def cache_dir():
     return Path(base or Path.home() / ".cache") / "meshfirmware" / "station-recovery"
 
 
-def ensure_runtime():
+def ensure_runtime(entry=None):
     if sys.version_info < (3, 10):
         raise RuntimeError("Install Python 3.10 or newer from https://www.python.org/downloads/ and run again.")
     try:
@@ -62,7 +62,7 @@ def ensure_runtime():
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if check.returncode:
         subprocess.run([str(python), "-m", "pip", "install", "--disable-pip-version-check", "esptool==" + VERSION], check=True)
-    raise SystemExit(subprocess.call([str(python), str(Path(__file__).resolve()), *sys.argv[1:]],
+    raise SystemExit(subprocess.call([str(python), str(Path(entry or __file__).resolve()), *sys.argv[1:]],
                                     env={**os.environ, "MESH_STATION_RECOVERY_VENV": "1"}))
 
 

@@ -7,9 +7,11 @@ or [Meshtastic](https://github.com/meshtastic/firmware) firmware over USB.
 (hardware preview; desktop Chrome/Edge, no local helper).
 See [browser features and limits](web/README.md).
 
-Station G2/G3 stuck after an update? Choose **Recover boot-looping Station G2/G3**
-at the first Linux/Windows flasher menu, or [download the standalone recovery ZIP](https://github.com/mikecarper/MeshCore/releases/download/station-v1.18.0.2-alpha2/Station-G2-G3-USB-Recovery-v1.zip).
-See the [recovery guide](STATION-RECOVERY.md).
+ESP32 board stuck after an update? Choose **Recover boot-looping ESP32** at the
+first Linux/Windows flasher menu. Select firmware for your exact board from the
+catalog, or use a local merged BIN. Settings are kept when the partition layout
+matches; factory erase is a separate choice.
+See the [ESP32 recovery guide](ESP32-RECOVERY.md) or [download the standalone recovery ZIP](https://github.com/mikecarper/meshfirmware/releases/download/esp32-recovery-v1/ESP32-USB-Recovery-v1.zip).
 
 ## Windows
 

@@ -5,4 +5,5 @@ tools/meshcore_partition_expansion.json text eol=lf
 tools/generate_partition_helper_manifest.py text eol=lf
 recover-station.sh text eol=lf
 recover-station.cmd text eol=crlf
+recover-esp32.cmd text eol=crlf
 tools/station_recovery.py text eol=lf

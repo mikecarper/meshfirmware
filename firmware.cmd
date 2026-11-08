@@ -8580,7 +8580,7 @@ function InvokeFlash {
 }
 
 
-function Invoke-StationRecovery {
+function Invoke-Esp32Recovery {
     # Only Python is needed here. Do not query a crashing application or prepare
     # unrelated flasher tools before entering the recovery engine.
     $python = Get-Command python -ErrorAction SilentlyContinue
@@ -8595,26 +8595,31 @@ function Invoke-StationRecovery {
     }
     $bootstrap = @'
 import hashlib, io, pathlib, subprocess, sys, tempfile, urllib.request, zipfile
-URL = "https://github.com/mikecarper/MeshCore/releases/download/station-v1.18.0.2-alpha2/Station-G2-G3-USB-Recovery-v1.zip"
-SHA256 = "a4452ef0e23aa7c940da243cd3f8935a83895afc6496640fd20f11935179d936"
+URL = "https://github.com/mikecarper/meshfirmware/releases/download/esp32-recovery-v1/ESP32-USB-Recovery-v1.zip"
+SHA256 = "2aad7a86bf0564907c393e170b1efc966ff2e0b2b9174c93f157d416f37585b2"
 try:
     if sys.version_info < (3, 10):
         raise RuntimeError("Recovery requires Python 3.10 or newer.")
-    print("Downloading and checking the Station recovery package...", flush=True)
-    request = urllib.request.Request(URL, headers={"User-Agent": "meshfirmware-station-recovery"})
+    print("Downloading and checking the ESP32 recovery tools...", flush=True)
+    request = urllib.request.Request(URL, headers={"User-Agent": "meshfirmware-esp32-recovery"})
     with urllib.request.urlopen(request, timeout=60) as response:
         data = response.read(20 * 1024 * 1024 + 1)
     if hashlib.sha256(data).hexdigest() != SHA256:
         raise RuntimeError("Recovery package checksum mismatch. No device was opened.")
-    with tempfile.TemporaryDirectory(prefix="Station-Recovery-") as folder:
+    with tempfile.TemporaryDirectory(prefix="ESP32-Recovery-") as folder:
         with zipfile.ZipFile(io.BytesIO(data)) as bundle:
             for entry in bundle.infolist():
                 path = pathlib.PurePosixPath(entry.filename)
                 if path.is_absolute() or ".." in path.parts or "\\" in entry.filename:
                     raise RuntimeError("Invalid recovery package path.")
             bundle.extractall(folder)
-        script = pathlib.Path(folder) / "Station-Recovery/tools/station_recovery.py"
-        result = subprocess.call([sys.executable, str(script), *sys.argv[1:]])
+        arguments = sys.argv[1:]
+        legacy = "--station" in arguments
+        if legacy:
+            arguments.remove("--station")
+        entry = "station_recovery.py" if legacy else "esp32_recovery.py"
+        script = pathlib.Path(folder) / "ESP32-Recovery/tools" / entry
+        result = subprocess.call([sys.executable, str(script), *arguments])
     raise SystemExit(result)
 except (Exception, KeyboardInterrupt) as error:
     print("Recovery could not finish: " + (str(error) or "cancelled"), file=sys.stderr)
@@ -8632,10 +8637,10 @@ except (Exception, KeyboardInterrupt) as error:
 }
 
 $operation = Prompt-Menu -Title 'Mesh firmware updater' -Options @(
-    'Install/update firmware', 'Recover boot-looping Station G2/G3'
+    'Install/update firmware', 'Recover boot-looping ESP32'
 ) -DefaultIndex 1
 if ($operation.Index -eq 2) {
-    $recoveryStatus = Invoke-StationRecovery
+    $recoveryStatus = Invoke-Esp32Recovery
     $scriptOver = $true
     Read-Host 'Press Enter to exit'
     exit $recoveryStatus
