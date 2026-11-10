@@ -30,6 +30,31 @@ not a remote USB-only node.
 
 ## Use
 
+### Custom firmware and board checks
+
+Choose **Custom firmware** in the main **Firmware** dropdown, then select a
+BIN/DFU ZIP/UF2 file or enter its download URL. Local files stay in the browser.
+The page inspects the contents, not the filename, before showing a write plan:
+
+- ESP32 application BINs use the connected radio's actual partition/OTA offsets.
+  Valid merged images retain their detected `0x0` or `0x1000` file origin.
+- Application fit and expansion are checked automatically. An oversized custom
+  application still needs an exact, verified migration package; a renamed copy
+  of a published image can be matched by its complete SHA-256. Unknown builds
+  are not expanded using a guessed helper or a different release's application.
+- nRF52 uses a validated serial DFU ZIP; the bootloader handles its addresses.
+  ZIP/DAT/component hashes and board checks still apply. UF2 remains the
+  separate supported non-nRF52 drive-copy path.
+
+The main inspection panel reports board **match**, **mismatch**, or **unverified**
+using available image metadata and the selected/reported hardware. Shared USB
+IDs, an nRF52 DFU init packet, or a similar filename do not prove a physical
+board. Missing metadata stays unverified. Board warnings can be explicitly
+overridden for the current image and device, followed by the normal final
+write confirmation. Reconnecting or changing the image/board revokes that
+approval. These overrides do not bypass corrupt-file, wrong-silicon,
+flash-bounds, security or exact partition-migration checks.
+
 ### Optional radio and MediaMesh settings
 
 Open **Radio & MediaMesh settings · optional**, then **Load & check selected build**. On

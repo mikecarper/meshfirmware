@@ -171,17 +171,34 @@ export function inspectFirmware(name, bytes) {
     return { name, architecture: 'uf2', kind: 'UF2 drive copy', family, sha256: hash(bytes), payloadHash:hash(bytes), payload: bytes, destructive:true, warnings: ['Advanced UF2-only path: choose the radio’s bootloader drive in the folder picker, not Downloads. This page copies one UF2 file, never downloaded folders. Family IDs do not prove board compatibility. Target startup remains unverified after copying.'] };
   }
   if (!/\.bin$/i.test(name)) fail('Choose a BIN, legacy nRF52 DFU ZIP, or UF2, or select a supported image inside a release archive.');
-  const merged = bytes.length > 0x9000 && bytes[0x8000] === 0xaa && bytes[0x8001] === 0x50;
-  const offset = bytes[0] === 0xe9 ? 0 : merged && bytes[0x1000] === 0xe9 ? 0x1000 : -1;
+  const offset = bytes[0] === 0xe9 ? 0 : bytes[0x1000] === 0xe9 ? 0x1000 : -1;
   if (offset < 0 || bytes.length < offset + 24) fail('Not a validated ESP32 image.');
   const bootLength=validateEspImage(bytes.subarray(offset));
-  if(merged && offset+bootLength>0x8000) fail('Merged bootloader overlaps its partition table.');
-  if (merged) partitionTable(bytes.subarray(0x8000, 0x9000));
-  else if (/-merged|factory|full.?install/i.test(name)) fail('Filename claims a merged install, but no valid partition table exists.');
-  const expert = !merged && (bytes.length < 36 || new DataView(bytes.buffer, bytes.byteOffset).getUint32(32, true) !== 0xabcd5432);
+  const descriptor = at => bytes.length >= at + 36 && new DataView(bytes.buffer, bytes.byteOffset).getUint32(at + 32, true) === 0xabcd5432;
+  const application = offset === 0 && descriptor(0), layouts=[], layoutErrors=[];
   const chipId = bytes[offset + 12] | bytes[offset + 13] << 8;
-  if (merged && offset !== ([0,2].includes(chipId) ? 0x1000 : 0)) fail('Merged bootloader is not at the expected offset for its declared ESP32 chip.');
-  return { name, architecture: 'esp32', kind: merged ? 'Merged install' : expert ? 'Expert ESP image / bootloader' : 'Application update', merged, expert, chipId, payload: bytes, payloadHash: hash(bytes), sha256: hash(bytes), destructive: merged || expert, warnings: merged ? ['Whole-chip erase. Node identity and settings will be lost.'] : expert ? ['Validated image without an ESP-IDF application descriptor. You must supply its exact flash offset. A wrong bootloader or offset can require physical recovery. No settings preservation is promised.'] : ['The physical partition table, OTA state, NVS migration state, image chip, and chip MAC are checked before writes. Required partition expansion must be verified before the final application update.'] };
+  // A valid application descriptor outranks partition-like bytes within its
+  // program data. A two-byte AA50 sequence alone does not prove a merged file.
+  if (!application) for (const flashOffset of [0,0x1000]) {
+    const partitionTableOffset=0x8000-flashOffset;
+    if (bytes.length < partitionTableOffset+4096 || bytes[partitionTableOffset]!==0xaa || bytes[partitionTableOffset+1]!==0x50) continue;
+    try {
+      partitionTable(bytes.subarray(partitionTableOffset,partitionTableOffset+4096));
+      if (flashOffset+offset!==([0,2].includes(chipId)?0x1000:0)) fail('Merged bootloader is not at the expected offset for its declared ESP32 chip.');
+      if (descriptor(offset)) fail('Merged bootloader contains an application descriptor. Its write origin cannot be inferred safely.');
+      if (offset+bootLength>partitionTableOffset) fail('Merged bootloader overlaps its partition table.');
+      layouts.push({flashOffset,partitionTableOffset});
+    } catch(error) { layoutErrors.push(error); }
+  }
+  if (layouts.length>1) fail('Merged ESP32 image has ambiguous write origins.');
+  const merged=layouts.length===1;
+  if (!application && !merged && layoutErrors.length) throw layoutErrors[0];
+  if (!merged && offset!==0) fail('Not a validated ESP32 image with a supported merged layout.');
+  const expert = !merged && !application, filenameClaimsMerged=/-merged|factory|full.?install/i.test(name);
+  if (expert && filenameClaimsMerged) fail('Filename claims a merged install, but no valid partition table exists.');
+  const warnings=merged ? ['Whole-chip erase. Node identity and settings will be lost.'] : expert ? ['Validated image without an ESP-IDF application descriptor. You must supply its exact flash offset. A wrong bootloader or offset can require physical recovery. No settings preservation is promised.'] : ['The physical partition table, OTA state, NVS migration state, image chip, and chip MAC are checked before writes. Required partition expansion must be verified before the final application update.'];
+  if (application && filenameClaimsMerged) warnings.push('The filename suggests a merged install, but the validated bytes identify an application-only update. Its write offsets come from the connected radio’s partition table.');
+  return { name, architecture: 'esp32', kind: merged ? 'Merged install' : expert ? 'Expert ESP image / bootloader' : 'Application update', merged, expert, chipId, flashOffset:merged?layouts[0].flashOffset:null, partitionTableOffset:merged?layouts[0].partitionTableOffset:null, payload: bytes, payloadHash: hash(bytes), sha256: hash(bytes), destructive: merged || expert, warnings };
 }
 
 export function validateUf2(bytes) {

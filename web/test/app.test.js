@@ -19,6 +19,7 @@ import {createNextStepScroller} from '../src/next-step-scroll.js';
 import {tryNativeUsbFallback} from '../src/connection-fallback.js';
 import {catalogProvider,catalogItemKey} from '../src/catalog.js';
 import {hash as firmwareHash,md5hex,partitionTable as parsePartitionTable,crc32,inspectFirmware as inspectFirmwareBytes} from '../src/firmware.js';
+import {assessFirmwareBoard} from '../src/firmware-board.js';
 import {inspectRadioDefaults,customizeRadioDefaults} from '../src/radio-defaults.js';
 import {createPostFlashSettingsPlan,applyPostFlashSettings} from '../src/post-flash-settings.js';
 import {createPostFlashCompanionRequest} from '../src/post-flash-companion.js';
@@ -56,6 +57,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
     fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,parseUsbMode,MigrationApproval,cleanCliReply,assessBootloaderVersion,firmwareFilesLinks,fetch:async()=>{throw Error('Unexpected network request');},fetchFirmwareBytes:(url,options)=>verifiedDownload(url,{...options,mirrorBase:'https://mirror.example.test/firmware/',pageOrigin:'https://mirror.example.test',fetchImpl:(target,init)=>target==='https://mirror.example.test/firmware/index.json'?Promise.resolve({ok:false,status:404}):options.fetchImpl(target,init)}),assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),commonCliRestorePreview:()=>({operations:[],skipped:[],warnings:[]}),restoreCommonCli:async()=>{throw Error('Unexpected CommonCLI restore');},
     backupCoverage,createNextStepScroller,tryNativeUsbFallback,SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
   });
+  context.assessFirmwareBoard=()=>({status:'match',requiresOverride:false,reason:'Test board identity.'});
   context.quickHotspotUrl=quickHotspotUrl;context.postFlashBleAdvice=postFlashBleAdvice;context.createNrfActivationCheck=()=>null;
   context.inspectRadioDefaults=inspectRadioDefaults;context.customizeRadioDefaults=customizeRadioDefaults;
   context.createPostFlashSettingsPlan=createPostFlashSettingsPlan;context.applyPostFlashSettings=applyPostFlashSettings;context.createPostFlashCompanionRequest=createPostFlashCompanionRequest;context.loadRadioPresets=async()=>({presets:[],source:'bundled',warning:'Test preset inventory.'});
@@ -1441,7 +1443,7 @@ test('provider picker shows Keymind Cascade and stock and restores a saved histo
   ui.context.localStorage.setItem('meshfirmware.selections',JSON.stringify({provider:'Keymind Cascade Logging',hardware:v4Item.hardware,role:v4Item.role,version:v4Item.version}));
   resolveCatalog({items:[v4Item,{...v4Item,provider:'Keymind Cascade'}],warnings:[],generatedAt:'2026-10-27T00:00:00Z'});
   await new Promise(resolve=>setImmediate(resolve));
-  assert.deepEqual(ui.elements.get('provider').options.map(option=>[option.text,option.value]),[['All providers',''],['Keymind Cascade','Keymind Cascade'],['MeshCore (stock)','MeshCore']]);
+  assert.deepEqual(ui.elements.get('provider').options.map(option=>[option.text,option.value]),[['All providers',''],['Custom firmware','Custom'],['Keymind Cascade','Keymind Cascade'],['MeshCore (stock)','MeshCore']]);
   assert.equal(ui.elements.get('provider').value,'Keymind Cascade');assert.equal(ui.elements.get('hardware').value,v4Item.hardware);assert.equal(ui.elements.get('role').value,v4Item.role);assert.equal(ui.elements.get('version').value,v4Item.version);
   assert.equal(JSON.parse(ui.context.localStorage.getItem('meshfirmware.selections')).provider,'Keymind Cascade');assert.deepEqual(ui.calls,[]);
 });
@@ -2616,7 +2618,7 @@ test('board-neutral erase keeps final-board checks and wipe consent without a sp
     ui.context.confirm=async(_title,_detail,_warning,token)=>{ui.calls.push('confirm:'+token);return outcome==='erase';};ui.context.flashNrf=async(_link,candidate)=>ui.calls.push('write:'+candidate.name);
     await ui.elements.get('flash').onclick();
     assert.equal(assessed[0],ui.context.pkg.name,'Final firmware is checked before the erase utility');
-    if(outcome==='wrong-final-board'){assert.deepEqual(assessed,[ui.context.pkg.name]);assert.ok(ui.calls.includes('confirm:rak3401-to-rak4631'));}
+    if(outcome==='wrong-final-board'){assert.ok(assessed.includes(ui.context.pkg.name));assert.ok(ui.calls.includes('confirm:rak3401-to-rak4631'));assert.ok(!ui.calls.includes('confirm:WIPE WITHOUT BACKUP'),'Rejected final firmware never reaches wipe confirmation');}
     else{assert.deepEqual(assessed.slice(0,2),[ui.context.pkg.name,ui.context.erase.name]);assert.ok(ui.calls.includes('confirm:WIPE WITHOUT BACKUP'));assert.ok(!ui.calls.some(call=>call.startsWith('confirm:rak')),'The neutral erase result does not ask for a fake board mismatch');}
     assert.deepEqual(ui.calls.filter(call=>call.startsWith('write:')),outcome==='erase'?['write:'+ui.context.erase.name]:[]);
     assert.equal(ui.evaluate('state.pkg.name'),'RAK_3401_companion.zip','Erasing never substitutes or automatically writes the final image');
@@ -3210,12 +3212,43 @@ function customEspImage({merged=false,expert=false}={}){
   if(expert){app.fill(0,32,36);app[239]=app.subarray(32,224).reduce((checksum,byte)=>checksum^byte,0xef);}
   if(!merged)return app;
   const bytes=new Uint8Array(0x10000+app.length).fill(255),table=Uint8Array.from(migrationFlowFixture().bridgePlan.targetTable);
-  bytes.set(app);bytes.set(table,0x8000);bytes.set(app,0x10000);return bytes;
+  const boot=app.slice();boot.fill(0,32,36);boot[239]=boot.subarray(32,224).reduce((checksum,byte)=>checksum^byte,0xef);
+  bytes.set(boot);bytes.set(table,0x8000);bytes.set(app,0x10000);return bytes;
 }
 async function customEspWorkbench(mode='update'){
   const ui=workbench();await Promise.resolve();ui.context.hash=firmwareHash;ui.context.inspectFirmware=inspectFirmwareBytes;ui.context.inventory=[v4Item,mergedItem(v4Item)];ui.context.initialMode=mode;
   ui.evaluate('state.items=inventory;state.installMode=initialMode;syncInstallMode();filterCatalog();');ui.elements.get('hardware').value=v4Item.hardware;return ui;
 }
+
+test('Custom firmware is a first-class Firmware choice and exposes local and URL inputs in that section',async()=>{
+  const ui=await customEspWorkbench();ui.elements.get('provider').value='Custom';ui.elements.get('auto-detect-board').checked=true;
+  await ui.elements.get('provider').onchange();
+  assert.equal(ui.elements.get('provider').value,'Custom');assert.equal(ui.evaluate('state.manualSelections.provider'),'Custom');
+  assert.equal(ui.elements.get('custom-firmware').hidden,false);assert.equal(ui.elements.get('custom-firmware').open,true);
+  assert.equal(ui.elements.get('artifact-field').hidden,true);assert.equal(ui.elements.get('role').disabled,true);assert.equal(ui.elements.get('version').disabled,true);
+  assert.deepEqual(artifactChoices(ui),[]);assert.deepEqual(ui.calls,[]);
+  ui.elements.get('provider').value='Keymind Cascade';await ui.elements.get('provider').onchange();
+  assert.equal(ui.elements.get('custom-firmware').hidden,true);assert.equal(ui.elements.get('artifact-field').hidden,false);
+});
+
+test('custom inspection explains detected merged origin and actual app offsets without writing or claiming early expansion success',async()=>{
+  const ui=await customEspWorkbench();ui.context.image=customEspImage();ui.elements.get('provider').value='Custom';
+  await ui.evaluate('loadFirmware("renamed.bin",image);');ui.evaluate('controls();');
+  assert.equal(ui.elements.get('firmware-inspection').hidden,false,ui.evaluate('JSON.stringify({pkg:state.pkg?.name,provider:$("provider").value,summary:$("automatic-summary").textContent})'));assert.match(ui.elements.get('firmware-inspection-summary').textContent,/Application update/);
+  assert.match(ui.elements.get('firmware-inspection-layout').textContent,/read from the connected radio/);
+  ui.evaluate('state.plan={sha256:state.pkg.sha256,addresses:[0x420000,0x20000]};controls();');
+  assert.match(ui.elements.get('firmware-inspection-layout').textContent,/0x420000, 0x20000.*no expansion needed/);
+  ui.evaluate('state.plan={sha256:state.pkg.sha256,addresses:[0x10000,0x150000],needed:true};controls();');
+  assert.match(ui.elements.get('firmware-inspection-layout').textContent,/expansion required.*bridge.*checked after expansion/i);
+  ui.context.image=customEspImage({merged:true});await ui.evaluate('loadFirmware("anything.bin",image);');ui.evaluate('controls();');
+  assert.match(ui.elements.get('firmware-inspection-layout').textContent,/write offset 0x0.*no expansion bridge/);assert.deepEqual(ui.calls,[]);
+});
+
+test('custom dropdown selection preserves the deliberate local image during automatic device matching',async()=>{
+  const ui=await customEspWorkbench();ui.elements.get('auto-detect-board').checked=true;ui.elements.get('provider').value='Custom';ui.context.image=customEspImage();
+  await ui.evaluate('loadFirmware("mine.bin",image);');ui.evaluate('state.manualSelections.provider="Custom";state.device={model:"Heltec V4",role:"common-cli"};selectDetectedBoard();');
+  assert.equal(ui.elements.get('provider').value,'Custom');assert.equal(ui.evaluate('state.pkg?.name'),'mine.bin',ui.elements.get('automatic-summary').textContent);assert.equal(ui.evaluate('state.pkg.sha256'),firmwareHash(ui.context.image));assert.deepEqual(ui.calls,[]);
+});
 
 test('validated custom ESP32 bytes select their installation mode without discarding the image or authorizing a write',async()=>{
   for(const [initial,merged,expected]of [['update',true,'install'],['install',false,'update']]){
@@ -4411,4 +4444,68 @@ test('stopping while the application link closes retains startup verification fo
   const ui=await migrationWorkbench();await ui.elements.get('prepare').onclick();let approval,applicationCloses=0;
   ui.faults.duringSerialClose=async({application})=>{if(application){applicationCloses++;approval=ui.evaluate('state.migrationApproval');assert.equal(approval.phase,'waiting-application');ui.elements.get('stop-migration-auto').onclick();}};
   await ui.elements.get('flash').onclick();assert.equal(applicationCloses,1);assert.equal(approval.phase,'revoked');assert.equal(ui.evaluate('state.migrationApproval'),null);assert.ok(ui.evaluate('state.verification'));assert.ok(ui.evaluate("localStorage.getItem('meshfirmware.verifyApplication')"));assert.match(ui.elements.get('notice').textContent,/stopped/i);assert.doesNotMatch(ui.elements.get('notice').textContent,/startup verified/i);assert.deepEqual(ui.calls.filter(call=>/^(write|finish):/.test(call)),['write:bridge','finish:bridge','write:final','finish:final']);
+});
+
+async function boardWarningWorkbench(architecture='nrf52'){
+  const ui=workbench();await Promise.resolve();ui.context.pkg=fakePackage({architecture});ui.context.selectedPort=ui.port;
+  ui.elements.get('hardware').value='Heltec T114';
+  ui.evaluate('state.pkg=pkg;state.port=selectedPort;state.plan={generation:state.generation,port:state.port,sha256:pkg.sha256,installMode:state.installMode,addresses:[0x10000]};');
+  ui.context.assessFirmwareBoard=()=>({status:'mismatch',requiresOverride:true,reason:'Image targets T1000-E, not the selected T114.'});
+  return ui;
+}
+test('main inspection shows mismatched and unverified board warnings without claiming a match',async()=>{
+  const ui=await boardWarningWorkbench();ui.evaluate('updateFirmwareInspection();');
+  assert.match(ui.elements.get('firmware-inspection-board').textContent,/Board mismatch:.*T1000-E.*acknowledging/);
+  assert.equal(ui.elements.get('firmware-inspection').classList.contains('board-warning'),true);
+  ui.context.assessFirmwareBoard=()=>({status:'unknown',requiresOverride:true,reason:'This file has no verified board identity.'});ui.evaluate('updateFirmwareInspection();');
+  assert.match(ui.elements.get('firmware-inspection-board').textContent,/Board not verified:.*no verified board identity/);assert.deepEqual(ui.calls,[]);
+});
+test('board mismatches can be overridden on nRF52, ESP32 and UF2 but still need final write confirmation',async()=>{
+  for(const architecture of ['nrf52','esp32','uf2']){
+    const ui=await boardWarningWorkbench(architecture);
+    ui.context.confirm=async(title,detail,warning,token)=>{ui.calls.push(token);if(token==='FLASH MISMATCHED BOARD'){assert.match(title,/mismatch/);assert.match(detail,/T1000-E.*T114/);assert.match(warning,/continue anyway.*SWD.*chip-family/s);return true;}assert.match(detail,/Board check:.*T1000-E/);return false;};
+    await ui.evaluate('flashPreparedFirmware();');assert.deepEqual(ui.calls,['FLASH MISMATCHED BOARD','FLASH'],architecture);
+  }
+});
+test('cancelling an unknown-board acknowledgement stops before any hardware operation',async()=>{
+  const ui=await boardWarningWorkbench();ui.context.assessFirmwareBoard=()=>({status:'unknown',requiresOverride:true,reason:'No embedded board identity.'});
+  ui.context.confirm=async(_title,_detail,_warning,token)=>{ui.calls.push(token);return false;};
+  await assert.rejects(ui.evaluate('flashPreparedFirmware();'),/Board override cancelled/);assert.deepEqual(ui.calls,['FLASH UNVERIFIED BOARD']);
+});
+test('a board override is revoked if the radio, image, board or runtime evidence changes while warning is open',async()=>{
+  for(const change of ['state.generation++','state.port={getInfo:()=>({})}','state.pkg={...state.pkg}','$("hardware").value="Other board"','state.device={model:"Changed"}','state.installMode="install"']){
+    const ui=await boardWarningWorkbench();ui.context.confirm=async(_title,_detail,_warning,token)=>{ui.calls.push(token);ui.evaluate(change);return true;};
+    await assert.rejects(ui.evaluate('flashPreparedFirmware();'),/changed during confirmation/,change);assert.deepEqual(ui.calls,['FLASH MISMATCHED BOARD']);
+  }
+});
+test('board evidence is checked again after the final write dialog, not only after the mismatch warning',async()=>{
+  const ui=await boardWarningWorkbench();ui.context.confirm=async(_title,_detail,_warning,token)=>{ui.calls.push(token);if(token==='FLASH')ui.evaluate('state.device={model:"Changed during final prompt"}');return true;};
+  await assert.rejects(ui.evaluate('flashPreparedFirmware();'),/changed during confirmation/);assert.deepEqual(ui.calls,['FLASH MISMATCHED BOARD','FLASH']);
+});
+test('a UF2 board override cannot be carried to another mounted drive or edited drive identity',async()=>{
+  for(const change of ['state.directory={name:"Different drive"}','state.plan.uf2Info="Board-ID: Changed"']){
+    const ui=await boardWarningWorkbench('uf2');ui.evaluate('state.directory={name:"Original drive"};state.plan.uf2Info="Board-ID: Original";');
+    ui.context.confirm=async(_title,_detail,_warning,token)=>{ui.calls.push(token);ui.evaluate(change);return true;};
+    await assert.rejects(ui.evaluate('flashPreparedFirmware();'),/changed during confirmation/);assert.deepEqual(ui.calls,['FLASH MISMATCHED BOARD']);
+  }
+});
+test('a generic-board match cannot waive the protected RAK board warning',async()=>{
+  const ui=await boardWarningWorkbench();ui.context.assessFirmwareBoard=()=>({status:'match',requiresOverride:false,reason:'Generic board match.'});
+  ui.context.assessBoard=()=>({requiresOverride:true,payloadFamily:'rak4631',deviceFamily:'rak3401',reason:'Protected RAK target conflicts.'});
+  ui.context.confirm=async(_title,detail,_warning,token)=>{ui.calls.push(token);assert.match(detail,/Protected RAK target conflicts/);return false;};
+  await assert.rejects(ui.evaluate('flashPreparedFirmware();'),/Board override cancelled/);assert.deepEqual(ui.calls,['FLASH MISMATCHED BOARD']);
+});
+test('a board-specific non-RAK erase ZIP also receives its own overridable board check',async()=>{
+  const ui=await boardWarningWorkbench();ui.context.erase=fakePackage({name:'other-board-formatter.zip',erase:true,destructive:true});ui.evaluate('state.plan.erasePkg=erase;');
+  ui.context.assessFirmwareBoard=({pkg})=>pkg===ui.context.erase?{status:'mismatch',requiresOverride:true,reason:'The formatter targets a different board.'}:{status:'match',requiresOverride:false,reason:'Final image matches.'};
+  ui.context.confirm=async(_title,detail,_warning,token)=>{ui.calls.push(token);assert.match(detail,/formatter targets.*other-board-formatter/s);return false;};
+  await assert.rejects(ui.evaluate('flashPreparedFirmware();'),/Board override cancelled/);assert.deepEqual(ui.calls,['FLASH MISMATCHED BOARD']);
+});
+test('real custom inspection wires the byte-level unknown-board assessment into the final flash warning',async()=>{
+  const ui=await customEspWorkbench();ui.context.image=customEspImage();ui.context.selectedPort=ui.port;
+  await ui.evaluate('loadFirmware("custom.bin",image);');ui.context.assessFirmwareBoard=assessFirmwareBoard;
+  ui.evaluate('state.port=selectedPort;state.plan={generation:state.generation,port:state.port,sha256:state.pkg.sha256,installMode:state.installMode,addresses:[0x10000]};controls();');
+  assert.match(ui.elements.get('firmware-inspection-board').textContent,/Board not verified:.*does not expose/);
+  ui.context.confirm=async(_title,detail,_warning,token)=>{ui.calls.push(token);assert.match(detail,/filename.*do not prove/);return false;};
+  await assert.rejects(ui.evaluate('flashPreparedFirmware();'),/Board override cancelled/);assert.deepEqual(ui.calls,['FLASH UNVERIFIED BOARD']);
 });

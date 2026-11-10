@@ -13,6 +13,7 @@ import { backupCoverage } from './backup-coverage.js';
 import { commonCliRestorePreview, restoreCommonCli, commonCliReplyState } from './common-cli.js';
 import { quickSettingPlan, quickHotspotUrl } from './quick-settings.js';
 import { assessBoard, rakFamily, endfIdentity } from './board-safety.js';
+import { assessFirmwareBoard } from './firmware-board.js';
 import { BrowserPlanner } from './planner.js';
 import { waitForMigration } from './migration.js';
 import { recoveryPackage } from './bootloader-recovery.js';
@@ -35,6 +36,7 @@ import { xiaoInstalledStatus, xiaoInfoProfile, xiaoBootloaderItem } from './xiao
 import { postFlashBleAdvice } from './post-flash-advice.js';
 import { createNrfActivationCheck } from './nrf-activation.js';
 import { inspectRadioDefaults, customizeRadioDefaults } from './radio-defaults.js';
+import { resolveCustomFirmwareName } from './custom-firmware.js';
 import { createPostFlashSettingsPlan, applyPostFlashSettings } from './post-flash-settings.js';
 import { createPostFlashCompanionRequest } from './post-flash-companion.js';
 import { loadRadioPresets } from './radio-presets.js';
@@ -538,6 +540,7 @@ function nextFlasherControl(){
   if(isBootloaderInfo()&&!dfuIds.has(portId(state.port))&&!$('already-bootloader').checked)return 'select-port';
   if(state.migration?.uart&&!state.migration.settled&&!['writing','written'].includes(state.migration.phase))return 'wait-migration';
   if(state.archive&&!state.pkg)return $('archive-entry').value?'load-entry':'archive-entry';
+  if($('provider').value==='Custom'&&!state.pkg)return 'firmware-file';
   if(!state.pkg&&!$('artifact').value){
     if(!state.items.length)return null;
     for(const id of ['hardware','role'])if(!$(id).value&&[...$(id).options].filter(option=>option.value&&!option.disabled).length>(id==='hardware'?0:1))return id;
@@ -563,7 +566,8 @@ function updateNextAction(){
   if(id==='radio-defaults-apply'){$('radio-defaults').open=true;$('step-guidance').textContent='Apply the edited radio defaults, then continue with backup or flashing.';}
   if(id==='load-bootloader')revealPanel('bootloader-options');
   if(id==='load-entry'||id==='archive-entry')revealPanel('archive-picker');
-  const messages={hardware:'Step 2: Choose the exact hardware for this radio.',role:'Step 2: Choose the firmware role.',artifact:'Step 2.5: Choose a firmware build to continue.',finish:'Next: Reset verified ESP32 to start the firmware that was written. Keep USB and power connected.','verify-app':'Step 5: Verify running application to check startup without flashing again.','wait-migration':'Next: Wait for UART migration to verify it has settled. Do not reset an active bridge.','load-entry':'Next: Load this archive entry for the exact board, then continue preparation.','archive-entry':'Next: Choose the exact board image from this release ZIP.','expert-offset':'Next: Enter the documented flash offset for this component. No offset is guessed.','transport-mode':'Next: Choose the correct bootloader connection method; automatic detection was ambiguous.'};
+  const messages={hardware:'Step 2: Choose the exact hardware for this radio.',role:'Step 2: Choose the firmware role.',artifact:'Step 2.5: Choose a firmware build to continue.','firmware-file':'Choose a custom firmware file or load its URL. Its type, write offsets and partition fit are checked automatically.',finish:'Next: Reset verified ESP32 to start the firmware that was written. Keep USB and power connected.','verify-app':'Step 5: Verify running application to check startup without flashing again.','wait-migration':'Next: Wait for UART migration to verify it has settled. Do not reset an active bridge.','load-entry':'Next: Load this archive entry for the exact board, then continue preparation.','archive-entry':'Next: Choose the exact board image from this release ZIP.','expert-offset':'Next: Enter the documented flash offset for this component. No offset is guessed.','transport-mode':'Next: Choose the correct bootloader connection method; automatic detection was ambiguous.'};
+  if(id==='firmware-file')revealPanel('custom-firmware');
   if(id==='select-backup-application')$('step-guidance').textContent='Restart the radio, then choose its application USB port to back up. No firmware is written by this step.';
   if(messages[id])$('step-guidance').textContent=messages[id];
   if(id==='select-port'&&isBootloaderInfo()&&!state.verification)$('step-guidance').textContent='Next: select this same radio’s DFU serial port. INFO_UF2.TXT does not prove the current port is in DFU. For an unlisted bootloader, explicitly check Already in ROM/DFU.';
@@ -585,6 +589,9 @@ function controls() {
   $('show-all-nrf').disabled ||= continuingDeviceFlow()||!!state.plan?.written;
   $('backup-application-help').hidden=!state.backupApplicationRequest;
   syncSelectionLink();
+  updateFirmwareInspection();
+  const custom=$('provider').value==='Custom';$('artifact-field').hidden=custom;
+  $('role').disabled ||= custom;$('version').disabled ||= custom;
   updateBootloaderInfoPanel();
   $('select-port').disabled ||= !('serial' in navigator);
   $('prepare').hidden=isMeshtasticMigration();$('skip-backup-option').hidden=isMeshtasticMigration();
@@ -821,7 +828,7 @@ function selectDetectedBoard() {
     const architectures=new Set(state.items.filter(i=>i.hardware===result.hardware).map(i=>i.architecture));
     if(architectures.size===1&&state.device)state.device.architecture=[...architectures][0];
     const provider=$('provider').value;
-    if(provider&&!state.items.some(i=>i.provider===provider&&i.hardware===result.hardware))$('provider').value='';
+    if(provider&&provider!=='Custom'&&!state.items.some(i=>i.provider===provider&&i.hardware===result.hardware))$('provider').value='';
     if($('hardware').value!==result.hardware){$('role').value='';$('version').value='';}
     $('hardware').value='';filterCatalog('provider');$('hardware').value=result.hardware;filterCatalog('hardware');
   }else if($('auto-detect-board').checked){
@@ -842,6 +849,7 @@ function selectDetectedBoard() {
 }
 function applyAutomaticSelections(){
   if(!$('auto-detect-board').checked)return;
+  if($('provider').value==='Custom'){updateFirmwareSelectionSummary();controls();return;}
   const result=chooseFirmware({items:state.items,device:state.device||{},hardware:$('hardware').value,...state.manualSelections,installMode:state.installMode,architecture:catalogArchitecture()});
   const selected=result.artifactIndex===null?null:state.items[result.artifactIndex];
   if(state.pkg&&(!selected||state.item?.name!==selected.name||state.item?.url!==selected.url)){
@@ -1092,10 +1100,30 @@ async function ensureBackup() {
 }
 function selectedHardware(){return state.item?.hardware||$('hardware').value||state.recovery?.hardware||'';}
 function boardAssessment(pkg){return assessBoard(pkg,{selectedHardware:selectedHardware(),deviceModel:isBootloaderInfo()?'':state.device?.model||state.recovery?.deviceModel||''});}
-async function acknowledgeBoard(pkg) {
-  const check=boardAssessment(pkg);
-  if(check.requiresOverride&&!await confirm('nRF52 board safety override',`Payload ${check.firmwareFamily}; connected ${check.deviceFamily}. ${check.reason}`,'A wrong board image or bootloader may need SWD recovery. This approval applies only to this write and this selected interface.',check.token))fail('Board override cancelled before writing.');
-  return check;
+function firmwareBoardDevice(){
+  return {...state.device,model:isBootloaderInfo()?'':state.device?.model||state.recovery?.deviceModel||'',usbInfo:state.port?.getInfo?.()||{},chipId:state.esp?.loader?.chip?.IMAGE_CHIP_ID};
+}
+function firmwareBoardAssessment(pkg=state.pkg){
+  return assessFirmwareBoard({pkg,hardware:selectedHardware(),device:firmwareBoardDevice(),items:state.items,plan:state.plan});
+}
+// Approvals live only on this call stack. A reconnect, image/board edit or new
+// identity revokes them, including edits made while another dialog is open.
+function firmwareWriteScope(pkg,plan){
+  const port=state.port,generation=state.generation,hardware=selectedHardware(),hardwareValue=$('hardware').value,device=state.device,erase=plan.erasePkg,installMode=state.installMode,directory=state.directory,driveInfo=plan.uf2Info;
+  const evidence=JSON.stringify(firmwareBoardDevice()),assessment=JSON.stringify(firmwareBoardAssessment(pkg)),protectedAssessment=pkg.architecture==='nrf52'?JSON.stringify(boardAssessment(pkg)):null,eraseAssessment=erase?JSON.stringify([firmwareBoardAssessment(erase),boardAssessment(erase)]):null;
+  const sha256=pkg.sha256,payloadHash=pkg.payloadHash;
+  return ()=>{
+    if(state.pkg!==pkg||state.plan!==plan||state.port!==port||state.generation!==generation||state.installMode!==installMode||state.directory!==directory||plan.uf2Info!==driveInfo||selectedHardware()!==hardware||$('hardware').value!==hardwareValue||state.device!==device||pkg.sha256!==sha256||pkg.payloadHash!==payloadHash||plan.erasePkg!==erase||JSON.stringify(firmwareBoardDevice())!==evidence||JSON.stringify(firmwareBoardAssessment(pkg))!==assessment||(pkg.architecture==='nrf52'&&JSON.stringify(boardAssessment(pkg))!==protectedAssessment)||(erase&&JSON.stringify([firmwareBoardAssessment(erase),boardAssessment(erase)])!==eraseAssessment))fail('Radio, firmware or board evidence changed during confirmation. Review again; no write was authorized.');
+  };
+}
+async function acknowledgeFirmwareBoard(pkg,assertCurrent){
+  const check=firmwareBoardAssessment(pkg),protectedCheck=pkg.architecture==='nrf52'?boardAssessment(pkg):null;
+  if(!check.requiresOverride&&!protectedCheck?.requiresOverride)return check;
+  const protectedMismatch=protectedCheck?.requiresOverride&&['rak3401','rak4631'].includes(protectedCheck.payloadFamily)&&['rak3401','rak4631'].includes(protectedCheck.deviceFamily)&&protectedCheck.payloadFamily!==protectedCheck.deviceFamily;
+  const mismatch=check.status==='mismatch'||protectedMismatch,title=mismatch?'Firmware board mismatch':'Board compatibility is unverified';
+  const detail=[check.reason,protectedCheck?.requiresOverride?protectedCheck.reason:'',`Selected hardware: ${selectedHardware()||'not selected'}`,`File: ${pkg.name}`,`SHA-256: ${pkg.sha256}`].filter(Boolean).join('\n');
+  const accepted=await confirm(title,detail,'You may continue anyway. A wrong board image can fail to boot, use incorrect radio pins or require physical/SWD recovery. This approval applies only to this image and this selected device; chip-family, integrity and flash-bounds checks are not waived.',protectedCheck?.token||(mismatch?'FLASH MISMATCHED BOARD':'FLASH UNVERIFIED BOARD'));
+  assertCurrent();if(!accepted)fail('Board override cancelled before writing.');return check;
 }
 async function erasePackage() {
   const file=$('erase-file').files[0],url=$('erase-source').value,port=state.port,generation=state.generation,final=state.pkg;
@@ -1109,7 +1137,7 @@ async function erasePackage() {
 }
 function payloadFirmwareIdentity(pkg) {
   let identity=pkg.architecture==='nrf52'?pkg.firmwareIdentity:endfIdentity(pkg.payload);
-  if(!identity&&pkg.merged){for(const part of state.esp?.plan?.parts||[]){if(part.type!==0||part.offset>=pkg.payload.length)continue;let end=Math.min(part.offset+part.size,pkg.payload.length);while(end>part.offset&&pkg.payload[end-1]===255)end--;identity=endfIdentity(pkg.payload.subarray(part.offset,end));if(identity)break;}}
+  if(!identity&&pkg.merged){const fileOffset=pkg.flashOffset??0;for(const part of state.esp?.plan?.parts||[]){const start=part.offset-fileOffset;if(part.type!==0||start<0||start>=pkg.payload.length)continue;let end=Math.min(start+part.size,pkg.payload.length);while(end>start&&pkg.payload[end-1]===255)end--;identity=endfIdentity(pkg.payload.subarray(start,end));if(identity)break;}}
   return identity;
 }
 function firmwareDowngradeWarning(pkg=state.pkg,item=state.item) {
@@ -1262,6 +1290,8 @@ function invalidateFirmwareSelection() {
   $('radio-preset').value='custom';
   for(const [id,value]of [['preset','unchanged'],['cross','unchanged'],['frequency','911.150'],['bandwidth','250000'],['sf','7'],['cr','5'],['mode','rxtx'],['preamble','0']])$('media-mesh-'+id).value=value;
   state.nrfPrepareResume=null;
+  state.customFirmwareSource=null;
+  state.expansionInspection=null;
   if(!state.skipBackupForOperation)$('skip-backup').checked=false;
   state.pkg=null;state.plan=null;state.item=null;state.archive=null;state.archiveContext=null;state.loadedRecovery=null;state.directory=null;state.backupApproved=null;state.generation++;
   $('image-name').textContent='No image loaded';$('image-kind').textContent='—';$('image-size').textContent='—';$('image-sha').textContent='';$('image-warning').textContent='';
@@ -1273,6 +1303,45 @@ async function clearFirmwareSelection() {
   await closeEsp();
 }
 function customInstallModeSyncAllowed(){return !installModeLocked()&&!continuingDeviceFlow()&&!state.flashProgress;}
+function updateFirmwareInspection(){
+  const pkg=state.pkg,box=$('firmware-inspection');box.hidden=!pkg;
+  if(!pkg)return;
+  const chip=({0:'ESP32',2:'ESP32-S2',5:'ESP32-C3',9:'ESP32-S3',13:'ESP32-C6'})[pkg.chipId]||'ESP32';
+  const address=value=>'0x'+value.toString(16),plan=state.plan&&state.plan.sha256===pkg.sha256&&Array.isArray(state.plan.addresses)&&state.plan.addresses.length&&state.plan.addresses.every(Number.isInteger)?state.plan:null;
+  let title=pkg.kind,detail='';
+  if(pkg.architecture==='esp32'){
+    title=`${pkg.merged?'Full install':pkg.expert?'ESP component':'Application update'} · ${chip}`;
+    if(pkg.expert)detail='The file does not prove a safe write address. Enter the documented component offset below; expansion is not attempted for components.';
+    else if(pkg.merged)detail=`Detected write offset ${address(pkg.flashOffset??0)}. Includes bootloader and partition table; no expansion bridge is needed. Erasing settings still requires confirmation.`;
+    else if(plan?.needed&&!plan.verified)detail=`Partition expansion required. A verified USB bridge runs first at ${plan.addresses.map(address).join(', ')}; final application offsets are checked after expansion. Nothing is written until you approve.`;
+    else if(plan)detail=`Application write offsets: ${plan.addresses.map(address).join(', ')}. ${plan.verified?'Partition expansion verified.':'Fits the existing partitions; no expansion needed.'}`;
+    else if(state.expansionInspection?.sha256===pkg.sha256)detail='Partition expansion required. A compatible, verified USB migration package must be found before this application can be written. No write plan is authorized yet.';
+    else detail='Application offsets and partition fit will be read from the connected radio, not guessed from the filename. Expansion is checked automatically during preparation.';
+  }else if(pkg.architecture==='nrf52')detail='Serial DFU ZIP detected. The bootloader handles the write addresses; ESP32 partition expansion does not apply.';
+  else detail='UF2 target addresses are carried inside the file. Review the compatible hardware before continuing.';
+  $('firmware-inspection-summary').textContent=title;
+  $('firmware-inspection-layout').textContent=detail;
+  const check=firmwareBoardAssessment(pkg),board=$('firmware-inspection-board');
+  board.textContent=`${check.status==='match'?'Board identity matches':check.status==='mismatch'?'Board mismatch':'Board not verified'}: ${check.reason}${check.requiresOverride?' You can continue after acknowledging the warning.':''}`;
+  box.classList.toggle('board-warning',check.status!=='match');
+}
+async function customFirmwarePlannerName(pkg){
+  const generation=state.generation;
+  state.expansionInspection={sha256:pkg.sha256,needed:true};updateFirmwareInspection();
+  progress(0,'Partition expansion is required. Checking this file against published firmware hashes…');
+  let source;
+  try{source=await resolveCustomFirmwareName(pkg,state.items);}catch(error){
+    if(state.pkg!==pkg||state.generation!==generation)fail('Firmware or radio selection changed during custom image inspection.');
+    if(/immutable|bytes.*changed|ambiguous|invalid.*(?:catalog|index)/i.test(error.message||''))throw error;
+    // The native helper can still validate a correctly named release or an
+    // exact supplied package if the optional public mirror is unavailable.
+    log(`Custom firmware source lookup: ${error.message||String(error)}`);return pkg.name;
+  }
+  if(state.pkg!==pkg||state.generation!==generation)fail('Firmware or radio selection changed during custom image inspection.');
+  state.customFirmwareSource=source;
+  if(source&&source.name!==pkg.name)log(`Custom file matches published firmware ${source.name} by its complete SHA-256. Original file bytes are unchanged.`);
+  return source?.name||pkg.name;
+}
 async function loadFirmware(name, bytes, item = null,{allowModeSync=true}={}) {
   // Capture before invalidation clears a written plan or revokes automation.
   // Reloading a pending flow's original image must not reinterpret its mode.
@@ -1301,7 +1370,7 @@ async function loadFirmware(name, bytes, item = null,{allowModeSync=true}={}) {
   state.radioDefaults={name,bytes:bytes.slice(),sourceSha256:hash(bytes),verifiedSourceSha256:expected||null,inspection:null,appliedSettings:null,dirty:false,provenance:null};
   state.pkg = pkg;state.item=item;state.backupApproved=null; $('image-name').textContent = pkg.name; $('image-kind').textContent = pkg.kind; $('image-size').textContent = size(bytes.length); $('image-sha').textContent = pkg.sha256;refreshFirmwareWarnings();
   let customModeNotice='';
-  if(syncCustomMode&&!exact&&customInstallModeSyncAllowed()&&pkg.architecture==='esp32'&&!pkg.expert&&((pkg.merged===true&&pkg.kind==='Merged install')||(pkg.merged===false&&pkg.kind==='Application update'&&!preserveMeshtasticInstall))){
+  if(syncCustomMode&&(!exact||$('provider').value==='Custom')&&customInstallModeSyncAllowed()&&pkg.architecture==='esp32'&&!pkg.expert&&((pkg.merged===true&&pkg.kind==='Merged install')||(pkg.merged===false&&pkg.kind==='Application update'&&!preserveMeshtasticInstall))){
     // Validated bytes, not the filename, decide a fresh custom image's mode.
     // This changes only the display/filter; final erase/write consent remains.
     state.installMode=pkg.merged?'install':'update';installModeSource={kind:'manual',port:state.port};syncInstallMode();filterCatalog();
@@ -1315,10 +1384,11 @@ async function loadFirmware(name, bytes, item = null,{allowModeSync=true}={}) {
 }
 function options(id, values, placeholder) {
   const select = $(id), prior = select.value;
+  if(id==='provider')values=[...values,'Custom'];
   // A detected physical target remains visible even when the chosen provider
   // has no build for it. In that case no firmware artifact is selected.
   if(id==='hardware'&&state.detectedHardware&&(!catalogArchitecture()||catalogHardwareAllowed(state.detectedHardware)))values=[...values,state.detectedHardware];
-  select.replaceChildren(new Option(placeholder,''),...Array.from(new Set(values)).filter(Boolean).sort(id==='version'?compareVersions:undefined).map(v => new Option(id==='provider'&&v==='MeshCore'?'MeshCore (stock)':v,v)));
+  select.replaceChildren(new Option(placeholder,''),...Array.from(new Set(values)).filter(Boolean).sort(id==='version'?compareVersions:undefined).map(v => new Option(id==='provider'&&v==='MeshCore'?'MeshCore (stock)':id==='provider'&&v==='Custom'?'Custom firmware':v,v)));
   if ([...select.options].some(o => o.value === prior)) select.value = prior;
 }
 // The chip family and installed-loader hints narrow choices, never prove the
@@ -1332,7 +1402,8 @@ function filterCatalog(changed = 'project',{preserveArtifact=false}={}) {
   let items = state.items.filter(i => i.project === $('project').value&&(!architecture||i.architecture===architecture)&&(!narrow||candidates.includes(i.hardware)));
   const compatibleHardware=new Set(items.map(item=>item.hardware));
   if(architecture&&state.manualSelections.hardware&&!compatibleHardware.has(state.manualSelections.hardware))for(const key of ['hardware','role','version'])delete state.manualSelections[key];
-  for (const id of ['provider','hardware','role','version']) { if (['project','provider','hardware','role','version'].indexOf(id) > ['project','provider','hardware','role','version'].indexOf(changed)) options(id,items.map(i => i[id]),id==='hardware'&&narrow?'Matching nRF52 boards':`All ${id === 'hardware' ? architecture==='nrf52'?'nRF52 boards':'boards' : id + 's'}`); if ($(id).value) items = items.filter(i => i[id] === $(id).value); }
+  for (const id of ['provider','hardware','role','version']) { if (['project','provider','hardware','role','version'].indexOf(id) > ['project','provider','hardware','role','version'].indexOf(changed)) options(id,items.map(i => i[id]),id==='hardware'&&narrow?'Matching nRF52 boards':`All ${id === 'hardware' ? architecture==='nrf52'?'nRF52 boards':'boards' : id + 's'}`); if ($(id).value&&!(id==='provider'&&$(id).value==='Custom')) items = items.filter(i => i[id] === $(id).value); }
+  if($('provider').value==='Custom'){items=[];$('custom-firmware').hidden=false;$('custom-firmware').open=true;}
   items=items.filter(item=>matchesCatalogInstallMode(item,state.installMode));
   items.sort((a,b)=>compareVersions(a.version,b.version));
   $('artifact').replaceChildren(new Option(`${items.length} artifacts · choose a file`,''),...items.map(item => new Option(`${[item.title,item.subtitle].filter(Boolean).join(' / ')} · ${item.name} · ${item.action}`,String(state.items.indexOf(item)))));
@@ -1610,7 +1681,7 @@ $('load-recovery').onclick=()=>operation(async()=>{
   const loaded=recoveryPackage(catalog,id,bundle);setAutomaticSha(loaded.profile.sha256,loaded.name);await loadFirmware(loaded.name,loaded.bytes);state.loadedRecovery={...loaded.profile,version:catalog.version};$('image-warning').textContent=[...state.pkg.warnings,recoveryWarning].join(' ');
   notice(`Verified OTAFIX ${catalog.version} R_${id} ZIP loaded for installed identity ${loaded.profile.installedIdentity}. No device commands were sent. ${recoveryWarning}`);
 });
-for (const id of ['project','provider','hardware','role','version']) $(id).onchange = () => operation(async()=>{await clearFirmwareSelection();state.manualSelections[id]=$(id).value;for(const next of ['hardware','role','version'].slice(['provider','hardware','role','version'].indexOf(id)))delete state.manualSelections[next];filterCatalog(id);if($('auto-detect-board').checked)applyAutomaticSelections();else updateFirmwareSelectionSummary();});
+for (const id of ['project','provider','hardware','role','version']) $(id).onchange = () => operation(async()=>{await clearFirmwareSelection();state.manualSelections[id]=$(id).value;for(const next of ['hardware','role','version'].slice(['provider','hardware','role','version'].indexOf(id)))delete state.manualSelections[next];if(id==='provider')$('custom-firmware').hidden=$('provider').value!=='Custom';filterCatalog(id);if($('auto-detect-board').checked)applyAutomaticSelections();else updateFirmwareSelectionSummary();});
 for(const [id,mode]of [['install-mode-update','update'],['install-mode-install','install']])$(id).onchange=()=>$(id).checked?operation(()=>setInstallMode(mode)):undefined;
 async function fetchSelectedFirmware(){
   const item = $('artifact').value?state.items[Number($('artifact').value)]:null; if (!item) fail('Choose an artifact.');
@@ -1754,7 +1825,7 @@ async function prepareSelectedFirmware({waitForRom=false}={}) {
     const planner = pkg.merged || pkg.expert ? null : (state.planner ||= new BrowserPlanner());
     const packageFile=$('migration-package').files[0],setFile=$('usb-set').files[0];
     if((packageFile?.size||0)>(32<<20) || (setFile?.size||0)>(32<<20)) fail('Migration artifact exceeds 32 MiB.');
-    const args={planner,packageBytes:packageFile?new Uint8Array(await packageFile.arrayBuffer()):null,usbSetBytes:setFile?new Uint8Array(await setFile.arrayBuffer()):null,resume:!!state.migration,expertOffset,recovery:state.espRecovery};
+    const args={planner,packageBytes:packageFile?new Uint8Array(await packageFile.arrayBuffer()):null,usbSetBytes:setFile?new Uint8Array(await setFile.arrayBuffer()):null,resume:!!state.migration,expertOffset,recovery:state.espRecovery,resolveFirmwareName:customFirmwarePlannerName};
     let prepared;
     for(let attempt=0;attempt<5;attempt++) {
       try { prepared=await esp.prepare(pkg,args);break; }
@@ -1826,12 +1897,14 @@ async function flashPreparedFirmware() {
   if (!pkg || !plan || plan.generation !== state.generation || plan.port !== state.port || plan.sha256 !== pkg.sha256) fail('Selection changed; inspect again.');
   if(plan.installMode!==undefined&&plan.installMode!==state.installMode)fail('Installation mode changed; prepare the selected build again before writing.');
   assertInstallModePackage(pkg);
+  const assertBoardScope=firmwareWriteScope(pkg,plan);
   const temporary=selectedRecovery(pkg);
   if(temporary&&!await confirm('Install this temporary allow-all recovery bridge?',`${pkg.name}\nInstalled profile: ${temporary.id}\nInstalled identity retained: ${temporary.installedIdentity}\nSHA-256 ${pkg.sha256}`,recoveryWarning,`RECOVERY ${temporary.id}`))return;
-  if(pkg.architecture==='nrf52')await acknowledgeBoard(pkg);
-  if(plan.erasePkg)await acknowledgeBoard(plan.erasePkg);
+  assertBoardScope();
+  const boardCheck=await acknowledgeFirmwareBoard(pkg,assertBoardScope);
+  if(plan.erasePkg){await acknowledgeFirmwareBoard(plan.erasePkg,assertBoardScope);assertBoardScope();}
   const token = pkg.expert ? `WRITE 0x${plan.addresses[0].toString(16)}` : pkg.destructive||plan.erasePkg ? 'WIPE WITHOUT BACKUP' : 'FLASH';
-  const detail = `${pkg.name}\nSHA-256 ${pkg.sha256}\n${radioDefaultsSummary() ? radioDefaultsSummary()+'\nSource SHA-256 '+state.radioDefaults.sourceSha256+'\n':''}${plan.mac ? 'Verified chip MAC ' + plan.mac : plan.uf2Info || 'Board identity unknown to this browser. Confirm the selected nRF52 board yourself.'}${selectedBootloader(pkg)?'\nOur OTAFIX '+selectedBootloader(pkg).version+' · '+selectedBootloader(pkg).profile+'\n'+bootloaderReinstallWarning:''}${plan.erasePkg?'\nERASE FIRST: '+plan.erasePkg.name+'\nSHA-256 '+plan.erasePkg.sha256+'\n'+plan.erasePkg.warnings.join(' '):''}`;
+  const detail = `${pkg.name}\nSHA-256 ${pkg.sha256}\nBoard check: ${boardCheck.reason}\n${radioDefaultsSummary() ? radioDefaultsSummary()+'\nSource SHA-256 '+state.radioDefaults.sourceSha256+'\n':''}${plan.mac ? 'Verified chip MAC ' + plan.mac : plan.uf2Info || 'Physical board identity is not independently verified.'}${selectedBootloader(pkg)?'\nOur OTAFIX '+selectedBootloader(pkg).version+' · '+selectedBootloader(pkg).profile+'\n'+bootloaderReinstallWarning:''}${plan.erasePkg?'\nERASE FIRST: '+plan.erasePkg.name+'\nSHA-256 '+plan.erasePkg.sha256+'\n'+plan.erasePkg.warnings.join(' '):''}`;
   const backupWarning=isMeshtasticMigration()?'Meshtastic will be replaced. Its settings, channels and identity are not backed up or converted to MeshCore. ':$('skip-backup').checked?'You chose to skip backup. No new logical backup was created. ':'';
   if(state.migrationApproval&&(plan.requiresRevisionOverride||plan.chunkedRecovery))fail('The new plan needs an unapproved compatibility override or interrupted-write recovery. Automatic continuation stopped. Inspect and acknowledge it manually.');
   let allowRevisionMismatch=false;
@@ -1841,7 +1914,7 @@ async function flashPreparedFirmware() {
   let approval=state.migrationApproval;
   if(!approval&&bridge&&!state.migration&&!plan.requiresRevisionOverride&&!plan.chunkedRecovery){
     const candidate=new MigrationApproval(pkg,plan,{identity:state.device});
-    const scope=`${detail}\nUSB bridge SHA-256 ${plan.bridge_sha256}\nExpanded table SHA-256 ${plan.target_table_sha256}\nOne approval: write and verify bridge → run expansion → verify restored settings/layout on the same MAC → write and verify this exact final firmware → restart and check startup.`;
+    const scope=`${detail}\nUSB bridge SHA-256 ${plan.bridge_sha256}\nExpanded table SHA-256 ${plan.target_table_sha256}\nOne approval: write and verify bridge → run expansion → verify restored settings/layout on the same MAC → write and verify this exact final firmware → restart and check startup.${boardCheck.requiresOverride?'\nBoard compatibility is not established. After a USB reconnect, the board warning must be acknowledged again before the final firmware write.':''}`;
     if(!await confirm('Expand partitions and finish this firmware update?',scope,backupWarning+[firmwareDowngradeWarning(pkg),...pkg.warnings,...(plan.compatibilityWarnings||[])].filter(Boolean).join(' ')+' The bridge preserves supported identity/settings, not all logs or optional files. Power loss during partition-table replacement can require physical recovery. This approval includes the required restarts, even if automatic finish is off. Keep this tab and power connected. Existing granted USB ports resume automatically; the browser may still require you to choose a new interface. No further Prepare, Flash or Reset presses are needed. Failed checks stop the run without automatic write/reset retries.'+(candidate.identity?.publicKey?'':' No pre-flash public identity is available; final application identity cannot be independently proven.'),'EXPAND AND FLASH'))return;
     if(plan.generation!==state.generation||plan.port!==state.port)fail('Device disconnected or selection changed during confirmation.');
     state.migrationApproval=approval=candidate;state.approvalPort=state.port;state.approvalResetPort=state.port;controls();
@@ -1850,6 +1923,7 @@ async function flashPreparedFirmware() {
     if(!await confirm('Write this firmware?',detail,backupWarning+[firmwareDowngradeWarning(pkg),...pkg.warnings,...(plan.compatibilityWarnings||[])].filter(Boolean).join(' ')+' Settings backups exclude firmware/bootloader images, stored messages and runtime logs. Keep power connected. Wrong bootloader firmware may require SWD recovery.',token))return;
   }
   if (plan.generation !== state.generation || plan.port !== state.port) fail('Device disconnected or selection changed during confirmation.');
+  assertBoardScope();
   if((state.radioDefaults?.postFlashPlan||null)!==settingsPlan)fail('Post-flash settings changed during confirmation. Review the operation again.');
   if(approval){if(approval!==state.migrationApproval)fail('Automatic migration approval was stopped.');if(bridge)approval.beginBridge(pkg,plan);else approval.beginFinal(pkg,plan);}
   clearVerification();

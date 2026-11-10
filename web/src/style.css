@@ -374,6 +374,15 @@ footer { font-size: 15.4px; line-height: 1.6; overflow-wrap: anywhere; }
 .radio-defaults-fields input, .radio-defaults-fields select { width: 100%; }
 .radio-defaults .digest { overflow-wrap: anywhere; }
 .radio-defaults.pending { border-left: 3px solid #b57500; padding-left: 12px; }
+.custom-firmware { margin: 16px 0; padding: 14px; border: 1px solid var(--border, #d8e2eb); border-radius: 8px; }
+.workflow .custom-firmware summary { font-size: 16.8px; }
+.custom-firmware .file-drop strong { font-size: 16.8px; }
+.custom-firmware .file-drop small { font-size: 15.4px; }
+.custom-firmware input[type=file]::file-selector-button { font: inherit; min-height: 44px; }
+.firmware-inspection { margin: 14px 0; padding: 14px; background: #edf8f6; border: 1px solid #b8dcd5; border-radius: 8px; overflow-wrap: anywhere; }
+.firmware-inspection strong { font-size: 16.8px; }
+.workflow .firmware-inspection p { font-size: 15.4px; margin: 6px 0 0; }
+.firmware-inspection.board-warning { background: #fff7e8; border-color: #d9a441; }
 
 @media (max-width: 900px) {
   .sidebar { flex-wrap: wrap; }

@@ -108,14 +108,16 @@ function inspectSource(name,bytes){
     payload=bytes;
     const markerOffset=oneMarker(bytes);
     if(pkg.merged){
-      const parts=partitionTable(bytes.subarray(0x8000,0x9000)),bootStart=[0,2].includes(pkg.chipId)?0x1000:0;
-      const bootLength=validateEspImage(bytes.subarray(bootStart,0x8000));
-      if(!padding(bytes.subarray(bootStart+bootLength,0x8000)))reject('Signed bootloaders or nonpadding merged bootloader trailers cannot be customized.');
+      const fileOffset=pkg.flashOffset??0,tableOffset=0x8000-fileOffset;
+      const parts=partitionTable(bytes.subarray(tableOffset,tableOffset+4096)),bootStart=([0,2].includes(pkg.chipId)?0x1000:0)-fileOffset;
+      const bootLength=validateEspImage(bytes.subarray(bootStart,tableOffset));
+      if(!padding(bytes.subarray(bootStart+bootLength,tableOffset)))reject('Signed bootloaders or nonpadding merged bootloader trailers cannot be customized.');
       const candidates=[];let populated=0;
       for(const part of parts.filter(part=>part.type===0)){
-        if(part.offset>=bytes.length||bytes[part.offset]!==0xe9)continue;
+        const start=part.offset-fileOffset;
+        if(start>=bytes.length||bytes[start]!==0xe9)continue;
         if(++populated>1)reject('Multiple populated ESP32 application partitions cannot be customized as one image.');
-        const candidate=espImage(bytes,part.offset,Math.min(part.offset+part.size,bytes.length));
+        const candidate=espImage(bytes,start,Math.min(start+part.size,bytes.length));
         if(candidate.chipId!==pkg.chipId)reject('Merged application and bootloader chip identities disagree.');
         if(candidate.segments.some(segment=>markerOffset>=segment.start&&markerOffset+64<=segment.end)){
           if(part.flags&1)reject('Encrypted ESP32 application partitions cannot be customized.');

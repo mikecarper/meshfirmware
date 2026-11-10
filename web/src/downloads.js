@@ -121,6 +121,17 @@ async function loadIndex(base,fetchImpl){
   try{return await pending;}catch(cause){if(cache.get(key)===pending)cache.delete(key);throw cause;}
 }
 
+// Read only the bounded, same-origin public index. Local firmware bytes and
+// their digest are never uploaded or included in the request URL. Match only
+// whole original assets, not chunks that happen to appear inside an archive.
+export async function findFirmwareSources({sha256,size:byteLength}={}, {fetchImpl=fetch,mirrorBase=defaultMirrorBase,pageOrigin=globalThis.location?.origin}={}){
+  if(typeof sha256!=='string'||!digest(sha256.toLowerCase())||!size(byteLength))throw error('Invalid local firmware SHA-256 or size.','hash');
+  if(typeof fetchImpl!=='function')throw error('A firmware index fetch function is required.','url');
+  const expected=sha256.toLowerCase(),base=mirrorBaseUrl(mirrorBase,pageOrigin),index=await loadIndex(base,fetchImpl);
+  return Object.freeze([...index.values()].filter(entry=>entry.sha256===expected&&entry.size===byteLength)
+    .map(entry=>Object.freeze({url:entry.url,sha256:entry.sha256,size:entry.size})));
+}
+
 function unpackMirror(gzip,entry){
   if(hash(gzip)!==entry.gzipSha256)throw error('Firmware mirror compressed SHA-256 does not match its verified index.');
   // The build emits one ordinary gzip member with no optional filename/header

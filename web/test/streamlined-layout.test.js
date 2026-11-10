@@ -174,9 +174,11 @@ test('extras stay collapsed while the console is open directly after the main fl
   for(const id of ['advanced-options','backups','capabilities']){const node=get(id);assert.equal(node.tag,'details',id);assert.ok(!has(node,'open'),`#${id} must start collapsed`);}
   const workflow=nodes.find(node=>hasClass(node,'workflow')),console=get('console'),settings=get('quick-settings'),siblings=workflow.parent.children,index=siblings.indexOf(workflow);
   assert.equal(console.tag,'details');assert.ok(has(console,'open'));assert.equal(siblings[index+1],console);assert.equal(siblings[index+2],settings);assert.ok(settings.start<get('advanced-options').start);
-  for(const id of ['connection-options','custom-firmware','bootloader-options','nrf-actions','migration-options','verification-options','esp-retry-options','image-details']){
+  for(const id of ['connection-options','bootloader-options','nrf-actions','migration-options','verification-options','esp-retry-options','image-details']){
     const node=get(id);assert.equal(node.tag,'details',id);assert.ok(!has(node,'open'),id);assert.ok(inside(node,get('advanced-options')),`#${id} belongs under extras`);
   }
+  assert.ok(inside(get('custom-firmware'),get('firmware-choices')),'Custom file/URL inputs belong in the main Firmware section');
+  assert.ok(has(get('custom-firmware'),'hidden'),'The custom picker starts hidden until selected');
   for(const id of ['auto-detect-board','auto-backup','auto-finish'])assert.ok(has(get(id),'checked'),`Collapsing #${id} must not change its safe default`);
 });
 

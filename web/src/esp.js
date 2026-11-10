@@ -145,18 +145,19 @@ export function appWriteOrder(parts, otaBytes = null) {
 }
 
 export function mergedMirrorSegments(pkg, parts, populated) {
+  const fileOffset=pkg.flashOffset??0;
   const ota=parts.filter(part=>part.type===0&&part.subtype>=0x10&&part.subtype<=0x1f).sort((a,b)=>a.subtype-b.subtype);
   const missing=ota.filter(part=>!populated.has(part.offset));
   if(ota.length<2||!missing.length)return [];
   if(ota.map(part=>part.subtype).some((subtype,index)=>subtype!==0x10+index))fail('Merged OTA identities are not unique and contiguous.');
   const source=ota[0];
-  if(!populated.has(source.offset)||pkg.payload.length>source.offset+source.size)fail('Cannot safely identify the exact merged primary application boundary for fallback mirroring. Select a complete compatible merged image.');
+  if(!populated.has(source.offset)||fileOffset+pkg.payload.length>source.offset+source.size)fail('Cannot safely identify the exact merged primary application boundary for fallback mirroring. Select a complete compatible merged image.');
   // As in the Linux flasher, preserve the entire original app including its
   // EndF trailer/padding; never invent a boundary from only the ESP checksum.
-  const app=pkg.payload.subarray(source.offset);
+  const sourceOffset=source.offset-fileOffset,app=pkg.payload.subarray(sourceOffset);
   validateEspImage(app);
   if(missing.some(part=>app.length>part.size))fail('Embedded application does not fit every secondary OTA slot.');
-  return missing.map(part=>({address:part.offset,sourceOffset:source.offset,length:app.length,payloadHash:hash(app)}));
+  return missing.map(part=>({address:part.offset,sourceOffset,length:app.length,payloadHash:hash(app)}));
 }
 
 export async function readVerifiedFlash(loader,address,size,onPacketReceived=null) {
@@ -241,22 +242,24 @@ export class EspSession {
     return this.recordPlan(plan);
   }
   planProof(plan) { return hash(new TextEncoder().encode(JSON.stringify([plan.sha256,plan.payloadHash,plan.mac,plan.addresses,plan.merged,plan.expert,!!plan.needed,!!plan.verified,plan.bridge_sha256,plan.segments,plan.revisionProof,plan.requiresRevisionOverride,plan.revisionOverrideToken,!!plan.chunkedRecovery]))); }
-  async prepare(pkg, {planner,packageBytes,usbSetBytes,resume,expertOffset,recovery} = {}) {
+  async prepare(pkg, {planner,packageBytes,usbSetBytes,resume,expertOffset,recovery,resolveFirmwareName} = {}) {
     this.plan=null; this.#planProof=null; this.#written=false;this.#writeRecovery=null;
     if (pkg.architecture !== 'esp32' || pkg.chipId !== this.loader.chip.IMAGE_CHIP_ID || hash(pkg.payload) !== pkg.payloadHash) fail('Firmware chip or immutable payload verification failed.');
-    if (pkg.payload.length > this.flashBytes) fail('Image exceeds physical flash.');
+    const fileOffset=pkg.merged?(pkg.flashOffset??0):0;
+    if (![0,0x1000].includes(fileOffset)||pkg.payload.length+fileOffset > this.flashBytes) fail('Image exceeds physical flash or has an unsupported merged origin.');
     await this.assertMac();
     if(pkg.expert) {
       if(!Number.isInteger(expertOffset) || expertOffset<0 || expertOffset%4096 || expertOffset+Math.ceil(pkg.payload.length/4)*4>this.flashBytes) fail('Expert ESP image requires an explicit 4 KiB-aligned flash offset within physical flash.');
       return this.recordCompatiblePlan(pkg,{sha256:pkg.sha256,payloadHash:pkg.payloadHash,mac:this.mac,addresses:[expertOffset],merged:false,expert:true,parts:[]},recovery);
     }
-    const parts = pkg.merged ? partitionTable(pkg.payload.subarray(0x8000,0x9000),this.flashBytes) : partitionTable(await this.loader.readFlash(0x8000,4096),this.flashBytes);
+    const tableOffset=0x8000-fileOffset;
+    const parts = pkg.merged ? partitionTable(pkg.payload.subarray(tableOffset,tableOffset+4096),this.flashBytes) : partitionTable(await this.loader.readFlash(0x8000,4096),this.flashBytes);
     let addresses;
     if (pkg.merged) {
-      const proposed = partitionTable(pkg.payload.subarray(0x8000,0x9000),this.flashBytes);
+      const proposed = parts;
       const populated=new Set();
-      for (const p of proposed.filter(p => p.type === 0 && p.offset < pkg.payload.length)) {
-        const image=pkg.payload.subarray(p.offset,Math.min(p.offset+p.size,pkg.payload.length));
+      for (const p of proposed.filter(p => p.type === 0 && p.offset < fileOffset+pkg.payload.length)) {
+        const image=pkg.payload.subarray(p.offset-fileOffset,Math.min(p.offset+p.size-fileOffset,pkg.payload.length));
         if (image.every(b=>b===255)) continue; // An erased inactive slot is allowed.
         const length = validateEspImage(image);
         if (length > p.size || (image[12]|image[13]<<8)!==pkg.chipId || image.length<36 || new DataView(image.buffer,image.byteOffset,image.byteLength).getUint32(32,true)!==0xabcd5432) fail('Merged application exceeds its partition or has the wrong chip/application identity.');
@@ -266,11 +269,11 @@ export class EspSession {
       let bootable=proposed.find(p=>p.type===0 && p.subtype===0)?.offset;
       if(proposed.some(part=>part.type===0&&part.subtype>=0x10&&part.subtype<=0x1f)) {
         if(ota.length!==1 || ota[0].size<8192) fail('Merged OTA metadata is ambiguous.');
-        const metadata=new Uint8Array(8192).fill(255),source=pkg.payload.subarray(ota[0].offset,Math.min(ota[0].offset+8192,pkg.payload.length)); metadata.set(source);
+        const metadata=new Uint8Array(8192).fill(255),source=pkg.payload.subarray(ota[0].offset-fileOffset,Math.min(ota[0].offset+8192-fileOffset,pkg.payload.length)); metadata.set(source);
         bootable=activeOta(proposed,metadata);
       }
       if(bootable===undefined || !populated.has(bootable)) fail('Merged install does not contain a valid application in its boot-selected partition.');
-      const mirrors=mergedMirrorSegments(pkg,proposed,populated),segments=[{address:0,sourceOffset:0,length:pkg.payload.length,payloadHash:pkg.payloadHash},...mirrors];
+      const mirrors=mergedMirrorSegments(pkg,proposed,populated),segments=[{address:fileOffset,sourceOffset:0,length:pkg.payload.length,payloadHash:pkg.payloadHash},...mirrors];
       return this.recordCompatiblePlan(pkg,{sha256:pkg.sha256,payloadHash:pkg.payloadHash,mac:this.mac,addresses:segments.map(segment=>segment.address),merged:true,parts,segments,mirroredSlots:mirrors.length},recovery);
     } else {
       // The shared expansion helper reviews ESP32/C3/S3 only. Other supported
@@ -284,7 +287,9 @@ export class EspSession {
         // The exact native helper decides whether the unchanged source table
         // needs a bridge rewrite or the expanded target needs completion proof.
         // A UI pending marker alone must never force target-table verification.
-        let result=await planner.call('plan',{...snapshots,name:pkg.name,image:pkg.payload,chip:this.loader.chip.CHIP_NAME,flashBytes:this.flashBytes,package:packageBytes,usbSet:usbSetBytes});
+        const needsExpansion=parts.some(part=>part.type===0&&pkg.payload.length>part.size);
+        const firmwareName=needsExpansion&&!packageBytes&&typeof resolveFirmwareName==='function'?await resolveFirmwareName(pkg):pkg.name;
+        let result=await planner.call('plan',{...snapshots,name:firmwareName||pkg.name,image:pkg.payload,chip:this.loader.chip.CHIP_NAME,flashBytes:this.flashBytes,package:packageBytes,usbSet:usbSetBytes});
         if((result.needed&&result.resume===true)||(resume&&!result.needed))result=await planner.call('verify',{...snapshots,image:pkg.payload,sha256:pkg.sha256});
         this.planner=planner;
         return this.recordCompatiblePlan(pkg,{...result,sha256:pkg.sha256,payloadHash:pkg.payloadHash,mac:this.mac,addresses:result.app_offsets,merged:false,parts},recovery);

@@ -61,8 +61,9 @@ export function compatibilityImages(pkg, plan) {
   const images = [];
   const add = (image, offset, label) => images.push({ image, offset, label, bootloader: offset === bootOffset, requirements: imageRevisionRequirements(image) });
   if (pkg.merged) {
-    add(pkg.payload.subarray(bootOffset), bootOffset, 'Merged bootloader');
-    for (const part of plan.parts || []) if (part.type === 0 && part.offset < pkg.payload.length && pkg.payload[part.offset] === 0xe9) add(pkg.payload.subarray(part.offset, Math.min(part.offset + part.size, pkg.payload.length)), part.offset, `Application 0x${part.offset.toString(16)}`);
+    const fileOffset=pkg.flashOffset??0;
+    add(pkg.payload.subarray(bootOffset-fileOffset), bootOffset, 'Merged bootloader');
+    for (const part of plan.parts || []) if (part.type === 0 && part.offset < fileOffset+pkg.payload.length && pkg.payload[part.offset-fileOffset] === 0xe9) add(pkg.payload.subarray(part.offset-fileOffset, Math.min(part.offset + part.size-fileOffset, pkg.payload.length)), part.offset, `Application 0x${part.offset.toString(16)}`);
   } else add(pkg.payload, plan.addresses[0], pkg.expert ? 'ESP component' : 'Application');
   if (plan.needed && !plan.verified) add(Uint8Array.from(plan.bridge), plan.addresses[0], 'USB migration bridge');
   return images;

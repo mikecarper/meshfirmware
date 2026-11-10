@@ -48,7 +48,7 @@ test('SLIP round-trip, HCI header checksum, ACK checksum/CRC bounds',() => {
 });
 test('ESP image checksum, app descriptor, image kind and immutable digest',() => {
   const data = espImage(); assert.equal(validateEspImage(data),64); assert.equal(inspectFirmware('app.bin',data).chipId,9);
-  assert.throws(() => inspectFirmware('app-merged.bin',data),/merged/); const damaged = data.slice(); damaged[35] ^= 1; assert.throws(() => inspectFirmware('app.bin',damaged),/checksum/);
+  const misleading=inspectFirmware('app-merged.bin',data); assert.equal(misleading.merged,false); assert.equal(misleading.expert,false); assert.ok(misleading.warnings.some(warning=>/filename.*application-only/i.test(warning))); const damaged = data.slice(); damaged[35] ^= 1; assert.throws(() => inspectFirmware('app.bin',damaged),/checksum/);
 });
 test('physical partitions and OTA sequence order follow checked script algorithm',() => {
   const parts = partitionTable(table(),4<<20), ota = new Uint8Array(8192).fill(255); assert.equal(activeOta(parts,ota),0x10000);

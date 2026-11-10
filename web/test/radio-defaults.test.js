@@ -36,6 +36,14 @@ function unsupported(name,bytes,pattern){const inspected=inspectRadioDefaults(na
 test('the canonical disabled block matches the firmware ABI initializer byte-for-byte',()=>{
   const bytes=block();assert.equal(bytes.length,64);assert.deepEqual(bytes.subarray(0,16),encode('MCRDEFAULTS0001\0'));assert.deepEqual([...bytes.subarray(16,20)],[1,0,64,0]);assert.ok(bytes.subarray(20,60).every(byte=>byte===0));assert.deepEqual([...bytes.subarray(60)],[0xa6,0x73,0x37,0x89]);
 });
+test('nonzero-origin classic ESP32 merged customization preserves its file origin, partitions and bootloader',()=>{
+  const app=image({chip:0}),boot=image({chip:0,app:false,marker:null,endf:false});
+  const bytes=new Uint8Array(0xf000+app.length).fill(255);bytes.set(boot);bytes.set(table(),0x7000);bytes.set(app,0xf000);
+  const before=bytes.slice(),result=customizeRadioDefaults('custom.bin',bytes,defaults),pkg=inspectFirmware('custom.bin',result.bytes);
+  assert.equal(inspectRadioDefaults('custom.bin',bytes).supported,true);assert.equal(pkg.merged,true);assert.equal(pkg.flashOffset,0x1000);
+  assert.deepEqual(bytes,before);assert.deepEqual(result.bytes.subarray(0,0xf000),before.subarray(0,0xf000));
+  assert.deepEqual(inspectRadioDefaults('custom.bin',result.bytes).settings,defaults);assert.equal(result.bytes.length,bytes.length);
+});
 test('nRF52 disabled ABI template is inspected and a new full ZIP repairs DAT, manifest, ZIP and EndF integrity without input mutation',()=>{
   const original=nrf(),snapshot=original.bytes.slice(),settings={...defaults,txPowerDbm:-9},settingsBefore={...settings};
   assert.deepEqual(inspectRadioDefaults('RAK_3401_companion_radio_full.zip',original.bytes).settings,disabled);
