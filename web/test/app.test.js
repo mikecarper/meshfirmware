@@ -16,7 +16,7 @@ import {chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogI
 import {chooseConnection,parseUsbMode} from '../src/connection-choice.js';
 import {lookupUsbConnectionMap} from '../src/usb-connection-map.js';
 import {createNextStepScroller} from '../src/next-step-scroll.js';
-import {tryNativeUsbFallback} from '../src/connection-fallback.js';
+import {tryNativeUsbFallback,xiaoS3ManualBootAdvice} from '../src/connection-fallback.js';
 import {catalogProvider,catalogItemKey} from '../src/catalog.js';
 import {hash as firmwareHash,md5hex,partitionTable as parsePartitionTable,crc32,inspectFirmware as inspectFirmwareBytes} from '../src/firmware.js';
 import {assessFirmwareBoard} from '../src/firmware-board.js';
@@ -55,7 +55,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
   if(verification)storage.set('meshfirmware.verifyApplication',JSON.stringify(verification));
   const context=vm.createContext({quickSettingPlan,commonCliReplyState,canonicalHardware,nrfDfuUsbIds,lookupUsbConnectionMap,usbConnectionMap:{schemaVersion:1,builds:[]},document:{getElementById:id=>{assert.ok(elements.has(id),`Missing HTML id ${id}`);return elements.get(id);},querySelectorAll:()=>[...elements.values()]},navigator:{serial:{requestPort:async()=>{calls.push('chooser');return port;},getPorts(){throw new Error('must not enumerate automatically');},addEventListener(type,handler){serialEvents[type]=handler;}}},window:{performance:performanceApi,location:{search},addEventListener(type,handler){windowEvents[type]=handler;}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},Option,URL,URLSearchParams,Blob,Uint8Array,TextEncoder,TextDecoder,console,setTimeout,clearTimeout,AbortSignal,Date,
     fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,parseUsbMode,MigrationApproval,cleanCliReply,assessBootloaderVersion,firmwareFilesLinks,fetch:async()=>{throw Error('Unexpected network request');},fetchFirmwareBytes:(url,options)=>verifiedDownload(url,{...options,mirrorBase:'https://mirror.example.test/firmware/',pageOrigin:'https://mirror.example.test',fetchImpl:(target,init)=>target==='https://mirror.example.test/firmware/index.json'?Promise.resolve({ok:false,status:404}):options.fetchImpl(target,init)}),assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),commonCliRestorePreview:()=>({operations:[],skipped:[],warnings:[]}),restoreCommonCli:async()=>{throw Error('Unexpected CommonCLI restore');},
-    backupCoverage,createNextStepScroller,tryNativeUsbFallback,SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
+    backupCoverage,createNextStepScroller,tryNativeUsbFallback,xiaoS3ManualBootAdvice,SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
   });
   context.assessFirmwareBoard=()=>({status:'match',requiresOverride:false,reason:'Test board identity.'});
   context.quickHotspotUrl=quickHotspotUrl;context.postFlashBleAdvice=postFlashBleAdvice;context.createNrfActivationCheck=()=>null;
@@ -1824,6 +1824,23 @@ test('unsupported explicit automatic preferences stay refused and do not display
 test('Prepare update with a live TinyUSB report loads the automatic artifact and requests guarded handoff, never flashes',async()=>{
   const ui=workbench({productionDefaults:true});await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({architecture:'esp32'});ui.evaluate("state.port=selectedPort;state.device={model:'Heltec V4 OLED',architecture:'esp32'};");ui.port.getInfo=()=>({usbVendorId:0x303a,usbProductId:0x0002});ui.elements.get('artifact').value='0';ui.context.fetchSelectedFirmware=async()=>{ui.calls.push('fetch');ui.evaluate('state.pkg=pkg;');};ui.context.ensureBackup=async()=>ui.calls.push('backup');ui.context.confirm=async(_t,_d,_w,token)=>{ui.calls.push(token);return true;};ui.context.touch1200=async(_port,kind)=>ui.calls.push(kind);
   ui.evaluate("state.device.usbMode='tinyusb';state.device.usbModeStatus='reported';");await ui.elements.get('prepare').onclick();assert.deepEqual(ui.calls,['fetch','backup','ENTER BOOTLOADER','tinyusb']);assert.equal(ui.evaluate('state.port'),null);assert.equal(ui.elements.get('transport-mode').value,'no_reset');assert.equal(ui.elements.get('already-bootloader').checked,true);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);
+});
+
+test('XIAO S3 handoff explains physical BOOT and VM port reselection without another write',async()=>{
+  const ui=workbench({productionDefaults:true});await Promise.resolve();
+  ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({architecture:'esp32'});
+  ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0059});
+  ui.evaluate("state.port=selectedPort;state.device={model:'Seeed XIAO ESP32-S3',architecture:'esp32',usbMode:'tinyusb',usbModeStatus:'reported'};");
+  ui.elements.get('artifact').value='0';ui.context.fetchSelectedFirmware=async()=>{ui.calls.push('fetch');ui.evaluate('state.pkg=pkg;');};
+  ui.context.ensureBackup=async()=>ui.calls.push('backup');ui.context.confirm=async()=>true;
+  ui.context.touch1200=async(_port,kind)=>ui.calls.push(kind);
+  await ui.elements.get('prepare').onclick();
+  assert.deepEqual(ui.calls,['fetch','backup','tinyusb']);
+  assert.match(ui.elements.get('notice').textContent,/hold BOOT, tap RESET, then release BOOT/);
+  assert.match(ui.elements.get('notice').textContent,/In a VM, attach the newly appeared USB device/);
+  assert.match(ui.elements.get('notice').textContent,/Already in ROM\/DFU/);
+  assert.equal(ui.elements.get('already-bootloader').checked,true);
+  assert.equal(ui.evaluate('state.plan'),null);
 });
 
 test('successful application rereads retain exact-model architecture for automatic connection choice',async()=>{

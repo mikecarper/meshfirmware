@@ -23,7 +23,7 @@ import { chooseConnection, parseUsbMode } from './connection-choice.js';
 import { lookupUsbConnectionMap } from './usb-connection-map.js';
 import usbConnectionMap from './data/usb-connection-map.json';
 import { createNextStepScroller } from './next-step-scroll.js';
-import { tryNativeUsbFallback } from './connection-fallback.js';
+import { tryNativeUsbFallback, xiaoS3ManualBootAdvice } from './connection-fallback.js';
 import { MigrationApproval } from './migration-approval.js';
 import { assessBootloaderVersion } from './bootloader-version.js';
 import { fetchFirmwareBytes } from './downloads.js';
@@ -1787,11 +1787,12 @@ async function prepareSelectedFirmware({waitForRom=false}={}) {
   // Backup rereads the node. Fresh live evidence may supersede a historical
   // hint or introduce a conflict; never reset using the pre-backup choice.
   mode=connectionMode({allowFallback:true});assertConnectionMode();
+  const manualBootAdvice=xiaoS3ManualBootAdvice({usbInfo:state.port.getInfo(),model:state.device?.model});
   const testingConnection=mode==='auto_probe',preferredMode=testingConnection&&['tinyusb','usb_reset'].includes(state.connection?.mode)?state.connection.mode:null;
   if(mode==='tinyusb'){
     if(!await confirm('Enter the detected USB bootloader?',state.device?.model||'Selected TinyUSB application','Backup was considered first. This resets only the selected radio, without flashing it. Then choose that SAME radio’s ROM port to continue.','ENTER BOOTLOADER'))return;
     state.handoff=true;try{await touch1200(state.port,'tinyusb');}catch(error){log(`Bootloader entry was interrupted (${error.message}); no second touch was sent.`);}
-    state.port=null;state.generation++;$('transport-mode').value='no_reset';$('already-bootloader').checked=true;$('port-status').textContent='Choose same ROM radio';notice('Bootloader entry requested, not yet verified. Choose the same radio’s ROM port; its connection strategy is already set. Then Prepare update verifies chip and partitions. If the device disappears, pause VMs with USB auto-capture before retrying; do not assume a 30-second return.');return;
+    state.port=null;state.generation++;$('transport-mode').value='no_reset';$('already-bootloader').checked=true;$('port-status').textContent='Choose same ROM radio';notice('Bootloader entry requested, not yet verified. Choose the same radio’s ROM port; its connection strategy is already set. Then Prepare update verifies chip and partitions. If the device disappears, pause VMs with USB auto-capture before retrying; do not assume a 30-second return.'+(manualBootAdvice?' '+manualBootAdvice:''));return;
   }
   const trialPort=state.port,trialGeneration=state.generation,trialInstallMode=state.installMode;
   state.handoff=true;
@@ -1810,7 +1811,7 @@ async function prepareSelectedFirmware({waitForRom=false}={}) {
       if(result.handoff){
         await closeEsp();state.handoff=true;state.port=null;state.generation++;$('transport-mode').value='no_reset';$('already-bootloader').checked=true;$('port-status').textContent='Choose same ROM radio';
         progress(0,'Bootloader handoff requested, not yet verified. Select the same radio’s ROM USB port; preparation will not reset it again.');
-        notice('USB connection testing is waiting for the radio. Select the same radio’s ROM port; preparation will connect without another reset. Nothing has been erased or written. If a VM captured USB, pause its USB auto-capture before retrying.');return;
+        notice('USB connection testing is waiting for the radio. Select the same radio’s ROM port; preparation will connect without another reset. Nothing has been erased or written. If a VM captured USB, pause its USB auto-capture before retrying.'+(manualBootAdvice?' '+manualBootAdvice:''));return;
       }
       esp=result.session;info=result.info;mode=result.mode;
       if(state.port!==trialPort||state.generation!==trialGeneration||state.pkg!==pkg)fail('The radio or image changed during USB connection testing. No write was performed.');
@@ -1849,7 +1850,19 @@ async function prepareSelectedFirmware({waitForRom=false}={}) {
     else if(prepared.needed) { $('migration-status').textContent=`Verified USB migration for ${prepared.board}; exact firmware ${prepared.firmware_version}. Keep this tab open until final verification.`; notice(prepared.resume===false&&state.migration?'Original source layout verified. The partial bridge can be rewritten safely before it is started; review and acknowledge the migration again.':'Partition expansion is needed. Review & flash writes the verified USB bridge first. No application or bridge has been written yet.'); }
     else notice(`Read-only plan ready for ${info.mac}. Offsets: ${state.plan.addresses.map(n => '0x' + n.toString(16)).join(', ')}.${prepared.mirroredSlots?' Missing fallback slots will be populated and independently verified.':''}`);
   }
-  catch (error) { try{await closeEsp();}catch(closeError){log(`Serial close: ${closeError.message}`);}if(testingConnection){progress(0,`Automatic connection testing stopped: ${error.message||String(error)}`);if(state.port===trialPort&&state.generation===trialGeneration){state.connectionTrial={port:trialPort,generation:trialGeneration,failed:true};state.handoff=false;updateConnectionChoice();}}throw error; }
+  catch (error) {
+    try{await closeEsp();}catch(closeError){log(`Serial close: ${closeError.message}`);}
+    let reported=error;
+    if(manualBootAdvice&&(error.connectionFallbackExhausted===true||error.romHandshakeFailed===true||error.romNotReady===true)){
+      // A browser may return a read-only DOMException. Keep its recovery flags
+      // without trying to mutate its message property.
+      reported=Object.assign(new Error('',{cause:error}),error);
+      reported.message=`${error.message||String(error)} ${manualBootAdvice}`;
+      reported.name=error.name||'Error';
+    }
+    if(testingConnection){progress(0,`Automatic connection testing stopped: ${reported.message||String(reported)}`);if(state.port===trialPort&&state.generation===trialGeneration){state.connectionTrial={port:trialPort,generation:trialGeneration,failed:true};state.handoff=false;updateConnectionChoice();}}
+    throw reported;
+  }
 }
 $('prepare').onclick = () => operation(prepareSelectedFirmware);
 function nrfApplicationActivationCheck(pkg){

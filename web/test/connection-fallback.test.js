@@ -1,8 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {tryNativeUsbFallback} from '../src/connection-fallback.js';
+import {tryNativeUsbFallback,xiaoS3ManualBootAdvice} from '../src/connection-fallback.js';
 
 const noSync=()=>Object.assign(new Error('Failed to connect with the device'),{romHandshakeFailed:true});
+
+test('manual XIAO S3 guidance is limited to its USB identity or reviewed reported model',()=>{
+  const advice=xiaoS3ManualBootAdvice({usbInfo:{usbVendorId:0x2886,usbProductId:0x0059}});
+  assert.match(advice,/hold BOOT, tap RESET, then release BOOT/);
+  assert.match(advice,/In a VM, attach the newly appeared USB device/);
+  assert.match(advice,/same board’s ROM port/);
+  assert.match(xiaoS3ManualBootAdvice({model:'Seeed XIAO ESP32-S3'}),/hold BOOT/);
+  assert.equal(xiaoS3ManualBootAdvice({usbInfo:{usbVendorId:0x2886,usbProductId:0x8059},model:'Xiao nRF52'}),'');
+  assert.equal(xiaoS3ManualBootAdvice({usbInfo:{usbVendorId:0x303a,usbProductId:0x1001},model:'Heltec V4'}),'');
+  assert.equal(xiaoS3ManualBootAdvice(), '');
+});
 function fixture({results=[],onConnect,onClose,onTouch}={}){
   const calls=[],sessions=[],info={chip:'ESP32-S3',mac:'aa:bb:cc:dd:ee:ff',flashBytes:4<<20};
   let current=true,available=true,index=0;

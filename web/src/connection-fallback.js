@@ -10,6 +10,17 @@ function pendingTinyUsbHandoff(error){
 }
 function stale(){return new Error('The selected radio or firmware changed during connection testing. No further reset was sent.');}
 
+// Board-specific guidance is only informational; it must never select a port,
+// change a connection mode, or imply that the ROM or device identity was proved.
+export function xiaoS3ManualBootAdvice({usbInfo={},model=''}={}){
+  const knownUsb=usbInfo?.usbVendorId===0x2886&&usbInfo?.usbProductId===0x0059;
+  const name=typeof model==='string'?model.replace(/[^a-z0-9]/gi,'').toUpperCase():'';
+  const knownModel=new Set(['XIAOS3','XIAOS3WIO','SEEEDXIAOS3','SEEEDXIAOESP32S3',
+    'SEEEDSTUDIOXIAOS3','SEEEDSTUDIOXIAOS3WIO']);
+  if(!knownUsb&&!knownModel.has(name))return '';
+  return 'If the ROM port does not appear, on the XIAO ESP32-S3 hold BOOT, tap RESET, then release BOOT. In a VM, attach the newly appeared USB device to the VM. Select the same board’s ROM port, choose Already in ROM/DFU, then prepare the update again.';
+}
+
 export async function tryNativeUsbFallback({connect,close,touch,isCurrent,portAvailable,log=()=>{},preferredMode=null}={}){
   if([connect,close,touch,isCurrent,portAvailable,log].some(callback=>typeof callback!=='function'))throw new TypeError('Native USB connection testing requires bounded connection and selected-port callbacks.');
   if(![null,'usb_reset','tinyusb'].includes(preferredMode))throw new TypeError('The preferred native USB connection method must be usb_reset, tinyusb or null.');
