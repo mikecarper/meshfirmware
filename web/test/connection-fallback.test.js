@@ -6,6 +6,9 @@ const noSync=()=>Object.assign(new Error('Failed to connect with the device'),{r
 
 test('manual XIAO S3 guidance is limited to its USB identity or reviewed reported model',()=>{
   const advice=xiaoS3ManualBootAdvice({usbInfo:{usbVendorId:0x2886,usbProductId:0x0059}});
+  assert.match(advice,/If the ROM port does not appear, try a USB hub/);
+  assert.match(advice,/data-capable cable/);
+  assert.match(advice,/application port, choose ESP32 TinyUSB application/);
   assert.match(advice,/hold BOOT, tap RESET, then release BOOT/);
   assert.match(advice,/In a VM, attach the newly appeared USB device/);
   assert.match(advice,/same board’s ROM port/);

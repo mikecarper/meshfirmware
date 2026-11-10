@@ -1836,11 +1836,26 @@ test('XIAO S3 handoff explains physical BOOT and VM port reselection without ano
   ui.context.touch1200=async(_port,kind)=>ui.calls.push(kind);
   await ui.elements.get('prepare').onclick();
   assert.deepEqual(ui.calls,['fetch','backup','tinyusb']);
+  assert.match(ui.elements.get('notice').textContent,/If the ROM port does not appear, try a USB hub/);
   assert.match(ui.elements.get('notice').textContent,/hold BOOT, tap RESET, then release BOOT/);
   assert.match(ui.elements.get('notice').textContent,/In a VM, attach the newly appeared USB device/);
   assert.match(ui.elements.get('notice').textContent,/Already in ROM\/DFU/);
   assert.equal(ui.elements.get('already-bootloader').checked,true);
   assert.equal(ui.evaluate('state.plan'),null);
+});
+
+test('manual XIAO S3 handoff offers hub advice only if the ROM port does not appear',async()=>{
+  const ui=workbench({productionDefaults:true});await Promise.resolve();
+  ui.context.selectedPort=ui.port;
+  ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0059});
+  ui.evaluate("state.port=selectedPort;state.device={model:'Seeed XIAO ESP32-S3',architecture:'esp32',usbMode:'tinyusb',usbModeStatus:'reported'};");
+  ui.context.ensureBackup=async()=>ui.calls.push('backup');ui.context.confirm=async()=>true;
+  ui.context.touch1200=async(_port,kind)=>ui.calls.push(kind);
+  await ui.elements.get('touch').onclick();
+  assert.deepEqual(ui.calls,['backup','tinyusb']);
+  assert.match(ui.elements.get('notice').textContent,/Choose USB port again for the same device/);
+  assert.match(ui.elements.get('notice').textContent,/If the ROM port does not appear, try a USB hub/);
+  assert.equal(ui.evaluate('state.port'),null);
 });
 
 test('successful application rereads retain exact-model architecture for automatic connection choice',async()=>{

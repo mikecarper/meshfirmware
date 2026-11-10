@@ -18,7 +18,7 @@ export function xiaoS3ManualBootAdvice({usbInfo={},model=''}={}){
   const knownModel=new Set(['XIAOS3','XIAOS3WIO','SEEEDXIAOS3','SEEEDXIAOESP32S3',
     'SEEEDSTUDIOXIAOS3','SEEEDSTUDIOXIAOS3WIO']);
   if(!knownUsb&&!knownModel.has(name))return '';
-  return 'If the ROM port does not appear, on the XIAO ESP32-S3 hold BOOT, tap RESET, then release BOOT. In a VM, attach the newly appeared USB device to the VM. Select the same board’s ROM port, choose Already in ROM/DFU, then prepare the update again.';
+  return 'If the ROM port does not appear, try a USB hub and a data-capable cable. Select the same board’s application port, choose ESP32 TinyUSB application as the bootloader connection, and retry the reset. If the ROM port still does not appear, on the XIAO ESP32-S3 hold BOOT, tap RESET, then release BOOT. In a VM, attach the newly appeared USB device to the VM. Select the same board’s ROM port, choose Already in ROM/DFU, then prepare the update again.';
 }
 
 export async function tryNativeUsbFallback({connect,close,touch,isCurrent,portAvailable,log=()=>{},preferredMode=null}={}){

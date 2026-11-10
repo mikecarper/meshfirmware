@@ -1720,9 +1720,10 @@ $('touch').onclick = () => operation(async () => {
   if (dfuIds.has(portId(state.port))) fail('Already a known DFU port; no 1200-baud touch is needed.');
   await ensureBackup();
   if (mode!=='nrf52'&&!await confirm('Enter USB bootloader?','This resets the selected application USB interface. A new port may appear.','Bluetooth may disconnect. Select the same physical device again after the touch.','ENTER BOOTLOADER')) return;
+  const manualBootAdvice=mode==='tinyusb'?xiaoS3ManualBootAdvice({usbInfo:state.port?.getInfo?.(),model:state.device?.model}):'';
   await closeEsp();if(mode==='nrf52'){await requestNrf52Handoff();return;}
   state.handoff=true; try { await touch1200(state.port,mode); } catch (error) { log(`The touch was interrupted (${error.message}). Delivery is uncertain; no second touch was sent.`); }
-  state.handoff=true;state.port = null; state.generation++; $('port-status').textContent = 'Select bootloader port'; $('device-name').textContent = 'USB handoff requested'; notice('Choose USB port again for the same device. Set ESP32 to already in ROM, or select the nRF52 DFU port. If a VM captures the reconnect, pause its USB auto-capture before retrying.');
+  state.handoff=true;state.port = null; state.generation++; $('port-status').textContent = 'Select bootloader port'; $('device-name').textContent = 'USB handoff requested'; notice('Choose USB port again for the same device. Set ESP32 to already in ROM, or select the nRF52 DFU port. If a VM captures the reconnect, pause its USB auto-capture before retrying.'+(manualBootAdvice?' '+manualBootAdvice:''));
   if (mode === 'tinyusb') $('transport-mode').value = 'no_reset';
 });
 $('probe').onclick = () => operation(detectSelectedBoard);
