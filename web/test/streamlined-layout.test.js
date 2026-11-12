@@ -59,7 +59,7 @@ test('USB selection is the first initially visible main-page control in the comp
 
 test('Serial console is immediately after Flash firmware in the top navigation',()=>{
   const navigation=nodes.find(node=>node.tag==='nav'&&node.attrs['aria-label']==='Tools');
-  assert.ok(navigation);assert.deepEqual(navigation.children.filter(node=>node.tag==='a').map(node=>node.attrs.href),['#flasher','#console','#backups','#capabilities']);
+  assert.ok(navigation);assert.deepEqual(navigation.children.filter(node=>node.tag==='a').map(node=>node.attrs.href),['#flasher','#console','#backups','#capabilities','https://mikecarper.github.io/MeshCore/']);
 });
 
 test('main workflow and console controls use 140 percent type without page zoom',()=>{
