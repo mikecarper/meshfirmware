@@ -48,6 +48,30 @@ function nrfBundledComponents(item){
   const component='(?:bootloader|softdevice)',version='(?:(?:OTAFIX|Adafruit)\\s+)?(?:v?\\d+(?:\\.\\d+){1,3}\\s+)?';
   return new RegExp(`(?:\\b(?:includes?|bundles?|carries|embeds?)\\s+(?:the\\s+)?(?:exact[- ]board\\s+)?|\\+\\s*)${version}${component}\\b(?!\\s+(?:support|compatibility|requirements?))`,'i').test(description);
 }
+// Only the rebuilt 1.18.0.1 applications have the reviewed embedded-loader
+// identity guard. These are manual choices, never automatic recommendations.
+// Keep the release family, asset filename, repository and published digest
+// bound together: an old catalog entry cannot authorize an earlier combo.
+export function guardedEmbeddedApplication(item){
+  if(!item||item.project!=='MeshCore'||catalogProvider(item.provider)!=='Keymind Cascade'||
+      item.architecture!=='nrf52'||item.action!=='flash'||!['repeater','roomServer'].includes(item.role)||
+      typeof item.hardware!=='string'||!item.hardware.trim()||
+      item.version!=='v1.18.0.1-halo-keymind-cascade-dev-03214a16'||
+      typeof item.name!=='string'||!/^[A-Za-z0-9_-]+-with-bootloader-2\.4\.12-(?:full|reduced)-ota-v1\.18\.0\.1-halo-keymind-cascade-dev-40dd42de\.zip$/.test(item.name)||
+      !/^[a-f0-9]{64}$/i.test(item.sha256||''))return false;
+  const prefix=item.name.split('-with-bootloader-')[0];
+  if(/(?:^|[_.\s-])(?:bootloader|softdevice|erase|formatter|format|wipe)(?:[_.\s-]|$)|^R_/i.test(prefix))return false;
+  if(['includesSoftdevice','containsSoftdevice','embeddedSoftdevice','erase','destructive'].some(key=>item[key]===true)||
+      (Array.isArray(item.components)&&item.components.some(component=>typeof component==='string'&&/^(?:softdevice|erase|formatter|wipe)$/i.test(component.trim()))))return false;
+  if(item.role==='repeater'&&!/_repeater(?:_|-)/i.test(item.name))return false;
+  if(item.role==='roomServer'&&!/_room_server(?:_|-)/i.test(item.name))return false;
+  try{
+    const url=new URL(item.url);
+    return url.origin==='https://github.com'&&!url.username&&!url.password&&!url.search&&!url.hash&&
+      ['lora-ota-v1.18.0.1-halo-keymind-cascade-dev-03214a16','lora-ota-2-v1.18.0.1-halo-keymind-cascade-dev-03214a16'].some(tag=>
+        url.pathname==='/mikecarper/MeshCore/releases/download/'+tag+'/'+item.name);
+  }catch{return false;}
+}
 export function matchesInstallMode(item,installMode='update'){
   if(!['update','install'].includes(installMode))return false;
   if(!item||item.project!=='MeshCore'||!applicationRoles.has(item.role)||typeof item.name!=='string'||typeof item.version!=='string'||typeof item.url!=='string')return false;
@@ -61,11 +85,11 @@ export function matchesInstallMode(item,installMode='update'){
   // erase package and explicit erase/reconnect consent in the flashing flow.
   return item.architecture==='nrf52'&&item.action==='flash'&&/\.zip$/i.test(item.name)&&!merged;
 }
-// Catalog visibility is broader only for historical application wrappers.
-// nRF52 embedded-bootloader variants stay out of the normal firmware list;
-// bootloader updates have their own exact-board, separately confirmed workflow.
+// Explicitly selected, reviewed embedded-loader applications can appear in the
+// list, but remain excluded from automatic selection by matchesInstallMode.
 export function matchesCatalogInstallMode(item,installMode='update'){
   if(matchesInstallMode(item,installMode))return true;
+  if(['update','install'].includes(installMode)&&guardedEmbeddedApplication(item))return true;
   if(!['update','install'].includes(installMode)||!item||item.project!=='MeshCore'||!applicationRoles.has(item.role))return false;
   if(![item.name,item.version,item.url].every(value=>typeof value==='string'&&value.trim()))return false;
   if(installMode!=='update'||/(?:^|[_.\s-])(?:merged|bootloader|softdevice|erase|formatter|format)(?:[_.\s-]|$)|^R_/i.test(item.name))return false;
