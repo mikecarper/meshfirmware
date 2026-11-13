@@ -621,6 +621,7 @@ function controls() {
   syncInstallMode();
   updateStepGuidance(updateArtifactChoiceHighlight());
   updateBootloaderOffer();
+  updateTopBootloaderAction();
   // Extras stay collapsed for ordinary updates, but never conceal a required
   // recovery/migration step or a deliberately selected destructive action.
   if(state.espRecovery)revealPanel('esp-retry-options');
@@ -1481,6 +1482,25 @@ function bootloaderItem(){
   if(running&&file&&running!==file)return null;
   return xiaoBootloaderItem({item,snapshot:state.bootloaderCatalog,profile:running||file});
 }
+function repeaterBootloaderRole(){
+  const device=state.device;
+  if(device?.role==='companion'||/^companion/i.test(device?.catalogRole||''))return false;
+  return ['repeater','roomServer'].includes($('role').value);
+}
+function topBootloaderActionAvailable(){
+  if(!repeaterBootloaderRole())return false;
+  const hardware=$('hardware').value,role=$('role').value,provider=$('provider').value;
+  if($('artifact').value){
+    const selected=state.items[Number($('artifact').value)];
+    if(!selected||selected.hardware!==hardware||selected.role!==role||(provider&&selected.provider!==provider))return false;
+  }
+  return !!hardware&&state.items.some(item=>item.hardware===hardware&&item.role===role&&item.architecture==='nrf52'&&(!provider||item.provider===provider));
+}
+function updateTopBootloaderAction(){
+  const button=$('top-bootloader-update'),board=bootloaderItem();
+  button.hidden=!topBootloaderActionAvailable();
+  button.disabled=state.busy||button.hidden||board?.hardware!==$('hardware').value||!board?.bootloaderInfo||continuingDeviceFlow()||!!state.esp||!!state.plan||!!state.flashProgress;
+}
 function bootloaderUpdateContext(){
   const board=bootloaderItem(),device=state.device,info=board?.bootloaderInfo;
   if(!state.port||isNonMeshCore(device)||device?.architecture!=='nrf52'||!info||board.architecture!=='nrf52'||dfuIds.has(portId(state.port))||$('already-bootloader').checked)return null;
@@ -1509,6 +1529,7 @@ function updateBootloaderOffer(){
   $('nrf-bootloader-warning').hidden=!canOffer;
 }
 async function offerBootloaderAfterStartup(){
+  if(!repeaterBootloaderRole())return;
   const context=bootloaderUpdateContext();if(!canPrepareBootloaderUpdate(context))return;
   const {info,assessment}=context,port=state.port,generation=state.generation,key=JSON.stringify([state.device.publicKey||state.device.model,assessment.reported,info.sha256]);
   const approved={sha256:info.sha256,url:info.url,version:info.version,hardware:context.board.hardware,reported:assessment.reported,publicKey:state.device.publicKey,model:state.device.model};
@@ -1651,21 +1672,35 @@ $('radio-preset').onchange=chooseRadioPreset;
 $('radio-defaults-download').onclick=()=>operation(async()=>{const draft=state.radioDefaults;if(!draft?.provenance||!draft.customizedBytes||draft.dirty||hash(draft.customizedBytes)!==state.pkg?.sha256)fail('Apply valid defaults before saving the customized firmware.');download('custom-defaults-'+draft.name,draft.customizedBytes);notice('Customized firmware download started. This does not flash the radio.');});
 for(const id of ['radio-defaults-enabled',...radioDefaultsFields,'media-mesh-preset','media-mesh-cross',...mediaMeshFields]){const edited=()=>{if(radioDefaultsFields.includes(id))$('radio-preset').value='custom';editRadioDefaults();};$(id).onchange=edited;$(id).oninput=edited;}
 $('bootloader-source').onchange=controls;
-async function loadBootloaderFirmware(){
+async function loadBootloaderFirmware({assertContext=()=>{}}={}){
   const url=$('bootloader-source').value,source=bootloaderItem(),item=source?{...source,bootloader:[...(source.bootloader||[])],...(source.bootloaderInfo?{bootloaderInfo:{...source.bootloaderInfo}}:{})}:null,info=item?.bootloaderInfo;
   await clearFirmwareSelection();
+  assertContext();
   if(!url||!item)fail('Choose exact hardware or an explicit board firmware artifact and its bootloader ZIP.');
   if(item.architecture==='nrf52'&&(!info||info.url!==url||!item.bootloader?.includes(url)))fail('No verified stable bootloader from our fork is available for this exact hardware. Select a custom ZIP manually if you intend a recovery.');
   $('download-firmware').href=httpsUrl(url);
   try{
     setAutomaticSha(info?.sha256||'',new URL(url).pathname.split('/').pop());
     const bytes=await boundedFetch(url,{expectedSha256:info?.sha256||''});
+    assertContext();
     if(info&&bytes.length!==info.size)fail('Published bootloader size does not match the downloaded ZIP.');
     await loadFirmware(new URL(url).pathname.split('/').pop(),bytes,item);
     if(info)notice(`Our stable OTAFIX ${info.version} loaded and SHA-256 verified. ${bootloaderReinstallWarning}`);
   }catch(error){revealPanel('image-details');revealPanel('custom-firmware');throw new Error(error.message+' If this exact build is not hosted and the source blocks fetching, download the bootloader ZIP and choose it locally.');}
 }
 $('load-bootloader').onclick=()=>operation(loadBootloaderFirmware);
+$('top-bootloader-update').onclick=()=>operation(async()=>{
+  const board=bootloaderItem();
+  if(!topBootloaderActionAvailable()||board?.hardware!==$('hardware').value||!board?.bootloaderInfo||continuingDeviceFlow()||state.esp||state.plan||state.flashProgress)fail('Choose a supported repeater or room and its exact board bootloader before continuing.');
+  const selected=Object.fromEntries(['provider','hardware','role','artifact'].map(id=>[id,$(id).value])),port=state.port,device=state.device,info=JSON.stringify(board.bootloaderInfo);
+  let generation=null;
+  const assertContext=()=>{
+    if(generation===null)generation=state.generation;
+    if(generation!==state.generation||state.port!==port||state.device!==device||Object.entries(selected).some(([id,value])=>$(id).value!==value)||!topBootloaderActionAvailable()||JSON.stringify(bootloaderItem()?.bootloaderInfo)!==info)fail('The selected radio or bootloader changed. Choose it again; nothing was written.');
+  };
+  updateDownload();
+  await loadBootloaderFirmware({assertContext});
+});
 $('prepare-bootloader-update').onclick=()=>operation(async()=>{
   const context=bootloaderUpdateContext();
   if(!canPrepareBootloaderUpdate(context))fail('No separate bootloader update is currently recommended for this connected board.');

@@ -3517,6 +3517,75 @@ async function bootloaderOfferWorkbench({reported='0.11.0-OTAFIX2.4.10',role='co
   return {...ui,info,item,device,link};
 }
 
+test('the top bootloader action follows step 5, and the separate offer lives under Advanced',()=>{
+  assert.ok(html.indexOf('id="verify-app"')<html.indexOf('id="top-bootloader-update"'));
+  assert.ok(html.indexOf('id="top-bootloader-update"')<html.indexOf('id="advanced-options"'));
+  assert.ok(html.indexOf('id="advanced-options"')<html.indexOf('id="nrf-bootloader-offer"'));
+});
+
+test('the top bootloader action is available before USB for a supported exact repeater or room',async()=>{
+  const ui=workbench();await Promise.resolve();
+  const info={version:'2.4.12',profile:'heltec_t096',url:'https://example.test/t096.zip',sha256:'c'.repeat(64),size:64};
+  const repeater=xiaoRepeaterItem({hardware:'Heltec Mesh Node T096',bootloader:[info.url],bootloaderInfo:info});
+  const room={...repeater,role:'roomServer'};
+  ui.context.inventory=[repeater,room];ui.evaluate('state.items=inventory;filterCatalog();');
+  ui.elements.get('provider').value='MeshCore';ui.elements.get('hardware').value=repeater.hardware;
+  for(const role of ['repeater','roomServer']){
+    ui.elements.get('role').value=role;ui.elements.get('artifact').value='';ui.evaluate('updateDownload();controls();');
+    assert.equal(ui.elements.get('top-bootloader-update').hidden,false,role);
+    assert.equal(ui.elements.get('top-bootloader-update').disabled,false,role);
+    assert.equal(ui.evaluate('state.port'),null);assert.equal(ui.evaluate('state.pkg'),null);
+    assert.deepEqual(ui.calls,[]);
+  }
+  for(const role of ['companionFull','sensor','']){
+    ui.elements.get('role').value=role;ui.evaluate('controls();');
+    assert.equal(ui.elements.get('top-bootloader-update').hidden,true,role);
+  }
+  ui.elements.get('role').value='repeater';ui.context.detectedCompanion={role:'companion',catalogRole:'companionFull'};
+  ui.evaluate('state.device=detectedCompanion;controls();');
+  assert.equal(ui.elements.get('top-bootloader-update').hidden,true);
+  ui.evaluate('state.device=null;');ui.elements.get('artifact').value='1';ui.evaluate('controls();');
+  assert.equal(ui.elements.get('top-bootloader-update').hidden,true,'a stale room selection cannot supply a repeater bootloader');
+});
+
+test('the top bootloader action loads only the selected verified bootloader and never flashes',async()=>{
+  const ui=workbench();await Promise.resolve();
+  const info={version:'2.4.12',profile:'heltec_t096',url:'https://example.test/t096.zip',sha256:'c'.repeat(64),size:64};
+  const item=xiaoRepeaterItem({hardware:'Heltec Mesh Node T096',bootloader:[info.url],bootloaderInfo:info});
+  ui.context.inventory=[item];ui.evaluate('state.items=inventory;filterCatalog();');
+  ui.elements.get('provider').value='MeshCore';ui.elements.get('hardware').value=item.hardware;ui.elements.get('role').value='repeater';ui.elements.get('artifact').value='';
+  ui.context.component=fakePackage({name:'t096.zip',kind:'softdevice_bootloader',destructive:true,sha256:info.sha256});
+  ui.context.boundedFetch=async(url,options)=>{ui.calls.push('download:'+url);assert.equal(options.expectedSha256,info.sha256);return new Uint8Array(info.size);};
+  ui.context.hash=()=>info.sha256;ui.context.checkedZip=()=>[{name:'manifest.json'},{name:'bootloader.bin'},{name:'bootloader.dat'}];ui.context.inspectFirmware=()=>ui.context.component;
+  ui.evaluate('updateDownload();controls();');await ui.elements.get('top-bootloader-update').onclick();
+  assert.equal(ui.evaluate('state.pkg.name'),'t096.zip');assert.equal(ui.evaluate('state.item.bootloaderInfo.profile'),'heltec_t096');
+  assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls,['download:'+info.url]);
+});
+
+test('changing the selected role during bootloader download cannot load stale bytes',async()=>{
+  const ui=workbench();await Promise.resolve();
+  const info={version:'2.4.12',profile:'heltec_t096',url:'https://example.test/t096.zip',sha256:'c'.repeat(64),size:64};
+  const item=xiaoRepeaterItem({hardware:'Heltec Mesh Node T096',bootloader:[info.url],bootloaderInfo:info});
+  ui.context.inventory=[item];ui.evaluate('state.items=inventory;filterCatalog();');
+  ui.elements.get('provider').value='MeshCore';ui.elements.get('hardware').value=item.hardware;ui.elements.get('role').value='repeater';ui.elements.get('artifact').value='';
+  let resume;ui.context.boundedFetch=()=>new Promise(resolve=>{resume=resolve;});
+  ui.evaluate('updateDownload();controls();');const pending=ui.elements.get('top-bootloader-update').onclick();
+  while(!resume)await new Promise(resolve=>setImmediate(resolve));
+  ui.elements.get('role').value='companionFull';resume(new Uint8Array(info.size));await pending;
+  assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);
+  assert.match(ui.elements.get('notice').textContent,/selected radio or bootloader changed/i);
+  assert.deepEqual(ui.calls,[]);
+});
+
+test('a detected companion never receives the automatic post-startup bootloader prompt',async()=>{
+  const ui=await bootloaderOfferWorkbench({role:'companion',protocol:14});
+  ui.context.choose=async()=>{ui.calls.push('unexpected-prompt');return 'prepare';};
+  await ui.evaluate('offerBootloaderAfterStartup()');
+  assert.equal(ui.elements.get('top-bootloader-update').hidden,true);
+  assert.ok(!ui.calls.includes('unexpected-prompt'));
+  assert.equal(ui.elements.get('nrf-bootloader-offer').hidden,false,'the manual offer stays available under Advanced');
+});
+
 test('a read-only nRF52 bootloader query offers the exact board update separately without loading or resetting',async()=>{
   const ui=await bootloaderOfferWorkbench({reported:'\u001b[32m> get bootloader.ver\r\n> 0.11.0-OTAFIX2.4.10\u001b[0m\r\n'});
   assert.equal(ui.evaluate('state.device.bootloaderVersion'),'0.11.0-OTAFIX2.4.10');assert.equal(ui.evaluate('state.device.architecture'),'nrf52');
@@ -3854,6 +3923,22 @@ function prepareNrfStartup(ui,{reported='0.11.0-OTAFIX2.4.10',publicKey=ui.devic
   ui.context.expected={sha256:'a'.repeat(64),architecture:'nrf52',role:'common-cli',model:ui.device.model,publicKey:ui.device.publicKey,version:'v1.18.0.2'};ui.context.appPkg=fakePackage({name:ui.item.name});
   ui.evaluate('state.verification=expected;state.handoff=true;state.pkg=appPkg;');ui.elements.get('already-bootloader').checked=false;ui.calls.length=0;
 }
+
+test('after step 5 verifies a repeater, the top bootloader action remains available',async()=>{
+  const ui=await bootloaderOfferWorkbench({reported:'unknown command'});
+  prepareNrfStartup(ui,{reported:'0.11.0-OTAFIX2.4.12'});
+  await ui.evaluate('verifyApplication();');ui.evaluate('controls();');
+  assert.equal(ui.evaluate('state.verification'),null);
+  assert.equal(ui.elements.get('top-bootloader-update').hidden,false);
+  assert.equal(ui.elements.get('top-bootloader-update').disabled,false);
+  const name=new URL(ui.info.url).pathname.split('/').pop();ui.context.bootPkg=fakePackage({name,kind:'softdevice_bootloader',destructive:true,sha256:ui.info.sha256});
+  ui.context.boundedFetch=async url=>{assert.equal(url,ui.info.url);ui.calls.push('download-bootloader');return new Uint8Array(ui.info.size);};
+  ui.context.hash=()=>ui.info.sha256;ui.context.checkedZip=()=>[{name:'manifest.json'},{name:'bootloader.bin'},{name:'bootloader.dat'}];ui.context.inspectFirmware=()=>ui.context.bootPkg;
+  await ui.elements.get('top-bootloader-update').onclick();
+  assert.ok(ui.calls.includes('download-bootloader'));
+  assert.equal(ui.evaluate('state.pkg'),ui.context.bootPkg);
+  assert.equal(ui.evaluate('state.plan'),null);
+});
 
 test('installing an application that can report bootloader version prompts only after startup is verified',async()=>{
   const ui=await bootloaderOfferWorkbench({reported:'unknown command'});assert.equal(ui.elements.get('prepare-bootloader-update').hidden,true);

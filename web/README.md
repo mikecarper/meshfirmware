@@ -629,6 +629,13 @@ bounds checks. Forced transfers still do not prove that the image will boot.
 
 ### nRF52 erase and recovery
 
+For repeaters and room servers with a supported exact board, **Update
+bootloader** appears beside the main workflow buttons. It loads the verified
+board-specific ZIP; backup, DFU handoff and the final flash confirmation are
+still separate. Ambiguous boards require the identity checks in Advanced
+options. Companion bootloader controls remain under **Advanced options &
+troubleshooting**, and Companions do not receive an automatic bootloader prompt.
+
 The normal nRF52 firmware list contains application-only serial DFU ZIPs in
 both **Update** and **Erase & new install** modes. Embedded `with-bootloader`
 variants are not offered there; bootloader replacement is a separate operation.

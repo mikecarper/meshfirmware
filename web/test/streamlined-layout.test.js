@@ -247,10 +247,9 @@ test('release notes and catalog metadata stay behind a collapsed Firmware detail
   assert.equal(closedAncestors(get('image-warning')).length,0,'Hiding release notes must not hide write warnings');
 });
 
-test('the connected nRF52 bootloader status is separate from firmware choices and hidden until supported detection',()=>{
-  const offer=get('nrf-bootloader-offer'),status=get('nrf-bootloader-status'),button=get('prepare-bootloader-update'),warning=get('nrf-bootloader-warning'),workflow=nodes.find(node=>hasClass(node,'workflow')),device=nodes.find(node=>hasClass(node,'device-display'));
-  assert.equal(offer.tag,'div');assert.ok(hasClass(offer,'bootloader-offer'));assert.ok(has(offer,'hidden'));assert.ok(inside(offer,workflow));assert.equal(closedAncestors(offer).length,0);
-  assert.ok(device.start<offer.start&&offer.start<get('firmware-choices').start,'Version status belongs beside the connected device, before application selection');
+test('the detailed bootloader status remains available under Advanced options',()=>{
+  const offer=get('nrf-bootloader-offer'),status=get('nrf-bootloader-status'),button=get('prepare-bootloader-update'),warning=get('nrf-bootloader-warning'),advanced=get('advanced-options');
+  assert.equal(offer.tag,'div');assert.ok(hasClass(offer,'bootloader-offer'));assert.ok(has(offer,'hidden'));assert.ok(inside(offer,advanced));assert.deepEqual(closedAncestors(offer),[advanced]);
   assert.ok(inside(status,offer));assert.equal(status.attrs.role,'status');assert.equal(status.attrs['aria-live'],'polite');
   assert.ok(inside(button,offer));assert.equal(button.tag,'button');assert.equal(button.attrs.type,'button');assert.ok(has(button,'hidden'));assert.ok(has(button,'data-lock'));assert.ok(hasClass(button,'secondary'));assert.ok(!hasClass(button,'step-button'));
   assert.equal(button.attrs['aria-describedby'],warning.attrs.id);assert.ok(inside(warning,offer));assert.match(html.slice(warning.start).split('</p>')[0],/Back up first/);assert.match(html.slice(warning.start).split('</p>')[0],/reinstalling the matching application/);
@@ -493,8 +492,9 @@ test('USB, backup and flash are primary actions while optional verification keep
     assert.match(button.attrs['aria-label']||'',new RegExp(`step ${number}\\b`,'i'),`#${id} must announce its step`);
   }
   assert.ok(inside(get('prepare-label'),get('prepare')));assert.match(html.slice(get('prepare-label').start).split('</span>')[0],/Backup\s*(?:&amp;|&)\s*prepare/i);
-  assert.ok(!nodes.filter(node=>node.tag==='button'&&!['select-port','prepare','flash','verify-app','read-bootloader-info'].includes(node.attrs.id)).some(node=>hasClass(node,'step-button')),'Optional tools must not suggest extra mandatory workflow steps');
-  const verify=get('verify-app'),row=get('flash').parent;assert.equal(verify.parent,row);assert.deepEqual(row.children.map(node=>node.attrs.id),['prepare','flash','verify-app'],'The main action row must follow steps 3, 4, 5');assert.equal(closedAncestors(verify).length,0);assert.ok(!inside(verify,get('verification-options')));assert.ok(has(verify,'disabled')&&has(verify,'data-lock'));
+  assert.ok(!nodes.filter(node=>node.tag==='button'&&!['select-port','prepare','flash','verify-app','top-bootloader-update','read-bootloader-info'].includes(node.attrs.id)).some(node=>hasClass(node,'step-button')),'Other optional tools must not suggest extra mandatory workflow steps');
+  const verify=get('verify-app'),bootloader=get('top-bootloader-update'),row=get('flash').parent;assert.equal(verify.parent,row);assert.deepEqual(row.children.map(node=>node.attrs.id),['prepare','flash','verify-app','top-bootloader-update'],'The optional bootloader action follows step 5');assert.equal(closedAncestors(verify).length,0);assert.ok(!inside(verify,get('verification-options')));assert.ok(has(verify,'disabled')&&has(verify,'data-lock'));
+  assert.equal(bootloader.tag,'button');assert.equal(bootloader.attrs.type,'button');assert.ok(has(bootloader,'hidden')&&has(bootloader,'disabled')&&has(bootloader,'data-lock'));assert.ok(hasClass(bootloader,'secondary'));assert.ok(!hasClass(bootloader,'primary'));assert.ok(!bootloader.children.some(node=>hasClass(node,'action-number')),'Bootloader update must be an optional unnumbered action');
 });
 
 test('step 2 numbers the installation choices once without creating a fake action or hiding their group label',()=>{
