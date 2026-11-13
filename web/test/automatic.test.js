@@ -269,25 +269,6 @@ test('nRF52 embedded-bootloader application bundles are absent from both ordinar
   }
 });
 
-test('only verified rebuilt guarded applications are visible manually, never auto-selected',()=>{
-  const version='v1.18.0.1-halo-keymind-cascade-dev-03214a16';
-  const name='Heltec_t1_repeater_lora_ota_no_external_sensors-with-bootloader-2.4.12-full-ota-v1.18.0.1-halo-keymind-cascade-dev-40dd42de.zip';
-  const url='https://github.com/mikecarper/MeshCore/releases/download/lora-ota-'+version+'/'+name;
-  const guarded=app({provider:'Keymind Cascade',hardware:'Heltec Mesh Node T1',architecture:'nrf52',role:'repeater',action:'flash',version,name,url,sha256:'c'.repeat(64)});
-  for(const mode of ['update','install']){
-    assert.equal(matchesCatalogInstallMode(guarded,mode),true);
-    assert.equal(matchesInstallMode(guarded,mode),false);
-    assert.equal(chooseFirmware({items:[guarded],hardware:guarded.hardware,provider:guarded.provider,role:guarded.role,installMode:mode}).artifactIndex,null);
-    for(const change of [{sha256:undefined},{sha256:'bad'},{version:'v1.18.0.2'},
-      {name:name.replace('40dd42de','03214a16')},{url:url.replace('40dd42de','03214a16')},
-      {url:url.replace('github.com','evil.example')},{url:url+'?x=1'},
-      {provider:'MeshCore'},{role:'companionFull'},{role:'roomServer'},{action:'download'},
-      {includesSoftdevice:true},{components:['softdevice']},{erase:true},{destructive:true}]){
-      assert.equal(matchesCatalogInstallMode({...guarded,...change},mode),false,JSON.stringify(change));
-    }
-  }
-});
-
 test('explicit nRF52 bundled-content metadata or an embedded asset basename cannot hide behind an ordinary filename',()=>{
   const nrf=app({architecture:'nrf52',action:'flash',name:'board_repeater-v1.18.0.zip',url:'https://example.test/board_repeater-v1.18.0.zip'});
   const embedded=[

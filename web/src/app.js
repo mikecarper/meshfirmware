@@ -18,7 +18,7 @@ import { BrowserPlanner } from './planner.js';
 import { waitForMigration } from './migration.js';
 import { recoveryPackage } from './bootloader-recovery.js';
 import { detectBoard, detectRecoveryProfile } from './board-detection.js';
-import { chooseFirmware, firmwareVersionWarning, matchesCatalogInstallMode, guardedEmbeddedApplication } from './automatic.js';
+import { chooseFirmware, firmwareVersionWarning, matchesCatalogInstallMode } from './automatic.js';
 import { chooseConnection, parseUsbMode } from './connection-choice.js';
 import { lookupUsbConnectionMap } from './usb-connection-map.js';
 import usbConnectionMap from './data/usb-connection-map.json';
@@ -879,8 +879,7 @@ function updateFirmwareSelectionSummary({item,automatic=false,reason=''}={}) {
   const detail=item?.role?`${item.hardware} · ${item.provider} · ${item.title||item.role} · ${item.version}\n${item.name}\n${state.installMode==='install'?'Erase & new install selected.':automatic?'Write-only update selected.':'Manual firmware selection.'} Prepare ${state.installMode==='install'?'install':'update'} downloads, validates and offers backup before bootloader entry. Nothing is flashed until you confirm.`
     :state.pkg?`${state.pkg.name}\nValidated image loaded. Manually review it against the connected radio before preparing and flashing. Nothing is written until you confirm.`
     :[fields.length?`Firmware target: ${fields.join(' · ')}.`:'',reason||'Choose hardware, role and a firmware artifact. No image has been loaded or written.'].filter(Boolean).join('\n');
-  const embeddedWarning=guardedEmbeddedApplication(item)?'Includes a guarded bootloader updater. The bootloader may be replaced after startup if the installed bootloader matches. Confirm the exact hardware before proceeding.':'';
-  $('automatic-summary').textContent=[isBootloaderInfo()?bootloaderInfoWarning:isMeshtastic()?meshtasticMigrationWarning:'',item&&!state.pkg?firmwareDowngradeWarning(null,item):'',mismatch,detail,embeddedWarning].filter(Boolean).join('\n');
+  $('automatic-summary').textContent=[isBootloaderInfo()?bootloaderInfoWarning:isMeshtastic()?meshtasticMigrationWarning:'',item&&!state.pkg?firmwareDowngradeWarning(null,item):'',mismatch,detail].filter(Boolean).join('\n');
 }
 function continuingDeviceFlow(){return !!(state.migrationApproval||state.handoff||state.recovery||state.espRecovery||state.migration||state.verification);}
 function resetAutomaticBoardSelection(message) {
@@ -1368,11 +1367,6 @@ async function loadFirmware(name, bytes, item = null,{allowModeSync=true}={}) {
     }
   }
   const pkg = inspectFirmware(name,bytes);
-  if(guardedEmbeddedApplication(item)){
-    if(pkg.name!==item.name||pkg.sha256.toLowerCase()!==item.sha256.toLowerCase()||pkg.architecture!=='nrf52'||pkg.kind!=='application'||pkg.erase||pkg.destructive)fail('Embedded-bootloader application bytes did not match the verified catalog entry. Nothing was written.');
-    pkg.guardedEmbedded=true;
-    pkg.warnings.push('This application includes a guarded bootloader updater. It may replace the bootloader after startup if the installed bootloader matches; confirm the exact physical board.');
-  }
   state.radioDefaults={name,bytes:bytes.slice(),sourceSha256:hash(bytes),verifiedSourceSha256:expected||null,inspection:null,appliedSettings:null,dirty:false,provenance:null};
   state.pkg = pkg;state.item=item;state.backupApproved=null; $('image-name').textContent = pkg.name; $('image-kind').textContent = pkg.kind; $('image-size').textContent = size(bytes.length); $('image-sha').textContent = pkg.sha256;refreshFirmwareWarnings();
   let customModeNotice='';
@@ -1923,18 +1917,6 @@ async function flashPreparedFirmware() {
   assertBoardScope();
   const boardCheck=await acknowledgeFirmwareBoard(pkg,assertBoardScope);
   if(plan.erasePkg){await acknowledgeFirmwareBoard(plan.erasePkg,assertBoardScope);assertBoardScope();}
-  const guardedItem=guardedEmbeddedApplication(state.item)?state.item:null;
-  if(pkg.guardedEmbedded&&!guardedItem)fail('The embedded-bootloader catalog identity changed after loading. Prepare the update again.');
-  const guardedChoice=$('artifact').value,guardedEvidence=guardedItem?JSON.stringify(guardedItem):null;
-  const assertGuardedSelection=()=>{
-    if(guardedItem&&(state.item!==guardedItem||JSON.stringify(guardedItem)!==guardedEvidence||!guardedEmbeddedApplication(guardedItem)||$('artifact').value!==guardedChoice||state.pkg!==pkg||state.plan!==plan||plan.generation!==state.generation||plan.port!==state.port))fail('The selection changed during bootloader confirmation. Prepare the update again.');
-  };
-  if(guardedItem){
-    if(pkg.name!==guardedItem.name||pkg.sha256.toLowerCase()!==guardedItem.sha256.toLowerCase())fail('The selected embedded-bootloader application no longer matches its verified catalog entry.');
-    if(!await confirm('Application with bootloader updater',`${guardedItem.hardware}\n${pkg.name}\nSHA-256 ${pkg.sha256}`,'The application may replace the installed bootloader after startup if its identity is recognized. Confirm the exact physical board and review the normal write confirmation next.','INCLUDE BOOTLOADER'))return;
-    assertGuardedSelection();
-    assertBoardScope();
-  }
   const token = pkg.expert ? `WRITE 0x${plan.addresses[0].toString(16)}` : pkg.destructive||plan.erasePkg ? 'WIPE WITHOUT BACKUP' : 'FLASH';
   const detail = `${pkg.name}\nSHA-256 ${pkg.sha256}\nBoard check: ${boardCheck.reason}\n${radioDefaultsSummary() ? radioDefaultsSummary()+'\nSource SHA-256 '+state.radioDefaults.sourceSha256+'\n':''}${plan.mac ? 'Verified chip MAC ' + plan.mac : plan.uf2Info || 'Physical board identity is not independently verified.'}${selectedBootloader(pkg)?'\nOur OTAFIX '+selectedBootloader(pkg).version+' · '+selectedBootloader(pkg).profile+'\n'+bootloaderReinstallWarning:''}${plan.erasePkg?'\nERASE FIRST: '+plan.erasePkg.name+'\nSHA-256 '+plan.erasePkg.sha256+'\n'+plan.erasePkg.warnings.join(' '):''}`;
   const backupWarning=isMeshtasticMigration()?'Meshtastic will be replaced. Its settings, channels and identity are not backed up or converted to MeshCore. ':$('skip-backup').checked?'You chose to skip backup. No new logical backup was created. ':'';
@@ -1956,7 +1938,6 @@ async function flashPreparedFirmware() {
   }
   if (plan.generation !== state.generation || plan.port !== state.port) fail('Device disconnected or selection changed during confirmation.');
   assertBoardScope();
-  assertGuardedSelection();
   if((state.radioDefaults?.postFlashPlan||null)!==settingsPlan)fail('Post-flash settings changed during confirmation. Review the operation again.');
   if(approval){if(approval!==state.migrationApproval)fail('Automatic migration approval was stopped.');if(bridge)approval.beginBridge(pkg,plan);else approval.beginFinal(pkg,plan);}
   clearVerification();

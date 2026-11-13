@@ -12,7 +12,7 @@ import {nrfDfuUsbIds} from '../src/nrf-usb-ids.js';
 import {nrfBoardCandidates} from '../src/nrf-board-candidates.js';
 import {parseBootloaderInfo,detectBootloaderBoard} from '../src/bootloader-info.js';
 import {xiaoInstalledStatus,xiaoInfoProfile,xiaoBootloaderItem} from '../src/xiao-bootloader.js';
-import {chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,guardedEmbeddedApplication} from '../src/automatic.js';
+import {chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode} from '../src/automatic.js';
 import {chooseConnection,parseUsbMode} from '../src/connection-choice.js';
 import {lookupUsbConnectionMap} from '../src/usb-connection-map.js';
 import {createNextStepScroller} from '../src/next-step-scroll.js';
@@ -54,7 +54,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
   if(espRecovery)storage.set('meshfirmware.espRecovery',JSON.stringify(espRecovery));
   if(verification)storage.set('meshfirmware.verifyApplication',JSON.stringify(verification));
   const context=vm.createContext({quickSettingPlan,commonCliReplyState,canonicalHardware,nrfDfuUsbIds,lookupUsbConnectionMap,usbConnectionMap:{schemaVersion:1,builds:[]},document:{getElementById:id=>{assert.ok(elements.has(id),`Missing HTML id ${id}`);return elements.get(id);},querySelectorAll:()=>[...elements.values()]},navigator:{serial:{requestPort:async()=>{calls.push('chooser');return port;},getPorts(){throw new Error('must not enumerate automatically');},addEventListener(type,handler){serialEvents[type]=handler;}}},window:{performance:performanceApi,location:{search},addEventListener(type,handler){windowEvents[type]=handler;}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},Option,URL,URLSearchParams,Blob,Uint8Array,TextEncoder,TextDecoder,console,setTimeout,clearTimeout,AbortSignal,Date,
-    fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,guardedEmbeddedApplication,chooseConnection,parseUsbMode,MigrationApproval,cleanCliReply,assessBootloaderVersion,firmwareFilesLinks,fetch:async()=>{throw Error('Unexpected network request');},fetchFirmwareBytes:(url,options)=>verifiedDownload(url,{...options,mirrorBase:'https://mirror.example.test/firmware/',pageOrigin:'https://mirror.example.test',fetchImpl:(target,init)=>target==='https://mirror.example.test/firmware/index.json'?Promise.resolve({ok:false,status:404}):options.fetchImpl(target,init)}),assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),commonCliRestorePreview:()=>({operations:[],skipped:[],warnings:[]}),restoreCommonCli:async()=>{throw Error('Unexpected CommonCLI restore');},
+    fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,parseUsbMode,MigrationApproval,cleanCliReply,assessBootloaderVersion,firmwareFilesLinks,fetch:async()=>{throw Error('Unexpected network request');},fetchFirmwareBytes:(url,options)=>verifiedDownload(url,{...options,mirrorBase:'https://mirror.example.test/firmware/',pageOrigin:'https://mirror.example.test',fetchImpl:(target,init)=>target==='https://mirror.example.test/firmware/index.json'?Promise.resolve({ok:false,status:404}):options.fetchImpl(target,init)}),assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),commonCliRestorePreview:()=>({operations:[],skipped:[],warnings:[]}),restoreCommonCli:async()=>{throw Error('Unexpected CommonCLI restore');},
     backupCoverage,createNextStepScroller,tryNativeUsbFallback,xiaoS3ManualBootAdvice,SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
   });
   context.assessFirmwareBoard=()=>({status:'match',requiresOverride:false,reason:'Test board identity.'});
@@ -1977,74 +1977,6 @@ test('nRF52 mode never opens a mounted-drive picker even for a non-Nordic UF2',a
 });
 const fakePackage=(extra={})=>({name:'final.zip',architecture:'nrf52',kind:'application',sha256:'a'.repeat(64),payloadHash:'b'.repeat(64),payload:new Uint8Array(64),warnings:[],destructive:false,...extra});
 function serialMock(ui){ui.context.SerialLink=class{async open(){ui.calls.push('open');}async close(){ui.calls.push('close');}async command(command){ui.calls.push(command);return '';}};}
-
-function guardedT1(profile='full'){
-  const version='v1.18.0.1-halo-keymind-cascade-dev-03214a16';
-  const name=`Heltec_t1_repeater_lora_ota_no_external_sensors-with-bootloader-2.4.12-${profile}-ota-v1.18.0.1-halo-keymind-cascade-dev-40dd42de.zip`;
-  return {project:'MeshCore',provider:'Keymind Cascade',hardware:'Heltec Mesh Node T1',architecture:'nrf52',role:'repeater',action:'flash',version,name,url:`https://github.com/mikecarper/MeshCore/releases/download/lora-ota-${version}/${name}`,sha256:'a'.repeat(64),title:'Repeater',subtitle:`${profile} + OTAFIX 2.4.12 bootloader`,erase:[],bootloader:[]};
-}
-
-test('guarded T1 choices are visible, clearly described, and never auto-selected',async()=>{
-  const ui=workbench();await Promise.resolve();
-  const embedded=[guardedT1(),guardedT1('reduced')];
-  const ordinary=embedded.map((item,i)=>({...item,name:`Heltec_t1_repeater-${i}-v1.18.0.zip`,url:`https://example.test/t1-${i}.zip`,subtitle:'LoRa OTA'}));
-  ui.context.inventory=[...ordinary,...embedded];ui.evaluate('state.items=inventory;filterCatalog();');
-  for(const [id,value] of [['provider','Keymind Cascade'],['hardware','Heltec Mesh Node T1'],['role','repeater'],['version',embedded[0].version]])ui.elements.get(id).value=value;
-  ui.evaluate('filterCatalog();');assert.deepEqual(artifactChoices(ui),['0','1','2','3']);
-  ui.elements.get('artifact').value='2';await ui.elements.get('artifact').onchange();
-  assert.match(ui.elements.get('automatic-summary').textContent,/bootloader may be replaced/i);
-  assert.equal(ui.evaluate('state.pkg'),null);assert.deepEqual(ui.calls,[]);
-});
-
-test('embedded updater requires explicit confirmation bound to the same package and device',async()=>{
-  for(const scenario of ['decline','changed-item','changed-item-field','changed-choice','changed-port','changed-during-final','accept']){
-    const ui=workbench();await Promise.resolve();serialMock(ui);ui.context.selectedPort=ui.port;ui.context.item=guardedT1();ui.context.pkg=fakePackage({name:ui.context.item.name});
-    ui.elements.get('hardware').value=ui.context.item.hardware;
-    ui.evaluate('state.item=item;state.port=selectedPort;state.pkg=pkg;state.plan={generation:state.generation,port:selectedPort,sha256:pkg.sha256};');
-    const prompts=[];ui.context.confirm=async(title,detail,warning,token)=>{
-      prompts.push({title,detail,warning,token});
-      if(token==='INCLUDE BOOTLOADER'){
-        assert.match(detail,/Heltec Mesh Node T1/);assert.match(detail,/SHA-256/);assert.match(warning,/may replace the installed bootloader/);
-        if(scenario==='changed-item')ui.evaluate('state.item={...state.item};');
-        if(scenario==='changed-item-field')ui.evaluate("state.item.sha256='f'.repeat(64);");
-        if(scenario==='changed-choice')ui.elements.get('artifact').value='3';
-        if(scenario==='changed-port')ui.evaluate('state.port={getInfo:()=>({})};');
-        return scenario!=='decline';
-      }
-      if(token==='FLASH'&&scenario==='changed-during-final')ui.evaluate("state.item.sha256='f'.repeat(64);");
-      return true;
-    };
-    ui.context.flashNrf=async()=>ui.calls.push('write');
-    await ui.elements.get('flash').onclick();
-    assert.equal(prompts[0]?.token,'INCLUDE BOOTLOADER',scenario);
-    if(scenario==='accept'){
-      assert.equal(prompts[1]?.token,'FLASH');assert.equal(ui.calls.filter(x=>x==='write').length,1);
-    }else{
-      assert.equal(prompts.length,scenario==='changed-during-final'?2:1,scenario);assert.ok(!ui.calls.includes('write'),scenario);
-      if(scenario!=='decline')assert.match(ui.elements.get('notice').textContent,/selection changed/i);
-    }
-  }
-});
-
-test('guarded application loading requires matching application bytes and warns before writing',async()=>{
-  for(const variant of ['valid','hash','component']){
-    const ui=workbench();await Promise.resolve();ui.context.item=guardedT1();
-    ui.context.pkg=fakePackage({name:ui.context.item.name,...(variant==='hash'?{sha256:'f'.repeat(64)}:{}),...(variant==='component'?{kind:'bootloader'}:{})});
-    ui.context.inspectFirmware=()=>ui.context.pkg;ui.context.checkedZip=()=>[{name:'manifest.json'},{name:'app.bin'},{name:'app.dat'}];
-    const run=ui.evaluate('loadFirmware(item.name,new Uint8Array(64),item)');
-    if(variant!=='valid'){await assert.rejects(run,/did not match the verified catalog entry/);assert.equal(ui.evaluate('state.pkg'),null);}
-    else{await run;assert.equal(ui.evaluate('state.pkg.guardedEmbedded'),true);assert.match(ui.elements.get('image-warning').textContent,/guarded bootloader updater/i);assert.ok(ui.evaluate('state.pkg.warnings').some(x=>/may replace the bootloader/i.test(x)));}
-    assert.deepEqual(ui.calls,[]);
-  }
-});
-
-test('guarded provenance cannot be downgraded before flash by changing catalog metadata',async()=>{
-  const ui=workbench();await Promise.resolve();serialMock(ui);ui.context.selectedPort=ui.port;ui.context.item=guardedT1();ui.context.pkg=fakePackage({name:ui.context.item.name,guardedEmbedded:true});
-  ui.elements.get('hardware').value=ui.context.item.hardware;
-  ui.evaluate("state.item={...item,url:'https://example.test/not-reviewed'};state.port=selectedPort;state.pkg=pkg;state.plan={generation:state.generation,port:selectedPort,sha256:pkg.sha256};");
-  ui.context.confirm=async()=>{ui.calls.push('confirm');return true;};ui.context.flashNrf=async()=>ui.calls.push('write');
-  await ui.elements.get('flash').onclick();assert.match(ui.elements.get('notice').textContent,/catalog identity changed/i);assert.deepEqual(ui.calls,[]);
-});
 
 test('manual catalog downgrade is warned before loading and stays loadable without a device operation',async()=>{
   const ui=workbench();await Promise.resolve();ui.context.inventory=[v4Item];ui.context.pkg=fakePackage({name:v4Item.name,architecture:'esp32'});ui.evaluate("state.items=inventory;state.device={version:'v1.19.0'};filterCatalog();");ui.elements.get('artifact').value='0';ui.evaluate('updateDownload();controls();');

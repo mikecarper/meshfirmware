@@ -15,15 +15,6 @@ const releaseUrl=(tag,name,owner='meshcore-dev',repository='MeshCore')=>`https:/
 function application({name='board_repeater-v1.18.0.bin',version='v1.18.0',...patch}={}){
   return {project:'MeshCore',provider:'MeshCore',hardware:'Board',architecture:'esp32',role:'repeater',action:'flash-update',name,version,url:releaseUrl(version,name),bootloader:[],erase:[],...patch};
 }
-test('reviewed T1 embedded-updater applications are included in the CORS mirror',()=>{
-  const version='v1.18.0.1-halo-keymind-cascade-dev-03214a16';
-  const entries=['full','reduced'].map(profile=>{
-    const name=`Heltec_t1_repeater_lora_ota_no_external_sensors-with-bootloader-2.4.12-${profile}-ota-v1.18.0.1-halo-keymind-cascade-dev-40dd42de.zip`;
-    return application({provider:'Keymind Cascade',hardware:'Heltec Mesh Node T1',architecture:'nrf52',action:'flash',name,version,url:releaseUrl('lora-ota-'+version,name,'mikecarper'),sha256:(profile==='full'?'a':'b').repeat(64)});
-  });
-  const sources=selectMirrorSources({items:entries}).sources;
-  for(const entry of entries){const result=sources.find(source=>source.url===entry.url);assert.equal(result?.kind,'application');assert.equal(result?.sha256,entry.sha256);}
-});
 function inventory(items,contents=new Map()){
   const releases=new Map(),repositories=new Map(),assetRequests=[],apiRequests=[];
   for(const item of items){

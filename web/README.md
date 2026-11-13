@@ -629,14 +629,11 @@ bounds checks. Forced transfers still do not prove that the image will boot.
 
 ### nRF52 erase and recovery
 
-The nRF52 firmware list contains application serial DFU ZIPs in both **Update**
-and **Erase & new install** modes. Reviewed, digest-verified 1.18.0.1
-`with-bootloader` applications are available as explicit manual choices; they
-are never chosen automatically. Their embedded updater may replace a recognized
-installed bootloader after startup, so the page asks for separate confirmation.
-Other bootloader replacements remain separate operations. Deliberately supplied
-custom files remain available through **Custom file or download URL**, with the
-existing payload, board and destructive-write checks.
+The normal nRF52 firmware list contains application-only serial DFU ZIPs in
+both **Update** and **Erase & new install** modes. Embedded `with-bootloader`
+variants are not offered there; bootloader replacement is a separate operation.
+Deliberately supplied custom files remain available through **Custom file or
+download URL**, with the existing payload, board and destructive-write checks.
 
 Bootloader recommendations use the latest stable release of our
 `mikecarper/Adafruit_nRF52_Bootloader_OTAFIX` fork, refreshed with the catalog
