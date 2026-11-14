@@ -14,6 +14,8 @@ const defaultMirrorBase=new URL(mirrorDirectory,import.meta.url);
 // site, leaving room for current firmware in this flasher's mirror budget.
 const historicalMirrorPath='/MeshCore/firmware-1.18.0.1/firmware/';
 const defaultHistoricalMirrorBase=new URL(historicalMirrorPath,defaultMirrorBase);
+const historicalUsbBridge='https://github.com/mikecarper/MeshCore/releases/download/utility-usb-partition-v1-3d3d5827/meshcore-usb-partition-bridges.zip';
+const historicalUsbBridgeHash='187cac4f3f716d5df50e123a03ba51da637356874a434a72a60d9eb99d988ed8';
 const indexCaches=new WeakMap();
 const digest=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
 const size=value=>Number.isSafeInteger(value)&&value>0&&value<=MAX_FIRMWARE_BYTES;
@@ -40,6 +42,7 @@ function mirrorBaseUrl(value,pageOrigin){
 }
 
 function historicalReleaseSource(value){
+  if(value===historicalUsbBridge)return true;
   const url=https(value);
   if(url.username||url.password||url.search||url.hash||url.href!==value)return false;
   const version='v1.18.0.1-halo-keymind-cascade-dev-03214a16';
@@ -174,7 +177,8 @@ export async function fetchFirmwareBytes(url,{expectedSha256='',fetchImpl=fetch,
   if(onVerified!=null&&typeof onVerified!=='function')throw error('The verified-download callback must be a function.','url');
   if(typeof expectedSha256!=='string'||expectedSha256&&!/^[a-f0-9]{64}$/i.test(expectedSha256))throw error('Invalid expected firmware SHA-256.','hash');
   if(utility&&expectedSha256&&expectedSha256.toLowerCase()!==utility.sha256)throw error('Selected erase utility SHA-256 differs from its pinned public ZIP.','hash');
-  const expected=utility?.sha256||expectedSha256.toLowerCase(),base=mirrorBaseUrl(mirrorBase,pageOrigin);let index;
+  if(source===historicalUsbBridge&&expectedSha256&&expectedSha256.toLowerCase()!==historicalUsbBridgeHash)throw error('Selected USB bridge SHA-256 differs from its pinned release.','hash');
+  const expected=utility?.sha256||(source===historicalUsbBridge?historicalUsbBridgeHash:expectedSha256.toLowerCase()),base=mirrorBaseUrl(mirrorBase,pageOrigin);let index;
   // Report provenance only after complete original bytes match a known digest,
   // never from an unhashed direct download or an independently verified part.
   const verified=async(bytes,sha256)=>{await onVerified?.(Object.freeze({sha256,sourceUrl:source}));return bytes;};

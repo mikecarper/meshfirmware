@@ -78,6 +78,15 @@ test('the historical mirror is not consulted for another release or repository',
   assert.ok(!calls.some(url=>url.startsWith(historyBase.href)));
 });
 
+test('the exact shared migration bridge can use the historical mirror only with its pinned hash',async()=>{
+  const url='https://github.com/mikecarper/MeshCore/releases/download/utility-usb-partition-v1-3d3d5827/meshcore-usb-partition-bridges.zip';
+  const f=fixture();f.entry.url=url;const calls=[];
+  const fetchImpl=async requested=>{calls.push(String(requested));if(String(requested)===new URL('index.json',base).href)return jsonResponse({...f.index,entries:[]});if(String(requested)===new URL('index.json',historyBase).href)return jsonResponse(f.index);throw Error('unexpected bytes fetch');};
+  await assert.rejects(fetchFirmwareBytes(url,{fetchImpl,mirrorBase:base,historicalMirrorBase:historyBase,pageOrigin:base.origin}),/SHA-256/);
+  assert.deepEqual(calls,[new URL('index.json',base).href,new URL('index.json',historyBase).href]);
+  await assert.rejects(fetchFirmwareBytes(url,{fetchImpl,mirrorBase:base,historicalMirrorBase:historyBase,pageOrigin:base.origin,expectedSha256:'a'.repeat(64)}),/pinned release/);
+});
+
 function multipartFixture(){
   const a=fixture(new TextEncoder().encode('public migration prefix')),b=fixture(new Uint8Array(2048).fill(17)),raw=new Uint8Array([...a.raw,...b.raw,...a.raw]);
   const {url,...prefix}=a.entry,{url:unused,...payload}=b.entry;
