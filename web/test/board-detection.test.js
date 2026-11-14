@@ -38,6 +38,15 @@ test('old and updated V4 OLED model strings select normal V4 without guessing TF
   for(const deviceModel of ['Heltec V4.3','Heltec V4.3 TFT','Heltec V4.3 OLED R8'])assert.equal(detectBoard({items,deviceModel}).hardware,null);
 });
 
+test('complete R8 TFT and OLED manufacturer reports select only R8 without generalizing base V4',()=>{
+  const items=[item('Heltec v4'),item('Heltec v4 R8'),item('Heltec v4 + Expansion Kit (Touch)')];
+  for(const deviceModel of ['Heltec V4 R8 TFT','Heltec V4.2 R8 TFT','Heltec V4.3 R8 TFT','Heltec V4 R8 OLED','Heltec V4.2 R8 OLED','Heltec V4.3 R8 OLED','  HELTEC_V4.3_R8_TFT  ']){
+    const result=detectBoard({items,deviceModel});assert.equal(result.hardware,'Heltec v4 R8');assert.deepEqual(result.candidates,['Heltec v4 R8']);assert.equal(result.source,'application-model');
+    assert.equal(detectBoard({items:[item('Heltec v4')],deviceModel}).hardware,null,'a missing R8 entry never substitutes a base V4');
+  }
+  for(const deviceModel of ['Heltec V4 TFT','Heltec V4.2 TFT','Heltec V4.3 TFT','Heltec V4.4 R8 TFT','Heltec V4 R8 none detected','Heltec V4 TFT R8','Heltec V4 R8 TFT other','Unknown Heltec V4 R8 TFT'])assert.equal(detectBoard({items,deviceModel}).hardware,null,deviceModel);
+});
+
 test('exact headless V4 model strings select the base hardware without a USB or display guess',()=>{
   const items=[item('Heltec v4'),item('Heltec v4 R8'),item('Heltec v4 + Expansion Kit (Touch)')];
   for(const deviceModel of ['Heltec V4.2 none detected','Heltec V4.3 none detected','  HELTEC_V4.2_NONE_DETECTED  ']){

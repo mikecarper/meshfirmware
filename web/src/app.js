@@ -19,7 +19,7 @@ import { BrowserPlanner } from './planner.js';
 import { waitForMigration } from './migration.js';
 import { recoveryPackage } from './bootloader-recovery.js';
 import { detectBoard, detectRecoveryProfile } from './board-detection.js';
-import { chooseFirmware, firmwareVersionWarning, matchesCatalogInstallMode } from './automatic.js';
+import { chooseFirmware, defaultFirmwareProvider, firmwareVersionWarning, matchesCatalogInstallMode } from './automatic.js';
 import { chooseConnection, parseUsbMode } from './connection-choice.js';
 import { lookupUsbConnectionMap } from './usb-connection-map.js';
 import usbConnectionMap from './data/usb-connection-map.json';
@@ -393,9 +393,31 @@ function syncInstallMode(){
   if(!locked&&!component&&wadameshSelected())$('install-mode-hint').textContent=state.installMode==='install'?'Wadamesh first install writes its merged image after whole-chip erase. Identity, contacts, channels and settings are deleted.':'Update requires an existing matching Wadamesh layout. App offsets and slot sizes are checked; no Keymind expansion bridge runs.';
   $('install-mode-hint').classList.toggle('mode-warning',state.installMode==='install'||!!component);
 }
-function applyWadameshInstallDefault({explicitMode=false,port=state.port}={}){
+function applyWadameshInstallDefault({explicitMode=false,port=state.port,automatic=false}={}){
   if(!isWadamesh($('provider').value)||explicitMode||installModeLocked())return;
-  state.installMode='install';installModeSource={kind:'manual',port};syncInstallMode();
+  state.installMode='install';installModeSource={kind:automatic?'provider':'manual',port};syncInstallMode();
+}
+function applyDefaultProvider(hardware=$('hardware').value){
+  // Only defaults follow the board. A deliberate provider or shared selection
+  // stays authoritative, and a pending operation retains its original image.
+  if(state.manualSelections.provider||$('provider').value==='Custom'||state.pkg||state.esp||installModeLocked()||continuingDeviceFlow())return;
+  const provider=defaultFirmwareProvider({items:state.items,device:state.device||{},hardware,role:state.manualSelections.role,version:state.manualSelections.version,architecture:catalogArchitecture()});
+  if($('provider').value===provider){
+    if(isWadamesh(provider)&&state.installMode!=='install'){
+      const priorMode=state.installMode;
+      applyWadameshInstallDefault({automatic:true,explicitMode:installModeSource?.kind==='manual'});
+      if(state.installMode!==priorMode)filterCatalog('provider');
+    }
+    return;
+  }
+  // Detection can change the architecture scope before controls have rebuilt
+  // the provider menu (for example nRF52 -> ESP32 on the next radio).
+  if(![...$('provider').options].some(option=>option.value===provider))filterCatalog('project');
+  $('provider').value=[...$('provider').options].some(option=>option.value===provider)?provider:'';
+  for(const id of ['role','version'])if(!state.manualSelections[id])$(id).value='';
+  if(isWadamesh(provider))applyWadameshInstallDefault({automatic:true,explicitMode:installModeSource?.kind==='manual'});
+  else if(installModeSource?.kind==='provider'){state.installMode='update';installModeSource=null;syncInstallMode();}
+  filterCatalog('provider');
 }
 function modePairKey(item){
   if(isWadamesh(item))return JSON.stringify([item.provider,item.hardware,item.role,item.version,item.wadameshBuild,item.requiredDisplay]);
@@ -891,6 +913,7 @@ function selectDetectedBoard() {
     state.detectedHardware=result.hardware;
     const architectures=new Set(state.items.filter(i=>i.hardware===result.hardware).map(i=>i.architecture));
     if(architectures.size===1&&state.device)state.device.architecture=[...architectures][0];
+    applyDefaultProvider(result.hardware);
     const provider=$('provider').value;
     if(provider&&provider!=='Custom'&&!state.items.some(i=>i.provider===provider&&i.hardware===result.hardware))$('provider').value='';
     if($('hardware').value!==result.hardware){$('role').value='';$('version').value='';}
@@ -914,7 +937,8 @@ function selectDetectedBoard() {
 function applyAutomaticSelections(){
   if(!$('auto-detect-board').checked)return;
   if($('provider').value==='Custom'){updateFirmwareSelectionSummary();controls();return;}
-  const result=chooseFirmware({items:state.items,device:state.device||{},hardware:$('hardware').value,...state.manualSelections,installMode:state.installMode,architecture:catalogArchitecture()});
+  applyDefaultProvider();
+  const result=chooseFirmware({items:state.items,device:state.device||{},hardware:$('hardware').value,provider:state.pkg||installModeLocked()||continuingDeviceFlow()?$('provider').value:'',...state.manualSelections,installMode:state.installMode,architecture:catalogArchitecture()});
   const selected=result.artifactIndex===null?null:state.items[result.artifactIndex];
   if(state.pkg&&(!selected||state.item?.name!==selected.name||state.item?.url!==selected.url)){
     if(state.esp)fail('Close the current inspected session before changing the automatic firmware selection.');
@@ -1546,13 +1570,14 @@ function filterCatalog(changed = 'project',{preserveArtifact=false}={}) {
   let items = state.items.filter(i => i.project === $('project').value&&(!architecture||i.architecture===architecture)&&(!narrow||candidates.includes(i.hardware)));
   const compatibleHardware=new Set(items.map(item=>item.hardware));
   if(architecture&&state.manualSelections.hardware&&!compatibleHardware.has(state.manualSelections.hardware))for(const key of ['hardware','role','version'])delete state.manualSelections[key];
-  for (const id of ['provider','hardware','role','version']) { if (['project','provider','hardware','role','version'].indexOf(id) > ['project','provider','hardware','role','version'].indexOf(changed)) options(id,items.map(i => i[id]),id==='hardware'&&narrow?`Matching ${architecture==='nrf52'?'nRF52':catalogCandidates().chipFamily||'ESP32'} boards`:`All ${id === 'hardware' ? architecture==='nrf52'?'nRF52 boards':architecture==='esp32'?'ESP32 boards':'boards' : id + 's'}`); if ($(id).value&&!(id==='provider'&&$(id).value==='Custom')) items = items.filter(i => i[id] === $(id).value); }
+  const hardwareItems=items;
+  for (const id of ['provider','hardware','role','version']) { if (['project','provider','hardware','role','version'].indexOf(id) > ['project','provider','hardware','role','version'].indexOf(changed)) options(id,(id==='hardware'&&!state.manualSelections.provider&&$('provider').value!=='Custom'?hardwareItems:items).map(i => i[id]),id==='hardware'&&narrow?`Matching ${architecture==='nrf52'?'nRF52':catalogCandidates().chipFamily||'ESP32'} boards`:`All ${id === 'hardware' ? architecture==='nrf52'?'nRF52 boards':architecture==='esp32'?'ESP32 boards':'boards' : id + 's'}`); if ($(id).value&&!(id==='provider'&&$(id).value==='Custom')) items = items.filter(i => i[id] === $(id).value); }
   if($('provider').value==='Custom'){items=[];$('custom-firmware').hidden=false;$('custom-firmware').open=true;}
   items=items.filter(item=>matchesCatalogInstallMode(item,state.installMode));
   items.sort((a,b)=>compareVersions(a.version,b.version));
   $('artifact').replaceChildren(new Option(`${items.length} artifacts · choose a file`,''),...items.map(item => new Option(`${[item.title,item.subtitle].filter(Boolean).join(' / ')} · ${item.name} · ${item.action}`,String(state.items.indexOf(item)))));
   if(preserveArtifact&&[...$('artifact').options].some(option=>option.value===priorArtifact))$('artifact').value=priorArtifact;
-  try{localStorage.setItem('meshfirmware.selections',JSON.stringify({...Object.fromEntries(['provider','hardware','role','version'].map(id=>[id,$(id).value])),versionExplicit:Object.hasOwn(state.manualSelections,'version')}));}catch{}
+  try{localStorage.setItem('meshfirmware.selections',JSON.stringify({...Object.fromEntries(['provider','hardware','role','version'].map(id=>[id,$(id).value])),providerExplicit:!!state.manualSelections.provider,versionExplicit:Object.hasOwn(state.manualSelections,'version')}));}catch{}
   updateDownload(); controls();
 }
 function linkedCatalogSelections() {
@@ -1744,7 +1769,7 @@ $('select-port').onclick = () => operation(async () => {
     // physical device (including after a disconnect). Keep it for handoffs.
     if(state.transportModePort&&state.transportModePort!==port)$('transport-mode').value='auto';
     if(!sameModeRadio){
-      if(installModeSource?.port&&installModeSource.port!==port){state.installMode='update';syncInstallMode();installModeSource=null;applyWadameshInstallDefault({port});}
+      if(installModeSource?.port&&installModeSource.port!==port){state.installMode='update';syncInstallMode();installModeSource=null;if(state.manualSelections.provider)applyWadameshInstallDefault({port});}
       else if(installModeSource?.port===null)installModeSource={...installModeSource,port};
     }
     state.finishedFirmware=null;
@@ -1865,7 +1890,23 @@ $('load-recovery').onclick=()=>operation(async()=>{
   const loaded=recoveryPackage(catalog,id,bundle);setAutomaticSha(loaded.profile.sha256,loaded.name);await loadFirmware(loaded.name,loaded.bytes);state.loadedRecovery={...loaded.profile,version:catalog.version};$('image-warning').textContent=[...state.pkg.warnings,recoveryWarning].join(' ');
   notice(`Verified OTAFIX ${catalog.version} R_${id} ZIP loaded for installed identity ${loaded.profile.installedIdentity}. No device commands were sent. ${recoveryWarning}`);
 });
-for (const id of ['project','provider','hardware','role','version']) $(id).onchange = () => operation(async()=>{await clearFirmwareSelection();state.manualSelections[id]=$(id).value;if(id==='project'||id==='provider'){for(const next of ['hardware','role','version'])delete state.manualSelections[next];}else if(id==='hardware')delete state.manualSelections.role;if(id==='provider'){$('custom-firmware').hidden=$('provider').value!=='Custom';applyWadameshInstallDefault();}if(['hardware','role'].includes(id)&&!Object.hasOwn(state.manualSelections,'version'))$('version').value='';filterCatalog(id);if(['hardware','role'].includes(id)&&!Object.hasOwn(state.manualSelections,'version')&&$('provider').value==='Keymind Cascade'&&$('hardware').value&&$('role').value){const newest=[...$('version').options].map(o=>o.value).filter(Boolean).sort(compareVersions)[0];if(newest){$('version').value=newest;filterCatalog('version');}}if($('auto-detect-board').checked)applyAutomaticSelections();else updateFirmwareSelectionSummary();});
+for (const id of ['project','provider','hardware','role','version']) $(id).onchange = () => operation(async()=>{
+  await clearFirmwareSelection();state.manualSelections[id]=$(id).value;
+  if(id==='project'||id==='provider'){for(const next of ['hardware','role','version'])delete state.manualSelections[next];}
+  else if(id==='hardware')delete state.manualSelections.role;
+  if(id==='provider'){
+    $('custom-firmware').hidden=$('provider').value!=='Custom';
+    if(!isWadamesh($('provider').value)&&installModeSource?.kind==='provider'){state.installMode='update';installModeSource=null;syncInstallMode();}
+    applyWadameshInstallDefault();
+  }else applyDefaultProvider();
+  if(['hardware','role'].includes(id)&&!Object.hasOwn(state.manualSelections,'version'))$('version').value='';
+  filterCatalog(id);
+  if(['hardware','role'].includes(id)&&!Object.hasOwn(state.manualSelections,'version')&&$('provider').value==='Keymind Cascade'&&$('hardware').value&&$('role').value){
+    const newest=[...$('version').options].map(o=>o.value).filter(Boolean).sort(compareVersions)[0];
+    if(newest){$('version').value=newest;filterCatalog('version');}
+  }
+  if($('auto-detect-board').checked)applyAutomaticSelections();else updateFirmwareSelectionSummary();
+});
 for(const [id,mode]of [['install-mode-update','update'],['install-mode-install','install']])$(id).onchange=()=>$(id).checked?operation(()=>setInstallMode(mode)):undefined;
 async function fetchSelectedFirmware(){
   const item = $('artifact').value?state.items[Number($('artifact').value)]:null; if (!item) fail('Choose an artifact.');
@@ -2486,6 +2527,10 @@ getCatalog().then(catalog => {
   // Older saved versions remain visible, but only a marked user choice is a
   // preference during automatic device selection. Others use the latest.
   saved.provider=catalogProvider(saved.provider)||'Keymind Cascade';
+  // Older storage did not distinguish automatic Keymind from a user choice.
+  // Keep deliberate legacy alternatives, but let the former default follow
+  // this board. New selections save that distinction explicitly.
+  const savedProviderExplicit=saved.providerExplicit===true||(saved.providerExplicit===undefined&&saved.provider!=='Keymind Cascade');
   if(typeof saved.hardware==='string')saved.hardware=canonicalHardware(saved.hardware);
   // Catalogs before the version preference marker saved automatic choices as
   // well as manual ones. When a newer exact board/role Keymind build exists,
@@ -2495,18 +2540,35 @@ getCatalog().then(catalog => {
     if(newest&&(!saved.version||compareVersions(newest,saved.version)<0))saved.version=newest;
   }
   const linked=installModeLocked()?{}:linkedCatalogSelections(),hasLinked=Object.keys(linked).length>0;
+  if(linked.build&&!linked.provider){
+    const builds=state.items.filter(item=>item.name===linked.build&&matchesCatalogInstallMode(item,linked.mode||state.installMode)&&['hardware','role','version'].every(id=>!linked[id]||item[id]===linked[id]));
+    const providers=[...new Set(builds.map(item=>item.provider))];
+    if(providers.length===1)linked.provider=providers[0];
+  }
   const selections=hasLinked?{provider:'Keymind Cascade',...linked}:saved;
+  if(!state.pkg&&!state.esp&&!installModeLocked()&&!continuingDeviceFlow()&&!linked.provider&&(hasLinked||!savedProviderExplicit)){
+    const provider=defaultFirmwareProvider({items:state.items,device:state.device||{},hardware:selections.hardware,role:linked.role,version:linked.version||(!hasLinked&&saved.versionExplicit===true?saved.version:''),architecture:catalogArchitecture()});
+    if(provider!==selections.provider)for(const id of ['role','version'])if(!Object.hasOwn(linked,id)&&!(id==='version'&&saved.versionExplicit===true&&!hasLinked))delete selections[id];
+    selections.provider=provider;
+  }
+  // An unavailable explicit provider must remain unavailable, not turn into
+  // permission to substitute a different firmware and installation mode.
+  if(linked.provider||(!hasLinked&&savedProviderExplicit))state.manualSelections.provider=selections.provider;
+  // A temporarily incompatible provider/display scope must not discard a
+  // deliberate version before runtime hardware detection can restore it.
+  if(typeof selections.version==='string'&&selections.version&&(linked.version||(!hasLinked&&saved.versionExplicit===true)))state.manualSelections.version=selections.version;
   if(linked.mode&&installModeSource===null){state.installMode=linked.mode;installModeSource={kind:'manual',port:state.port};syncInstallMode();}
   let filtersMatched=true;
   filterCatalog();
   for(const id of ['provider','hardware','role','version']){
     if([...$(id).options].some(o=>o.value===selections[id])){
       $(id).value=selections[id];
-      if(id==='provider'||Object.hasOwn(linked,id)||(id==='version'&&saved.versionExplicit===true&&!hasLinked))state.manualSelections[id]=selections[id];
-      if(id==='provider')applyWadameshInstallDefault({explicitMode:!!linked.mode});
+      if((id==='provider'&&!hasLinked&&savedProviderExplicit)||Object.hasOwn(linked,id)||(id==='version'&&saved.versionExplicit===true&&!hasLinked))state.manualSelections[id]=selections[id];
+      if(id==='provider'&&state.manualSelections.provider)applyWadameshInstallDefault({explicitMode:!!linked.mode});
       filterCatalog(id);
     }else if(Object.hasOwn(linked,id))filtersMatched=false;
   }
+  applyDefaultProvider();
   if(linked.build&&filtersMatched){
     const matches=[...$('artifact').options].filter(o=>o.value&&state.items[Number(o.value)].name===linked.build);
     if(matches.length===1)$('artifact').value=matches[0].value;

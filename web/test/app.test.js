@@ -13,7 +13,7 @@ import {nrfBoardCandidates} from '../src/nrf-board-candidates.js';
 import {espBoardCandidates} from '../src/esp-board-candidates.js';
 import {parseBootloaderInfo,detectBootloaderBoard} from '../src/bootloader-info.js';
 import {xiaoInstalledStatus,xiaoInfoProfile,xiaoBootloaderItem} from '../src/xiao-bootloader.js';
-import {chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode} from '../src/automatic.js';
+import {chooseFirmware,defaultFirmwareProvider,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode} from '../src/automatic.js';
 import {chooseConnection,parseUsbMode} from '../src/connection-choice.js';
 import {lookupUsbConnectionMap} from '../src/usb-connection-map.js';
 import {createNextStepScroller} from '../src/next-step-scroll.js';
@@ -66,7 +66,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
   context.createPostFlashSettingsPlan=createPostFlashSettingsPlan;context.applyPostFlashSettings=applyPostFlashSettings;context.createPostFlashCompanionRequest=createPostFlashCompanionRequest;context.loadRadioPresets=async()=>({presets:[],source:'bundled',warning:'Test preset inventory.'});
   context.detectApplication=(...args)=>context.detectMeshCore(...args);context.detectMeshtasticBoard=detectMeshtasticBoard;
   context.parseBootloaderInfo=parseBootloaderInfo;context.detectBootloaderBoard=detectBootloaderBoard;context.xiaoInstalledStatus=xiaoInstalledStatus;context.xiaoInfoProfile=xiaoInfoProfile;context.xiaoBootloaderItem=xiaoBootloaderItem;context.chooseBootloaderInfoFile=async()=>{calls.push('file-picker');throw Error('Unexpected file chooser');};
-  context.selectionLink=selectionLink;context.nrfBoardCandidates=nrfBoardCandidates;context.espBoardCandidates=espBoardCandidates;context.isWadamesh=isWadamesh;context.wadameshDisplayAssessment=wadameshDisplayAssessment;context.WADAMESH_STARTUP_NOTICE=WADAMESH_STARTUP_NOTICE;
+  context.selectionLink=selectionLink;context.nrfBoardCandidates=nrfBoardCandidates;context.espBoardCandidates=espBoardCandidates;context.isWadamesh=isWadamesh;context.wadameshDisplayAssessment=wadameshDisplayAssessment;context.WADAMESH_STARTUP_NOTICE=WADAMESH_STARTUP_NOTICE;context.defaultFirmwareProvider=defaultFirmwareProvider;
   vm.runInContext(source,context);
   return {context,elements,calls,port,serialEvents,windowEvents,evaluate:code=>vm.runInContext(code,context)};
 }
@@ -4865,6 +4865,118 @@ test('real custom inspection wires the byte-level unknown-board assessment into 
 });
 
 const wadaItem=(merged=false)=>({...v4Item,provider:'Wadamesh TAK',role:'gui',version:'tak-beta_103.1',action:merged?'flash-wipe':'flash-update',name:`wadamesh-heltec-v4${merged?'-merged':''}.bin`,url:`https://github.com/jade-on-mesh/wadamesh-tak/releases/download/tak-beta_103.1/wadamesh-heltec-v4${merged?'-merged':''}.bin`,requiredDisplay:'tft',wadameshBuild:'heltec-v4',title:'Wadamesh TAK · standalone',size:merged?5000000:4934464,...(!merged?{requiresExistingProvider:'Wadamesh TAK'}:{})});
+const takDefaultItems=(hardware='LilyGo T-Deck')=>[
+  {...v4Item,provider:'Keymind Cascade',hardware,role:'companionFull',...(hardware==='Heltec v4'?{releaseNotes:'SETUP - https://mikecarper.github.io/MeshCore/firmware_picker/?hardware=heltec_v4'}:{})},
+  {...v4Item,provider:'Keymind Cascade',hardware,role:'companionFull',action:'flash-wipe',name:'keymind-board-merged.bin'},
+  ...[false,true].map(merged=>({...wadaItem(merged),hardware,requiredDisplay:hardware.startsWith('Heltec v4')?'tft':undefined}))
+];
+test('detected supported hardware defaults to Wadamesh merged install instead of preserving the old MeshCore role',async()=>{
+  const ui=workbench({productionDefaults:true,catalogPromise:Promise.resolve(linkedCatalog(takDefaultItems()))});await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(ui.elements.get('provider').value,'Keymind Cascade');assert.equal(ui.evaluate('state.manualSelections.provider'),undefined);
+  ui.evaluate('state.device={model:"LilyGo T-Deck",catalogRole:"repeater",version:"v1.18.0"};selectDetectedBoard();');
+  assert.equal(ui.elements.get('provider').value,'Wadamesh TAK');assert.equal(ui.elements.get('role').value,'gui');assert.equal(ui.elements.get('artifact').value,'3');assert.equal(ui.evaluate('state.installMode'),'install');assert.equal(ui.evaluate('installModeSource.kind'),'provider');
+  assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(JSON.parse(ui.context.localStorage.getItem('meshfirmware.selections')).providerExplicit,false);assert.deepEqual(ui.calls,[]);
+});
+test('implicit provider hardware menu includes Wadamesh-only boards and switches provider even with automatic artifact selection off',async()=>{
+  const hardware='Elecrow CrowPanel Advance 3.5',items=[...takDefaultItems().slice(0,2),...takDefaultItems(hardware).slice(2)],ui=workbench({catalogPromise:Promise.resolve(linkedCatalog(items))});await new Promise(resolve=>setImmediate(resolve));
+  assert.ok(ui.elements.get('hardware').options.some(option=>option.value===hardware));
+  ui.elements.get('hardware').value=hardware;await ui.elements.get('hardware').onchange();
+  assert.equal(ui.elements.get('provider').value,'Wadamesh TAK');assert.equal(ui.elements.get('hardware').value,hardware);assert.equal(ui.evaluate('state.installMode'),'install');assert.deepEqual(artifactChoices(ui),['3']);assert.equal(ui.elements.get('artifact').value,'');assert.deepEqual(ui.calls,[]);
+});
+test('a newly detected ESP32 board refreshes a prior nRF52 provider scope before selecting Wadamesh install',async()=>{
+  const items=[linkedT114Item,...takDefaultItems()],ui=workbench({catalogPromise:Promise.resolve(linkedCatalog(items))});await new Promise(resolve=>setImmediate(resolve));ui.context.selectedPort=ui.port;
+  ui.evaluate('state.port=selectedPort;state.device={architecture:"nrf52"};filterCatalog();');assert.ok(!ui.elements.get('provider').options.some(option=>option.value==='Wadamesh TAK'));
+  ui.evaluate('state.device={architecture:"esp32",model:"LilyGo T-Deck",catalogRole:"companionFull"};selectDetectedBoard();');
+  assert.equal(ui.elements.get('provider').value,'Wadamesh TAK');assert.equal(ui.evaluate('state.installMode'),'install');assert.equal(ui.evaluate('state.manualSelections.provider'),undefined);assert.deepEqual(artifactChoices(ui),['4']);assert.deepEqual(ui.calls,[]);
+});
+test('V4 automatic provider exception permits only a positively reported R8 TFT',async()=>{
+  for(const [model,hardware,wada] of [
+    ['Heltec V4 OLED','Heltec v4',false],['Heltec v4','Heltec v4',false],
+    ['Heltec v4 R8','Heltec v4 R8',false],['Heltec V4.3 R8 OLED','Heltec v4 R8',false],
+    ['Heltec V4.3 R8 TFT','Heltec v4 R8',true]
+  ]){
+    const ui=workbench({productionDefaults:true,catalogPromise:Promise.resolve(linkedCatalog(takDefaultItems(hardware)))});await new Promise(resolve=>setImmediate(resolve));
+    ui.context.model=model;ui.evaluate('state.device={model,catalogRole:"companionFull"};selectDetectedBoard();');
+    assert.equal(ui.elements.get('provider').value,wada?'Wadamesh TAK':'Keymind Cascade',model);assert.equal(ui.evaluate('state.installMode'),wada?'install':'update',model);assert.equal(ui.elements.get('artifact').value,wada?'3':'0',model);assert.deepEqual(ui.calls,[]);
+  }
+});
+test('explicit Keymind choices and shared provider/update links override the automatic Wadamesh preference',async()=>{
+  for(const kind of ['manual','saved','link']){
+    const options=kind==='saved'?{savedSelections:{provider:'Keymind Cascade',providerExplicit:true}}:kind==='link'?{search:'?provider=Keymind+Cascade&mode=update'}:{};
+    const ui=workbench({...options,productionDefaults:true,catalogPromise:Promise.resolve(linkedCatalog(takDefaultItems()))});await new Promise(resolve=>setImmediate(resolve));
+    if(kind==='manual'){ui.elements.get('provider').value='Keymind Cascade';await ui.elements.get('provider').onchange();}
+    ui.evaluate('state.device={model:"LilyGo T-Deck",catalogRole:"companionFull"};selectDetectedBoard();');
+    assert.equal(ui.elements.get('provider').value,'Keymind Cascade',kind);assert.equal(ui.elements.get('artifact').value,'0',kind);assert.equal(ui.evaluate('state.installMode'),'update',kind);assert.equal(JSON.parse(ui.context.localStorage.getItem('meshfirmware.selections')).providerExplicit,true);assert.deepEqual(ui.calls,[]);
+  }
+});
+test('an explicitly saved Keymind version is preserved when Wadamesh also supports that board',async()=>{
+  const items=takDefaultItems(),item=items[0],savedSelections={provider:item.provider,providerExplicit:false,hardware:item.hardware,role:item.role,version:item.version,versionExplicit:true};
+  const ui=workbench({productionDefaults:true,savedSelections,catalogPromise:Promise.resolve(linkedCatalog(items))});await new Promise(resolve=>setImmediate(resolve));
+  ui.evaluate('state.device={model:"LilyGo T-Deck",catalogRole:"companionFull"};selectDetectedBoard();');
+  assert.equal(ui.elements.get('provider').value,'Keymind Cascade');assert.equal(ui.elements.get('artifact').value,'0');assert.equal(ui.elements.get('version').value,item.version);assert.equal(ui.evaluate('state.installMode'),'update');
+  const saved=JSON.parse(ui.context.localStorage.getItem('meshfirmware.selections'));assert.equal(saved.versionExplicit,true);assert.equal(saved.providerExplicit,false);assert.deepEqual(ui.calls,[]);
+});
+test('an explicit older Wadamesh version survives the temporary Keymind default until R8 TFT is detected',async()=>{
+  const items=takDefaultItems('Heltec v4 R8'),old={...items[3],version:'tak-beta_103.0',name:'wadamesh-old-merged.bin',url:'https://example.test/wadamesh-old-merged.bin'};
+  const savedSelections={provider:old.provider,providerExplicit:false,hardware:old.hardware,role:old.role,version:old.version,versionExplicit:true};
+  const ui=workbench({productionDefaults:true,savedSelections,catalogPromise:Promise.resolve(linkedCatalog([...items,old]))});await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(ui.elements.get('provider').value,'Keymind Cascade');assert.equal(ui.evaluate('state.manualSelections.version'),old.version);assert.equal(ui.elements.get('artifact').value,'');
+  ui.evaluate('state.device={model:"Heltec V4.3 R8 TFT",catalogRole:"companionFull"};selectDetectedBoard();');
+  assert.equal(ui.elements.get('provider').value,'Wadamesh TAK');assert.equal(ui.elements.get('artifact').value,'4');assert.equal(ui.elements.get('version').value,old.version);assert.equal(ui.evaluate('state.installMode'),'install');assert.deepEqual(ui.calls,[]);
+});
+test('remembered defaults do not become explicit provider choices on the next load',async()=>{
+  for(const provider of ['Keymind Cascade','Wadamesh TAK']){
+    const ui=workbench({savedSelections:{provider,providerExplicit:false,hardware:'LilyGo T-Deck'},catalogPromise:Promise.resolve(linkedCatalog(takDefaultItems()))});await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(ui.elements.get('provider').value,'Wadamesh TAK');assert.equal(ui.evaluate('state.installMode'),'install');assert.equal(ui.evaluate('state.manualSelections.provider'),undefined);assert.equal(JSON.parse(ui.context.localStorage.getItem('meshfirmware.selections')).providerExplicit,false);assert.deepEqual(ui.calls,[]);
+  }
+});
+test('unavailable explicit providers never turn into an automatic Wadamesh installation',async()=>{
+  for(const options of [{savedSelections:{provider:'MeshCore',providerExplicit:true,hardware:'LilyGo T-Deck'}},{search:'?provider=MeshCore&hardware=LilyGo+T-Deck'}]){
+    const ui=workbench({...options,productionDefaults:true,catalogPromise:Promise.resolve(linkedCatalog(takDefaultItems()))});await new Promise(resolve=>setImmediate(resolve));
+    ui.evaluate('applyAutomaticSelections();');assert.equal(ui.evaluate('state.manualSelections.provider'),'MeshCore');assert.equal(ui.elements.get('provider').value,'');assert.equal(ui.elements.get('artifact').value,'');assert.equal(ui.evaluate('state.installMode'),'update');assert.match(ui.elements.get('automatic-summary').textContent,/No write-only/);assert.deepEqual(ui.calls,[]);
+  }
+});
+test('unfinished device workflows retain their saved firmware instead of adopting a new provider default',async()=>{
+  for(const flow of [{pending:{mac:'aa:bb:cc:dd:ee:ff',sha256:'a'.repeat(64)}},{recovery:{sha256:'a'.repeat(64),name:'final.zip',eraseComplete:true}},{espRecovery:{sha256:'a'.repeat(64),mac:'aa:bb:cc:dd:ee:ff',merged:true}},{verification:{sha256:'a'.repeat(64),name:'final.bin'}}]){
+    const items=takDefaultItems(),ui=workbench({...flow,savedSelections:{...items[0],providerExplicit:false},catalogPromise:Promise.resolve(linkedCatalog(items))});
+    const mode=ui.evaluate('state.installMode');await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(ui.evaluate('continuingDeviceFlow()'),true);assert.equal(ui.evaluate('state.installMode'),mode);
+    for(const id of ['provider','hardware','role','version'])assert.equal(ui.elements.get(id).value,items[0][id],id);
+    assert.equal(ui.evaluate('state.migrationApproval'),null);assert.deepEqual(ui.calls,[]);
+  }
+});
+test('switching away from automatic Wadamesh resets only its default erase mode, not a deliberate installation choice',async()=>{
+  for(const explicitMode of [false,true]){
+    const ui=workbench({productionDefaults:true,catalogPromise:Promise.resolve(linkedCatalog(takDefaultItems()))});await new Promise(resolve=>setImmediate(resolve));
+    ui.evaluate('state.device={model:"LilyGo T-Deck",catalogRole:"companionFull"};selectDetectedBoard();');assert.equal(ui.evaluate('state.installMode'),'install');
+    if(explicitMode)await ui.evaluate('setInstallMode("install");');
+    ui.elements.get('provider').value='Keymind Cascade';await ui.elements.get('provider').onchange();
+    assert.equal(ui.evaluate('state.installMode'),explicitMode?'install':'update');assert.equal(ui.elements.get('artifact').value,explicitMode?'1':'0');assert.deepEqual(ui.calls,[]);
+  }
+});
+test('legacy automatic Keymind preference follows the board and explicit Update remains authoritative',async()=>{
+  const ui=workbench({productionDefaults:true,savedSelections:{provider:'Keymind Cascade',hardware:'LilyGo T-Deck'},search:'?hardware=LilyGo+T-Deck&mode=update',catalogPromise:Promise.resolve(linkedCatalog(takDefaultItems()))});await new Promise(resolve=>setImmediate(resolve));
+  ui.evaluate('applyAutomaticSelections();');assert.equal(ui.elements.get('provider').value,'Wadamesh TAK');assert.equal(ui.evaluate('state.installMode'),'update');assert.equal(ui.elements.get('artifact').value,'2');assert.equal(ui.evaluate('state.manualSelections.provider'),undefined);assert.deepEqual(ui.calls,[]);
+});
+test('partial selection links resolve their exact build provider before applying the automatic default',async()=>{
+  for(const index of [0,3]){
+    const items=takDefaultItems(),item=items[index],search='?'+new URLSearchParams({hardware:item.hardware,role:item.role,version:item.version,build:item.name,mode:index===3?'install':'update'});
+    const ui=workbench({search,catalogPromise:Promise.resolve(linkedCatalog(items))});await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(ui.elements.get('provider').value,item.provider);assert.equal(ui.elements.get('artifact').value,String(index));assert.equal(ui.evaluate('state.manualSelections.provider'),item.provider);assert.deepEqual(ui.calls,[]);
+  }
+});
+test('partial role/version links apply compatible Wadamesh filters before choosing the build',async()=>{
+  const items=takDefaultItems(),item=items[3],search='?'+new URLSearchParams({hardware:item.hardware,role:item.role,version:item.version});
+  const ui=workbench({search,catalogPromise:Promise.resolve(linkedCatalog(items))});await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(ui.elements.get('provider').value,'Wadamesh TAK');assert.equal(ui.elements.get('role').value,'gui');assert.equal(ui.elements.get('version').value,item.version);assert.equal(ui.evaluate('state.installMode'),'install');assert.deepEqual(artifactChoices(ui),['3']);assert.equal(ui.evaluate('state.manualSelections.provider'),undefined);assert.deepEqual(ui.calls,[]);
+});
+test('a new non-Wadamesh radio resets an implicit Wadamesh install default instead of inheriting an erase',async()=>{
+  const items=[...takDefaultItems(),{...v4Item,provider:'Keymind Cascade',role:'companionFull',releaseNotes:'SETUP - https://mikecarper.github.io/MeshCore/firmware_picker/?hardware=heltec_v4'}],ui=workbench({productionDefaults:true,catalogPromise:Promise.resolve(linkedCatalog(items))});await new Promise(resolve=>setImmediate(resolve));serialMock(ui);
+  ui.context.previousPort={getInfo:()=>({usbVendorId:0x303a,usbProductId:0x0002})};
+  ui.evaluate('state.port=previousPort;state.device={model:"LilyGo T-Deck",catalogRole:"companionFull"};selectDetectedBoard();');
+  assert.equal(ui.evaluate('state.installMode'),'install');ui.context.detectMeshCore=async()=>({model:'Heltec V4 OLED',catalogRole:'companionFull'});await ui.elements.get('select-port').onclick();
+  assert.equal(ui.elements.get('provider').value,'Keymind Cascade');assert.equal(ui.evaluate('state.installMode'),'update');assert.notEqual(ui.evaluate('installModeSource?.kind'),'manual');assert.equal(ui.elements.get('artifact').value,'4');assert.deepEqual(ui.calls,['chooser','open','close']);
+});
 test('selecting Wadamesh defaults to merged installation and displays its limits without loading firmware or touching USB',async()=>{
   const ui=workbench({catalogPromise:Promise.resolve(linkedCatalog([v4Item,{...v4Item,provider:'Keymind Cascade'},wadaItem(),wadaItem(true)]))});await new Promise(resolve=>setImmediate(resolve));
   assert.equal(ui.elements.get('provider').value,'Keymind Cascade');ui.elements.get('provider').value='Wadamesh TAK';await ui.elements.get('provider').onchange();

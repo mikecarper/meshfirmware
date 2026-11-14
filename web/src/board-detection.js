@@ -11,6 +11,12 @@ const modelAliases=[
   ['Heltec V4 OLED',['Heltec v4']],
   ['Heltec V4.2 OLED',['Heltec v4']],
   ['Heltec V4.3 OLED',['Heltec v4']],
+  ['Heltec V4 R8 TFT',['Heltec v4 R8']],
+  ['Heltec V4.2 R8 TFT',['Heltec v4 R8']],
+  ['Heltec V4.3 R8 TFT',['Heltec v4 R8']],
+  ['Heltec V4 R8 OLED',['Heltec v4 R8']],
+  ['Heltec V4.2 R8 OLED',['Heltec v4 R8']],
+  ['Heltec V4.3 R8 OLED',['Heltec v4 R8']],
   // Exact unified-display status from HeltecV4Board::getManufacturerName().
   // No attached display is still the base V4, not an unknown board or R8.
   ['Heltec V4.2 none detected',['Heltec v4']],

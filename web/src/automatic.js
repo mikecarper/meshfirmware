@@ -62,6 +62,22 @@ export function matchesInstallMode(item,installMode='update'){
   // erase package and explicit erase/reconnect consent in the flashing flow.
   return item.architecture==='nrf52'&&item.action==='flash'&&/\.zip$/i.test(item.name)&&!merged;
 }
+// A provider preference is only a catalog suggestion. Require a usable merged
+// installation for this exact board; it does not authorize erasing or writing.
+// V4 TFT images are not a general V4 default: only a positive R8 TFT runtime
+// configuration qualifies, never an OLED/headless report or bootloader file.
+export function defaultFirmwareProvider({items=[],device={},hardware='',role='',version='',architecture=''}={}){
+  const board=canonicalHardware(text(hardware)),selectedRole=text(role),selectedVersion=text(version);
+  if(!board||board==='Heltec v4')return 'Keymind Cascade';
+  if(board==='Heltec v4 R8'&&(device?.firmwareFamily==='bootloader'||device?.role==='bootloader'
+    ||!/^Heltec[ _-]+V4(?:\.[23])?[ _-]+R8[ _-]+TFT$/i.test(text(device?.model))))return 'Keymind Cascade';
+  const available=items.some(item=>isWadamesh(item)&&canonicalHardware(item.hardware)===board
+    &&item.architecture==='esp32'&&(!architecture||item.architecture===architecture)&&matchesInstallMode(item,'install')
+    &&text(item.version)&&text(item.url)
+    &&(!selectedRole||item.role===selectedRole)&&(!selectedVersion||item.version===selectedVersion)
+    &&wadameshDisplayAssessment({item,device}).status!=='mismatch');
+  return available?'Wadamesh TAK':'Keymind Cascade';
+}
 // Catalog visibility is broader only for historical application wrappers.
 // nRF52 embedded-bootloader variants stay out of the normal firmware list;
 // bootloader updates have their own exact-board, separately confirmed workflow.
@@ -127,7 +143,7 @@ export function chooseFirmware({items=[],device={},hardware='',provider='',role=
   const meshtastic=device?.firmwareFamily==='meshtastic'||device?.role==='meshtastic';
   const bootloader=device?.firmwareFamily==='bootloader'||device?.role==='bootloader';
   const migrating=meshtastic||bootloader;
-  const selectedProvider=catalogProvider(text(provider))||'Keymind Cascade',standalone=isWadamesh(selectedProvider);
+  const selectedProvider=catalogProvider(text(provider))||defaultFirmwareProvider({items,device,hardware,role,version,architecture}),standalone=isWadamesh(selectedProvider);
   const selections={provider:selectedProvider,hardware:canonicalHardware(text(hardware)),role:text(role)||(standalone?'gui':inferredRole(device)),version:text(version)};
   const result=(reason,candidates=[],artifactIndex=null)=>{
     const warning=standalone||migrating||artifactIndex===null?'':firmwareVersionWarning(device?.version,items[artifactIndex]?.version);
@@ -139,7 +155,7 @@ export function chooseFirmware({items=[],device={},hardware='',provider='',role=
   // architectures from both the preferred provider and stock fallback.
   const available=items.map((item,index)=>({item,index})).filter(({item})=>(architecture===''||item.architecture===architecture)&&matchesInstallMode(item,installMode)&&canonicalHardware(item.hardware)===selections.hardware);
   let candidates=available.filter(({item})=>catalogProvider(item.provider)===selections.provider);
-  if(migrating&&!text(provider)&&!candidates.length){
+  if(migrating&&!standalone&&!text(provider)&&!candidates.length){
     const stock=available.filter(({item})=>catalogProvider(item.provider)==='MeshCore');
     if(stock.length){selections.provider='MeshCore';candidates=stock;}
   }
@@ -164,7 +180,7 @@ export function chooseFirmware({items=[],device={},hardware='',provider='',role=
     if(meshtastic&&!text(role))return result(`No ${installMode==='install'?'erase/new install':'write-only application update'} matches the Meshtastic-based ${selections.role==='repeater'?'Repeater':'Full Companion'} default for this exact hardware/provider. Choose another role or provider explicitly; no alternative role was substituted.`);
     return result(installMode==='install'?'No erase/new install matches the selected role. An unsupported explicit role is never replaced automatically.':'No write-only application update matches the selected role. An unsupported explicit role is never replaced automatically.');
   }
-  // A deliberate switch to the standalone provider selects a different UI
+  // Selecting the standalone provider chooses a different UI
   // target. Keep its exact board/display/radio variants, not the old role's
   // Keymind build environment. Physical chip checks still run before writes.
   const exactTarget=standalone?'':text(device?.firmwareTarget||device?.exactTarget),hardwareId=standalone?'':text(device?.hardwareId)||(!exactTarget?reviewedModelHardware(device,selections):'');

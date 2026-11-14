@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode} from '../src/automatic.js';
+import {chooseFirmware,defaultFirmwareProvider,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode} from '../src/automatic.js';
 const app=(more={})=>({project:'MeshCore',hardware:'Heltec v4',provider:'MeshCore',architecture:'esp32',role:'repeater',version:'v1.18.0',action:'flash-update',name:'heltec_v4_repeater-v1.18.0.bin',url:'https://example.test/heltec_v4_repeater-v1.18.0.bin',...more});
 test('Keymind chooses 1.18.0.2 for a running 1.18.0.1 node unless an older version is explicitly chosen',()=>{
   const old=app({provider:'Keymind Cascade',version:'v1.18.0.1',name:'old-v1.18.0.1.bin',url:'https://example.test/old.bin'});
@@ -55,13 +55,78 @@ test('Keymind is the default even for stock firmware and unavailable Keymind bui
   const missing=choose([stock],{provider:''});assert.equal(missing.selections.provider,'Keymind Cascade');assert.equal(missing.artifactIndex,null);
   assert.equal(choose([stock,keymind],{provider:'MeshCore'}).artifactIndex,0);
 });
-test('Wadamesh is explicit, defaults to its standalone role, and never automatically selects TFT for an OLED report',()=>{
+test('explicit Wadamesh defaults to its standalone role and never automatically selects TFT for an OLED report',()=>{
   const wada={...app(),provider:'Wadamesh TAK',role:'gui',action:'flash-wipe',name:'wadamesh-heltec-v4-merged.bin',version:'tak-beta_103.1',requiredDisplay:'tft'};
   const oled=choose([wada],{provider:'Wadamesh TAK',installMode:'install',device:{model:'Heltec V4.3 OLED',catalogRole:'companionBle'}});
   assert.equal(oled.artifactIndex,null);assert.equal(oled.selections.role,'gui');assert.match(oled.reason,/TFT.*OLED/);
   const tft=choose([wada],{provider:'Wadamesh TAK',installMode:'install',device:{model:'Heltec V4.3 TFT',catalogRole:'companionBle',version:'v1.18.0',firmwareTarget:'old_meshcore_companion',hardwareId:'old_meshcore_hardware'}});
   assert.equal(tft.artifactIndex,0);assert.equal(tft.selections.role,'gui');assert.equal(tft.warning,'');
   assert.equal(choose([wada],{provider:'',installMode:'install'}).artifactIndex,null,'An unavailable Keymind build does not select Wadamesh');
+});
+
+const wadaInstall=(hardware,more={})=>app({hardware,provider:'Wadamesh TAK',role:'gui',action:'flash-wipe',version:'tak-beta_103.1',name:'wadamesh-board-merged.bin',url:'https://example.test/wadamesh-board-merged.bin',...more});
+test('Wadamesh defaults for exact supported catalog boards with usable merged installs',()=>{
+  const boards=['LilyGo T-Deck','Elecrow ThinkNode M9','LilyGo T-Lora Pager (SX1262)','LilyGo T-Lora Pager (LR1121)','Seeed Wio Tracker L2','Elecrow CrowPanel Advance 3.5','Elecrow CrowPanel Advance 5.0'];
+  const items=boards.map(hardware=>wadaInstall(hardware));
+  for(const [index,hardware] of boards.entries()){
+    const before=structuredClone(items),input={items,hardware,device:{catalogRole:'repeater'},architecture:'esp32'};
+    assert.equal(defaultFirmwareProvider(input),'Wadamesh TAK',hardware);
+    const result=chooseFirmware({...input,installMode:'install'});
+    assert.equal(result.artifactIndex,index,hardware);assert.equal(result.selections.provider,'Wadamesh TAK');assert.equal(result.selections.role,'gui');assert.equal(result.warning,'');
+    assert.deepEqual(items,before,'a provider preference must not mutate catalog entries');
+  }
+  for(const hardware of ['',undefined,'LilyGo T-Deck Pro','LilyGo T-Lora Pager','Elecrow CrowPanel Advance 3.5 other'])assert.equal(defaultFirmwareProvider({items,hardware}),'Keymind Cascade');
+});
+
+test('Wadamesh defaults require an available exact-board merged application, not an update or utility',()=>{
+  const hardware='LilyGo T-Deck',install=wadaInstall(hardware);
+  assert.equal(defaultFirmwareProvider({items:[null,{project:'Meshtastic'},install],hardware}),'Wadamesh TAK');
+  for(const difference of [
+    {provider:'MeshCore'},{provider:'Keymind Cascade'},{hardware:'LilyGo T-Deck Pro'},{project:'Meshtastic'},
+    {role:'bootloader'},{architecture:'nrf52'},{architecture:'noflash'},{action:'flash-update'},{action:'download'},
+    {name:'wadamesh-board.bin'},{name:'bootloader-merged.bin'},{name:'FLASH_ERASE-merged.bin'},
+    {name:'softdevice-merged.bin'},{name:'R_board-merged.bin'},{name:'board-merged-component.bin'},
+    {name:undefined},{version:undefined},{url:undefined},{version:''},{version:' '},{url:''},{url:' '}
+  ])assert.equal(defaultFirmwareProvider({items:[{...install,...difference}],hardware}),'Keymind Cascade',JSON.stringify(difference));
+  assert.equal(defaultFirmwareProvider({items:[install],hardware,architecture:'nrf52'}),'Keymind Cascade');
+  assert.equal(defaultFirmwareProvider({items:[install],hardware,architecture:'esp32'}),'Wadamesh TAK');
+  const update={...install,action:'flash-update',name:'wadamesh-board.bin'};
+  assert.equal(defaultFirmwareProvider({items:[update],hardware}),'Keymind Cascade');
+  assert.equal(chooseFirmware({items:[install],hardware}).artifactIndex,null,'the provider preference never changes the selected install mode');
+  const stockUpdate=app({hardware,role:'gui'}),device={firmwareFamily:'meshtastic',role:'meshtastic',meshtasticRole:0};
+  const unavailableUpdate=chooseFirmware({items:[install,stockUpdate],hardware,device});
+  assert.equal(unavailableUpdate.selections.provider,'Wadamesh TAK');assert.equal(unavailableUpdate.artifactIndex,null,'an available merged Wadamesh install never substitutes a stock update');
+});
+
+test('Wadamesh preferences preserve explicit provider, role and version choices',()=>{
+  const hardware='LilyGo T-Deck',install=wadaInstall(hardware),keymind=app({hardware,provider:'Keymind Cascade',action:'flash-wipe',name:'tdeck_repeater-v1.18.0-merged.bin'}),stock={...keymind,provider:'MeshCore'},items=[install,keymind,stock];
+  const chooseDefault=more=>chooseFirmware({items,hardware,installMode:'install',device:{catalogRole:'repeater'},...more});
+  assert.equal(chooseDefault({}).artifactIndex,0);
+  assert.equal(chooseDefault({provider:'Keymind Cascade'}).artifactIndex,1);
+  assert.equal(chooseDefault({provider:'MeshCore'}).artifactIndex,2);
+  assert.equal(chooseDefault({provider:'Unknown'}).artifactIndex,null);
+  assert.equal(chooseDefault({role:'repeater'}).artifactIndex,1);
+  assert.equal(chooseDefault({role:'gui'}).artifactIndex,0);
+  assert.equal(chooseDefault({role:'sensor'}).artifactIndex,null);
+  assert.equal(chooseDefault({version:keymind.version}).artifactIndex,1);
+  assert.equal(chooseDefault({version:install.version}).artifactIndex,0);
+  assert.equal(chooseDefault({version:'unavailable'}).artifactIndex,null);
+  for(const more of [{role:'repeater'},{version:'v1.18.0'},{role:'gui',version:'unavailable'}])assert.equal(defaultFirmwareProvider({items,hardware,...more}),'Keymind Cascade');
+});
+
+test('Heltec V4 defaults remain Keymind except for a positive non-bootloader R8 TFT runtime report',()=>{
+  const base=wadaInstall('Heltec v4',{requiredDisplay:'tft'}),r8=wadaInstall('Heltec v4 R8',{requiredDisplay:'tft'}),items=[base,r8];
+  for(const model of ['Heltec V4 TFT','Heltec V4.2 TFT','Heltec V4.3 TFT','Heltec V4 R8 TFT','Heltec V4 OLED','Heltec V4.3 none detected'])assert.equal(defaultFirmwareProvider({items,hardware:'Heltec v4',device:{model}}),'Keymind Cascade',model);
+  for(const model of ['Heltec V4 R8 TFT','Heltec V4.2 R8 TFT','Heltec V4.3 R8 TFT','  HELTEC_V4.3_R8_TFT  ']){
+    const device={model,catalogRole:'companionBle',firmwareTarget:'old_meshcore_target',hardwareId:'old_meshcore_hardware'};
+    assert.equal(defaultFirmwareProvider({items,hardware:r8.hardware,device}),'Wadamesh TAK',model);
+    const result=chooseFirmware({items,hardware:r8.hardware,device,installMode:'install'});
+    assert.equal(result.artifactIndex,1);assert.equal(result.selections.role,'gui');assert.equal(result.warning,'');
+    for(const more of [{firmwareFamily:'bootloader'},{role:'bootloader'}])assert.equal(defaultFirmwareProvider({items,hardware:r8.hardware,device:{...device,...more}}),'Keymind Cascade');
+  }
+  for(const model of [undefined,'Heltec v4 R8','Heltec V4 R8 OLED','Heltec V4.3 R8 OLED','Heltec V4.3 R8 none detected','Heltec V4 TFT','Heltec V4.3 TFT','Heltec V4.4 R8 TFT','Heltec V4 R8 TFT other','Unknown Heltec V4 R8 TFT'])assert.equal(defaultFirmwareProvider({items,hardware:r8.hardware,device:{model}}),'Keymind Cascade',model);
+  assert.equal(defaultFirmwareProvider({items,hardware:'Heltec v4 + Expansion Kit (Touch)',device:{model:'Heltec V4 R8 TFT'}}),'Keymind Cascade');
+  assert.equal(defaultFirmwareProvider({items:[base],hardware:r8.hardware,device:{model:'Heltec V4 R8 TFT'}}),'Keymind Cascade','base V4 firmware cannot substitute for missing R8 firmware');
 });
 test('distinct historical logging images stay manual when they share a board role and version',()=>{
   const legacy=app({provider:'Keymind Cascade Logging',name:'heltec_v4_repeater-usb-logging-v1.18.0.bin',url:'https://example.test/usb-logging.bin'});
