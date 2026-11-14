@@ -2,6 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode} from '../src/automatic.js';
 const app=(more={})=>({project:'MeshCore',hardware:'Heltec v4',provider:'MeshCore',architecture:'esp32',role:'repeater',version:'v1.18.0',action:'flash-update',name:'heltec_v4_repeater-v1.18.0.bin',url:'https://example.test/heltec_v4_repeater-v1.18.0.bin',...more});
+test('Keymind chooses 1.18.0.2 for a running 1.18.0.1 node unless an older version is explicitly chosen',()=>{
+  const old=app({provider:'Keymind Cascade',version:'v1.18.0.1',name:'old-v1.18.0.1.bin',url:'https://example.test/old.bin'});
+  const current=app({provider:'Keymind Cascade',version:'v1.18.0.2',name:'new-v1.18.0.2.bin',url:'https://example.test/new.bin'});
+  const args={items:[old,current],hardware:'Heltec v4',device:{catalogRole:'repeater',version:'v1.18.0.1'}};
+  assert.equal(chooseFirmware(args).artifactIndex,1);
+  assert.equal(chooseFirmware({...args,version:'v1.18.0.1'}).artifactIndex,0);
+});
 const choose=(items,more={})=>chooseFirmware({items,hardware:'Heltec v4',provider:'MeshCore',device:{catalogRole:'repeater'},...more});
 
 test('newest exact-board write-only application is selected, never merged install',()=>{

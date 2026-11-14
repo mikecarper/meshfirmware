@@ -5,6 +5,14 @@ import {WADAMESH_PROVIDER,WADAMESH_LATEST_URL,wadameshBoardsUrl,wadameshCatalog}
 
 const raw='https://raw.githubusercontent.com/mikecarper/MeshCore/keymindCascade/';
 const treeURL='https://api.github.com/repos/mikecarper/MeshCore/git/trees/keymindCascade?recursive=1';
+// This immutable pre-1.18.0.2 provider contains the exact historical board,
+// role, files and migration notes. Do not relabel current files as an old build.
+export const KEYMIND_11801={
+  url:'https://raw.githubusercontent.com/mikecarper/MeshCore/a66f95b0892b0b845e198679464b68e4195908be/mesh-america/keymind-cascade-v1.16.0-provider.json',
+  sha256:'353fb3c04c173d76333dabf71fb10b9b7e1646b54b3bf0835128795bea2320dd',
+  size:1792619,
+  version:'v1.18.0.1-halo-keymind-cascade-dev-03214a16',
+};
 export function keymindProviderPaths(tree,variant) {
   const logging=variant==='logging',pattern=logging?/^mesh-america\/keymind-cascade-logging-v([0-9]+(?:\.[0-9]+){1,3})[^/]*-provider\.json$/:/^mesh-america\/keymind-cascade-v([0-9]+(?:\.[0-9]+){1,3})[^/]*-provider\.json$/;
   const fallback=`mesh-america/keymind-cascade-${logging?'logging-':''}v1.16.0-provider.json`;
@@ -28,6 +36,12 @@ export async function buildCatalog({readJson,readBytes,previous=async()=>null,no
     (async()=>{let tree;try{tree=await readJson(treeURL);if(!Array.isArray(tree?.tree)||tree.truncated)throw new Error('incomplete tree');}catch(error){warnings.push(`Keymind provider discovery: ${error.message}; trying published fallback paths.`);}
       await Promise.all([['Keymind Cascade','cascade'],['Keymind Cascade Logging','logging']].map(async([provider,variant])=>{try{const paths=keymindProviderPaths(tree,variant),config=await source(paths.map(path=>raw+path),v=>Array.isArray(v?.device)&&v.device.length>0,provider);items.push(...catalogItems(config,[],provider));}catch(error){await reuse(provider,error);}}));
     })(),
+    (async()=>{try{
+      const config=await readJson(KEYMIND_11801.url,{sha256:KEYMIND_11801.sha256,size:KEYMIND_11801.size,maxSize:2<<20});
+      const historical=catalogItems(config,[],'Keymind Cascade');
+      if(!historical.length||historical.some(item=>item.version!==KEYMIND_11801.version||!item.url.startsWith('https://github.com/mikecarper/MeshCore/releases/download/')))throw new Error('historical provider does not contain the expected version and release routes');
+      items.push(...historical);
+    }catch(error){warnings.push(`Keymind Cascade 1.18.0.1: historical catalog unavailable (${error.message}); use a matching local file or release URL.`);}})(),
     (async()=>{try{
       const release=await readJson(WADAMESH_LATEST_URL),manifest=await readJson(wadameshBoardsUrl(release));
       const result=wadameshCatalog(release,manifest);items.push(...result.items);warnings.push(...result.warnings);

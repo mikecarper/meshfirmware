@@ -1479,6 +1479,9 @@ async function loadFirmware(name, bytes, item = null,{allowModeSync=true}={}) {
 function options(id, values, placeholder) {
   const select = $(id), prior = select.value;
   if(id==='provider')values=[...values,'Custom'];
+  // Keep an explicit older-version choice visible even when the selected
+  // board/role has no matching build. Never silently substitute another image.
+  if(id==='version'&&state.manualSelections.version)values=[...values,state.manualSelections.version];
   // A detected physical target remains visible even when the chosen provider
   // has no build for it. In that case no firmware artifact is selected.
   if(id==='hardware'&&state.detectedHardware&&(!catalogArchitecture()||catalogHardwareAllowed(state.detectedHardware)))values=[...values,state.detectedHardware];
@@ -1549,7 +1552,7 @@ function filterCatalog(changed = 'project',{preserveArtifact=false}={}) {
   items.sort((a,b)=>compareVersions(a.version,b.version));
   $('artifact').replaceChildren(new Option(`${items.length} artifacts · choose a file`,''),...items.map(item => new Option(`${[item.title,item.subtitle].filter(Boolean).join(' / ')} · ${item.name} · ${item.action}`,String(state.items.indexOf(item)))));
   if(preserveArtifact&&[...$('artifact').options].some(option=>option.value===priorArtifact))$('artifact').value=priorArtifact;
-  try{localStorage.setItem('meshfirmware.selections',JSON.stringify(Object.fromEntries(['provider','hardware','role','version'].map(id=>[id,$(id).value]))));}catch{}
+  try{localStorage.setItem('meshfirmware.selections',JSON.stringify({...Object.fromEntries(['provider','hardware','role','version'].map(id=>[id,$(id).value])),versionExplicit:Object.hasOwn(state.manualSelections,'version')}));}catch{}
   updateDownload(); controls();
 }
 function linkedCatalogSelections() {
@@ -1862,7 +1865,7 @@ $('load-recovery').onclick=()=>operation(async()=>{
   const loaded=recoveryPackage(catalog,id,bundle);setAutomaticSha(loaded.profile.sha256,loaded.name);await loadFirmware(loaded.name,loaded.bytes);state.loadedRecovery={...loaded.profile,version:catalog.version};$('image-warning').textContent=[...state.pkg.warnings,recoveryWarning].join(' ');
   notice(`Verified OTAFIX ${catalog.version} R_${id} ZIP loaded for installed identity ${loaded.profile.installedIdentity}. No device commands were sent. ${recoveryWarning}`);
 });
-for (const id of ['project','provider','hardware','role','version']) $(id).onchange = () => operation(async()=>{await clearFirmwareSelection();state.manualSelections[id]=$(id).value;for(const next of ['hardware','role','version'].slice(['provider','hardware','role','version'].indexOf(id)))delete state.manualSelections[next];if(id==='provider'){$('custom-firmware').hidden=$('provider').value!=='Custom';applyWadameshInstallDefault();}filterCatalog(id);if($('auto-detect-board').checked)applyAutomaticSelections();else updateFirmwareSelectionSummary();});
+for (const id of ['project','provider','hardware','role','version']) $(id).onchange = () => operation(async()=>{await clearFirmwareSelection();state.manualSelections[id]=$(id).value;if(id==='project'||id==='provider'){for(const next of ['hardware','role','version'])delete state.manualSelections[next];}else if(id==='hardware')delete state.manualSelections.role;if(id==='provider'){$('custom-firmware').hidden=$('provider').value!=='Custom';applyWadameshInstallDefault();}if(['hardware','role'].includes(id)&&!Object.hasOwn(state.manualSelections,'version'))$('version').value='';filterCatalog(id);if(['hardware','role'].includes(id)&&!Object.hasOwn(state.manualSelections,'version')&&$('provider').value==='Keymind Cascade'&&$('hardware').value&&$('role').value){const newest=[...$('version').options].map(o=>o.value).filter(Boolean).sort(compareVersions)[0];if(newest){$('version').value=newest;filterCatalog('version');}}if($('auto-detect-board').checked)applyAutomaticSelections();else updateFirmwareSelectionSummary();});
 for(const [id,mode]of [['install-mode-update','update'],['install-mode-install','install']])$(id).onchange=()=>$(id).checked?operation(()=>setInstallMode(mode)):undefined;
 async function fetchSelectedFirmware(){
   const item = $('artifact').value?state.items[Number($('artifact').value)]:null; if (!item) fail('Choose an artifact.');
@@ -2480,6 +2483,8 @@ getCatalog().then(catalog => {
   $('catalog-status').textContent=`${state.items.length.toLocaleString()} artifacts · snapshot ${new Date(catalog.generatedAt).toLocaleString()} · ${catalog.warnings.length} provider warnings${catalog.cached?' · cached':''}`;
   let saved={...state.manualSelections};
   if(!resetSavedSelectionsOnLoad)try{const value=JSON.parse(localStorage.getItem('meshfirmware.selections')||'{}');if(value&&typeof value==='object'&&!Array.isArray(value))saved=value;}catch{}
+  // Older saved versions remain visible, but only a marked user choice is a
+  // preference during automatic device selection. Others use the latest.
   saved.provider=catalogProvider(saved.provider)||'Keymind Cascade';
   if(typeof saved.hardware==='string')saved.hardware=canonicalHardware(saved.hardware);
   const linked=installModeLocked()?{}:linkedCatalogSelections(),hasLinked=Object.keys(linked).length>0;
@@ -2490,7 +2495,7 @@ getCatalog().then(catalog => {
   for(const id of ['provider','hardware','role','version']){
     if([...$(id).options].some(o=>o.value===selections[id])){
       $(id).value=selections[id];
-      if(id==='provider'||Object.hasOwn(linked,id))state.manualSelections[id]=selections[id];
+      if(id==='provider'||Object.hasOwn(linked,id)||(id==='version'&&saved.versionExplicit===true&&!hasLinked))state.manualSelections[id]=selections[id];
       if(id==='provider')applyWadameshInstallDefault({explicitMode:!!linked.mode});
       filterCatalog(id);
     }else if(Object.hasOwn(linked,id))filtersMatched=false;

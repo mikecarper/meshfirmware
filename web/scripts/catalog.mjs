@@ -20,9 +20,9 @@ export async function bytes(url,{sha256,size,fetchImpl=fetch}={}) {
   if(total!==size||createHash('sha256').update(payload).digest('hex')!==sha256)throw new Error('Public asset release size or SHA-256 verification failed.');
   return payload;
 }
-export async function json(url,{sha256,size,fetchImpl=fetch}={}) {
+export async function json(url,{sha256,size,maxSize=1<<20,fetchImpl=fetch}={}) {
   if(sha256!==undefined||size!==undefined){
-    if(!Number.isInteger(size)||size>(1<<20))throw new Error('Invalid verified public-manifest fetch bounds.');
+    if(!Number.isInteger(maxSize)||maxSize<=0||maxSize>(4<<20)||!Number.isInteger(size)||size>maxSize)throw new Error('Invalid verified public-manifest fetch bounds.');
     return JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(await bytes(url,{sha256,size,fetchImpl})));
   }
   return (await responseFor(url,fetchImpl)).json();

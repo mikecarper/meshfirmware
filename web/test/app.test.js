@@ -1662,6 +1662,23 @@ test('page defaults to Keymind while a saved explicit stock choice remains avail
     assert.equal(ui.elements.get('provider').value,saved?.provider||'Keymind Cascade');assert.deepEqual(ui.calls,[]);
   }
 });
+test('Keymind defaults to latest after board and role selection, and an explicit older version follows later selections',async()=>{
+  const make=(hardware,role,version)=>({...v4Item,provider:'Keymind Cascade',hardware,role,version,name:`${hardware}-${role}-${version}.bin`,url:`https://example.test/${hardware}-${role}-${version}.bin`});
+  const items=[make('Board A','repeater','v1.18.0.1'),make('Board A','repeater','v1.18.0.2'),make('Board A','roomServer','v1.18.0.1'),make('Board A','roomServer','v1.18.0.2'),make('Board B','repeater','v1.18.0.2')];
+  const ui=workbench({catalogPromise:Promise.resolve(linkedCatalog(items))});await new Promise(resolve=>setImmediate(resolve));
+  ui.elements.get('hardware').value='Board A';await ui.elements.get('hardware').onchange();
+  ui.elements.get('role').value='repeater';await ui.elements.get('role').onchange();
+  assert.equal(ui.elements.get('version').value,'v1.18.0.2');
+  ui.elements.get('version').value='v1.18.0.1';await ui.elements.get('version').onchange();
+  ui.elements.get('role').value='roomServer';await ui.elements.get('role').onchange();
+  assert.equal(ui.elements.get('version').value,'v1.18.0.1');
+  assert.equal(ui.elements.get('artifact').options.filter(x=>x.value).length,1);
+  ui.elements.get('hardware').value='Board B';await ui.elements.get('hardware').onchange();
+  ui.elements.get('role').value='repeater';await ui.elements.get('role').onchange();
+  assert.equal(ui.elements.get('version').value,'v1.18.0.1');
+  assert.equal(ui.elements.get('artifact').options.filter(x=>x.value).length,0,'an unavailable explicit version must not silently select a new version');
+  assert.deepEqual(ui.calls,[]);
+});
 const linkedT114Item={...v4Item,provider:'Keymind Cascade',hardware:'Heltec T114',architecture:'nrf52',action:'flash',role:'companionFull',version:'v1.18.0.1-halo-keymind',name:'Heltec_t114_companion_radio_full.zip',url:'https://example.test/t114.zip'};
 const linkedCatalog=items=>({items,warnings:[],generatedAt:'2026-10-27T00:00:00Z'});
 

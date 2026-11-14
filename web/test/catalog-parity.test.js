@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {catalogItems,catalogProvider,combineProviderItems,compareVersions,getCatalog,validateCatalog} from '../src/catalog.js';
-import {buildCatalog,keymindProviderPaths} from '../scripts/catalog-build.mjs';
+import {buildCatalog,keymindProviderPaths,KEYMIND_11801} from '../scripts/catalog-build.mjs';
 import {WADAMESH_PROVIDER,WADAMESH_LATEST_URL,wadameshBoardsUrl,wadameshCatalog,WADAMESH_REPOSITORY} from '../scripts/wadamesh-catalog.mjs';
 const config=(name='Board')=>({staticPath:'/firmware',device:[{name,type:'nrf52',erase:'erase.zip',bootloader:['boot.uf2','boot.zip'],firmware:[{role:'repeater',title:'Repeater',subTitle:'Full USB + OTA',notice:'Check <b>bootloader</b>',version:{'v1.18.0':{notes:'release detail',files:[{name:'app.zip',type:'flash',digest:'sha256:'+'a'.repeat(64)}]}}}]}]});
 const snapshot=items=>({generatedAt:'2026-01-01T00:00:00Z',warnings:[],items});
@@ -42,6 +42,22 @@ test('catalog retains erase, bootloader, variant and release context without HTM
 test('versions and Keymind manifests sort numerically newest first',()=>{
   assert.deepEqual(['v1.9.0','v1.18.0','v1.18.0.1','v1.18.0-rc1'].sort(compareVersions),['v1.18.0.1','v1.18.0','v1.18.0-rc1','v1.9.0']);
   const tree={tree:['1.9.0','1.18.0','1.20.1'].map(version=>({type:'blob',path:`mesh-america/keymind-cascade-v${version}-provider.json`}))};assert.match(keymindProviderPaths(tree,'cascade')[0],/v1.20.1/);assert.equal(keymindProviderPaths(tree,'logging').length,1);
+});
+test('retains exact verified 1.18.0.1 routes next to current 1.18.0.2 without relabeling either',async()=>{
+  const old=config('Old Board'),current=config('Old Board');
+  const historical=old.device[0].firmware[0],fresh=current.device[0].firmware[0];
+  historical.version={[KEYMIND_11801.version]:{notes:'old exact requirements',files:[{name:'old.zip',type:'flash',url:'https://github.com/mikecarper/MeshCore/releases/download/v1.18.0.1-test/old.zip'}]}};
+  fresh.version={'v1.18.0.2-halo-keymind-cascade-dev-a723af94':{notes:'new exact requirements',files:[{name:'new.zip',type:'flash',url:'https://github.com/mikecarper/MeshCore/releases/download/v1.18.0.2-test/new.zip'}]}};
+  let verified=false;
+  const result=await buildCatalog({readJson:async(url,opts)=>{if(url===KEYMIND_11801.url){assert.deepEqual(opts,{sha256:KEYMIND_11801.sha256,size:KEYMIND_11801.size,maxSize:2<<20});verified=true;return old;}return publicSources(current,current)(url);}});
+  assert(verified);assert.equal(result.items.length,2);
+  assert.deepEqual(result.items.map(x=>x.version),['v1.18.0.2-halo-keymind-cascade-dev-a723af94',KEYMIND_11801.version]);
+  assert.match(result.items[0].url,/v1\.18\.0\.2-test\/new\.zip/);assert.equal(result.items[0].releaseNotes,'new exact requirements');
+  assert.match(result.items[1].url,/v1\.18\.0\.1-test\/old\.zip/);assert.equal(result.items[1].releaseNotes,'old exact requirements');
+});
+test('historical provider errors do not mislabel another version as 1.18.0.1',async()=>{
+  const result=await buildCatalog({readJson:publicSources(config(),config())});
+  assert.equal(result.items.length,1);assert.ok(result.warnings.some(w=>w.includes('historical catalog unavailable')));
 });
 test('official outage does not prevent fresh Keymind catalog and uses validated old official entries',async()=>{
   const old={generatedAt:'2026-01-01T00:00:00Z',warnings:[],items:catalogItems(config('Old Official'))};
