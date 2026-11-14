@@ -1,6 +1,8 @@
 import { ESPLoader, Transport, ESPError } from 'esptool-js';
 import { fail, hash, md5hex, partitionTable, activeOta, text, sleep, validateEspImage, words } from './firmware.js';
 import { assessEspCompatibility } from './esp-compatibility.js';
+import {espSlotChoices,selectEspWriteSlots} from './esp-slots.js';
+export {espSlotChoices,selectEspWriteSlots} from './esp-slots.js';
 
 const RECOVERY_FORMAT='meshfirmware-esp-write-recovery-v1';
 const RECOVERY_CHUNK=16384;
@@ -90,17 +92,18 @@ async function detectWithSingleReset(loader,mode) {
 function writeProgram(pkg,plan,flashBytes) {
   const bridge=!!(plan.needed&&!plan.verified),payload=bridge?Uint8Array.from(plan.bridge):pkg.payload;
   const segments=(plan.segments||plan.addresses.map(address=>({address,sourceOffset:0,length:payload.length,payloadHash:hash(payload)}))).map(part=>({address:part.address,sourceOffset:part.sourceOffset||0,length:part.length,payloadHash:part.payloadHash}));
-  return {mac:plan.mac,sha256:pkg.sha256,payloadHash:pkg.payloadHash,chipId:pkg.chipId,flashBytes,stage:bridge?'bridge':pkg.merged?'merged':pkg.expert?'component':'application',merged:!!plan.merged,expert:!!plan.expert,bridgeHash:bridge?plan.bridge_sha256:null,partitionHash:bridge?plan.source_table_sha256:hash(new TextEncoder().encode(JSON.stringify(plan.parts||[]))),revisionProof:plan.revisionProof,segments};
+  return {mac:plan.mac,sha256:pkg.sha256,payloadHash:pkg.payloadHash,chipId:pkg.chipId,flashBytes,stage:bridge?'bridge':pkg.merged?'merged':pkg.expert?'component':'application',merged:!!plan.merged,expert:!!plan.expert,bridgeHash:bridge?plan.bridge_sha256:null,partitionHash:bridge?plan.source_table_sha256:hash(new TextEncoder().encode(JSON.stringify(plan.parts||[]))),revisionProof:plan.revisionProof,slotSelection:plan.slotSelection||'both',segments};
 }
 export function validateEspWriteRecovery(value) {
   const hex=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
   if(!value||value.format!==RECOVERY_FORMAT||!/^([a-f0-9]{2}:){5}[a-f0-9]{2}$/.test(value.mac)||!hex(value.sha256)||!hex(value.payloadHash)||!hex(value.partitionHash)||!hex(value.revisionProof)||!Number.isInteger(value.chipId)||![0,2,5,9,13].includes(value.chipId)||!Number.isInteger(value.flashBytes)||value.flashBytes<(1<<18)||value.flashBytes>(128<<20)||!['bridge','merged','component','application'].includes(value.stage)||typeof value.merged!=='boolean'||typeof value.expert!=='boolean'||typeof value.eraseComplete!=='boolean'||!Number.isInteger(value.attempts)||value.attempts<0||value.attempts>MAX_RECOVERY_ATTEMPTS||!Array.isArray(value.segments)||!value.segments.length||value.segments.length>32||!value.segments.every(s=>s&&Number.isInteger(s.address)&&s.address>=0&&s.address%4096===0&&Number.isInteger(s.sourceOffset)&&s.sourceOffset>=0&&Number.isInteger(s.length)&&s.length>0&&s.length<=(64<<20)&&s.address+Math.ceil(s.length/4)*4<=value.flashBytes&&hex(s.payloadHash))||new Set(value.segments.map(s=>s.address)).size!==value.segments.length||(value.stage==='bridge'?!hex(value.bridgeHash):value.bridgeHash!==null))fail('Invalid ESP write-recovery descriptor.');
   if(!Number.isInteger(Math.log2(value.flashBytes))||value.merged!==(value.stage==='merged')||value.expert!==(value.stage==='component')||value.segments.some(s=>s.sourceOffset+s.length>(64<<20)))fail('Invalid ESP recovery stage or geometry.');
+  if(value.slotSelection!==undefined&&(!['a','b','both'].includes(value.slotSelection)||value.stage!=='application'&&value.slotSelection!=='both'))fail('Invalid ESP recovery slot selection.');
   return value;
 }
 function bindWriteRecovery(value,program) {
   validateEspWriteRecovery(value);
-  for(const key of Object.keys(program))if(JSON.stringify(value[key])!==JSON.stringify(program[key]))fail('Interrupted ESP write belongs to a different chip, firmware, partition layout or write stage.');
+  for(const key of Object.keys(program))if(JSON.stringify(key==='slotSelection'&&value[key]===undefined?'both':value[key])!==JSON.stringify(program[key]))fail('Interrupted ESP write belongs to a different chip, firmware, partition layout or write stage.');
   if(value.merged&&!value.eraseComplete)fail('The previous whole-chip erase was not confirmed. Chunk recovery cannot skip an uncertain erase. Use Discard ESP retry record, then explicitly authorize a fresh full install and wipe.');
   if(value.attempts>=MAX_RECOVERY_ATTEMPTS)fail('Three interrupted chunk-recovery attempts were exhausted. Inspect the USB connection; use Discard ESP retry record before explicitly authorizing a fresh write.');
   return Object.freeze({...program,format:RECOVERY_FORMAT,eraseComplete:value.eraseComplete,attempts:value.attempts,segments:Object.freeze(program.segments.map(s=>Object.freeze({...s})))});
@@ -190,6 +193,8 @@ export class EspSession {
   #planProof = null;
   #written = false;
   #writeRecovery = null;
+  #inspection = null;
+  #inspectionGeneration = 0;
   constructor(port, log) {
     this.transport = new Transport(port);
     this.loader = new ESPLoader({ transport: this.transport, baudrate: 115200, romBaudrate: 115200, terminal: { clean() {}, writeLine: log, write: log } });
@@ -197,6 +202,8 @@ export class EspSession {
     this.port = port; this.mac = null; this.flashBytes = 0; this.plan = null; this.connectMode=null;
   }
   async connect(mode,{singleReset=false}={}) {
+    this.#invalidateInspection();
+    const inspectionContext={loader:this.loader,transport:this.transport,port:this.port,generation:this.#inspectionGeneration};
     if (!['no_reset','usb_reset','default_reset'].includes(mode)) fail('Choose a qualified ESP32 bootloader/reset mode.');
     if(typeof singleReset!=='boolean')fail('The single-reset option must be a boolean.');
     this.mac=null; this.flashBytes=0; this.plan=null; this.#planProof=null; this.#written=false; this.#writeRecovery=null; this.connectMode=null;
@@ -222,16 +229,40 @@ export class EspSession {
       try { this.loader.info(`ESP32 connection stage: physical flash-ID inspection failed after ${this.loader.syncStubDetected?'reusing the running':'starting the'} stub. No additional reset or flash write was sent.`); } catch {}
       throw error;
     }
+    if(this.#inspectionGeneration!==inspectionContext.generation || this.loader!==inspectionContext.loader || this.transport!==inspectionContext.transport || this.port!==inspectionContext.port || this.loader.transport!==inspectionContext.transport || this.transport.device!==inspectionContext.port)fail('The ESP session changed during chip inspection. No inspection reset was authorized.');
     this.connectMode=mode;
-    return { chip: this.loader.chip.CHIP_NAME, mac: this.mac, flashBytes: this.flashBytes };
+    this.#inspection={loader:this.loader,transport:this.transport,port:this.port,chip:this.loader.chip,chipId:this.loader.chip.IMAGE_CHIP_ID,mac:this.mac,flashBytes:this.flashBytes,mode,generation:this.#inspectionGeneration};
+    return { chip: this.loader.chip.CHIP_NAME, chipId: this.loader.chip.IMAGE_CHIP_ID, mac: this.mac, flashBytes: this.flashBytes };
   }
   async assertMac() { if (!this.mac || (await this.loader.chip.readMac(this.loader)).toLowerCase() !== this.mac) fail('Physical chip MAC changed. Write stopped.'); }
+  #invalidateInspection() { this.#inspection=null;this.#inspectionGeneration++; }
+  #assertInspection(inspection) {
+    if(!inspection || this.#inspectionGeneration!==inspection.generation || this.plan || this.#planProof || this.#written || this.#writeRecovery || this.loader!==inspection.loader || this.transport!==inspection.transport || this.loader.transport!==inspection.transport || this.transport.device!==inspection.port || this.port!==inspection.port || this.loader.chip!==inspection.chip || this.loader.chip.IMAGE_CHIP_ID!==inspection.chipId || this.mac!==inspection.mac || this.flashBytes!==inspection.flashBytes || this.connectMode!==inspection.mode)fail('Reset after chip inspection requires the unchanged, successfully inspected session with no flash plan, and is permitted only once.');
+  }
   recordPlan(plan) {
+    this.#invalidateInspection();
     if(plan.segments)plan.segments=Object.freeze(plan.segments.map(segment=>Object.freeze({...segment})));
+    if(plan.parts)plan.parts=Object.freeze(plan.parts.map(part=>Object.freeze({...part})));
+    plan.allSlotAddresses=Object.freeze([...(plan.allSlotAddresses||plan.addresses)]);
+    plan.slotSelection||='both';
+    const slots=espSlotChoices({architecture:'esp32',merged:plan.merged,expert:plan.expert,payload:{length:0}},plan);
+    plan.slotBootAddress=slots.bootAddress;plan.writesBootSlot=slots.writesBootSlot;
     plan.addresses=Object.freeze([...plan.addresses]); this.plan=plan;
     this.#planProof=this.planProof(plan); this.#written=false; return plan;
   }
   async recordCompatiblePlan(pkg,plan,recovery=null) {
+    this.#invalidateInspection();
+    // A single-slot interrupted update must be rebuilt as that same subset
+    // before revision-proof/segment binding, never silently expanded to Both.
+    if(recovery){
+      validateEspWriteRecovery(recovery);
+      const previous=recovery.segments.map(segment=>segment.address);
+      if(recovery.stage==='application'&&JSON.stringify(previous)!==JSON.stringify(plan.addresses)){
+        const slots=espSlotChoices(pkg,plan),match=slots.canSelect&&slots.options.find(option=>option.value!=='both'&&JSON.stringify(option.addresses)===JSON.stringify(previous));
+        if(!match)fail('Interrupted application slots no longer match the inspected OTA layout.');
+        plan=selectEspWriteSlots(pkg,plan,match.value);
+      }
+    }
     plan={...plan,...await assessEspCompatibility(this.loader,pkg,plan)};
     if(recovery){
       validateEspWriteRecovery(recovery);
@@ -241,8 +272,20 @@ export class EspSession {
     }
     return this.recordPlan(plan);
   }
-  planProof(plan) { return hash(new TextEncoder().encode(JSON.stringify([plan.sha256,plan.payloadHash,plan.mac,plan.addresses,plan.merged,plan.expert,!!plan.needed,!!plan.verified,plan.bridge_sha256,plan.segments,plan.revisionProof,plan.requiresRevisionOverride,plan.revisionOverrideToken,!!plan.chunkedRecovery]))); }
+  planProof(plan) { return hash(new TextEncoder().encode(JSON.stringify([plan.sha256,plan.payloadHash,plan.mac,plan.addresses,plan.allSlotAddresses,plan.slotSelection,plan.slotBootAddress,plan.writesBootSlot,plan.parts,plan.merged,plan.expert,!!plan.needed,!!plan.verified,plan.bridge_sha256,plan.segments,plan.revisionProof,plan.requiresRevisionOverride,plan.revisionOverrideToken,!!plan.chunkedRecovery]))); }
+  async selectSlots(pkg,selection='both'){
+    const original=this.plan,proof=this.#planProof;
+    if(!original||!proof||this.planProof(original)!==proof||original.mac!==this.mac||hash(pkg.payload)!==original.payloadHash||pkg.sha256!==original.sha256||pkg.chipId!==this.loader.chip.IMAGE_CHIP_ID||this.#written)fail('Verified firmware or flash plan changed before slot selection. Inspect again.');
+    const selected=selectEspWriteSlots(pkg,original,selection);
+    if(selection===(original.slotSelection||'both'))return original;
+    const compatibility=await assessEspCompatibility(this.loader,pkg,selected);
+    await this.assertMac();
+    if(this.plan!==original||this.#planProof!==proof||this.planProof(original)!==proof||hash(pkg.payload)!==original.payloadHash)fail('Firmware or inspected slot plan changed during compatibility checks.');
+    if(JSON.stringify(compatibility.revisionCheck.revision)!==JSON.stringify(original.revisionCheck?.revision)||compatibility.requiresRevisionOverride!==original.requiresRevisionOverride||JSON.stringify(compatibility.compatibilityWarnings)!==JSON.stringify(original.compatibilityWarnings))fail('Silicon revision evidence changed during slot selection. Inspect again before authorizing a write.');
+    return this.recordPlan({...selected,...compatibility});
+  }
   async prepare(pkg, {planner,packageBytes,usbSetBytes,resume,expertOffset,recovery,resolveFirmwareName,migrationDisabledReason} = {}) {
+    this.#invalidateInspection();
     this.plan=null; this.#planProof=null; this.#written=false;this.#writeRecovery=null;
     if (pkg.architecture !== 'esp32' || pkg.chipId !== this.loader.chip.IMAGE_CHIP_ID || hash(pkg.payload) !== pkg.payloadHash) fail('Firmware chip or immutable payload verification failed.');
     const fileOffset=pkg.merged?(pkg.flashOffset??0):0;
@@ -254,7 +297,7 @@ export class EspSession {
     }
     const tableOffset=0x8000-fileOffset;
     const parts = pkg.merged ? partitionTable(pkg.payload.subarray(tableOffset,tableOffset+4096),this.flashBytes) : partitionTable(await this.loader.readFlash(0x8000,4096),this.flashBytes);
-    let addresses;
+    let addresses,slotBootAddress;
     if (pkg.merged) {
       const proposed = parts;
       const populated=new Set();
@@ -274,7 +317,7 @@ export class EspSession {
       }
       if(bootable===undefined || !populated.has(bootable)) fail('Merged install does not contain a valid application in its boot-selected partition.');
       const mirrors=mergedMirrorSegments(pkg,proposed,populated),segments=[{address:fileOffset,sourceOffset:0,length:pkg.payload.length,payloadHash:pkg.payloadHash},...mirrors];
-      return this.recordCompatiblePlan(pkg,{sha256:pkg.sha256,payloadHash:pkg.payloadHash,mac:this.mac,addresses:segments.map(segment=>segment.address),merged:true,parts,segments,mirroredSlots:mirrors.length},recovery);
+      return this.recordCompatiblePlan(pkg,{sha256:pkg.sha256,payloadHash:pkg.payloadHash,mac:this.mac,addresses:segments.map(segment=>segment.address),slotBootAddress:bootable,merged:true,parts,segments,mirroredSlots:mirrors.length},recovery);
     } else {
       // The shared expansion helper reviews ESP32/C3/S3 only. Other supported
       // chips may update fitting slots, never run an unreviewed migration.
@@ -283,7 +326,7 @@ export class EspSession {
         if(nvs.length>1 || ota.length>1 || nvs.some(part=>part.size>(1<<20)) || ota.some(part=>part.size<8192)) fail('Ambiguous NVS/OTA layout. Browser migration cannot proceed.');
         if(resume&&(nvs.length!==1||ota.length!==1))fail('Migration completion requires its exact NVS and OTA snapshots.');
         const snapshots={table:await this.loader.readFlash(0x8000,4096),nvs:nvs.length?await this.loader.readFlash(nvs[0].offset,nvs[0].size):null,ota:ota.length?await this.loader.readFlash(ota[0].offset,8192):null,mac:this.mac};
-        appWriteOrder(parts,snapshots.ota);
+        slotBootAddress=appWriteOrder(parts,snapshots.ota).at(-1);
         // The exact native helper decides whether the unchanged source table
         // needs a bridge rewrite or the expanded target needs completion proof.
         // A UI pending marker alone must never force target-table verification.
@@ -292,7 +335,7 @@ export class EspSession {
         let result=await planner.call('plan',{...snapshots,name:firmwareName||pkg.name,image:pkg.payload,chip:this.loader.chip.CHIP_NAME,flashBytes:this.flashBytes,package:packageBytes,usbSet:usbSetBytes});
         if((result.needed&&result.resume===true)||(resume&&!result.needed))result=await planner.call('verify',{...snapshots,image:pkg.payload,sha256:pkg.sha256});
         this.planner=planner;
-        return this.recordCompatiblePlan(pkg,{...result,sha256:pkg.sha256,payloadHash:pkg.payloadHash,mac:this.mac,addresses:result.app_offsets,merged:false,parts},recovery);
+        return this.recordCompatiblePlan(pkg,{...result,sha256:pkg.sha256,payloadHash:pkg.payloadHash,mac:this.mac,addresses:result.app_offsets,slotBootAddress,merged:false,parts},recovery);
       }
       const apps = parts.filter(p => p.type === 0);
       if (apps.some(p => pkg.payload.length > p.size)) fail(migrationDisabledReason||'Partition expansion is required, but no reviewed browser migration plan exists for this chip/layout. No write was performed.');
@@ -302,10 +345,12 @@ export class EspSession {
       const ota = parts.filter(p => p.type === 1 && p.subtype === 0);
       if (ota.length > 1 || ota.some(part=>part.size<8192)) fail('Ambiguous OTA metadata layout.');
       addresses = appWriteOrder(parts,ota.length?await this.loader.readFlash(ota[0].offset,8192):null);
+      slotBootAddress=addresses.at(-1);
     }
-    return this.recordCompatiblePlan(pkg,{ sha256: pkg.sha256, payloadHash: pkg.payloadHash, mac: this.mac, addresses, merged: pkg.merged, parts },recovery);
+    return this.recordCompatiblePlan(pkg,{ sha256: pkg.sha256, payloadHash: pkg.payloadHash, mac: this.mac, addresses,slotBootAddress, merged: pkg.merged, parts },recovery);
   }
   async recoverBridge(pkg,{planner}={}) {
+    this.#invalidateInspection();
     this.plan=null; this.#planProof=null; this.#written=false;
     if(this.connectMode!=='no_reset' || !planner || pkg.architecture!=='esp32' || pkg.merged || pkg.expert || pkg.chipId!==this.loader.chip.IMAGE_CHIP_ID || hash(pkg.payload)!==pkg.payloadHash || pkg.sha256!==pkg.payloadHash) fail('Bridge recovery requires a no-reset ROM connection, the unchanged original final application and its browser validator.');
     await this.assertMac();
@@ -329,6 +374,7 @@ export class EspSession {
     return plan;
   }
   async flash(pkg, progress, {allowRevisionMismatch=false,chunkedRecovery=false} = {}) {
+    this.#invalidateInspection();
     this.#written=false;
     const plan = this.plan;
     if (!plan || hash(pkg.payload) !== plan.payloadHash || pkg.sha256 !== plan.sha256) fail('Firmware changed after confirmation.');
@@ -382,6 +428,20 @@ export class EspSession {
     if(!this.#written || !this.#planProof || !this.plan || this.planProof(this.plan)!==this.#planProof) fail('Reset is permitted only once after a completely verified write.');
     this.#written=false; // An uncertain reset may already have taken effect.
     await this.assertMac();
+    await this.#resetToApplication(nativeUsb);
+  }
+  // Chip inspection has its own one-use reset permission. It never invents a
+  // write/plan proof or enables finish(), and cannot survive planning or close.
+  async finishInspection(nativeUsb) {
+    if(typeof nativeUsb!=='boolean')fail('The native-USB inspection reset option must be a boolean.');
+    const inspection=this.#inspection;
+    this.#inspection=null; // Consume before any uncertain device operation.
+    this.#assertInspection(inspection);
+    await this.assertMac();
+    this.#assertInspection(inspection);
+    await this.#resetToApplication(nativeUsb);
+  }
+  async #resetToApplication(nativeUsb) {
     if (nativeUsb && [2,9].includes(this.loader.chip.IMAGE_CHIP_ID)) {
       // Native S2/S3 CDC has no external EN pin. Clear only forced download,
       // then arm the hardware RTC watchdog. Never retry an uncertain reset.
@@ -400,6 +460,7 @@ export class EspSession {
     }
   }
   async close({strict=false}={}) {
+    this.#invalidateInspection();
     if(typeof strict!=='boolean')fail('The strict-close option must be a boolean.');
     try{await this.transport.disconnect();}catch(error){if(strict)throw error;}
   }

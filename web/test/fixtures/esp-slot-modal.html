@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP32 slot modal · UI-only preview</title>
+<link rel="stylesheet" href="/src/style.css">
+<main>
+  <h1>UI-only slot preview</h1>
+  <p>No USB access, firmware downloads or device commands. This uses the real confirmation markup and styles with an illustrative two-slot layout.</p>
+  <button id="preview-open">Preview final confirmation</button>
+  <p id="preview-result" role="status"></p>
+</main>
+<script type="module">
+  import {espSlotChoices} from '/src/esp-slots.js';
+  const source=await (await fetch('/index.html')).text();
+  const parsed=new DOMParser().parseFromString(source,'text/html');
+  const dialog=parsed.getElementById('confirm-dialog');document.body.append(dialog);
+  const $=id=>document.getElementById(id);
+  const choices=espSlotChoices({architecture:'esp32',payload:new Uint8Array(64)},{addresses:[0x10000,0x210000],slotBootAddress:0x210000,parts:[{type:0,subtype:0x10,offset:0x10000,size:0x200000},{type:0,subtype:0x11,offset:0x210000,size:0x200000}]});
+  $('confirm-title').textContent='Write this firmware?';$('confirm-detail').textContent='Illustrative application.bin · UI preview, not a device operation';$('confirm-warning').textContent='Keep power connected. Review the selected targets before confirming.';$('confirm-submit').textContent='Flash firmware';$('confirm-esp-slots').hidden=false;$('confirm-esp-slot-reason').textContent=choices.reason;
+  function update(){const selected=choices.options.find(option=>$('confirm-esp-slot-'+option.value).checked);$('confirm-esp-slot-summary').textContent='Write targets: '+selected.addresses.map(value=>'0x'+value.toString(16)).join(', ')+'. '+(selected.writesBootSlot?'OTA boot selection is unchanged. Each selected write is read back and verified.':'Boot selection is unchanged. This does not update the boot-selected application; startup verification and post-flash settings will not run.');}
+  for(const option of choices.options){$('confirm-esp-slot-'+option.value+'-label').textContent=option.label;$('confirm-esp-slot-'+option.value).onchange=update;}
+  $('preview-open').onclick=()=>{for(const option of choices.options)$('confirm-esp-slot-'+option.value).checked=option.value==='both';update();dialog.showModal();};
+  dialog.addEventListener('close',()=>{$('preview-result').textContent=dialog.returnValue==='confirm'?'UI-only selection confirmed; no device operation.':'Preview cancelled; no device operation.';});
+</script>
+</html>

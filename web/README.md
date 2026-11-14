@@ -59,6 +59,72 @@ verified through MeshCore's USB protocol. After reset, check the device screen.
 Configure radio/MediaMesh settings in Wadamesh itself; this provider does not
 queue MeshCore USB settings or change the downloaded firmware defaults.
 
+### ESP32 slot choice
+
+The final flash popup offers **Slot A**, **Slot B**, or **Both slots (default)**
+for inspected application updates with exactly two fitting OTA partitions.
+A means `ota_0` and B means `ota_1`; the popup shows their actual addresses.
+Both preserves the normal inactive-first, boot-selected-last write order.
+
+Selecting one slot does not change OTA boot selection. Writing only the slot
+not selected for boot leaves the existing application selected; the popup
+warns that startup verification and post-flash settings will not run. If USB
+settings are queued, that inactive-only choice is unavailable. A/B is not a
+boot-switching control.
+
+After a boot-selected single-slot update, startup verification additionally
+requires the firmware's read-only `get boot.slot` response to identify that
+exact running partition. An unsupported getter or fallback to the untouched
+slot leaves startup unverified and prevents queued settings from being sent.
+Both-slot updates retain the existing startup checks.
+
+Merged/full installs, component writes, partition expansion and its approved
+final write retain their required targets. Interrupted-write recovery retains
+the exact original subset; it cannot silently change a single-slot retry to
+Both. Changing a selection rechecks compatibility and chip identity before any
+write. Cancelling or changing the image/device invalidates the approval.
+
+### Unidentified standalone firmware
+
+The application reader recognizes MeshCore and Meshtastic USB protocols.
+An opened serial port that answers neither is reported as **USB connected ·
+Application unknown**, not positively identified as Ripple, MeshCore or a
+particular board. Standalone firmware such as Ripple Ultra may not expose a
+supported local USB identity API. Choose the exact hardware manually in that
+case. Permission, disconnection and port-open errors remain connection errors;
+USB VID/PID alone does not establish the board or running firmware.
+
+### Narrowing ESP32 board choices
+
+A reviewed native ESP USB identity narrows the list to ESP32-family targets,
+without guessing S3, memory, connection method or board model. Generic UART
+adapters do not establish a processor family. A successful running-application
+architecture report can also narrow that family.
+
+For an unidentified ESP32 application, **Read ESP32 chip · narrow boards** is
+available before loading firmware. Its separate confirmation explicitly allows
+a brief bootloader restart, chip/security/flash-capacity inspection and one
+normal-boot restart request. It does not download a firmware file, read settings
+or messages, erase, flash, or create a write approval. A changed USB interface
+still needs the user to select the same radio; there is no guessed replacement.
+Startup after this inspection is not claimed verified.
+
+The observed ROM chip filters out only catalog boards whose reviewed processor
+profiles clearly disagree. Missing/conflicting chip metadata stays available.
+The current profile inventory maps the pinned MeshCore/PlatformIO recipes and
+explicit supported-provider chip metadata; unfamiliar future boards are not
+classified from similar names. No remaining candidate is automatically selected
+or treated as independent physical-board proof. **Show all ESP32 boards** removes
+chip-specific pruning while retaining ordinary firmware compatibility checks.
+
+The evidence belongs only to the selected port object in this page. It is not
+saved across page reloads, copied to another radio, or taken from a proposed
+firmware image. An unexpected disconnect clears it. Physical flash capacity is
+shown, but declared build capacities, PSRAM requirements and screen dimensions
+are not used as exact physical-board identifiers. Display dimensions may be
+compiled into firmware without an exposed USB query; no resolution was measured
+from the connected Ripple radio.
+
 ### Custom firmware and board checks
 
 Choose **Custom firmware** in the main **Firmware** dropdown, then select a

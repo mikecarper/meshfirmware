@@ -209,12 +209,24 @@ test('status, warnings, progress and required expert offsets cannot be trapped i
   assert.ok(!has(get('confirm-submit'),'disabled'),'Confirmation uses an enabled action button, not a typing gate');
 });
 
+test('ESP32 candidate override and chip inspection are optional unnumbered controls',()=>{
+  const option=get('show-all-esp-option'),check=get('show-all-esp'),inspect=get('inspect-esp-chip');
+  assert.ok(has(option,'hidden'));assert.ok(inside(check,option));assert.equal(check.attrs.type,'checkbox');assert.ok(has(check,'data-lock'));assert.ok(!has(check,'checked'));assert.equal(check.attrs.autocomplete,'off');
+  assert.match(html.slice(option.start).split('</label>')[0],/Show all ESP32 boards/);
+  assert.equal(inspect.tag,'button');assert.equal(inspect.attrs.type,'button');assert.ok(has(inspect,'hidden'));assert.ok(has(inspect,'data-lock'));
+  assert.match(html.slice(inspect.start).split('</button>')[0],/Read ESP32 chip · narrow boards/);assert.ok(!nodes.some(node=>inside(node,inspect)&&hasClass(node,'action-number')));
+  assert.equal(get('hardware').attrs['aria-describedby'],'hardware-filter-status');
+});
+
 test('operation confirmation keeps warnings and explicit action buttons without text entry',()=>{
   const dialog=get('confirm-dialog'),form=dialog.children.find(node=>node.tag==='form'),submit=get('confirm-submit');
   assert.ok(form);assert.equal(form.attrs.method,'dialog');
   for(const id of ['confirm-title','confirm-detail','confirm-warning'])assert.ok(inside(get(id),form),`#${id} remains visible in the confirmation form`);
   assert.ok(hasClass(get('confirm-warning'),'notice'),'Warnings must remain prominent');
-  assert.ok(!nodes.some(node=>inside(node,form)&&['input','textarea','select'].includes(node.tag)),'No confirmation may require typing or another field');
+  const fields=nodes.filter(node=>inside(node,form)&&['input','textarea','select'].includes(node.tag));
+  assert.equal(fields.length,3);assert.ok(fields.every(node=>node.tag==='input'&&node.attrs.type==='radio'&&node.attrs.name==='confirm-esp-slot'),'Only the optional ESP32 slot radios may be fields; no confirmation requires typing');
+  const slots=get('confirm-esp-slots');assert.equal(slots.tag,'fieldset');assert.ok(has(slots,'hidden'));assert.ok(inside(slots,form));assert.ok(fields.every(node=>inside(node,slots)));
+  assert.equal(get('confirm-esp-slot-both').attrs.value,'both');assert.ok(has(get('confirm-esp-slot-both'),'checked'));assert.equal(get('confirm-esp-slot-summary').attrs['aria-live'],'polite');
   for(const id of ['confirm-token-fields','token-label','confirm-token'])assert.ok(!byId.has(id),`Obsolete #${id} must not remain in the document`);
   const buttons=nodes.filter(node=>inside(node,form)&&node.tag==='button');assert.equal(buttons.length,2);
   const cancel=buttons.find(node=>node.attrs.value==='cancel');assert.ok(cancel);assert.match(html.slice(cancel.start).split('</button>')[0],/>Cancel$/);

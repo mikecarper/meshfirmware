@@ -40,8 +40,10 @@ test('a Meshtastic startup log containing a public key is not mistaken for MeshC
 });
 
 test('genuine transport failures never launch a fallback probe on a disconnected or locked port',async()=>{
-  for(const stage of ['command','read']){
-    const link=radio();link[stage]=async()=>{throw Error('Port unavailable');};await assert.rejects(detectApplication(link,options),/Port unavailable/);assert.ok(!link.writes.some(value=>value[0]===0x94));
+  for(const stage of ['command','read','write'])for(const name of ['NotAllowedError','SecurityError','NetworkError','NotFoundError','Error']){
+    const link=radio(),original=Object.assign(Error('Port unavailable'),{name});link[stage]=async()=>{throw original;};
+    await assert.rejects(detectApplication(link,options),error=>{assert.equal(error,original);assert.equal(Object.hasOwn(error,'usbSerialAvailable'),false);return true;});
+    assert.ok(!link.writes.some(value=>value[0]===0x94));
   }
 });
 
@@ -55,12 +57,16 @@ test('an unidentified application remains manual with a useful error rather than
   const link=radio();link.write=async value=>{link.writes.push([...value]);};
   await assert.rejects(detectApplication(link,options),error=>{
     assert.equal(error.code,'APPLICATION_UNIDENTIFIED');
+    assert.equal(error.usbSerialAvailable,true);
+    assert.match(error.message,/USB serial communication is available.*running firmware could not be identified/);
     assert.match(error.message,/No supported MeshCore or Meshtastic application/);
-    assert.match(error.message,/USB port opens, its serial driver is available/);
+    assert.match(error.message,/serial driver is available because this USB port opened/);
+    assert.match(error.message,/Standalone firmware such as Ripple Ultra may not expose these supported USB APIs/);
     assert.match(error.message,/may not provide a USB API.*BLE-only Companion/);
     assert.match(error.message,/exact hardware manually.*matching USB-enabled firmware/);
     assert.match(error.message,/No reset or firmware write was sent/);
     assert.doesNotMatch(error.message,/INFO_UF2|bootloader drive|install.*driver/i);
+    assert.doesNotMatch(error.message,/Ripple Ultra (?:detected|identified)|T-Deck (?:detected|identified)/i);
     return true;
   });
   assert.ok(!link.commands.some(command=>/^set |reboot/.test(command)));
@@ -128,7 +134,7 @@ test('a late MeshCore application can identify within the one ROM-startup budget
 
 test('ROM silence has one 25-second total deadline with bounded MeshCore, Full-terminal and Meshtastic phases',async()=>{
   const f=bootingRadio();
-  await assert.rejects(detectApplication(f.link,bootOptions(f)),error=>error.code==='APPLICATION_UNIDENTIFIED');
+  await assert.rejects(detectApplication(f.link,bootOptions(f)),error=>error.code==='APPLICATION_UNIDENTIFIED'&&error.usbSerialAvailable===true);
   assert.ok(f.now()<=25000,`startup exceeded its total budget: ${f.now()}ms`);
   assert.ok(f.now()>=24000,`startup stopped unexpectedly early: ${f.now()}ms`);
   assert.ok(mtRequests(f).length>1,'the same budget should alternate read-only protocols');
@@ -168,7 +174,7 @@ test('an identified MeshCore identity conflict never retries or launches Meshtas
 test('fatal command, read and write errors preserve the original failure and never acquire adaptive retry authority',async()=>{
   for(const failureStage of ['command','read','write'])for(const name of ['NotAllowedError','SecurityError','NetworkError','NotFoundError','Error']){
     const original=Object.assign(new Error('Synthetic port unavailable'),{name}),f=bootingRadio({failure:original,failureStage});
-    await assert.rejects(detectApplication(f.link,bootOptions(f)),error=>error===original);
+    await assert.rejects(detectApplication(f.link,bootOptions(f)),error=>{assert.equal(error,original);assert.equal(Object.hasOwn(error,'usbSerialAvailable'),false);return true;});
     assert.equal(f.commands.filter(command=>command==='get public.key').length,1);
     assert.equal(mtRequests(f).length,0);assert.ok(f.writes.length<=1,`${failureStage}/${name} allowed a later write`);assertStartupOnly(f.events);
   }
@@ -177,7 +183,7 @@ test('fatal command, read and write errors preserve the original failure and nev
 test('stale selection or a startup progress failure stops the adaptive run without issuing another operation',async()=>{
   const stale=bootingRadio(),original=Error('Selection changed');let current=true;
   const command=stale.link.command;stale.link.command=async(...args)=>{const result=await command(...args);current=false;return result;};
-  await assert.rejects(detectApplication(stale.link,{...bootOptions(stale),assertCurrent:()=>{if(!current)throw original;}}),error=>error===original);
+  await assert.rejects(detectApplication(stale.link,{...bootOptions(stale),assertCurrent:()=>{if(!current)throw original;}}),error=>{assert.equal(error,original);assert.equal(Object.hasOwn(error,'usbSerialAvailable'),false);return true;});
   assert.deepEqual(stale.commands,['get public.key']);assert.deepEqual(stale.writes,[]);
   for(const failureAt of [0,1]){
     const f=bootingRadio(),progressError=Error('Startup display stopped');let callsAtFailure=-1;

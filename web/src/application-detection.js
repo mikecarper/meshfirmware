@@ -85,6 +85,6 @@ export async function detectApplication(link,{assertCurrent=()=>{},meshCoreTimeo
       }
     }catch(error){nonRetryable(error);if(error!==windowExpired)throw error;}
   }
-  const error=Error((startup?'The radio reported a ROM boot, but no supported application became ready within 25 seconds. ':'')+'No supported MeshCore or Meshtastic application answered. If this USB port opens, its serial driver is available. The installed firmware may not provide a USB API, for example a BLE-only Companion build. Check the selected application port; a ROM/DFU port cannot identify the running application. Choose the exact hardware manually and matching USB-enabled firmware. No reset or firmware write was sent.');
-  error.code='APPLICATION_UNIDENTIFIED';throw error;
+  const error=Error((startup?'The radio reported a ROM boot, but no supported application became ready within 25 seconds. ':'')+'USB serial communication is available, but the running firmware could not be identified. No supported MeshCore or Meshtastic application answered. Standalone firmware such as Ripple Ultra may not expose these supported USB APIs; this does not mean the radio is faulty. The serial driver is available because this USB port opened. The installed firmware may not provide a USB API, for example a BLE-only Companion build. Check the selected application port; a ROM/DFU port cannot identify the running application. Choose the exact hardware manually and matching USB-enabled firmware. No reset or firmware write was sent.');
+  error.code='APPLICATION_UNIDENTIFIED';error.usbSerialAvailable=true;throw error;
 }

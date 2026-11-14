@@ -386,6 +386,14 @@ footer { font-size: 15.4px; line-height: 1.6; overflow-wrap: anywhere; }
 .workflow #wadamesh-info { font-size: 15.4px; margin-top: 14px; }
 .workflow #wadamesh-info strong { font-size: 16.8px; }
 .workflow #wadamesh-info p { font-size: 15.4px; line-height: 1.5; margin: 8px 0 0; }
+.confirm-esp-slots { margin: 18px 0; padding: 14px; border: 1px solid #b9cbd6; border-radius: 8px; }
+.confirm-esp-slots legend { font-size: 18px; font-weight: 700; }
+.confirm-esp-slot-options { display: flex; flex-wrap: wrap; gap: 10px; }
+.confirm-esp-slot-options label { display: flex; align-items: center; gap: 8px; margin: 0; padding: 10px; border: 1px solid #d7e2e9; border-radius: 6px; font-size: 16.8px; cursor: pointer; }
+.confirm-esp-slot-options label:has(input:checked) { border-color: var(--teal); background: #edf8f6; }
+.confirm-esp-slot-options label:has(input:disabled) { cursor: default; opacity: .65; }
+.confirm-esp-slot-options input { width: 18px; height: 18px; margin: 0; flex: 0 0 auto; accent-color: var(--teal); }
+.confirm-esp-slots p { font-size: 15.4px; line-height: 1.5; overflow-wrap: anywhere; }
 
 @media (max-width: 900px) {
   .sidebar { flex-wrap: wrap; }

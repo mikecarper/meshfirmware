@@ -10,6 +10,7 @@ import {detectMeshtastic} from '../src/meshtastic.js';
 import {canonicalHardware} from '../src/hardware-aliases.js';
 import {nrfDfuUsbIds} from '../src/nrf-usb-ids.js';
 import {nrfBoardCandidates} from '../src/nrf-board-candidates.js';
+import {espBoardCandidates} from '../src/esp-board-candidates.js';
 import {parseBootloaderInfo,detectBootloaderBoard} from '../src/bootloader-info.js';
 import {xiaoInstalledStatus,xiaoInfoProfile,xiaoBootloaderItem} from '../src/xiao-bootloader.js';
 import {chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode} from '../src/automatic.js';
@@ -20,6 +21,7 @@ import {tryNativeUsbFallback,xiaoS3ManualBootAdvice} from '../src/connection-fal
 import {catalogProvider,catalogItemKey} from '../src/catalog.js';
 import {hash as firmwareHash,md5hex,partitionTable as parsePartitionTable,crc32,inspectFirmware as inspectFirmwareBytes} from '../src/firmware.js';
 import {assessFirmwareBoard} from '../src/firmware-board.js';
+import {espSlotChoices,selectEspWriteSlots} from '../src/esp-slots.js';
 import {isWadamesh,wadameshDisplayAssessment,WADAMESH_STARTUP_NOTICE} from '../src/wadamesh.js';
 import {inspectRadioDefaults,customizeRadioDefaults} from '../src/radio-defaults.js';
 import {createPostFlashSettingsPlan,applyPostFlashSettings} from '../src/post-flash-settings.js';
@@ -58,16 +60,95 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
     fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,parseUsbMode,MigrationApproval,cleanCliReply,assessBootloaderVersion,firmwareFilesLinks,fetch:async()=>{throw Error('Unexpected network request');},fetchFirmwareBytes:(url,options)=>verifiedDownload(url,{...options,mirrorBase:'https://mirror.example.test/firmware/',pageOrigin:'https://mirror.example.test',fetchImpl:(target,init)=>target==='https://mirror.example.test/firmware/index.json'?Promise.resolve({ok:false,status:404}):options.fetchImpl(target,init)}),assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),commonCliRestorePreview:()=>({operations:[],skipped:[],warnings:[]}),restoreCommonCli:async()=>{throw Error('Unexpected CommonCLI restore');},
     backupCoverage,createNextStepScroller,tryNativeUsbFallback,xiaoS3ManualBootAdvice,SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
   });
-  context.assessFirmwareBoard=()=>({status:'match',requiresOverride:false,reason:'Test board identity.'});
+  context.assessFirmwareBoard=()=>({status:'match',requiresOverride:false,reason:'Test board identity.'});context.espSlotChoices=espSlotChoices;
   context.quickHotspotUrl=quickHotspotUrl;context.postFlashBleAdvice=postFlashBleAdvice;context.createNrfActivationCheck=()=>null;
   context.inspectRadioDefaults=inspectRadioDefaults;context.customizeRadioDefaults=customizeRadioDefaults;
   context.createPostFlashSettingsPlan=createPostFlashSettingsPlan;context.applyPostFlashSettings=applyPostFlashSettings;context.createPostFlashCompanionRequest=createPostFlashCompanionRequest;context.loadRadioPresets=async()=>({presets:[],source:'bundled',warning:'Test preset inventory.'});
   context.detectApplication=(...args)=>context.detectMeshCore(...args);context.detectMeshtasticBoard=detectMeshtasticBoard;
   context.parseBootloaderInfo=parseBootloaderInfo;context.detectBootloaderBoard=detectBootloaderBoard;context.xiaoInstalledStatus=xiaoInstalledStatus;context.xiaoInfoProfile=xiaoInfoProfile;context.xiaoBootloaderItem=xiaoBootloaderItem;context.chooseBootloaderInfoFile=async()=>{calls.push('file-picker');throw Error('Unexpected file chooser');};
-  context.selectionLink=selectionLink;context.nrfBoardCandidates=nrfBoardCandidates;context.isWadamesh=isWadamesh;context.wadameshDisplayAssessment=wadameshDisplayAssessment;context.WADAMESH_STARTUP_NOTICE=WADAMESH_STARTUP_NOTICE;
+  context.selectionLink=selectionLink;context.nrfBoardCandidates=nrfBoardCandidates;context.espBoardCandidates=espBoardCandidates;context.isWadamesh=isWadamesh;context.wadameshDisplayAssessment=wadameshDisplayAssessment;context.WADAMESH_STARTUP_NOTICE=WADAMESH_STARTUP_NOTICE;
   vm.runInContext(source,context);
   return {context,elements,calls,port,serialEvents,windowEvents,evaluate:code=>vm.runInContext(code,context)};
 }
+
+async function espSlotWorkbench({selection='both',boot=0x210000}={}){
+  const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;
+  ui.context.pkg=fakePackage({name:'slots.bin',architecture:'esp32'});
+  ui.context.slotPlan={sha256:ui.context.pkg.sha256,addresses:[0x10000,0x210000],parts:[{type:0,subtype:0x10,offset:0x10000,size:0x200000,label:'app0'},{type:0,subtype:0x11,offset:0x210000,size:0x200000,label:'app1'}],slotSelection:'both',slotBootAddress:boot,writesBootSlot:true};
+  if(selection!=='both')ui.context.slotPlan=selectEspWriteSlots(ui.context.pkg,ui.context.slotPlan,selection);
+  ui.evaluate('state.port=selectedPort;state.pkg=pkg;state.plan={...slotPlan,generation:state.generation,port:state.port,installMode:state.installMode};');
+  ui.context.openSlots=()=>ui.evaluate('flashSlotControls(state.pkg,state.plan,state.radioDefaults?.postFlashPlan)');
+  return ui;
+}
+function pickModalSlot(ui,value){for(const choice of ['a','b','both'])ui.elements.get('confirm-esp-slot-'+choice).checked=choice===value;ui.elements.get('confirm-esp-slot-'+value).onchange();}
+function closeConfirm(ui,value='confirm'){const dialog=ui.elements.get('confirm-dialog');dialog.returnValue=value;dialog.emit('close');}
+
+test('ESP32 final modal defaults to both real OTA slots and holds edits until confirmation',async()=>{
+  const ui=await espSlotWorkbench();ui.context.slotControls=ui.context.openSlots();
+  const pending=ui.evaluate('confirm("Write this firmware?","file","warning","FLASH",{espSlots:slotControls})');
+  assert.equal(ui.elements.get('confirm-esp-slots').hidden,false);assert.equal(ui.elements.get('confirm-esp-slot-both').checked,true);
+  assert.match(ui.elements.get('confirm-esp-slot-a-label').textContent,/Slot A.*0x10000/);assert.match(ui.elements.get('confirm-esp-slot-b-label').textContent,/Slot B.*0x210000/);
+  pickModalSlot(ui,'a');assert.match(ui.elements.get('confirm-esp-slot-summary').textContent,/0x10000.*does not update the boot-selected application.*verification.*will not run/);
+  assert.equal(ui.evaluate('state.plan.slotSelection'),'both');assert.equal(ui.context.slotControls.selection,'both');
+  closeConfirm(ui);assert.equal(await pending,true);assert.equal(ui.context.slotControls.selection,'a');assert.equal(ui.evaluate('state.plan.slotSelection'),'both');assert.equal(ui.elements.get('confirm-esp-slots').hidden,true);assert.deepEqual(ui.calls,[]);
+});
+
+test('cancel, stale scope and forged radio combinations cannot approve a slot change',async()=>{
+  for(const outcome of ['cancel','generation','image','plan','multiple','none']){
+    const ui=await espSlotWorkbench();ui.context.slotControls=ui.context.openSlots();const pending=ui.evaluate('confirm("Write","file","warning","FLASH",{espSlots:slotControls})');pickModalSlot(ui,'b');
+    if(outcome==='generation')ui.evaluate('state.generation++');if(outcome==='image')ui.evaluate('state.pkg={...state.pkg}');if(outcome==='plan')ui.evaluate('state.plan={...state.plan}');
+    if(outcome==='multiple')ui.elements.get('confirm-esp-slot-a').checked=true;if(outcome==='none')ui.elements.get('confirm-esp-slot-b').checked=false;
+    closeConfirm(ui,outcome==='cancel'?'cancel':'confirm');assert.equal(await pending,false,outcome);assert.equal(ui.context.slotControls.selection,'both',outcome);assert.deepEqual(ui.calls,[]);
+  }
+});
+
+test('slot controls reset for each ordinary final approval and stay hidden in unrelated confirmations',async()=>{
+  const ui=await espSlotWorkbench({selection:'a'});ui.context.slotControls=ui.context.openSlots();assert.equal(ui.context.slotControls.selection,'both');
+  const pending=ui.evaluate('confirm("Write","file","warning","FLASH",{espSlots:slotControls})');assert.equal(ui.elements.get('confirm-esp-slot-both').checked,true);closeConfirm(ui,'cancel');await pending;
+  const other=ui.evaluate('confirm("Board warning","file","warning","FLASH UNVERIFIED BOARD")');assert.equal(ui.elements.get('confirm-esp-slots').hidden,true);closeConfirm(ui,'cancel');await other;
+  ui.evaluate('state.pkg={...state.pkg,architecture:"nrf52"}');assert.equal(ui.context.openSlots(),null);assert.deepEqual(ui.calls,[]);
+});
+
+test('merged, migration and interrupted writes retain their fixed approved targets',async()=>{
+  for(const locked of ['merged','migration','approval','recovery','verified']){
+    const ui=await espSlotWorkbench({selection:locked==='recovery'?'a':'both'});
+    if(locked==='merged')ui.evaluate('state.pkg={...state.pkg,merged:true}');if(locked==='migration')ui.evaluate('state.migration={mac:"test"}');if(locked==='approval')ui.evaluate('state.migrationApproval={}');if(locked==='recovery')ui.evaluate('state.espRecovery={};state.plan.chunkedRecovery=true');if(locked==='verified')ui.evaluate('state.plan.verified=true');
+    ui.context.slotControls=ui.context.openSlots();assert.equal(ui.context.slotControls.canSelect,false,locked);const expected=locked==='recovery'?'a':'both';assert.equal(ui.context.slotControls.selection,expected,locked);
+    const pending=ui.evaluate('confirm("Write","file","warning","FLASH",{espSlots:slotControls})');assert.equal(ui.elements.get('confirm-esp-slot-'+expected).disabled,true);assert.equal(ui.elements.get('confirm-esp-slot-'+expected).checked,true);closeConfirm(ui);assert.equal(await pending,true,locked);assert.deepEqual(ui.calls,[]);
+  }
+});
+
+test('queued post-flash settings prevent approving an inactive-only write, even with a forged checked input',async()=>{
+  const ui=await espSlotWorkbench();ui.evaluate('state.radioDefaults={postFlashPlan:{mediaMesh:{preset:"off"}}}');ui.context.slotControls=ui.context.openSlots();
+  const pending=ui.evaluate('confirm("Write","file","warning","FLASH",{espSlots:slotControls})');assert.equal(ui.elements.get('confirm-esp-slot-a').disabled,true);assert.equal(ui.elements.get('confirm-esp-slot-b').disabled,false);assert.match(ui.elements.get('confirm-esp-slot-reason').textContent,/Queued USB settings/);
+  pickModalSlot(ui,'a');closeConfirm(ui);assert.equal(await pending,false);assert.equal(ui.context.slotControls.selection,'both');assert.deepEqual(ui.calls,[]);
+});
+
+test('final ESP32 approval reseals the chosen slot before writing and queues startup only for boot-slot writes',async()=>{
+  for(const selection of ['a','b','both']){
+    const ui=await espSlotWorkbench();ui.context.confirm=async(title,_detail,_warning,_action,options)=>{assert.equal(title,'Write this firmware?');assert.ok(options.espSlots);options.espSlots.selection=selection;ui.calls.push('approve');return true;};
+    ui.evaluate('state.esp={selectSlots:async()=>{throw Error("replace")},flash:async()=>{}}');
+    ui.evaluate('state.esp').selectSlots=async(pkg,choice)=>{ui.calls.push('select:'+choice);return selectEspWriteSlots(pkg,ui.evaluate('state.plan'),choice);};
+    ui.evaluate('state.esp').flash=async()=>{ui.calls.push('write');assert.deepEqual(Array.from(ui.evaluate('state.plan.addresses')),selection==='a'?[0x10000]:selection==='b'?[0x210000]:[0x10000,0x210000]);assert.equal(ui.evaluate('state.plan.port'),ui.port);};
+    await ui.evaluate('flashPreparedFirmware()');assert.deepEqual(ui.calls,selection==='both'?['approve','write']:['approve','select:'+selection,'write']);
+    assert.equal(ui.evaluate('state.plan.written'),true);assert.equal(!!ui.evaluate('state.verification'),selection!=='a');assert.equal(ui.elements.get('flash-progress-dialog').open,true);
+    if(selection==='a')assert.match(ui.elements.get('flash-progress-advice').textContent,/Only slot A.*boot.*not changed/i);
+  }
+});
+
+test('backend slot-reselection failures or changed context never reach a write',async()=>{
+  for(const outcome of ['failure','generation','session','settings']){
+    const ui=await espSlotWorkbench();ui.context.confirm=async(_title,_detail,_warning,_action,options)=>{options.espSlots.selection='a';if(outcome==='settings')ui.evaluate('state.radioDefaults={postFlashPlan:{mediaMesh:{preset:"off"}}}');return true;};
+    ui.evaluate('state.esp={}');ui.evaluate('state.esp').selectSlots=async()=>{ui.calls.push('select');if(outcome==='failure')throw Error('Identity changed');if(outcome==='generation')ui.evaluate('state.generation++');if(outcome==='session')ui.evaluate('state.esp={}');return selectEspWriteSlots(ui.context.pkg,ui.evaluate('state.plan'),'a');};
+    ui.evaluate('state.esp').flash=async()=>ui.calls.push('write');await assert.rejects(ui.evaluate('flashPreparedFirmware()'),/Identity changed|evidence changed|session changed|settings changed/);assert.equal(ui.calls.includes('write'),false,outcome);
+  }
+});
+
+test('finishing an inactive-only ESP32 write does not verify or configure the old application',async()=>{
+  const ui=await espSlotWorkbench({selection:'a'});ui.evaluate('state.plan.written=true;state.verification={name:"old"};state.esp={port:state.port,finish:async()=>{},close:async()=>{}}');
+  ui.context.detectMeshCore=()=>{throw Error('Must not query old application')};ui.context.applyPostFlashSettings=()=>{throw Error('Must not configure old application')};
+  await ui.evaluate('finishVerifiedEsp()');assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.evaluate('state.finishedFirmware.verified'),false);assert.match(ui.evaluate('state.finishedFirmware.startupAdvice'),/Only slot A.*not verified/);assert.match(ui.elements.get('notice').textContent,/No MeshCore startup check or settings commands/);assert.deepEqual(ui.calls,[]);
+});
 
 const t114MeshtasticItem=(more={})=>({project:'MeshCore',provider:'Keymind Cascade',hardware:'Heltec T114',architecture:'nrf52',role:'companionFull',version:'v1.18.0.1',name:'Heltec_t114_companion_radio_full-v1.18.0.1.zip',action:'flash',url:'https://example.test/t114.zip',...more});
 function radioDefaultsImage(){
@@ -515,7 +596,7 @@ test('nRF52 candidate filtering never turns a single remaining USB hint into an 
 });
 test('an unknown or ESP ROM interface is not nRF52 evidence, while explicit nRF52 mode retains all nRF52 choices',async()=>{
   for(const id of [[0x1234,0x5678],[0x303a,0x1001]]){
-    const ui=await nrfCandidateWorkbench({id,automatic:false});assert.ok(hardwareChoices(ui).includes('Heltec v4'));assert.equal(ui.elements.get('hardware-filter-status').hidden,true);
+    const ui=await nrfCandidateWorkbench({id,automatic:false});assert.ok(hardwareChoices(ui).includes('Heltec v4'));assert.equal(ui.elements.get('hardware-filter-status').hidden,id[0]!==0x303a);
     ui.elements.get('already-bootloader').checked=true;await ui.elements.get('already-bootloader').onchange();assert.ok(hardwareChoices(ui).includes('Heltec v4'));
     ui.elements.get('transport-mode').value='nrf52';await ui.elements.get('transport-mode').onchange();assert.deepEqual(hardwareChoices(ui),['Heltec T114','Other nRF52 board',rak3401Hardware,rak4631Hardware].sort());assert.equal(ui.elements.get('show-all-nrf-option').hidden,true);assert.equal(ui.evaluate('state.detectedHardware'),null);assert.deepEqual(ui.calls,['chooser']);
   }
@@ -534,11 +615,136 @@ test('an explicit nRF52 connection override belongs to its radio and cannot hide
     const ui=await nrfCandidateWorkbench({id:[0x1234,0x5678]});serialMock(ui);ui.elements.get('transport-mode').value='nrf52';await ui.elements.get('transport-mode').onchange();assert.ok(!hardwareChoices(ui).includes('Heltec v4'));
     if(disconnected)ui.serialEvents.disconnect({port:ui.port});
     const esp={getInfo:()=>({usbVendorId:0x303a,usbProductId:0x1001})};ui.context.navigator.serial.requestPort=async()=>{ui.calls.push('chooser');return esp;};ui.context.detectApplication=async()=>({firmwareFamily:'meshcore',role:'common-cli',model:'Heltec V4.2 OLED',catalogRole:'repeater',publicKey:null});
-    await ui.elements.get('select-port').onclick();assert.equal(ui.elements.get('transport-mode').value,'auto');assert.equal(ui.evaluate('state.device.architecture'),'esp32');assert.ok(hardwareChoices(ui).includes('Heltec v4'));assert.equal(ui.elements.get('hardware').value,'Heltec v4');assert.equal(ui.elements.get('hardware-filter-status').hidden,true);assert.ok(!ui.calls.includes('write')&&!ui.calls.includes('rom'));
+    await ui.elements.get('select-port').onclick();assert.equal(ui.elements.get('transport-mode').value,'auto');assert.equal(ui.evaluate('state.device.architecture'),'esp32');assert.ok(hardwareChoices(ui).includes('Heltec v4'));assert.equal(ui.elements.get('hardware').value,'Heltec v4');assert.equal(ui.elements.get('hardware-filter-status').hidden,false);assert.match(ui.elements.get('hardware-filter-status').textContent,/ESP32-family/);assert.ok(!ui.calls.includes('write')&&!ui.calls.includes('rom'));
   }
 });
 test('nRF52 scope changes retain pending erase recovery final bytes without a write or renewed approval',async()=>{
   const ui=workbench({recovery:{sha256:'a'.repeat(64),hardware:rak3401Hardware,phase:'reselect-dfu',eraseComplete:true}});await Promise.resolve();ui.context.inventory=[t114MeshtasticItem({hardware:rak3401Hardware,name:'rak3401.zip'}),t114MeshtasticItem({hardware:rak4631Hardware,name:'rak4631.zip'})];ui.context.pkg=fakePackage({architecture:'nrf52',sha256:'a'.repeat(64)});ui.context.selectedPort=ui.port;ui.port.getInfo=()=>({usbVendorId:0x239a,usbProductId:0x002a});ui.evaluate('state.items=inventory;state.port=selectedPort;state.pkg=pkg;controls();');assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);assert.equal(ui.evaluate('state.recovery.phase'),'reselect-dfu');assert.equal(ui.evaluate('state.recovery.eraseComplete'),true);assert.equal(ui.evaluate('state.backupApproved'),null);assert.equal(ui.elements.get('show-all-nrf').disabled,true);assert.deepEqual(ui.calls,[]);
+});
+
+const s3Inspection={chip:'ESP32-S3',chipId:9,mac:'aa:bb:cc:dd:ee:ff',flashBytes:16<<20};
+async function espCandidateWorkbench({id=[0x303a,0x1001],mode='auto',inspected=false}={}){
+  const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;
+  ui.port.getInfo=()=>({usbVendorId:id[0],usbProductId:id[1]});ui.elements.get('transport-mode').value=mode;
+  ui.context.inventory=['Heltec v4','Heltec v2','Heltec CT62','LilyGo T-LoRa C6','LilyGo T-Deck','LilyGo T-Deck Pro','Unknown future ESP board'].map(hardware=>t114MeshtasticItem({hardware,architecture:'esp32',name:hardware+'.bin',action:'flash-update'}));
+  ui.context.inventory.push(t114MeshtasticItem(),t114MeshtasticItem({hardware:'RP2040',architecture:'noflash',name:'rp.uf2',action:'download'}));
+  ui.context.inspectedChip=s3Inspection;ui.evaluate('state.items=inventory;state.port=selectedPort;filterCatalog();');
+  if(inspected)ui.evaluate('rememberEspChipInfo(state.port,inspectedChip);filterCatalog();');
+  return ui;
+}
+function mockChipInspection(ui,{failure=null}={}){
+  ui.context.EspSession=class{
+    constructor(port){assert.equal(port,ui.port);}
+    async connect(mode,options){ui.calls.push('connect:'+mode);assert.equal(options.singleReset,true);if(failure)throw failure;return s3Inspection;}
+    async finishInspection(nativeUsb){ui.calls.push('finishInspection:'+nativeUsb);}
+    async close(options){assert.equal(options.strict,true);ui.calls.push('close');}
+    async prepare(){assert.fail('Chip inspection must not prepare firmware');}
+    async flash(){assert.fail('Chip inspection must not write firmware');}
+    async finish(){assert.fail('Chip inspection must not use write completion');}
+  };
+  ui.context.touch1200=()=>assert.fail('A successful first chip connection must not send another reset');
+  ui.context.ensureBackup=()=>assert.fail('Chip inspection must not create firmware/backup approval');
+}
+
+test('native ESP USB hints filter architecture only while generic UART and unknown USB keep every architecture available',async()=>{
+  for(const id of [[0x303a,0x1001],[0x303a,0x0002],[0x10c4,0xea60],[0x1a86,0x7523],[0x1234,0x5678]]){
+    const ui=await espCandidateWorkbench({id}),native=id[0]===0x303a;
+    assert.equal(ui.evaluate('catalogArchitecture()'),native?'esp32':'');
+    assert.equal(hardwareChoices(ui).includes('Heltec T114'),!native);assert.equal(hardwareChoices(ui).includes('RP2040'),!native);
+    assert.ok(hardwareChoices(ui).includes('Heltec v2'));assert.ok(hardwareChoices(ui).includes('Heltec v4'));
+    assert.equal(ui.elements.get('hardware').value,'');assert.equal(ui.elements.get('artifact').value,'');
+    assert.equal(ui.evaluate('state.detectedHardware'),null);assert.equal(ui.evaluate('currentEspChipInfo()'),null);assert.deepEqual(ui.calls,[]);
+  }
+});
+
+test('a verified S3 inspection excludes reviewed incompatible chips and nRF52 but keeps T-Deck and unknown metadata without choosing a board',async()=>{
+  const ui=await espCandidateWorkbench({inspected:true});
+  assert.deepEqual(hardwareChoices(ui),['Heltec v4','LilyGo T-Deck','LilyGo T-Deck Pro','Unknown future ESP board'].sort());
+  assert.equal(ui.elements.get('hardware').value,'');assert.equal(ui.elements.get('artifact').value,'');assert.equal(ui.evaluate('state.detectedHardware'),null);
+  assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.boardDetected'),false);
+  assert.equal(ui.elements.get('show-all-esp-option').hidden,false);assert.equal(ui.elements.get('inspect-esp-chip').hidden,true);
+  assert.match(ui.elements.get('hardware-filter-status').textContent,/ESP32-S3.*16\.00 MiB.*unknown chip metadata.*not used to guess/);
+  assert.deepEqual(nextHighlight(ui),['hardware']);assert.deepEqual(ui.calls,[]);
+});
+
+test('show-all ESP override remains ESP-only and invalidates loaded firmware, preparation and backup before changing candidates',async()=>{
+  const ui=await espCandidateWorkbench({inspected:true});ui.context.pkg=fakePackage({architecture:'esp32'});ui.context.record=ui.calls;
+  ui.evaluate('state.pkg=pkg;state.plan={port:state.port};state.backupApproved={};state.esp={close:async()=>record.push("close-old-session")};');
+  ui.elements.get('show-all-esp').checked=true;await ui.elements.get('show-all-esp').onchange();
+  assert.ok(hardwareChoices(ui).includes('Heltec v2'));assert.ok(!hardwareChoices(ui).includes('Heltec T114'));
+  assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.backupApproved'),null);
+  ui.elements.get('hardware').value='Heltec v2';await ui.elements.get('hardware').onchange();
+  ui.elements.get('show-all-esp').checked=false;await ui.elements.get('show-all-esp').onchange();
+  assert.ok(!hardwareChoices(ui).includes('Heltec v2'));assert.equal(ui.elements.get('hardware').value,'');assert.equal(ui.evaluate('state.manualSelections.hardware'),undefined);
+  assert.deepEqual(ui.calls,['close-old-session']);
+});
+
+test('stale, disconnected and newly chosen ports never inherit a previous radio chip or show-all override',async()=>{
+  for(const outcome of ['changed-port','changed-usb','disconnect','new-selection']){
+    const ui=await espCandidateWorkbench({inspected:true}),nextPort={getInfo:()=>({usbVendorId:0x303a,usbProductId:0x1001})};ui.context.nextPort=nextPort;
+    if(outcome==='changed-port')ui.evaluate('state.port=nextPort;state.generation++;controls();');
+    if(outcome==='changed-usb'){ui.port.getInfo=()=>({usbVendorId:0x303a,usbProductId:0x0002});ui.evaluate('controls();');}
+    if(outcome==='disconnect')ui.serialEvents.disconnect({port:ui.port});
+    if(outcome==='new-selection'){
+      ui.elements.get('show-all-esp').checked=true;await ui.elements.get('show-all-esp').onchange();
+      ui.context.navigator.serial.requestPort=async()=>{ui.calls.push('chooser');return nextPort;};await ui.elements.get('select-port').onclick();
+      assert.equal(ui.elements.get('show-all-esp').checked,false);assert.equal(ui.evaluate('state.espChipFilter'),null);
+    }
+    assert.equal(ui.evaluate('currentEspChipInfo()'),null,outcome);assert.ok(hardwareChoices(ui).includes('Heltec v2'),outcome);
+    assert.equal(ui.evaluate('state.detectedHardware'),null,outcome);assert.deepEqual(ui.calls,outcome==='new-selection'?['chooser']:[],outcome);
+  }
+});
+
+test('optional chip reading needs no firmware and waits for final consent before its local connect, inspection finish and close only',async()=>{
+  for(const [mode,id,connection,native]of [
+    ['auto',[0x303a,0x1001],'no_reset',true],['no_reset',[0x303a,0x1001],'no_reset',true],
+    ['usb_reset',[0x303a,0x1001],'usb_reset',true],['default_reset',[0x10c4,0xea60],'default_reset',false],
+  ]){
+    const ui=await espCandidateWorkbench({id,mode});mockChipInspection(ui);
+    assert.equal(ui.elements.get('inspect-esp-chip').hidden,false);assert.equal(ui.elements.get('inspect-esp-chip').disabled,false);assert.deepEqual(ui.calls,[]);
+    const pending=ui.elements.get('inspect-esp-chip').onclick();assert.equal(ui.elements.get('confirm-dialog').open,true);
+    assert.equal(ui.elements.get('confirm-submit').textContent,'Restart & read chip');assert.match(ui.elements.get('confirm-warning').textContent,/No firmware is downloaded, erased or flashed/);
+    assert.deepEqual(ui.calls,[]);closeConfirm(ui);await pending;
+    assert.deepEqual(ui.calls,['connect:'+connection,'finishInspection:'+native,'close']);assert.equal(ui.evaluate('currentEspChipInfo().chipId'),9);
+    assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.esp'),null);assert.equal(ui.evaluate('state.backupApproved'),null);
+    assert.equal(ui.evaluate('state.chipInspection'),null);assert.equal(ui.evaluate('state.boardDetected'),false);assert.equal(ui.evaluate('state.verification'),null);
+    assert.equal(ui.elements.get('hardware').value,'');assert.match(ui.elements.get('notice').textContent,/normal-boot restart was requested, not verified/i);
+  }
+});
+
+test('declined or stale chip-read confirmation cannot construct a session, open USB or reset a radio',async()=>{
+  for(const outcome of ['cancel','escape','port','generation','firmware','plan','transport']){
+    const ui=await espCandidateWorkbench();mockChipInspection(ui);const pending=ui.elements.get('inspect-esp-chip').onclick();
+    if(outcome==='port')ui.evaluate('state.port={getInfo:()=>({})};');if(outcome==='generation')ui.evaluate('state.generation++;');
+    if(outcome==='firmware')ui.evaluate('state.pkg={name:"new.bin"};');if(outcome==='plan')ui.evaluate('state.plan={};');
+    if(outcome==='transport')ui.elements.get('transport-mode').value='usb_reset';
+    closeConfirm(ui,outcome==='cancel'?'cancel':outcome==='escape'?'':'confirm');await pending;
+    assert.deepEqual(ui.calls,[],outcome);assert.equal(ui.evaluate('currentEspChipInfo()'),null,outcome);assert.equal(ui.evaluate('state.chipInspection')??null,null,outcome);
+  }
+});
+
+test('failed or disconnected chip connections close their owned session without granting a completion reset or retaining stale chip evidence',async()=>{
+  for(const outcome of ['failed','disconnect']){
+    const ui=await espCandidateWorkbench({mode:'no_reset'});mockChipInspection(ui,{failure:outcome==='failed'?Error('Post-sync flash-ID read failed'):null});
+    if(outcome==='disconnect')ui.context.EspSession.prototype.connect=async()=>{ui.calls.push('connect:no_reset');ui.serialEvents.disconnect({port:ui.port});return s3Inspection;};
+    const pending=ui.elements.get('inspect-esp-chip').onclick();closeConfirm(ui);await pending;
+    assert.deepEqual(ui.calls,['connect:no_reset','close']);assert.equal(ui.evaluate('currentEspChipInfo()'),null);assert.equal(ui.evaluate('state.chipInspection'),null);
+    assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.verification'),null);
+    assert.match(ui.elements.get('notice').textContent,outcome==='failed'?/flash-ID read failed/:/selected radio changed/);
+  }
+});
+
+test('chip reading cannot bypass loaded firmware, prepared sessions, recovery or pending startup verification',async()=>{
+  for(const blocked of ['firmware','plan','session','recovery','espRecovery','migration','verification','handoff']){
+    const ui=await espCandidateWorkbench();mockChipInspection(ui);
+    if(blocked==='firmware')ui.evaluate('state.pkg={name:"loaded.bin",architecture:"esp32",warnings:[]};');
+    if(blocked==='plan')ui.evaluate('state.plan={port:state.port};');if(blocked==='session')ui.evaluate('state.esp={};');
+    if(blocked==='recovery')ui.evaluate('state.recovery={phase:"reselect-dfu"};');if(blocked==='espRecovery')ui.evaluate('state.espRecovery={};');
+    if(blocked==='migration')ui.evaluate('state.migration={};');if(blocked==='verification')ui.evaluate('state.verification={name:"old"};');if(blocked==='handoff')ui.evaluate('state.handoff=true;');
+    ui.evaluate('controls();');assert.equal(ui.elements.get('inspect-esp-chip').hidden,true,blocked);
+    await ui.elements.get('inspect-esp-chip').onclick();assert.deepEqual(ui.calls,[],blocked);assert.notEqual(ui.elements.get('confirm-dialog').open,true,blocked);
+    assert.match(ui.elements.get('notice').textContent,/before loading firmware.*no pending/);
+  }
 });
 
 test('one explicit bootloader-info choice parses and selects the exact firmware without any drive write or flash',async()=>{
@@ -1384,7 +1590,7 @@ test('next-action guidance offers another device after transfer but preserves wr
 
 test('temporary recovery and erase completion direct selection of the next image, never a repeat utility write',async()=>{
   for(const scenario of ['temporary-unknown','temporary-known','erase']){
-    const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({kind:'bootloader',destructive:true,erase:scenario==='erase'});ui.evaluate('state.port=selectedPort;state.pkg=pkg;');
+    const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.port.getInfo=()=>({usbVendorId:0x239a,usbProductId:0x002a});ui.context.inventory=[t114MeshtasticItem({hardware:'Actual physical board',bootloaderInfo:{profile:'physical-board',url:'https://example.test/normal.zip',sha256:'a'.repeat(64),version:'2.4.12'}})];ui.context.pkg=fakePackage({kind:'bootloader',destructive:true,erase:scenario==='erase'});ui.evaluate('state.items=inventory;state.port=selectedPort;state.pkg=pkg;filterCatalog();');
     if(scenario!=='erase'){ui.context.selectedRecovery=()=>({id:'gat562',installedIdentity:'GAT562_DFU'});if(scenario==='temporary-known'){ui.elements.get('hardware').value='Actual physical board';ui.elements.get('bootloader-source').value='https://example.test/normal.zip';}}
     ui.evaluate('completeNrfTransfer(pkg);controls();');if(scenario!=='erase'){assert.deepEqual(nextHighlight(ui),['select-port']);ui.evaluate('state.port=selectedPort;controls();');}
     assert.deepEqual(nextHighlight(ui),[scenario==='erase'?'artifact':scenario==='temporary-known'?'load-bootloader':'hardware']);assert.doesNotMatch(ui.elements.get('step-guidance').textContent,/^Step [34]:/);assert.deepEqual(ui.calls,[]);
@@ -1823,15 +2029,15 @@ test('unsupported explicit automatic preferences stay refused and do not display
 });
 
 test('Prepare update with a live TinyUSB report loads the automatic artifact and requests guarded handoff, never flashes',async()=>{
-  const ui=workbench({productionDefaults:true});await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({architecture:'esp32'});ui.evaluate("state.port=selectedPort;state.device={model:'Heltec V4 OLED',architecture:'esp32'};");ui.port.getInfo=()=>({usbVendorId:0x303a,usbProductId:0x0002});ui.elements.get('artifact').value='0';ui.context.fetchSelectedFirmware=async()=>{ui.calls.push('fetch');ui.evaluate('state.pkg=pkg;');};ui.context.ensureBackup=async()=>ui.calls.push('backup');ui.context.confirm=async(_t,_d,_w,token)=>{ui.calls.push(token);return true;};ui.context.touch1200=async(_port,kind)=>ui.calls.push(kind);
+  const ui=workbench({productionDefaults:true});await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({architecture:'esp32'});ui.context.inventory=[v4Item];ui.evaluate("state.items=inventory;state.port=selectedPort;state.device={model:'Heltec V4 OLED',architecture:'esp32'};filterCatalog();");ui.port.getInfo=()=>({usbVendorId:0x303a,usbProductId:0x0002});ui.elements.get('artifact').value='0';ui.context.fetchSelectedFirmware=async()=>{ui.calls.push('fetch');ui.evaluate('state.pkg=pkg;');};ui.context.ensureBackup=async()=>ui.calls.push('backup');ui.context.confirm=async(_t,_d,_w,token)=>{ui.calls.push(token);return true;};ui.context.touch1200=async(_port,kind)=>ui.calls.push(kind);
   ui.evaluate("state.device.usbMode='tinyusb';state.device.usbModeStatus='reported';");await ui.elements.get('prepare').onclick();assert.deepEqual(ui.calls,['fetch','backup','ENTER BOOTLOADER','tinyusb']);assert.equal(ui.evaluate('state.port'),null);assert.equal(ui.elements.get('transport-mode').value,'no_reset');assert.equal(ui.elements.get('already-bootloader').checked,true);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);
 });
 
 test('XIAO S3 handoff explains physical BOOT and VM port reselection without another write',async()=>{
   const ui=workbench({productionDefaults:true});await Promise.resolve();
-  ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({architecture:'esp32'});
+  ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({architecture:'esp32'});ui.context.inventory=[{...v4Item,hardware:'Seeed Studio Xiao S3'}];
   ui.port.getInfo=()=>({usbVendorId:0x2886,usbProductId:0x0059});
-  ui.evaluate("state.port=selectedPort;state.device={model:'Seeed XIAO ESP32-S3',architecture:'esp32',usbMode:'tinyusb',usbModeStatus:'reported'};");
+  ui.evaluate("state.items=inventory;state.port=selectedPort;state.device={model:'Seeed XIAO ESP32-S3',architecture:'esp32',usbMode:'tinyusb',usbModeStatus:'reported'};filterCatalog();");
   ui.elements.get('artifact').value='0';ui.context.fetchSelectedFirmware=async()=>{ui.calls.push('fetch');ui.evaluate('state.pkg=pkg;');};
   ui.context.ensureBackup=async()=>ui.calls.push('backup');ui.context.confirm=async()=>true;
   ui.context.touch1200=async(_port,kind)=>ui.calls.push(kind);
@@ -1894,7 +2100,7 @@ test('optional detection probes only after choosing a port and selects exact har
 });
 
 test('manual detection works with automatic port probing disabled and unknown models preserve manual hardware',async()=>{
-  const ui=workbench();await Promise.resolve();serialMock(ui);ui.context.selectedPort=ui.port;ui.evaluate('state.port=selectedPort;');ui.elements.get('hardware').value='Manual board';ui.context.detectMeshCore=async()=>({role:'companion',model:'Station G3 ESP'});
+  const ui=workbench();await Promise.resolve();serialMock(ui);ui.context.selectedPort=ui.port;ui.context.inventory=[{...v4Item,hardware:'Manual board'}];ui.evaluate('state.items=inventory;state.port=selectedPort;filterCatalog();');ui.elements.get('hardware').value='Manual board';ui.context.detectMeshCore=async()=>({role:'companion',model:'Station G3 ESP'});
   await ui.elements.get('probe').onclick();assert.deepEqual(ui.calls,['open','close']);assert.equal(ui.elements.get('hardware').value,'Manual board');assert.match(ui.elements.get('board-detection').textContent,/No complete exact/);
 });
 
@@ -1919,7 +2125,7 @@ test('board detection cannot open a port or change choices during pending writes
 });
 
 test('a disconnect during an outstanding board query cannot repopulate stale device evidence or selection',async()=>{
-  const ui=workbench();await Promise.resolve();serialMock(ui);ui.context.selectedPort=ui.port;ui.evaluate('state.port=selectedPort;');ui.elements.get('hardware').value='Manual';
+  const ui=workbench();await Promise.resolve();serialMock(ui);ui.context.selectedPort=ui.port;ui.context.inventory=[{...v4Item,hardware:'Manual'}];ui.evaluate('state.items=inventory;state.port=selectedPort;filterCatalog();');ui.elements.get('hardware').value='Manual';
   ui.context.detectMeshCore=async()=>{ui.serialEvents.disconnect({port:ui.port});return {model:'Station G3 ESP32'};};
   await ui.elements.get('probe').onclick();assert.equal(ui.evaluate('state.device'),null);assert.equal(ui.evaluate('state.boardDetected'),false);assert.equal(ui.elements.get('hardware').value,'Manual');assert.match(ui.elements.get('notice').textContent,/disconnected/);
 });
@@ -2853,7 +3059,8 @@ test('quick-setting unsupported replies are not reported as saved and Wi-Fi stat
 test('failed downloads and local reads clear the old firmware and write proof before failure',async()=>{
   for(const action of ['fetch-firmware','fetch-custom','load-bootloader','local-read','local-size','load-entry']){
     const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.record=ui.calls;
-    ui.evaluate("state.port=selectedPort;state.pkg={name:'old.bin',sha256:'a'.repeat(64)};state.plan={sha256:state.pkg.sha256,generation:0,port:selectedPort};state.esp={close:async()=>record.push('closed-old-session')};state.items=[{name:'new.bin',hardware:'test',url:'https://example.test/new.bin'}];state.archive=new Uint8Array(8);");
+    ui.context.inventory=[{...v4Item,name:'new.bin',hardware:'test',url:'https://example.test/new.bin'}];
+    ui.evaluate("state.port=selectedPort;state.pkg={name:'old.bin',sha256:'a'.repeat(64)};state.plan={sha256:state.pkg.sha256,generation:0,port:selectedPort};state.esp={close:async()=>record.push('closed-old-session')};state.items=inventory;state.archive=new Uint8Array(8);filterCatalog();");
     ui.elements.get('artifact').value='0';ui.elements.get('custom-url').value='https://example.test/new.bin';ui.elements.get('bootloader-source').value='https://example.test/boot.zip';ui.elements.get('archive-entry').value='new.bin';
     ui.context.fetch=async()=>{assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);throw new Error('download failed');};
     ui.context.checkedZip=()=>{throw new Error('archive entry failed');};
@@ -4686,4 +4893,111 @@ test('standalone firmware does not queue MeshCore USB settings or claim MeshCore
   ui.evaluate('state.esp={port:{getInfo:()=>({})},finish:async()=>{},close:async()=>{}};state.plan={written:true,sha256:state.pkg.sha256,transportMode:"no_reset"};');
   await ui.evaluate('finishVerifiedEsp();');assert.equal(ui.evaluate('state.finishedFirmware.provider'),'Wadamesh TAK');assert.equal(ui.evaluate('state.finishedFirmware.verified'),false);assert.equal(ui.evaluate('state.verification'),null);
   assert.match(ui.elements.get('notice').textContent,/not verified.*No MeshCore startup check or settings commands/s);assert.deepEqual(ui.calls,[]);
+});
+
+test('an opened USB port with an unsupported application is informational and requires an exact manual board',async()=>{
+  const ui=await meshtasticWorkbench();ui.port.getInfo=()=>({usbVendorId:0x303a,usbProductId:0x1001});
+  const original=Object.assign(Error('USB serial communication is available, but no supported MeshCore or Meshtastic application answered.'),{code:'APPLICATION_UNIDENTIFIED',usbSerialAvailable:true});
+  ui.context.detectApplication=async()=>{throw original;};
+  ui.evaluate('$("hardware").value="Heltec T114";filterCatalog("hardware");$("role").value="companionFull";filterCatalog("role");$("artifact").value="0";');
+  await ui.elements.get('select-port').onclick();
+  assert.equal(ui.elements.get('notice').textContent,original.message);assert.equal(ui.elements.get('notice').classList.contains('error'),false);
+  assert.equal(ui.elements.get('device-name').textContent,'USB connected · 303a:1001');assert.equal(ui.elements.get('port-status').textContent,'Application unknown');
+  assert.match(ui.elements.get('device-meta').textContent,/serial port opened.*firmware was not identified.*Standalone firmware such as Ripple Ultra may not expose.*exact hardware manually.*no board or firmware was guessed/s);
+  for(const id of ['device-name','device-meta','automatic-summary','notice'])assert.doesNotMatch(ui.elements.get(id).textContent,/(?:Ripple Ultra|T-Deck) (?:detected|identified)|Detected (?:Ripple|T-Deck)/i,id);
+  assert.match(ui.elements.get('automatic-summary').textContent,/USB serial is available.*unidentified.*exact hardware manually.*no previous board or firmware selection/s);
+  assert.match(ui.elements.get('log').textContent,/USB open; application unidentified:/);assert.doesNotMatch(ui.elements.get('log').textContent,/Stopped:/);
+  assert.equal(ui.evaluate('state.port'),ui.port);assert.equal(ui.evaluate('state.applicationProbeFailed'),true);assert.equal(ui.evaluate('state.boardDetected'),false);
+  for(const field of ['device','detectedHardware','pkg','plan','backupApproved'])assert.equal(ui.evaluate('state.'+field),null,field);
+  assert.equal(ui.elements.get('hardware').value,'');assert.equal(ui.elements.get('artifact').value,'');assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(nextHighlight(ui),['hardware']);
+  assert.deepEqual(ui.calls,['chooser','open','close']);
+});
+
+test('transport and permission failures do not become informational unsupported-application results',async()=>{
+  for(const name of ['NetworkError','NotAllowedError','SecurityError']){
+    const ui=await meshtasticWorkbench();ui.port.getInfo=()=>({usbVendorId:0x303a,usbProductId:0x1001});
+    const original=Object.assign(Error('The USB port could not be read.'),{name});ui.context.detectApplication=async()=>{throw original;};
+    await ui.elements.get('select-port').onclick();
+    assert.equal(ui.elements.get('notice').textContent,original.message,name);assert.equal(ui.elements.get('notice').classList.contains('error'),true,name);
+    assert.match(ui.elements.get('log').textContent,/Stopped: The USB port could not be read/);assert.doesNotMatch(ui.elements.get('log').textContent,/USB open; application unidentified/);
+    assert.notEqual(ui.elements.get('port-status').textContent,'Application unknown');assert.doesNotMatch(ui.elements.get('device-meta').textContent,/Ripple|running firmware was not identified/);
+    assert.equal(ui.evaluate('state.applicationProbeFailed'),false);assert.equal(ui.evaluate('state.device'),null);assert.equal(ui.evaluate('state.boardDetected'),false);
+    assert.equal(Object.hasOwn(original,'usbSerialAvailable'),false);assert.equal(ui.elements.get('flash').disabled,true);assert.deepEqual(ui.calls,['chooser','open','close']);
+  }
+});
+
+test('the unsupported-application information path requires both its exact code and affirmative USB diagnostic',async()=>{
+  for(const metadata of [{code:'APPLICATION_UNIDENTIFIED'},{code:'APPLICATION_UNIDENTIFIED',usbSerialAvailable:false},{code:'NETWORK_ERROR',usbSerialAvailable:true}]){
+    const ui=await meshtasticWorkbench(),original=Object.assign(Error('Identity was not available.'),metadata);ui.context.detectApplication=async()=>{throw original;};
+    await ui.elements.get('select-port').onclick();
+    assert.equal(ui.elements.get('notice').classList.contains('error'),true,JSON.stringify(metadata));assert.notEqual(ui.elements.get('port-status').textContent,'Application unknown');
+    assert.match(ui.elements.get('log').textContent,/Stopped: Identity was not available/);assert.doesNotMatch(ui.elements.get('log').textContent,/USB open; application unidentified/);assert.deepEqual(ui.calls,['chooser','open','close']);
+  }
+});
+
+test('single-slot startup records retain the inspected physical partition label and geometry',async()=>{
+  const ui=workbench();await Promise.resolve();ui.context.pkg=fakePackage({architecture:'esp32'});
+  ui.evaluate('state.plan={sha256:pkg.sha256,slotSelection:"a",addresses:[0x210000],parts:[{type:0,subtype:0x10,label:"custom_a",offset:0x210000,size:0x100000},{type:0,subtype:0x11,label:"custom_b",offset:0x10000,size:0x200000}]};');
+  assert.deepEqual(JSON.parse(ui.evaluate('JSON.stringify(verificationRecord(pkg).espSlot)')),{selection:'a',label:'custom_a',offset:0x210000,size:0x100000});
+  ui.evaluate('state.plan.slotSelection="b";state.plan.addresses=[0x10000];');
+  assert.deepEqual(JSON.parse(ui.evaluate('JSON.stringify(verificationRecord(pkg).espSlot)')),{selection:'b',label:'custom_b',offset:0x10000,size:0x200000});
+  ui.evaluate('state.plan.slotSelection="both";');assert.equal(ui.evaluate('verificationRecord(pkg).espSlot'),undefined);
+});
+test('malformed single-slot metadata remains explicitly unverified instead of silently becoming a Both record',async()=>{
+  const ui=workbench();await Promise.resolve();ui.context.pkg=fakePackage({architecture:'esp32'});
+  for(const plan of [{slotSelection:'a',addresses:[0x10000],parts:null},{slotSelection:'b',addresses:[0x10000],parts:{}},{slotSelection:'a',addresses:[0x110000],parts:[{type:0,subtype:0x10,label:'app0',offset:0x10000,size:0x100000}]}]){
+    ui.context.plan=plan;ui.evaluate('state.plan={sha256:pkg.sha256,...plan};');const record=ui.evaluate('verificationRecord(pkg)');assert.equal(record.espSlot.selection,plan.slotSelection);assert.equal(record.espSlot.label,null);assert.equal(record.espSlot.offset,null);assert.equal(record.espSlot.size,null);
+  }
+});
+function interceptBootSlotReply(ui,reply,{during=null}={}){
+  for(const [Type,method]of [[ui.context.SerialLink,'command'],[ui.context.MeshCore,'cli']]){
+    const original=Type.prototype[method];Type.prototype[method]=async function(command,...args){if(command!=='get boot.slot')return original.call(this,command,...args);ui.calls.push(command);during?.();return reply;};
+  }
+}
+test('single-slot startup checks the actual running custom label before applying settings on CommonCLI and Companion',async()=>{
+  for(const role of ['common-cli','companion'])for(const selection of ['a','b']){
+    const ui=await storageVerificationWorkbench(role,'int:esp32=8192K'),label=selection==='a'?'custom_a':'custom_b';
+    ui.context.expected.espSlot={selection,label,offset:selection==='a'?0x210000:0x10000,size:selection==='a'?0x100000:0x200000};
+    interceptBootSlotReply(ui,`> get boot.slot\r\n> running=${label} next=${label} app0=1024K app1=2048K`);ui.context.applyQueuedRadioSettings=async()=>ui.calls.push('settings-write');
+    await ui.evaluate('verifyApplication();');assert.equal(ui.evaluate('state.finishedFirmware.verified'),true);assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.calls.filter(call=>call==='get boot.slot').length,1);assert.ok(ui.calls.indexOf('get boot.slot')<ui.calls.indexOf('settings-write'));
+  }
+});
+test('the same version running from the untouched slot cannot verify a single-slot write or authorize settings',async()=>{
+  for(const role of ['common-cli','companion']){
+    const ui=await queuedSettingsVerificationWorkbench();if(role==='companion')ui.context.detectMeshCore=async()=>({role,model:ui.context.expected.model,publicKey:ui.context.expected.publicKey,protocol:14,version:'v1.18.0.1'});
+    ui.context.expected.role=role;ui.context.expected.espSlot={selection:'a',label:'app0',offset:0x10000,size:0x100000};interceptBootSlotReply(ui,'> running=app1 next=app0 app0=1024K app1=1024K');
+    await assert.rejects(ui.evaluate('verifyApplication();'),/running app1, not the written slot A.*single-slot application startup remains unverified/);assert.equal(ui.evaluate('state.finishedFirmware'),null);assert.ok(ui.evaluate('state.verification'));assert.equal(ui.evaluate('state.postFlashSettingsApproval.attempted'),false);assert.ok(!ui.calls.some(call=>call.startsWith('set ')));assert.equal(ui.calls.at(-1),'application-close');
+  }
+});
+test('unsupported, incomplete, duplicate or changed-layout slot replies leave startup unverified and send no settings',async()=>{
+  for(const reply of ['Unknown command','Error: unsupported','> running=app0 next=app0 app0=missing app1=1024K','> running=app0 next=app0 app0=2048K app1=1024K','> running=app0 next=app0 app0=1024K','> running=app0 next=app0 app0=1024K app1=1024K\n> running=app1 next=app1 app0=1024K app1=1024K']){
+    const ui=await queuedSettingsVerificationWorkbench();ui.context.expected.espSlot={selection:'a',label:'app0',offset:0x10000,size:0x100000};interceptBootSlotReply(ui,reply);
+    await assert.rejects(ui.evaluate('verifyApplication();'),/single-slot application startup remains unverified/);assert.equal(ui.evaluate('state.finishedFirmware'),null);assert.ok(ui.evaluate('state.verification'));assert.equal(ui.evaluate('state.postFlashSettingsApproval.attempted'),false);assert.ok(!ui.calls.some(call=>call.startsWith('set ')),reply);
+  }
+});
+test('older Companion single-slot writes stay startup-unverified without sending unsupported CLI or settings',async()=>{
+  const ui=await storageVerificationWorkbench('companion','Unknown command');ui.context.expected.espSlot={selection:'a',label:'app0',offset:0x10000,size:0x100000};
+  ui.context.detectMeshCore=async()=>({role:'companion',model:ui.context.expected.model,publicKey:ui.context.expected.publicKey,protocol:13,version:'v1.18.0.1'});ui.context.applyQueuedRadioSettings=async()=>ui.calls.push('settings-write');
+  await assert.rejects(ui.evaluate('verifyApplication();'),/older Companion.*single-slot application startup remains unverified/);assert.equal(ui.evaluate('state.finishedFirmware'),null);assert.ok(ui.evaluate('state.verification'));assert.deepEqual(ui.calls,['application-open','application-close']);
+});
+test('a changed single-slot target during its getter cannot authorize startup or queued settings',async()=>{
+  const ui=await storageVerificationWorkbench('common-cli','int:esp32=8192K');ui.context.expected.espSlot={selection:'a',label:'app0',offset:0x10000,size:0x100000};
+  interceptBootSlotReply(ui,'> running=app0 next=app0 app0=1024K app1=1024K',{during:()=>{ui.context.expected.espSlot.label='app1';}});ui.context.applyQueuedRadioSettings=async()=>ui.calls.push('settings-write');
+  await assert.rejects(ui.evaluate('verifyApplication();'),/Single-slot verification target changed/);assert.equal(ui.evaluate('state.finishedFirmware'),null);assert.ok(!ui.calls.includes('settings-write'));
+});
+test('duplicate application labels cannot identify the written slot and retain an invalid verification marker',async()=>{
+  const ui=workbench();await Promise.resolve();ui.context.pkg=fakePackage({architecture:'esp32'});
+  for(const subtype of [0,0x11]){
+    ui.context.otherSubtype=subtype;ui.evaluate('state.plan={sha256:pkg.sha256,slotSelection:"a",addresses:[0x10000],parts:[{type:0,subtype:0x10,label:"shared",offset:0x10000,size:0x100000},{type:0,subtype:otherSubtype,label:"shared",offset:0x110000,size:0x100000}]};');
+    const record=ui.evaluate('verificationRecord(pkg)');assert.equal(record.espSlot.selection,'a');assert.equal(record.espSlot.label,null);assert.equal(record.espSlot.offset,null);assert.equal(record.espSlot.size,null);
+    const verify=await storageVerificationWorkbench('common-cli','int:esp32=8192K');verify.context.expected.espSlot=record.espSlot;interceptBootSlotReply(verify,'> running=shared next=shared app0=1024K app1=1024K');verify.context.applyQueuedRadioSettings=async()=>verify.calls.push('settings-write');
+    await assert.rejects(verify.evaluate('verifyApplication();'),/single-slot identity is missing or invalid/);assert.equal(verify.evaluate('state.finishedFirmware'),null);assert.ok(!verify.calls.includes('get boot.slot'));assert.ok(!verify.calls.includes('settings-write'));
+  }
+});
+test('removing or changing the slot target during storage-layout reading cannot bypass the slot proof',async()=>{
+  for(const mutate of [expected=>{delete expected.espSlot;},expected=>{expected.espSlot.label='app1';}]){
+    const ui=await queuedSettingsVerificationWorkbench();ui.context.expected.espSlot={selection:'a',label:'app0',offset:0x10000,size:0x100000};const original=ui.context.SerialLink.prototype.command;
+    ui.context.SerialLink.prototype.command=async function(command,...args){const reply=await original.call(this,command,...args);if(command==='get storage.layout')mutate(ui.context.expected);return reply;};
+    await assert.rejects(ui.evaluate('verifyApplication();'),/Single-slot verification target changed/);assert.equal(ui.evaluate('state.finishedFirmware'),null);assert.ok(ui.evaluate('state.verification'));assert.equal(ui.evaluate('state.postFlashSettingsApproval.attempted'),false);assert.ok(!ui.calls.some(call=>call.startsWith('set ')));assert.ok(!ui.calls.includes('get boot.slot'));
+  }
 });
