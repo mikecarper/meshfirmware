@@ -20,6 +20,7 @@ import {tryNativeUsbFallback,xiaoS3ManualBootAdvice} from '../src/connection-fal
 import {catalogProvider,catalogItemKey} from '../src/catalog.js';
 import {hash as firmwareHash,md5hex,partitionTable as parsePartitionTable,crc32,inspectFirmware as inspectFirmwareBytes} from '../src/firmware.js';
 import {assessFirmwareBoard} from '../src/firmware-board.js';
+import {isWadamesh,wadameshDisplayAssessment,WADAMESH_STARTUP_NOTICE} from '../src/wadamesh.js';
 import {inspectRadioDefaults,customizeRadioDefaults} from '../src/radio-defaults.js';
 import {createPostFlashSettingsPlan,applyPostFlashSettings} from '../src/post-flash-settings.js';
 import {createPostFlashCompanionRequest} from '../src/post-flash-companion.js';
@@ -63,7 +64,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
   context.createPostFlashSettingsPlan=createPostFlashSettingsPlan;context.applyPostFlashSettings=applyPostFlashSettings;context.createPostFlashCompanionRequest=createPostFlashCompanionRequest;context.loadRadioPresets=async()=>({presets:[],source:'bundled',warning:'Test preset inventory.'});
   context.detectApplication=(...args)=>context.detectMeshCore(...args);context.detectMeshtasticBoard=detectMeshtasticBoard;
   context.parseBootloaderInfo=parseBootloaderInfo;context.detectBootloaderBoard=detectBootloaderBoard;context.xiaoInstalledStatus=xiaoInstalledStatus;context.xiaoInfoProfile=xiaoInfoProfile;context.xiaoBootloaderItem=xiaoBootloaderItem;context.chooseBootloaderInfoFile=async()=>{calls.push('file-picker');throw Error('Unexpected file chooser');};
-  context.selectionLink=selectionLink;context.nrfBoardCandidates=nrfBoardCandidates;
+  context.selectionLink=selectionLink;context.nrfBoardCandidates=nrfBoardCandidates;context.isWadamesh=isWadamesh;context.wadameshDisplayAssessment=wadameshDisplayAssessment;context.WADAMESH_STARTUP_NOTICE=WADAMESH_STARTUP_NOTICE;
   vm.runInContext(source,context);
   return {context,elements,calls,port,serialEvents,windowEvents,evaluate:code=>vm.runInContext(code,context)};
 }
@@ -4625,4 +4626,64 @@ test('real custom inspection wires the byte-level unknown-board assessment into 
   assert.match(ui.elements.get('firmware-inspection-board').textContent,/Board not verified:.*does not expose/);
   ui.context.confirm=async(_title,detail,_warning,token)=>{ui.calls.push(token);assert.match(detail,/filename.*do not prove/);return false;};
   await assert.rejects(ui.evaluate('flashPreparedFirmware();'),/Board override cancelled/);assert.deepEqual(ui.calls,['FLASH UNVERIFIED BOARD']);
+});
+
+const wadaItem=(merged=false)=>({...v4Item,provider:'Wadamesh TAK',role:'gui',version:'tak-beta_103.1',action:merged?'flash-wipe':'flash-update',name:`wadamesh-heltec-v4${merged?'-merged':''}.bin`,url:`https://github.com/jade-on-mesh/wadamesh-tak/releases/download/tak-beta_103.1/wadamesh-heltec-v4${merged?'-merged':''}.bin`,requiredDisplay:'tft',wadameshBuild:'heltec-v4',title:'Wadamesh TAK · standalone',size:merged?5000000:4934464,...(!merged?{requiresExistingProvider:'Wadamesh TAK'}:{})});
+test('selecting Wadamesh defaults to merged installation and displays its limits without loading firmware or touching USB',async()=>{
+  const ui=workbench({catalogPromise:Promise.resolve(linkedCatalog([v4Item,{...v4Item,provider:'Keymind Cascade'},wadaItem(),wadaItem(true)]))});await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(ui.elements.get('provider').value,'Keymind Cascade');ui.elements.get('provider').value='Wadamesh TAK';await ui.elements.get('provider').onchange();
+  assert.equal(ui.evaluate('state.installMode'),'install');assert.equal(ui.elements.get('install-mode-install').checked,true);assert.equal(ui.elements.get('wadamesh-info').hidden,false);assert.equal(ui.elements.get('radio-defaults').hidden,true);
+  assert.match(ui.elements.get('workflow-guidance').textContent,/No Keymind expansion or post-flash settings/);assert.match(ui.elements.get('install-mode-hint').textContent,/Wadamesh first install.*whole-chip erase/);
+  assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls,[]);
+});
+test('a saved Wadamesh provider defaults to first install while an explicit Update selection link is honored',async()=>{
+  for(const linked of [false,true]){
+    const ui=workbench({savedSelections:{provider:'Wadamesh TAK'},search:linked?'?provider=Wadamesh+TAK&mode=update':'',catalogPromise:Promise.resolve(linkedCatalog([wadaItem(),wadaItem(true)]))});await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(ui.elements.get('provider').value,'Wadamesh TAK');assert.equal(ui.evaluate('state.installMode'),linked?'update':'install');assert.deepEqual(ui.calls,[]);
+  }
+});
+test('Wadamesh mode switching pairs only the exact same board/build despite differing size and app-only requirements',async()=>{
+  const ui=workbench();await Promise.resolve();ui.context.inventory=[wadaItem(),wadaItem(true),{...wadaItem(true),wadameshBuild:'heltec-v4-r8',hardware:'Heltec v4 R8'}];
+  ui.evaluate('state.items=inventory;filterCatalog();$("provider").value="Wadamesh TAK";filterCatalog("provider");$("hardware").value=inventory[0].hardware;filterCatalog("hardware");$("role").value="gui";filterCatalog("role");$("artifact").value="0";');
+  await ui.evaluate('setInstallMode("install");');assert.equal(ui.elements.get('artifact').value,'1');assert.deepEqual(ui.calls,[]);
+});
+test('Wadamesh manual OLED-to-TFT selection retains a clear overridable display warning',async()=>{
+  const ui=await customEspWorkbench('install');ui.context.image=customEspImage({merged:true});ui.context.wada=wadaItem(true);ui.context.selectedPort=ui.port;
+  await ui.evaluate('loadFirmware(wada.name,image,wada);');ui.evaluate('state.port=selectedPort;state.device={model:"Heltec V4.3 OLED"};state.plan={generation:state.generation,port:state.port,sha256:state.pkg.sha256,installMode:state.installMode,addresses:[0]};controls();');
+  assert.match(ui.elements.get('firmware-inspection-board').textContent,/Board mismatch:.*requires a TFT.*OLED/);
+  ui.context.confirm=async(_title,detail,_warning,token)=>{ui.calls.push(token);assert.match(detail,/requires a TFT.*OLED/);return false;};
+  await assert.rejects(ui.evaluate('flashPreparedFirmware();'),/Board override cancelled/);assert.deepEqual(ui.calls,['FLASH MISMATCHED BOARD']);
+});
+test('a generic board match cannot claim the Wadamesh TFT requirement was verified',async()=>{
+  const ui=await customEspWorkbench('install');ui.context.image=customEspImage({merged:true});ui.context.wada=wadaItem(true);
+  await ui.evaluate('loadFirmware(wada.name,image,wada);');ui.evaluate('state.device={model:"Heltec v4"};controls();');
+  assert.match(ui.elements.get('firmware-inspection-board').textContent,/Board not verified:.*requires the TFT.*not been identified/);
+  assert.equal(ui.evaluate('firmwareBoardAssessment().requiresOverride'),true);assert.deepEqual(ui.calls,[]);
+});
+test('a renamed byte-identical Wadamesh file retains TFT warnings and does not gain MeshCore settings',async()=>{
+  const ui=await customEspWorkbench('install');ui.context.image=customEspImage({merged:true});
+  await ui.evaluate('loadFirmware("renamed.bin",image);');ui.context.known={...wadaItem(true),sha256:firmwareHash(ui.context.image)};
+  ui.evaluate('state.items.push(known);state.item=null;$("provider").value="Custom";state.device={model:"Heltec V4.3 OLED"};controls();');
+  assert.match(ui.elements.get('firmware-inspection-board').textContent,/Board mismatch:.*requires a TFT.*OLED/);assert.equal(ui.evaluate('radioSettingsAvailable()'),false);assert.equal(ui.elements.get('radio-defaults').hidden,true);
+  ui.evaluate('queueVerification(state.pkg);');assert.equal(ui.evaluate('state.verification'),null);assert.deepEqual(ui.calls,[]);
+});
+test('selecting a different USB radio restores the Wadamesh first-install default without probing it',async()=>{
+  const ui=workbench({catalogPromise:Promise.resolve(linkedCatalog([wadaItem(),wadaItem(true)]))});await new Promise(resolve=>setImmediate(resolve));
+  ui.elements.get('auto-detect-board').checked=false;ui.elements.get('provider').value='Wadamesh TAK';ui.context.previousPort={getInfo:()=>({})};
+  ui.evaluate('state.port=previousPort;state.manualSelections={provider:"Wadamesh TAK"};state.installMode="update";installModeSource={kind:"manual",port:previousPort};');
+  await ui.elements.get('select-port').onclick();assert.equal(ui.evaluate('state.port'),ui.port);assert.equal(ui.evaluate('state.installMode'),'install');assert.deepEqual(ui.calls,['chooser']);
+});
+test('starting another radio with a retained Wadamesh provider restores its merged-install default',async()=>{
+  const ui=workbench({catalogPromise:Promise.resolve(linkedCatalog([wadaItem(),wadaItem(true)]))});await new Promise(resolve=>setImmediate(resolve));
+  ui.elements.get('provider').value='Wadamesh TAK';ui.evaluate('state.manualSelections={provider:"Wadamesh TAK"};state.verification={name:"previous.bin",sha256:"a".repeat(64)};');ui.context.confirm=async()=>true;
+  await ui.evaluate('startNewRadio();');assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.elements.get('provider').value,'Wadamesh TAK');assert.equal(ui.evaluate('state.installMode'),'install');assert.deepEqual(ui.calls,[]);
+});
+test('standalone firmware does not queue MeshCore USB settings or claim MeshCore startup verification',async()=>{
+  const ui=await customEspWorkbench('install');ui.context.image=customEspImage({merged:true});ui.context.wada=wadaItem(true);
+  await ui.evaluate('loadFirmware(wada.name,image,wada);');ui.evaluate('state.radioDefaults.inspection={supported:false};queueVerification(state.pkg);');
+  assert.equal(ui.evaluate('radioSettingsAvailable()'),false);assert.equal(ui.evaluate('state.verification'),null);
+  await assert.rejects(ui.evaluate('inspectSelectedRadioDefaults();'),/Configure Wadamesh TAK.*on the device/);assert.deepEqual(ui.calls,[]);
+  ui.evaluate('state.esp={port:{getInfo:()=>({})},finish:async()=>{},close:async()=>{}};state.plan={written:true,sha256:state.pkg.sha256,transportMode:"no_reset"};');
+  await ui.evaluate('finishVerifiedEsp();');assert.equal(ui.evaluate('state.finishedFirmware.provider'),'Wadamesh TAK');assert.equal(ui.evaluate('state.finishedFirmware.verified'),false);assert.equal(ui.evaluate('state.verification'),null);
+  assert.match(ui.elements.get('notice').textContent,/not verified.*No MeshCore startup check or settings commands/s);assert.deepEqual(ui.calls,[]);
 });

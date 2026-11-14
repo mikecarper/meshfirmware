@@ -48,6 +48,14 @@ test('Keymind is the default even for stock firmware and unavailable Keymind bui
   const missing=choose([stock],{provider:''});assert.equal(missing.selections.provider,'Keymind Cascade');assert.equal(missing.artifactIndex,null);
   assert.equal(choose([stock,keymind],{provider:'MeshCore'}).artifactIndex,0);
 });
+test('Wadamesh is explicit, defaults to its standalone role, and never automatically selects TFT for an OLED report',()=>{
+  const wada={...app(),provider:'Wadamesh TAK',role:'gui',action:'flash-wipe',name:'wadamesh-heltec-v4-merged.bin',version:'tak-beta_103.1',requiredDisplay:'tft'};
+  const oled=choose([wada],{provider:'Wadamesh TAK',installMode:'install',device:{model:'Heltec V4.3 OLED',catalogRole:'companionBle'}});
+  assert.equal(oled.artifactIndex,null);assert.equal(oled.selections.role,'gui');assert.match(oled.reason,/TFT.*OLED/);
+  const tft=choose([wada],{provider:'Wadamesh TAK',installMode:'install',device:{model:'Heltec V4.3 TFT',catalogRole:'companionBle',version:'v1.18.0',firmwareTarget:'old_meshcore_companion',hardwareId:'old_meshcore_hardware'}});
+  assert.equal(tft.artifactIndex,0);assert.equal(tft.selections.role,'gui');assert.equal(tft.warning,'');
+  assert.equal(choose([wada],{provider:'',installMode:'install'}).artifactIndex,null,'An unavailable Keymind build does not select Wadamesh');
+});
 test('distinct historical logging images stay manual when they share a board role and version',()=>{
   const legacy=app({provider:'Keymind Cascade Logging',name:'heltec_v4_repeater-usb-logging-v1.18.0.bin',url:'https://example.test/usb-logging.bin'});
   const result=choose([app({provider:'Keymind Cascade'}),legacy],{provider:'Keymind Cascade'});

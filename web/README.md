@@ -30,6 +30,35 @@ not a remote USB-only node.
 
 ## Use
 
+### Wadamesh TAK
+
+Choose **Wadamesh TAK** in **Firmware** for its standalone touchscreen builds.
+The catalog follows the repository's latest release JSON and the `boards.json`
+from that exact release tag, with GitHub asset SHA-256 and size checks. Public
+release assets are mirrored through the normal verified-download pipeline;
+unavailable or invalid discovery retains the last validated provider snapshot.
+Keymind Cascade remains the default provider.
+
+Nine reviewed ESP32-S3 variants are available: T-Deck/Plus, ThinkNode M9,
+T-LoRa Pager SX1262 and LR1121, Heltec V4 TFT and V4-R8 TFT, Wio Tracker L2,
+and CrowPanel Advance 3.5-inch and 5-inch. Heltec images do **not** support OLED.
+A reported OLED configuration prevents automatic TFT selection; an explicit
+manual mismatch still needs the normal board-warning acknowledgement.
+ESP32-P4 variants remain unavailable in this flasher; use the
+[MediaMesh Flasher](https://cascadiamesh.org/mediamesh-flasher/) for those.
+
+Selecting this provider defaults to **Erase & new install** and its merged
+image at `0x0`. This flasher erases the whole chip, including identity,
+contacts, channels and settings. The upstream installer's preservation promise
+does not apply to this erase flow. **Update** is an explicit option only for
+an existing matching Wadamesh layout; offsets and slot capacity are read from
+the actual radio. A Keymind partition-expansion bridge is never substituted.
+
+Firmware transfer readback is verified, but Wadamesh startup is not claimed
+verified through MeshCore's USB protocol. After reset, check the device screen.
+Configure radio/MediaMesh settings in Wadamesh itself; this provider does not
+queue MeshCore USB settings or change the downloaded firmware defaults.
+
 ### Custom firmware and board checks
 
 Choose **Custom firmware** in the main **Firmware** dropdown, then select a

@@ -46,6 +46,18 @@ function session({chip=9,physical=dual()}={}) {
 }
 const unused=()=>{throw Error('A merged/fitting custom file must not resolve migration artifacts');};
 
+test('a provider can disable Keymind migration while fitting apps retain actual OTA offsets and readback',async()=>{
+  const pkg=inspectFirmware('wadamesh.bin',image()),{s,writes}=session({physical:dual(0x30000,0x130000)});
+  const plan=await s.prepare(pkg,{planner:{call:unused},resolveFirmwareName:unused,migrationDisabledReason:'Use the matching Wadamesh merged image.'});
+  assert.deepEqual(plan.addresses,appWriteOrder(plan.parts,new Uint8Array(8192).fill(255)));assert.equal(plan.merged,false);
+  await s.flash(pkg,()=>{});assert.equal(writes.length,2);assert.ok(writes.every(write=>write.eraseAll===false));
+});
+test('an oversized standalone app stops without a Keymind bridge or write when migration is disabled',async()=>{
+  const pkg=inspectFirmware('wadamesh.bin',image({dataSize:0x100000})),{s,writes}=session();
+  await assert.rejects(s.prepare(pkg,{planner:{call:unused},resolveFirmwareName:unused,migrationDisabledReason:'Wadamesh needs its own merged image.'}),/Wadamesh needs its own merged image/);
+  assert.deepEqual(writes,[]);assert.equal(s.plan,null);
+});
+
 test('nonzero-origin merged writes preserve the entire input, mirror the exact app and erase only once',async()=>{
   const fixture=nonzeroMerged(),before=fixture.bytes.slice(),pkg=inspectFirmware('custom.bin',fixture.bytes);
   const {s,writes,reads,readbacks}=session({chip:0});

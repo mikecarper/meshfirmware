@@ -37,6 +37,7 @@ import { postFlashBleAdvice } from './post-flash-advice.js';
 import { createNrfActivationCheck } from './nrf-activation.js';
 import { inspectRadioDefaults, customizeRadioDefaults } from './radio-defaults.js';
 import { resolveCustomFirmwareName } from './custom-firmware.js';
+import {isWadamesh,wadameshDisplayAssessment,WADAMESH_STARTUP_NOTICE} from './wadamesh.js';
 import { createPostFlashSettingsPlan, applyPostFlashSettings } from './post-flash-settings.js';
 import { createPostFlashCompanionRequest } from './post-flash-companion.js';
 import { loadRadioPresets } from './radio-presets.js';
@@ -80,7 +81,14 @@ state.postFlashSettingsApproval=null;state.postFlashSettingsResult=null;
 state.radioPresets=null;
 const radioDefaultsFields=['radio-defaults-frequency','radio-defaults-bandwidth','radio-defaults-sf','radio-defaults-cr','radio-defaults-preamble','radio-defaults-power'];
 const mediaMeshFields=['media-mesh-frequency','media-mesh-bandwidth','media-mesh-sf','media-mesh-cr','media-mesh-mode','media-mesh-preamble'];
-function radioSettingsAvailable(){const pkg=state.pkg;return !!state.radioDefaults?.inspection&&!!pkg&&((pkg.architecture==='nrf52'&&pkg.kind==='application'&&!pkg.erase&&!pkg.destructive&&!/bootloader|^R_/i.test(pkg.name))||(pkg.architecture==='esp32'&&!pkg.expert));}
+function wadameshImageMetadata(pkg=state.pkg){
+  if(isWadamesh(state.item)&&(!pkg||pkg===state.pkg))return state.item;
+  // A renamed local BIN can still be identified by its complete validated
+  // digest. Use catalog evidence, never a filename, for its TFT restriction.
+  return pkg?.architecture==='esp32'?state.items.find(item=>isWadamesh(item)&&item.sha256===pkg.payloadHash)||null:null;
+}
+function wadameshSelected(){return !!wadameshImageMetadata()||isWadamesh($('provider').value);}
+function radioSettingsAvailable(){const pkg=state.pkg;return !wadameshSelected()&&!!state.radioDefaults?.inspection&&!!pkg&&((pkg.architecture==='nrf52'&&pkg.kind==='application'&&!pkg.erase&&!pkg.destructive&&!/bootloader|^R_/i.test(pkg.name))||(pkg.architecture==='esp32'&&!pkg.expert));}
 function radioDefaultsLocked(){return continuingDeviceFlow()||!!state.plan?.written||!!state.flashProgress||!!state.finishedFirmware;}
 function assertRadioDefaultsReady(){if(state.radioDefaults?.dirty)fail('Apply the edited radio defaults before preparing or flashing.');}
 function radioDefaultsSummary(){
@@ -114,6 +122,7 @@ async function applyQueuedRadioSettings(link,device,expected,port,generation,mc,
 }
 function syncRadioDefaultsControls(){
   const draft=state.radioDefaults,locked=radioDefaultsLocked(),supported=radioSettingsAvailable(),editable=draft?.inspection?.supported===true;
+  $('radio-defaults').hidden=wadameshSelected();
   $('radio-defaults-load').disabled=state.busy||locked||(!state.pkg&&!$('artifact').value);
   $('radio-defaults-editor').hidden=!supported;
   $('radio-defaults-load').textContent=draft?.inspection?'Check selected build':'Load & check selected build';
@@ -142,6 +151,7 @@ function fillRadioDefaults(settings){
   $('radio-defaults-power').value=settings?.enabled&&settings.txPowerDbm!==null?String(settings.txPowerDbm):'';
 }
 async function inspectSelectedRadioDefaults(){
+  if(wadameshSelected())fail('Configure Wadamesh TAK radio and MediaMesh settings on the device. MeshCore USB settings are not applied to this standalone firmware.');
   if(radioDefaultsLocked())fail('Finish the current device operation before changing firmware defaults.');
   if(!state.pkg&&$('artifact').value)await fetchSelectedFirmware();
   const draft=state.radioDefaults;if(!draft||!state.pkg)fail('Load an exact firmware build first.');
@@ -303,6 +313,7 @@ function flashCompletionAdvice(result){
 }
 function firstStartupAdvice(pkg){
   if(!pkg||pkg.expert||pkg.erase)return '';
+  if(wadameshSelected())return WADAMESH_STARTUP_NOTICE;
   const erasedNrf=pkg.architecture==='nrf52'&&pkg.kind==='application'&&state.recovery?.phase==='final'&&state.recovery.eraseComplete===true&&state.recovery.sha256===pkg.sha256;
   const erasedEsp=pkg.architecture==='esp32'&&pkg.merged===true&&state.plan?.merged===true&&state.plan.sha256===pkg.sha256;
   return erasedNrf||erasedEsp?'First startup may create a new private identity and initialize storage. Give the radio time to start, then reconnect its application USB port to verify.':'';
@@ -375,9 +386,15 @@ function syncInstallMode(){
   const locked=installModeLocked();for(const id of ['install-mode-update','install-mode-install'])$(id).disabled=state.busy||locked;
   const component=state.pkg&&(state.pkg.expert||(state.pkg.architecture==='nrf52'&&(state.pkg.kind!=='application'||state.pkg.erase)));
   $('install-mode-hint').textContent=locked?(canStartNewRadio()?'Use Flash a new device to begin another update, or optionally verify the previous device.':'Finish the pending USB handoff, reset, recovery or migration before changing the installation mode. The original image and recovery checks are retained.'):component?'Advanced component/recovery file loaded. Its own board, offset and destructive-write checks still apply; this switch filters application builds.':state.installMode==='install'?'Erase & new install deletes node identity and settings. ESP32 uses a merged image; nRF52 validates an erase ZIP first, then writes the application after you reselect the same radio.':'Update writes the application without a whole-chip erase. Required partition migration is checked separately.';
+  if(!locked&&!component&&wadameshSelected())$('install-mode-hint').textContent=state.installMode==='install'?'Wadamesh first install writes its merged image after whole-chip erase. Identity, contacts, channels and settings are deleted.':'Update requires an existing matching Wadamesh layout. App offsets and slot sizes are checked; no Keymind expansion bridge runs.';
   $('install-mode-hint').classList.toggle('mode-warning',state.installMode==='install'||!!component);
 }
+function applyWadameshInstallDefault({explicitMode=false,port=state.port}={}){
+  if(!isWadamesh($('provider').value)||explicitMode||installModeLocked())return;
+  state.installMode='install';installModeSource={kind:'manual',port};syncInstallMode();
+}
 function modePairKey(item){
+  if(isWadamesh(item))return JSON.stringify([item.provider,item.hardware,item.role,item.version,item.wadameshBuild,item.requiredDisplay]);
   return catalogItemKey({...item,name:item.name.replace(/-merged(?=\.bin$)/i,''),url:'',sha256:undefined,action:'',artifactTitle:''});
 }
 async function setInstallMode(mode,{automatic=false}={}){
@@ -511,6 +528,7 @@ async function startNewRadio(){
   $('device-name').textContent='No USB port selected';$('device-meta').textContent='Choose the next radio’s USB port. Board and role are detected after connecting.';$('port-status').textContent='Not connected';
   $('backup-summary').textContent='';$('board-detection').textContent='Choose a USB port to detect the next radio.';$('recovery-profile').value='';$('installed-identity').value='';$('recovery-detection').textContent='';
   resetAutomaticBoardSelection('Ready for a new radio. Choose USB port to detect it; the previous image and identity are no longer selected.');
+  applyWadameshInstallDefault();
   $('connection-summary').textContent='Connection method is selected automatically after the running node is identified.';
   progress(0,'Ready for a new radio. Choose USB port to begin.');
   log('Previous radio startup verification was skipped by request; its transfer is not being claimed as startup-verified.');
@@ -577,6 +595,7 @@ function updateNextAction(){
   if(id==='select-port'&&state.verification)$('step-guidance').textContent='Step 1 again: choose the same radio’s application USB port, not its ROM/DFU port, to check startup.';
 }
 function controls() {
+  $('wadamesh-info').hidden=!wadameshSelected();
   if(state.applicationDetection&&(state.applicationDetection.port!==state.port||state.applicationDetection.generation!==state.generation))clearApplicationDetection();
   discardStaleBootloaderInfo();
   const scope=catalogScopeKey();
@@ -602,7 +621,7 @@ function controls() {
   if(state.backupApplicationRequest)for(const id of ['prepare','flash','touch'])$(id).disabled=true;
   $('skip-backup').disabled ||= isMeshtasticMigration()||!!completedFirmwareSelection()||!!state.verification||!!state.plan?.written||!!state.migrationApproval;
   $('skip-backup-warning').hidden=!$('skip-backup').checked;$('skip-backup-option').classList.toggle('enabled',$('skip-backup').checked);
-  $('workflow-guidance').textContent=isMeshtasticMigration()?'Step 4 downloads and checks firmware before confirmation. Meshtastic settings are not backed up or converted.':'Step 3 backs up settings. Skip backup goes straight to step 4. Required partition expansion and the final firmware run together after approval.';
+  $('workflow-guidance').textContent=wadameshSelected()?'Wadamesh uses its own partition layout. First install needs the merged image; app-only updates require an existing matching layout. No Keymind expansion or post-flash settings run.':isMeshtasticMigration()?'Step 4 downloads and checks firmware before confirmation. Meshtastic settings are not backed up or converted.':'Step 3 backs up settings. Skip backup goes straight to step 4. Required partition expansion and the final firmware run together after approval.';
   $('finish').disabled ||= !state.esp || !state.plan?.written;
   $('wait-migration').disabled ||= !state.port || !state.migration?.uart || state.migration?.settled;
   $('recover-bridge').disabled ||= !state.port || !state.pkg || !state.migration;
@@ -1105,7 +1124,11 @@ function firmwareBoardDevice(){
   return {...state.device,model:isBootloaderInfo()?'':state.device?.model||state.recovery?.deviceModel||'',usbInfo:state.port?.getInfo?.()||{},chipId:state.esp?.loader?.chip?.IMAGE_CHIP_ID};
 }
 function firmwareBoardAssessment(pkg=state.pkg){
-  return assessFirmwareBoard({pkg,hardware:selectedHardware(),device:firmwareBoardDevice(),items:state.items,plan:state.plan});
+  const device=firmwareBoardDevice(),check=assessFirmwareBoard({pkg,hardware:selectedHardware(),device,items:state.items,plan:state.plan});
+  const display=wadameshDisplayAssessment({item:wadameshImageMetadata(pkg),device});
+  if(display.status==='mismatch')return {...check,status:'mismatch',requiresOverride:true,reason:display.reason+' '+check.reason};
+  if(display.status==='unknown')return {...check,status:check.status==='mismatch'?'mismatch':'unknown',requiresOverride:true,reason:display.reason+' '+check.reason};
+  return check;
 }
 // Approvals live only on this call stack. A reconnect, image/board edit or new
 // identity revokes them, including edits made while another dialog is open.
@@ -1142,6 +1165,7 @@ function payloadFirmwareIdentity(pkg) {
   return identity;
 }
 function firmwareDowngradeWarning(pkg=state.pkg,item=state.item) {
+  if(isWadamesh(item)||wadameshSelected())return '';
   if(isNonMeshCore())return '';
   if(pkg&&(pkg.expert||pkg.erase||(pkg.architecture==='nrf52'&&pkg.kind!=='application')))return '';
   const identity=pkg?payloadFirmwareIdentity(pkg):null,name=pkg?.name||item?.name||'';
@@ -1176,7 +1200,7 @@ function verificationModelMatches(expected,device){
   const legacy=['Seeed Wio Tracker L1','Seeed SenseCAP Indicator'].includes(expected.model),target=canonicalHardware(expected.hardware||'');
   return !!(legacy&&target&&/^[a-f0-9]{64}$/i.test(expected.publicKey||'')&&device.publicKey===expected.publicKey&&after.hardware===target&&before.candidates.includes(target));
 }
-function queueVerification(pkg,options){state.verification=verificationRecord(pkg,options);persistFlow('verification','meshfirmware.verifyApplication');}
+function queueVerification(pkg,options){if(wadameshSelected()){clearVerification();return;}state.verification=verificationRecord(pkg,options);persistFlow('verification','meshfirmware.verifyApplication');}
 function completeNrfTransfer(pkg){
   const completionAdvice=postFlashBleAdvice(pkg,state.item),startupAdvice=firstStartupAdvice(pkg);
   state.finishedFirmware={sha256:pkg.sha256,verified:false,kind:pkg.erase?'erase':selectedRecovery(pkg)?'temporary-recovery':pkg.kind,...(completionAdvice?{completionAdvice}:{}),...(startupAdvice?{startupAdvice}:{})};
@@ -1389,7 +1413,7 @@ function options(id, values, placeholder) {
   // A detected physical target remains visible even when the chosen provider
   // has no build for it. In that case no firmware artifact is selected.
   if(id==='hardware'&&state.detectedHardware&&(!catalogArchitecture()||catalogHardwareAllowed(state.detectedHardware)))values=[...values,state.detectedHardware];
-  select.replaceChildren(new Option(placeholder,''),...Array.from(new Set(values)).filter(Boolean).sort(id==='version'?compareVersions:undefined).map(v => new Option(id==='provider'&&v==='MeshCore'?'MeshCore (stock)':id==='provider'&&v==='Custom'?'Custom firmware':v,v)));
+  select.replaceChildren(new Option(placeholder,''),...Array.from(new Set(values)).filter(Boolean).sort(id==='version'?compareVersions:undefined).map(v => new Option(id==='provider'&&v==='MeshCore'?'MeshCore (stock)':id==='provider'&&v==='Custom'?'Custom firmware':id==='role'&&isWadamesh($('provider').value)&&v==='gui'?'Standalone (GUI)':v,v)));
   if ([...select.options].some(o => o.value === prior)) select.value = prior;
 }
 // The chip family and installed-loader hints narrow choices, never prove the
@@ -1601,7 +1625,7 @@ $('select-port').onclick = () => operation(async () => {
     // physical device (including after a disconnect). Keep it for handoffs.
     if(state.transportModePort&&state.transportModePort!==port)$('transport-mode').value='auto';
     if(!sameModeRadio){
-      if(installModeSource?.port&&installModeSource.port!==port){state.installMode='update';syncInstallMode();installModeSource=null;}
+      if(installModeSource?.port&&installModeSource.port!==port){state.installMode='update';syncInstallMode();installModeSource=null;applyWadameshInstallDefault({port});}
       else if(installModeSource?.port===null)installModeSource={...installModeSource,port};
     }
     state.finishedFirmware=null;
@@ -1716,7 +1740,7 @@ $('load-recovery').onclick=()=>operation(async()=>{
   const loaded=recoveryPackage(catalog,id,bundle);setAutomaticSha(loaded.profile.sha256,loaded.name);await loadFirmware(loaded.name,loaded.bytes);state.loadedRecovery={...loaded.profile,version:catalog.version};$('image-warning').textContent=[...state.pkg.warnings,recoveryWarning].join(' ');
   notice(`Verified OTAFIX ${catalog.version} R_${id} ZIP loaded for installed identity ${loaded.profile.installedIdentity}. No device commands were sent. ${recoveryWarning}`);
 });
-for (const id of ['project','provider','hardware','role','version']) $(id).onchange = () => operation(async()=>{await clearFirmwareSelection();state.manualSelections[id]=$(id).value;for(const next of ['hardware','role','version'].slice(['provider','hardware','role','version'].indexOf(id)))delete state.manualSelections[next];if(id==='provider')$('custom-firmware').hidden=$('provider').value!=='Custom';filterCatalog(id);if($('auto-detect-board').checked)applyAutomaticSelections();else updateFirmwareSelectionSummary();});
+for (const id of ['project','provider','hardware','role','version']) $(id).onchange = () => operation(async()=>{await clearFirmwareSelection();state.manualSelections[id]=$(id).value;for(const next of ['hardware','role','version'].slice(['provider','hardware','role','version'].indexOf(id)))delete state.manualSelections[next];if(id==='provider'){$('custom-firmware').hidden=$('provider').value!=='Custom';applyWadameshInstallDefault();}filterCatalog(id);if($('auto-detect-board').checked)applyAutomaticSelections();else updateFirmwareSelectionSummary();});
 for(const [id,mode]of [['install-mode-update','update'],['install-mode-install','install']])$(id).onchange=()=>$(id).checked?operation(()=>setInstallMode(mode)):undefined;
 async function fetchSelectedFirmware(){
   const item = $('artifact').value?state.items[Number($('artifact').value)]:null; if (!item) fail('Choose an artifact.');
@@ -1859,10 +1883,10 @@ async function prepareSelectedFirmware({waitForRom=false}={}) {
     }
     if(state.migration && (state.migration.sha256!==pkg.sha256 || state.migration.mac!==info.mac)) fail('A migration is pending. Select its original firmware and the same physical chip.');
     if(state.espRecovery&&info.mac!==state.espRecovery.mac)fail('Different physical ESP32 chip: the interrupted write belongs to another MAC.');
-    const planner = pkg.merged || pkg.expert ? null : (state.planner ||= new BrowserPlanner());
+    const planner = pkg.merged || pkg.expert || wadameshSelected() ? null : (state.planner ||= new BrowserPlanner());
     const packageFile=$('migration-package').files[0],setFile=$('usb-set').files[0];
     if((packageFile?.size||0)>(32<<20) || (setFile?.size||0)>(32<<20)) fail('Migration artifact exceeds 32 MiB.');
-    const args={planner,packageBytes:packageFile?new Uint8Array(await packageFile.arrayBuffer()):null,usbSetBytes:setFile?new Uint8Array(await setFile.arrayBuffer()):null,resume:!!state.migration,expertOffset,recovery:state.espRecovery,resolveFirmwareName:customFirmwarePlannerName};
+    const args={planner,packageBytes:packageFile?new Uint8Array(await packageFile.arrayBuffer()):null,usbSetBytes:setFile?new Uint8Array(await setFile.arrayBuffer()):null,resume:!!state.migration,expertOffset,recovery:state.espRecovery,resolveFirmwareName:customFirmwarePlannerName,...(wadameshSelected()?{migrationDisabledReason:'Wadamesh TAK needs its own merged image and partition layout for first installation. Choose Erase & new install. A Keymind expansion bridge cannot be used for this provider.'}:{})};
     let prepared;
     for(let attempt=0;attempt<5;attempt++) {
       try { prepared=await esp.prepare(pkg,args);break; }
@@ -1954,7 +1978,8 @@ async function flashPreparedFirmware() {
   if(plan.erasePkg){await acknowledgeFirmwareBoard(plan.erasePkg,assertBoardScope);assertBoardScope();}
   const token = pkg.expert ? `WRITE 0x${plan.addresses[0].toString(16)}` : pkg.destructive||plan.erasePkg ? 'WIPE WITHOUT BACKUP' : 'FLASH';
   const detail = `${pkg.name}\nSHA-256 ${pkg.sha256}\nBoard check: ${boardCheck.reason}\n${radioDefaultsSummary() ? radioDefaultsSummary()+'\nSource SHA-256 '+state.radioDefaults.sourceSha256+'\n':''}${plan.mac ? 'Verified chip MAC ' + plan.mac : plan.uf2Info || 'Physical board identity is not independently verified.'}${selectedBootloader(pkg)?'\nOur OTAFIX '+selectedBootloader(pkg).version+' · '+selectedBootloader(pkg).profile+'\n'+bootloaderReinstallWarning:''}${plan.erasePkg?'\nERASE FIRST: '+plan.erasePkg.name+'\nSHA-256 '+plan.erasePkg.sha256+'\n'+plan.erasePkg.warnings.join(' '):''}`;
-  const backupWarning=isMeshtasticMigration()?'Meshtastic will be replaced. Its settings, channels and identity are not backed up or converted to MeshCore. ':$('skip-backup').checked?'You chose to skip backup. No new logical backup was created. ':'';
+  const providerWarning=wadameshSelected()?(pkg.merged?'Wadamesh TAK standalone installation: this flasher erases the whole chip, including identity, contacts, channels and settings. Configure radio/MediaMesh on the device afterward. ':'Wadamesh TAK application update: continue only if this radio already has the matching Wadamesh partition layout. Fitting app slots alone do not prove filesystem compatibility. No Keymind partition expansion or post-flash USB settings will run. '):'';
+  const backupWarning=providerWarning+(isMeshtasticMigration()?'Meshtastic will be replaced. Its settings, channels and identity are not backed up or converted to MeshCore. ':$('skip-backup').checked?'You chose to skip backup. No new logical backup was created. ':'');
   if(state.migrationApproval&&(plan.requiresRevisionOverride||plan.chunkedRecovery))fail('The new plan needs an unapproved compatibility override or interrupted-write recovery. Automatic continuation stopped. Inspect and acknowledge it manually.');
   let allowRevisionMismatch=false;
   if(plan.requiresRevisionOverride){if(!await confirm('ESP silicon-revision mismatch',detail+'\n'+(plan.compatibilityWarnings||[]).join('\n'),'The image is not compatible with the verified chip revision, or the constrained revision could not be verified. Force only if you accept that it may not boot. This does not override security, chip-family or flash bounds checks.',plan.revisionOverrideToken||'FORCE CHIP REVISION'))return;allowRevisionMismatch=true;}
@@ -2055,6 +2080,7 @@ $('discard-esp-recovery').onclick=()=>operation(async()=>{
 });
 async function finishVerifiedEsp(){
   if (!state.plan?.written) fail('No verified write to finish.');
+  const standalone=wadameshSelected(),pkg=state.pkg;
   const bridge=state.plan.needed && !state.plan.verified;
   if(bridge) {state.migration.phase='running';localStorage.setItem('meshfirmware.pendingMigration',JSON.stringify(state.migration));}
   const approval=state.migrationApproval,session=state.esp,previousPort=session.port||state.port,transport=state.plan.transportMode||session.connectMode||$('transport-mode').value;
@@ -2075,6 +2101,10 @@ async function finishVerifiedEsp(){
   else if(bridge) {state.port=null;state.generation++;$('transport-mode').value='no_reset';$('port-status').textContent='Wait for ROM return';notice(approval?'Expansion bridge started. Waiting for the same granted ROM port; if the browser requires a new permission, choose the same radio with step 1. The final write continues automatically after chip, layout and restoration checks.':'Migration bridge started. Keep power connected, wait for its automatic ROM return, then choose the same USB device and inspect again without resetting it.');}
   else {
     state.port=null;state.generation++;$('already-bootloader').checked=false;
+    if(standalone){
+      clearVerification();state.finishedFirmware={sha256:pkg.sha256,name:pkg.name,provider:'Wadamesh TAK',verified:false};
+      progress(1,'Wadamesh TAK transfer verified; restart requested. Check the device screen.');notice(WADAMESH_STARTUP_NOTICE+' No MeshCore startup check or settings commands were sent.');return;
+    }
     progress(1,'Firmware transfer verified. Reset requested; application startup has not been checked.');
     notice(approval?'Reset requested after verified writes. Choose the application port; startup and storage layout will be verified automatically.':'Reset requested after verified writes. Flash a new device, or optionally reconnect this radio’s application port to verify startup.');
     if(approval&&state.migrationApproval===approval&&(transport==='default_reset'||physical.mode==='default_reset')){state.port=previousPort;await continueApprovedMigration();}
@@ -2324,6 +2354,7 @@ getCatalog().then(catalog => {
     if([...$(id).options].some(o=>o.value===selections[id])){
       $(id).value=selections[id];
       if(id==='provider'||Object.hasOwn(linked,id))state.manualSelections[id]=selections[id];
+      if(id==='provider')applyWadameshInstallDefault({explicitMode:!!linked.mode});
       filterCatalog(id);
     }else if(Object.hasOwn(linked,id))filtersMatched=false;
   }

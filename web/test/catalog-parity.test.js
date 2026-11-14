@@ -2,8 +2,26 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {catalogItems,catalogProvider,combineProviderItems,compareVersions,getCatalog,validateCatalog} from '../src/catalog.js';
 import {buildCatalog,keymindProviderPaths} from '../scripts/catalog-build.mjs';
+import {WADAMESH_PROVIDER,WADAMESH_LATEST_URL,wadameshBoardsUrl,wadameshCatalog,WADAMESH_REPOSITORY} from '../scripts/wadamesh-catalog.mjs';
 const config=(name='Board')=>({staticPath:'/firmware',device:[{name,type:'nrf52',erase:'erase.zip',bootloader:['boot.uf2','boot.zip'],firmware:[{role:'repeater',title:'Repeater',subTitle:'Full USB + OTA',notice:'Check <b>bootloader</b>',version:{'v1.18.0':{notes:'release detail',files:[{name:'app.zip',type:'flash',digest:'sha256:'+'a'.repeat(64)}]}}}]}]});
 const snapshot=items=>({generatedAt:'2026-01-01T00:00:00Z',warnings:[],items});
+function wadameshSource(tag='tak-beta_103.1'){
+  const release={draft:false,tag_name:tag,published_at:'2026-11-13T03:24:05Z',html_url:`${WADAMESH_REPOSITORY}/releases/tag/${tag}`,assets:['.bin','-merged.bin'].map(suffix=>({name:`wadamesh-tdeck${suffix}`,size:4000000,digest:'sha256:'+'a'.repeat(64),browser_download_url:`${WADAMESH_REPOSITORY}/releases/download/${tag}/wadamesh-tdeck${suffix}`}))};
+  return {release,manifest:{boards:[{id:'tdeck',chip:'ESP32-S3',builds:{tdeck:{env:'LilyGo_TDeck_companion_radio_touch'}}}]}};
+}
+test('Wadamesh uses its own tagged board manifest and fresh release even while other providers are offline',async()=>{
+  const source=wadameshSource(),seen=[];
+  const result=await buildCatalog({readJson:async url=>{seen.push(url);if(url===WADAMESH_LATEST_URL)return source.release;if(url===wadameshBoardsUrl(source.release))return source.manifest;throw Error('other providers offline');}});
+  assert.equal(result.items.length,2);assert.ok(result.items.every(item=>item.provider===WADAMESH_PROVIDER));assert.ok(seen.includes(wadameshBoardsUrl(source.release)));assert.ok(!seen.some(url=>url.includes('wadamesh-tak/main/boards.json')));
+});
+test('a Wadamesh outage or invalid new release retains its last verified entries without replacing other providers',async()=>{
+  const previousSource=wadameshSource(),previous=snapshot([...catalogItems(config('Official Board')),...wadameshCatalog(previousSource.release,previousSource.manifest).items]);
+  for(const invalid of [false,true]){
+    const incoming=wadameshSource('tak-beta_104.1');incoming.release.assets[0].digest='sha256:invalid';
+    const result=await buildCatalog({previous:async()=>previous,readJson:async url=>{if(invalid&&url===WADAMESH_LATEST_URL)return incoming.release;if(invalid&&url===wadameshBoardsUrl(incoming.release))return incoming.manifest;throw Error('offline');}});
+    assert.equal(result.items.filter(item=>item.provider===WADAMESH_PROVIDER).length,2);assert.ok(result.items.some(item=>item.hardware==='Official Board'));assert.ok(result.items.filter(item=>item.provider===WADAMESH_PROVIDER).every(item=>item.version==='tak-beta_103.1'));assert.ok(result.warnings.some(warning=>warning===`${WADAMESH_PROVIDER}: retained last known public entries.`));
+  }
+});
 const legacyConfig=()=>{
   const value=config(),firmware=value.device[0].firmware[0];
   firmware.subTitle='Legacy USB logging profile';

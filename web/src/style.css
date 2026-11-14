@@ -383,6 +383,9 @@ footer { font-size: 15.4px; line-height: 1.6; overflow-wrap: anywhere; }
 .firmware-inspection strong { font-size: 16.8px; }
 .workflow .firmware-inspection p { font-size: 15.4px; margin: 6px 0 0; }
 .firmware-inspection.board-warning { background: #fff7e8; border-color: #d9a441; }
+.workflow #wadamesh-info { font-size: 15.4px; margin-top: 14px; }
+.workflow #wadamesh-info strong { font-size: 16.8px; }
+.workflow #wadamesh-info p { font-size: 15.4px; line-height: 1.5; margin: 8px 0 0; }
 
 @media (max-width: 900px) {
   .sidebar { flex-wrap: wrap; }

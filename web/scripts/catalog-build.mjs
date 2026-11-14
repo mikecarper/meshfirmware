@@ -1,6 +1,7 @@
 import {catalogItems,catalogProvider,combineProviderItems,compareVersions,validateCatalog,inheritOfficialUtilities} from '../src/catalog.js';
 import {BOOTLOADER_LATEST_URL,bootloaderManifestAsset,validateBootloaderSnapshot,applyBootloaderCatalog} from '../src/bootloader-catalog.js';
 import {recoveryBundleAsset,createRecoveryCatalog,validateRecoveryCatalog} from '../src/bootloader-recovery.js';
+import {WADAMESH_PROVIDER,WADAMESH_LATEST_URL,wadameshBoardsUrl,wadameshCatalog} from './wadamesh-catalog.mjs';
 
 const raw='https://raw.githubusercontent.com/mikecarper/MeshCore/keymindCascade/';
 const treeURL='https://api.github.com/repos/mikecarper/MeshCore/git/trees/keymindCascade?recursive=1';
@@ -27,6 +28,10 @@ export async function buildCatalog({readJson,readBytes,previous=async()=>null,no
     (async()=>{let tree;try{tree=await readJson(treeURL);if(!Array.isArray(tree?.tree)||tree.truncated)throw new Error('incomplete tree');}catch(error){warnings.push(`Keymind provider discovery: ${error.message}; trying published fallback paths.`);}
       await Promise.all([['Keymind Cascade','cascade'],['Keymind Cascade Logging','logging']].map(async([provider,variant])=>{try{const paths=keymindProviderPaths(tree,variant),config=await source(paths.map(path=>raw+path),v=>Array.isArray(v?.device)&&v.device.length>0,provider);items.push(...catalogItems(config,[],provider));}catch(error){await reuse(provider,error);}}));
     })(),
+    (async()=>{try{
+      const release=await readJson(WADAMESH_LATEST_URL),manifest=await readJson(wadameshBoardsUrl(release));
+      const result=wadameshCatalog(release,manifest);items.push(...result.items);warnings.push(...result.warnings);
+    }catch(error){await reuse(WADAMESH_PROVIDER,error);}})(),
     (async()=>{try{
       const release=await latestRelease,asset=bootloaderManifestAsset(release);
       const manifest=await readJson(asset.browser_download_url,{sha256:asset.digest.slice(7),size:asset.size});

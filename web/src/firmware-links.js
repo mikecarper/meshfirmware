@@ -1,3 +1,4 @@
+import {isWadamesh,WADAMESH_RELEASES_URL,WADAMESH_FLASHER_URL} from './wadamesh.js';
 const pickerBase='https://mikecarper.github.io/MeshCore/firmware_picker/';
 const pickerResults='firmware-picker-1-results';
 const stockReleases='https://github.com/meshcore-dev/MeshCore/releases';
@@ -32,6 +33,11 @@ export function firmwareFilesLinks({items=[],item=null,provider='Keymind Cascade
   const chosenProvider=canonicalProvider(selected?.provider||provider)||'Keymind Cascade';
   const chosenRole=selected?(typeof selected.role==='string'?selected.role:''):role;
   const download=safeHttps(selected?.url),downloadUrl=download?.href||null;
+  if(isWadamesh(chosenProvider)){
+    const match=download?.origin==='https://github.com'&&/^\/jade-on-mesh\/wadamesh-tak\/releases\/download\/([^/]+)\/[^/]+$/.exec(download.pathname);
+    const browseUrl=match?'https://github.com/jade-on-mesh/wadamesh-tak/releases/tag/'+match[1]:WADAMESH_RELEASES_URL;
+    return {browseUrl,downloadUrl,upstreamFlasherUrl:WADAMESH_FLASHER_URL,detail:'Browse Wadamesh TAK firmware releases. First USB installs require the matching merged image; check the exact display and radio variant. Download selected build keeps its exact file and release.'};
+  }
   if(chosenProvider==='MeshCore'){
     let browseUrl=stockReleases;
     const match=download?.origin==='https://github.com'&&/^\/meshcore-dev\/MeshCore\/releases\/download\/([^/]+)\/[^/]+$/i.exec(download.pathname);

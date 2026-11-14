@@ -85,3 +85,14 @@ test('legacy logging provider links normalize without mutating caller metadata',
   const item=entry(undefined,undefined,undefined,{provider:'Keymind Cascade Logging'}),before=JSON.stringify(item);
   assert.equal(selection(firmwareFilesLinks({item}).browseUrl).h,'GAT562_30S_Mesh_Kit');assert.equal(JSON.stringify(item),before);
 });
+
+test('Wadamesh links browse its exact release and never the Keymind picker',()=>{
+  const url='https://github.com/jade-on-mesh/wadamesh-tak/releases/download/tak-beta_103.1/wadamesh-heltec-v4-merged.bin';
+  const links=firmwareFilesLinks({item:{provider:'Wadamesh TAK',url},provider:'Keymind Cascade'});
+  assert.equal(links.browseUrl,'https://github.com/jade-on-mesh/wadamesh-tak/releases/tag/tak-beta_103.1');assert.equal(links.downloadUrl,url);assert.equal(links.upstreamFlasherUrl,'https://cascadiamesh.org/mediamesh-flasher/');assert.match(links.detail,/matching merged image.*display and radio/);assert.ok(!links.browseUrl.includes('mikecarper'));
+});
+test('Wadamesh unselected and foreign download URLs keep its public provider fallback',()=>{
+  for(const selected of [null,{provider:'Wadamesh TAK',url:asset},{provider:'Wadamesh TAK',url:'http://example.test/wadamesh.bin'},{provider:'Wadamesh TAK',url:'https://user:secret@github.com/jade-on-mesh/wadamesh-tak/releases/download/tag/image.bin'}]){
+    const links=firmwareFilesLinks({provider:'Wadamesh TAK',item:selected});assert.equal(links.browseUrl,'https://github.com/jade-on-mesh/wadamesh-tak/releases/latest');assert.equal(links.upstreamFlasherUrl,'https://cascadiamesh.org/mediamesh-flasher/');assert.doesNotMatch(links.detail,/Keymind/);
+  }
+});

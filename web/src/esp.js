@@ -242,7 +242,7 @@ export class EspSession {
     return this.recordPlan(plan);
   }
   planProof(plan) { return hash(new TextEncoder().encode(JSON.stringify([plan.sha256,plan.payloadHash,plan.mac,plan.addresses,plan.merged,plan.expert,!!plan.needed,!!plan.verified,plan.bridge_sha256,plan.segments,plan.revisionProof,plan.requiresRevisionOverride,plan.revisionOverrideToken,!!plan.chunkedRecovery]))); }
-  async prepare(pkg, {planner,packageBytes,usbSetBytes,resume,expertOffset,recovery,resolveFirmwareName} = {}) {
+  async prepare(pkg, {planner,packageBytes,usbSetBytes,resume,expertOffset,recovery,resolveFirmwareName,migrationDisabledReason} = {}) {
     this.plan=null; this.#planProof=null; this.#written=false;this.#writeRecovery=null;
     if (pkg.architecture !== 'esp32' || pkg.chipId !== this.loader.chip.IMAGE_CHIP_ID || hash(pkg.payload) !== pkg.payloadHash) fail('Firmware chip or immutable payload verification failed.');
     const fileOffset=pkg.merged?(pkg.flashOffset??0):0;
@@ -278,7 +278,7 @@ export class EspSession {
     } else {
       // The shared expansion helper reviews ESP32/C3/S3 only. Other supported
       // chips may update fitting slots, never run an unreviewed migration.
-      if (planner && [0,5,9].includes(pkg.chipId)) {
+      if (planner && !migrationDisabledReason && [0,5,9].includes(pkg.chipId)) {
         const nvs=parts.filter(p=>p.type===1 && p.subtype===2),ota=parts.filter(p=>p.type===1 && p.subtype===0);
         if(nvs.length>1 || ota.length>1 || nvs.some(part=>part.size>(1<<20)) || ota.some(part=>part.size<8192)) fail('Ambiguous NVS/OTA layout. Browser migration cannot proceed.');
         if(resume&&(nvs.length!==1||ota.length!==1))fail('Migration completion requires its exact NVS and OTA snapshots.');
@@ -295,7 +295,7 @@ export class EspSession {
         return this.recordCompatiblePlan(pkg,{...result,sha256:pkg.sha256,payloadHash:pkg.payloadHash,mac:this.mac,addresses:result.app_offsets,merged:false,parts},recovery);
       }
       const apps = parts.filter(p => p.type === 0);
-      if (apps.some(p => pkg.payload.length > p.size)) fail('Partition expansion is required, but no reviewed browser migration plan exists for this chip/layout. No write was performed.');
+      if (apps.some(p => pkg.payload.length > p.size)) fail(migrationDisabledReason||'Partition expansion is required, but no reviewed browser migration plan exists for this chip/layout. No write was performed.');
       const nvs = parts.filter(p => p.type === 1 && p.subtype === 2);
       if (nvs.length > 1 || nvs.some(part=>part.size > (1 << 20))) fail('Ambiguous NVS; migration completion cannot be verified.');
       if(nvs.length) {const state = await this.loader.readFlash(nvs[0].offset,nvs[0].size);if (text(state).includes('mesh-pt-migrate')) fail('NVS has partition migration records, and this chip/layout has no reviewed completion verifier.');}

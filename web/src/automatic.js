@@ -2,6 +2,7 @@
 // resets a device, or authorizes a write. Byte/chip/partition checks still run.
 import {catalogProvider,catalogItemKey,compareVersions} from './catalog.js';
 import {canonicalHardware} from './hardware-aliases.js';
+import {isWadamesh,wadameshDisplayAssessment} from './wadamesh.js';
 
 const applicationRoles=new Set(['companionFull','companionBle','companionUsb','repeater','roomServer','sensor','kissRadio','gui','guiSD']);
 const companionRoles=new Set(['companionFull','companionBle','companionUsb']);
@@ -126,9 +127,10 @@ export function chooseFirmware({items=[],device={},hardware='',provider='',role=
   const meshtastic=device?.firmwareFamily==='meshtastic'||device?.role==='meshtastic';
   const bootloader=device?.firmwareFamily==='bootloader'||device?.role==='bootloader';
   const migrating=meshtastic||bootloader;
-  const selections={provider:catalogProvider(text(provider))||'Keymind Cascade',hardware:canonicalHardware(text(hardware)),role:text(role)||inferredRole(device),version:text(version)};
+  const selectedProvider=catalogProvider(text(provider))||'Keymind Cascade',standalone=isWadamesh(selectedProvider);
+  const selections={provider:selectedProvider,hardware:canonicalHardware(text(hardware)),role:text(role)||(standalone?'gui':inferredRole(device)),version:text(version)};
   const result=(reason,candidates=[],artifactIndex=null)=>{
-    const warning=migrating||artifactIndex===null?'':firmwareVersionWarning(device?.version,items[artifactIndex]?.version);
+    const warning=standalone||migrating||artifactIndex===null?'':firmwareVersionWarning(device?.version,items[artifactIndex]?.version);
     return {selections,artifactIndex,candidates,reason,warning,downgrade:!!warning};
   };
   if(!['update','install'].includes(installMode))return result('Choose Update or Erase / new install explicitly. An unsupported install mode cannot select firmware.');
@@ -142,6 +144,11 @@ export function chooseFirmware({items=[],device={},hardware='',provider='',role=
     if(stock.length){selections.provider='MeshCore';candidates=stock;}
   }
   if(!candidates.length)return result(installMode==='install'?'No erase/new install matches this exact hardware/provider. Choose a matching merged ESP32 install or nRF52 application ZIP; no update, component or other board was substituted.':'No write-only application update matches this exact hardware/provider. Choose another provider or an explicit firmware file; no wipe or bootloader was substituted.');
+  if(standalone){
+    const compatible=candidates.filter(({item})=>wadameshDisplayAssessment({item,device}).status!=='mismatch');
+    if(!compatible.length)return result('Wadamesh TAK supports the Heltec V4 TFT display, not the reported OLED configuration. No TFT image was selected automatically. Choose compatible firmware, or review a manual selection with its display-mismatch warning.');
+    candidates=compatible;
+  }
   if(!selections.role){
     if(migrating)selections.role=['companionFull','companionBle','companionUsb'].find(role=>candidates.some(({item})=>item.role===role))||'';
   }
@@ -157,7 +164,10 @@ export function chooseFirmware({items=[],device={},hardware='',provider='',role=
     if(meshtastic&&!text(role))return result(`No ${installMode==='install'?'erase/new install':'write-only application update'} matches the Meshtastic-based ${selections.role==='repeater'?'Repeater':'Full Companion'} default for this exact hardware/provider. Choose another role or provider explicitly; no alternative role was substituted.`);
     return result(installMode==='install'?'No erase/new install matches the selected role. An unsupported explicit role is never replaced automatically.':'No write-only application update matches the selected role. An unsupported explicit role is never replaced automatically.');
   }
-  const exactTarget=text(device?.firmwareTarget||device?.exactTarget),hardwareId=text(device?.hardwareId)||(!exactTarget?reviewedModelHardware(device,selections):'');
+  // A deliberate switch to the standalone provider selects a different UI
+  // target. Keep its exact board/display/radio variants, not the old role's
+  // Keymind build environment. Physical chip checks still run before writes.
+  const exactTarget=standalone?'':text(device?.firmwareTarget||device?.exactTarget),hardwareId=standalone?'':text(device?.hardwareId)||(!exactTarget?reviewedModelHardware(device,selections):'');
   if(exactTarget||hardwareId){
     candidates=candidates.filter(({item})=>{
       const setup=setupHardware(item),declared=item.bootloaderInfo?.hardwareId;
