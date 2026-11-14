@@ -2487,6 +2487,13 @@ getCatalog().then(catalog => {
   // preference during automatic device selection. Others use the latest.
   saved.provider=catalogProvider(saved.provider)||'Keymind Cascade';
   if(typeof saved.hardware==='string')saved.hardware=canonicalHardware(saved.hardware);
+  // Catalogs before the version preference marker saved automatic choices as
+  // well as manual ones. When a newer exact board/role Keymind build exists,
+  // use it rather than treating the stale automatic selection as deliberate.
+  if(!installModeLocked()&&saved.provider==='Keymind Cascade'&&saved.versionExplicit!==true&&saved.hardware&&saved.role){
+    const newest=state.items.filter(item=>item.provider===saved.provider&&item.hardware===saved.hardware&&item.role===saved.role).map(item=>item.version).filter(Boolean).sort(compareVersions)[0];
+    if(newest&&(!saved.version||compareVersions(newest,saved.version)<0))saved.version=newest;
+  }
   const linked=installModeLocked()?{}:linkedCatalogSelections(),hasLinked=Object.keys(linked).length>0;
   const selections=hasLinked?{provider:'Keymind Cascade',...linked}:saved;
   if(linked.mode&&installModeSource===null){state.installMode=linked.mode;installModeSource={kind:'manual',port:state.port};syncInstallMode();}

@@ -108,3 +108,11 @@ test('production JSON fetch checks raw bytes and exact asset size before parsing
   await assert.rejects(()=>json(url,{sha256,size:bytes.length+1,fetchImpl}),/size or SHA-256/);
   await assert.rejects(()=>json(url,{sha256,size:0,fetchImpl}),/bounds/);
 });
+test('larger pinned historical manifests still require exact size, hash and an explicit bounded maximum',async()=>{
+  const input={value:'a'.repeat(1<<20)},bytes=new TextEncoder().encode(JSON.stringify(input));
+  const sha256=createHash('sha256').update(bytes).digest('hex'),url='https://example.test/history.json',fetchImpl=async()=>new Response(bytes);
+  await assert.rejects(()=>json(url,{sha256,size:bytes.length,fetchImpl}),/bounds/);
+  assert.deepEqual(await json(url,{sha256,size:bytes.length,maxSize:2<<20,fetchImpl}),input);
+  await assert.rejects(()=>json(url,{sha256:'a'.repeat(64),size:bytes.length,maxSize:2<<20,fetchImpl}),/SHA-256/);
+  await assert.rejects(()=>json(url,{sha256,size:bytes.length,maxSize:5<<20,fetchImpl}),/bounds/);
+});

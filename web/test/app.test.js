@@ -1679,6 +1679,18 @@ test('Keymind defaults to latest after board and role selection, and an explicit
   assert.equal(ui.elements.get('artifact').options.filter(x=>x.value).length,0,'an unavailable explicit version must not silently select a new version');
   assert.deepEqual(ui.calls,[]);
 });
+test('pre-upgrade remembered Keymind selections use the newest version; explicitly saved older choices stay selected',async()=>{
+  const old={...v4Item,provider:'Keymind Cascade',version:'v1.18.0.1',name:'old-v1.18.0.1.bin',url:'https://example.test/old.bin'};
+  const current={...old,version:'v1.18.0.2',name:'new-v1.18.0.2.bin',url:'https://example.test/new.bin'};
+  for(const explicit of [false,true]){
+    const saved={provider:old.provider,hardware:old.hardware,role:old.role,version:old.version,...(explicit?{versionExplicit:true}:{})};
+    const ui=workbench({savedSelections:saved,catalogPromise:Promise.resolve(linkedCatalog([old,current]))});await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(ui.elements.get('version').value,explicit?old.version:current.version);
+    assert.deepEqual(ui.calls,[]);
+  }
+  const pending=workbench({verification:{sha256:'a'.repeat(64),name:'final.bin'},savedSelections:{provider:old.provider,hardware:old.hardware,role:old.role,version:old.version},catalogPromise:Promise.resolve(linkedCatalog([old,current]))});
+  await new Promise(resolve=>setImmediate(resolve));assert.equal(pending.elements.get('version').value,old.version,'an unfinished verification retains its version');
+});
 const linkedT114Item={...v4Item,provider:'Keymind Cascade',hardware:'Heltec T114',architecture:'nrf52',action:'flash',role:'companionFull',version:'v1.18.0.1-halo-keymind',name:'Heltec_t114_companion_radio_full.zip',url:'https://example.test/t114.zip'};
 const linkedCatalog=items=>({items,warnings:[],generatedAt:'2026-10-27T00:00:00Z'});
 
