@@ -10,6 +10,10 @@ const MAX_MIRROR_ENTRIES=10000;
 // to a public asset path without its trailing slash, breaking project Pages.
 const mirrorDirectory='../firmware/';
 const defaultMirrorBase=new URL(mirrorDirectory,import.meta.url);
+// The historical mirror lives on the same Pages origin but in the MeshCore
+// site, leaving room for current firmware in this flasher's mirror budget.
+const historicalMirrorPath='/MeshCore/firmware-1.18.0.1/firmware/';
+const defaultHistoricalMirrorBase=new URL(historicalMirrorPath,defaultMirrorBase);
 const indexCaches=new WeakMap();
 const digest=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
 const size=value=>Number.isSafeInteger(value)&&value>0&&value<=MAX_FIRMWARE_BYTES;
@@ -33,6 +37,17 @@ function mirrorBaseUrl(value,pageOrigin){
   if((url.protocol!=='https:'&&!localHttp)||url.username||url.password||url.search||url.hash||!url.pathname.endsWith('/firmware/'))throw error('Invalid same-origin firmware mirror directory.');
   if(pageOrigin&&url.origin!==pageOrigin)throw error('The firmware mirror must use this page’s origin.');
   return url;
+}
+
+function historicalReleaseSource(value){
+  const url=https(value);
+  if(url.username||url.password||url.search||url.hash||url.href!==value)return false;
+  const version='v1.18.0.1-halo-keymind-cascade-dev-03214a16';
+  if(url.origin==='https://api.github.com')return migrationMetadataSource(value)?.tag==='utility-'+version;
+  if(url.origin!=='https://github.com')return false;
+  const match=/^\/mikecarper\/MeshCore\/releases\/download\/([^/]+)\/[^/]+$/.exec(url.pathname);
+  if(!match)return false;
+  return [version,'lora-ota-'+version,'lora-ota-2-'+version,'lora-ota-3-'+version,'full-profiles-'+version,'utility-'+version].includes(match[1]);
 }
 
 // Both the browser and the public-artifact boundary check use this validator.
@@ -153,7 +168,7 @@ function unpackMirror(gzip,entry){
 
 // Mirrored bytes still pass through the ordinary firmware/container/board
 // validators. This helper never opens USB, authorizes a write or uses a proxy.
-export async function fetchFirmwareBytes(url,{expectedSha256='',fetchImpl=fetch,mirrorBase=defaultMirrorBase,pageOrigin=globalThis.location?.origin,onVerified}={}){
+export async function fetchFirmwareBytes(url,{expectedSha256='',fetchImpl=fetch,mirrorBase=defaultMirrorBase,historicalMirrorBase=defaultHistoricalMirrorBase,pageOrigin=globalThis.location?.origin,onVerified}={}){
   const source=https(url).href,utility=publicEraseUtility(source);
   if(typeof fetchImpl!=='function')throw error('A firmware download fetch function is required.','url');
   if(onVerified!=null&&typeof onVerified!=='function')throw error('The verified-download callback must be a function.','url');
@@ -164,11 +179,17 @@ export async function fetchFirmwareBytes(url,{expectedSha256='',fetchImpl=fetch,
   // never from an unhashed direct download or an independently verified part.
   const verified=async(bytes,sha256)=>{await onVerified?.(Object.freeze({sha256,sourceUrl:source}));return bytes;};
   try{index=await loadIndex(base,fetchImpl);}catch(cause){if(!cause.mirrorUnavailable)throw cause;}
-  const entry=index?.get(source);
+  let entry=index?.get(source),entryBase=base;
+  if(!entry&&historicalReleaseSource(source)){
+    const history=mirrorBaseUrl(historicalMirrorBase,pageOrigin);
+    if(history.origin!==base.origin||history.pathname!==historicalMirrorPath)throw error('Invalid historical firmware mirror directory.');
+    try{const oldIndex=await loadIndex(history,fetchImpl);entry=oldIndex.get(source);if(entry)entryBase=history;}
+    catch(cause){if(!cause.mirrorUnavailable)throw cause;}
+  }
   if(entry){
     if(expected&&entry.sha256!==expected)throw error('Firmware mirror SHA-256 differs from the selected catalog release.');
     async function fetchPart(piece){
-      const {bytes,httpGzip}=await boundedDownload(new URL(piece.path,base).href,{fetchImpl,maxBytes:piece.gzipSize,expectedSize:piece.gzipSize,decodedGzipSize:piece.size,sameOrigin:true});
+      const {bytes,httpGzip}=await boundedDownload(new URL(piece.path,entryBase).href,{fetchImpl,maxBytes:piece.gzipSize,expectedSize:piece.gzipSize,decodedGzipSize:piece.size,sameOrigin:true});
       // A static host can serve the .gz file with Content-Encoding:gzip, which
       // makes the browser decode it before JavaScript can inspect compressed
       // bytes. The authoritative raw GitHub digest and exact size ALWAYS apply.

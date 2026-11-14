@@ -9,6 +9,7 @@ import {hash} from '../src/firmware.js';
 import {fetchFirmwareBytes,validateMirrorIndex,MAX_FIRMWARE_BYTES,MAX_MIRROR_INDEX_BYTES} from '../src/downloads.js';
 
 const base=new URL('https://flasher.test/meshfirmware/firmware/');
+const historyBase=new URL('https://flasher.test/MeshCore/firmware-1.18.0.1/firmware/');
 const source='https://github.com/mikecarper/MeshCore/releases/download/full-v1.18.0/board_repeater-v1.18.0.zip';
 const alternate='https://github.com/meshcore-dev/MeshCore/releases/download/repeater-v1.17.1/second.zip';
 const clone=value=>structuredClone(value);
@@ -39,6 +40,42 @@ test('verified same-origin mirror bytes download automatically with no direct Gi
   const f=fixture(),w=workbench(f);const result=await w.get(source,{expectedSha256:f.entry.sha256});
   assert.deepEqual(result,f.raw);assert.deepEqual(w.calls.map(call=>call.url),[new URL('index.json',base).href,new URL(f.entry.path,base).href]);
   for(const call of w.calls){assert.equal(call.options.credentials,'omit');assert.equal(call.options.mode,'same-origin');assert.ok(call.options.signal instanceof AbortSignal);assert.ok(!('headers' in call.options));}
+});
+
+test('an exact 1.18.0.1 firmware or migration source uses the verified same-origin historic mirror',async()=>{
+  const tag='v1.18.0.1-halo-keymind-cascade-dev-03214a16';
+  for(const historical of [
+    `https://github.com/mikecarper/MeshCore/releases/download/${tag}/board.zip`,
+    `https://github.com/mikecarper/MeshCore/releases/download/utility-${tag}/board-migration.zip`,
+    `https://api.github.com/repos/mikecarper/MeshCore/releases/tags/utility-${tag}`
+  ]){
+    const f=fixture();f.entry.url=historical;const calls=[];
+    const fetchImpl=async(url,options)=>{calls.push({url:String(url),options});if(String(url)===new URL('index.json',base).href)return jsonResponse({...f.index,entries:[]});if(String(url)===new URL('index.json',historyBase).href)return jsonResponse(f.index);if(String(url)===new URL(f.entry.path,historyBase).href)return response(f.gzip);throw Error('unexpected direct or external fetch');};
+    const result=await fetchFirmwareBytes(historical,{fetchImpl,mirrorBase:base,historicalMirrorBase:historyBase,pageOrigin:base.origin,expectedSha256:f.entry.sha256});
+    assert.deepEqual(result,f.raw);assert.deepEqual(calls.map(c=>c.url),[new URL('index.json',base).href,new URL('index.json',historyBase).href,new URL(f.entry.path,historyBase).href]);
+    assert.ok(calls.every(c=>c.options.mode==='same-origin'&&c.options.credentials==='omit'));
+  }
+});
+
+test('historical fallback rejects cross-origin, incorrect paths and corrupted data without an unverified direct retry',async()=>{
+  const tag='v1.18.0.1-halo-keymind-cascade-dev-03214a16',historical=`https://github.com/mikecarper/MeshCore/releases/download/${tag}/board.zip`;
+  for(const failure of ['cross-origin','wrong-path','bad-index','bad-gzip','wrong-hash']){
+    const f=fixture();f.entry.url=historical;const calls=[];
+    const fetchImpl=async url=>{calls.push(String(url));if(String(url)===new URL('index.json',base).href)return jsonResponse({...f.index,entries:[]});if(String(url)===new URL('index.json',historyBase).href)return failure==='bad-index'?response(new TextEncoder().encode('broken')):jsonResponse(f.index);if(String(url)===new URL(f.entry.path,historyBase).href){const bytes=f.gzip.slice();if(failure==='bad-gzip')bytes[12]^=1;return response(bytes);}throw Error('unexpected direct fetch');};
+    const selected=failure==='cross-origin'?'https://other.test/MeshCore/firmware-1.18.0.1/firmware/':failure==='wrong-path'?'https://flasher.test/other/firmware/':historyBase;
+    await assert.rejects(fetchFirmwareBytes(historical,{fetchImpl,mirrorBase:base,historicalMirrorBase:selected,pageOrigin:base.origin,...(failure==='wrong-hash'?{expectedSha256:'a'.repeat(64)}:{})}));
+    assert.ok(!calls.includes(historical),failure);
+  }
+  const crossOriginFetch=async url=>{if(String(url)===new URL('index.json',base).href)return jsonResponse({schemaVersion:1,entries:[],warnings:[]});throw Error('unexpected request');};
+  await assert.rejects(fetchFirmwareBytes(historical,{fetchImpl:crossOriginFetch,mirrorBase:base,historicalMirrorBase:'https://other.test/MeshCore/firmware-1.18.0.1/firmware/',pageOrigin:undefined}),/historical firmware mirror/);
+});
+
+test('the historical mirror is not consulted for another release or repository',async()=>{
+  const f=fixture(),calls=[];const fetchImpl=async url=>{calls.push(String(url));if(String(url)===new URL('index.json',base).href)return jsonResponse({...f.index,entries:[]});return response(f.raw);};
+  for(const url of [source,'https://github.com/other/MeshCore/releases/download/v1.18.0.1-halo-keymind-cascade-dev-03214a16/board.zip']){
+    assert.deepEqual(await fetchFirmwareBytes(url,{fetchImpl,mirrorBase:base,historicalMirrorBase:historyBase,pageOrigin:base.origin,expectedSha256:hash(f.raw)}),f.raw);
+  }
+  assert.ok(!calls.some(url=>url.startsWith(historyBase.href)));
 });
 
 function multipartFixture(){
