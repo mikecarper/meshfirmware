@@ -17,6 +17,10 @@ export const MIRROR_MAX_BYTES=850<<20;
 const MAX_SOURCES=4096,MAX_RELEASES=128,MAX_METADATA_BYTES=16<<20;
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
 const sha=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
+// These exact public files, including board-specific migrations, are hosted in
+// the separately verified historical mirror. Do not mirror them a second time
+// or let their utility release consume the current Pages site's size budget.
+const historicalKeymind=item=>catalogProvider(item?.provider)==='Keymind Cascade'&&item?.version==='v1.18.0.1-halo-keymind-cascade-dev-03214a16';
 // Current archives and their discovery metadata are required together. The
 // separate older USB set is a fallback for legacy packages, not a dependency
 // of every current (embedded-USB) archive; retain its existing availability
@@ -66,6 +70,7 @@ export function selectMirrorSources(catalog){
   invariant(catalog&&Array.isArray(catalog.items)&&catalog.items.length<=50000,'Invalid public mirror catalog.');
   const newest=new Map();
   for(const item of catalog.items){
+    if(historicalKeymind(item))continue;
     if(!matchesCatalogInstallMode(item,'update')&&!matchesCatalogInstallMode(item,'install'))continue;
     const key=profileKey(item),previous=newest.get(key),order=previous?compareVersions(item.version,previous[0].version):-1;
     if(!previous||order<0)newest.set(key,[item]);else if(order===0)previous.push(item);
@@ -75,6 +80,7 @@ export function selectMirrorSources(catalog){
   // Published development suffixes are not stable numeric release versions.
   const older=new Map();
   for(const item of catalog.items){
+    if(historicalKeymind(item))continue;
     if(!matchesCatalogInstallMode(item,'update')&&!matchesCatalogInstallMode(item,'install'))continue;
     if(!/^v?\d+(?:\.\d+){2,3}$/i.test(item.version))continue;
     const key=profileKey(item),latest=newest.get(key);

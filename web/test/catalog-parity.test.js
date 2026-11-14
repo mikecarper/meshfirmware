@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {catalogItems,catalogProvider,combineProviderItems,compareVersions,getCatalog,validateCatalog} from '../src/catalog.js';
 import {buildCatalog,keymindProviderPaths,KEYMIND_11801} from '../scripts/catalog-build.mjs';
+import {selectMirrorSources} from '../scripts/mirror.mjs';
 import {WADAMESH_PROVIDER,WADAMESH_LATEST_URL,wadameshBoardsUrl,wadameshCatalog,WADAMESH_REPOSITORY} from '../scripts/wadamesh-catalog.mjs';
 const config=(name='Board')=>({staticPath:'/firmware',device:[{name,type:'nrf52',erase:'erase.zip',bootloader:['boot.uf2','boot.zip'],firmware:[{role:'repeater',title:'Repeater',subTitle:'Full USB + OTA',notice:'Check <b>bootloader</b>',version:{'v1.18.0':{notes:'release detail',files:[{name:'app.zip',type:'flash',digest:'sha256:'+'a'.repeat(64)}]}}}]}]});
 const snapshot=items=>({generatedAt:'2026-01-01T00:00:00Z',warnings:[],items});
@@ -47,13 +48,18 @@ test('retains exact verified 1.18.0.1 routes next to current 1.18.0.2 without re
   const old=config('Old Board'),current=config('Old Board');
   const historical=old.device[0].firmware[0],fresh=current.device[0].firmware[0];
   historical.version={[KEYMIND_11801.version]:{notes:'old exact requirements',files:[{name:'old.zip',type:'flash',url:'https://github.com/mikecarper/MeshCore/releases/download/v1.18.0.1-test/old.zip'}]}};
+  const oldOnly=structuredClone(old.device[0]);oldOnly.name='Only Old Board';old.device.push(oldOnly);
   fresh.version={'v1.18.0.2-halo-keymind-cascade-dev-a723af94':{notes:'new exact requirements',files:[{name:'new.zip',type:'flash',url:'https://github.com/mikecarper/MeshCore/releases/download/v1.18.0.2-test/new.zip'}]}};
   let verified=false;
   const result=await buildCatalog({readJson:async(url,opts)=>{if(url===KEYMIND_11801.url){assert.deepEqual(opts,{sha256:KEYMIND_11801.sha256,size:KEYMIND_11801.size,maxSize:2<<20});verified=true;return old;}return publicSources(current,current)(url);}});
-  assert(verified);assert.equal(result.items.length,2);
-  assert.deepEqual(result.items.map(x=>x.version),['v1.18.0.2-halo-keymind-cascade-dev-a723af94',KEYMIND_11801.version]);
+  assert(verified);assert.equal(result.items.length,3);
+  assert.deepEqual(result.items.map(x=>x.version),['v1.18.0.2-halo-keymind-cascade-dev-a723af94',KEYMIND_11801.version,KEYMIND_11801.version]);
   assert.match(result.items[0].url,/v1\.18\.0\.2-test\/new\.zip/);assert.equal(result.items[0].releaseNotes,'new exact requirements');
   assert.match(result.items[1].url,/v1\.18\.0\.1-test\/old\.zip/);assert.equal(result.items[1].releaseNotes,'old exact requirements');
+  assert.equal(result.items[2].hardware,'Only Old Board','historical-only boards remain selectable in the catalog');
+  const mirror=selectMirrorSources(result);
+  assert.ok(!mirror.sources.some(source=>source.url.includes('v1.18.0.1-test')),'historical files use the separate historic mirror');
+  assert.ok(!mirror.utilityReleases.some(source=>source.tag.includes('1.18.0.1')),'historical migrations are not duplicated in the current mirror');
 });
 test('historical provider errors do not mislabel another version as 1.18.0.1',async()=>{
   const result=await buildCatalog({readJson:publicSources(config(),config())});

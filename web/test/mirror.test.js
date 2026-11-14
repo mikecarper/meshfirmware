@@ -58,6 +58,17 @@ test('previous stable means only the nearest older numeric version of each exact
   assert.ok(!result.sources.some(source=>source.url===ancient.url||source.url===preview.url));
 });
 
+test('the pinned Keymind 1.18.0.1 family uses its separate historical mirror, including old-only board profiles',()=>{
+  const old=application({provider:'Keymind Cascade',version:'v1.18.0.1-halo-keymind-cascade-dev-03214a16',name:'board_repeater-v1.18.0.1-halo-keymind-cascade-dev-03214a16.bin',url:'https://github.com/mikecarper/MeshCore/releases/download/full-profiles-v1.18.0.1-halo-keymind-cascade-dev-03214a16/board_repeater-v1.18.0.1-halo-keymind-cascade-dev-03214a16.bin'});
+  const onlyOld={...old,hardware:'Old-only board',name:'old_only-v1.18.0.1-halo-keymind-cascade-dev-03214a16.bin',url:old.url.replace('board_repeater','old_only')};
+  const newer={...old,version:'v1.18.0.2-halo-keymind-cascade-dev-a723af94',name:'board_repeater-v1.18.0.2-halo-keymind-cascade-dev-a723af94.bin',url:old.url.replaceAll('1.18.0.1','1.18.0.2').replaceAll('03214a16','a723af94')};
+  const stock={...old,provider:'MeshCore',url:'https://github.com/meshcore-dev/MeshCore/releases/download/v1.18.0.1/stock.bin'};
+  const result=selectMirrorSources({items:[old,onlyOld,newer,stock]});
+  assert.ok(!result.sources.some(source=>source.url===old.url||source.url===onlyOld.url));
+  assert.ok(result.sources.some(source=>source.url===newer.url));assert.ok(result.sources.some(source=>source.url===stock.url));
+  assert.deepEqual(result.utilityReleases.map(source=>source.tag),['utility-v1.18.0.2-halo-keymind-cascade-dev-a723af94']);
+});
+
 test('optional history cannot fill source slots before current profiles or expand historical utility discovery',()=>{
   const items=[];for(let index=0;index<2050;index++)for(const version of ['v1.18.0','v1.17.1'])items.push(application({version,name:`board_${index}_repeater-${version}.bin`,bootloader:version==='v1.17.1'?[releaseUrl('old-utility','obsolete_bootloader.zip')]:[]}));
   const result=selectMirrorSources({items});assert.equal(result.sources.length,4096);assert.equal(result.sources.filter(source=>source.priority===1).length,2050);assert.equal(result.sources.filter(source=>source.priority===2).length,2046);assert.equal(result.skippedHistorySources,4);
