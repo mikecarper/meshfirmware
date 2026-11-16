@@ -691,7 +691,7 @@ writing; no blind retry or 1200-baud fallback follows an uncertain handoff.
 
 | Feature | Browser behavior |
 | --- | --- |
-| MeshCore / Keymind catalog | Rebuilt daily/on deployment; repository-aware URLs, newest Keymind manifests, primary/proxy/validated-cache fallback, exact-board official utility fallback and newest-first versions; every raw publication route checked in CI |
+| MeshCore / Keymind catalog | Rebuilt every four hours/on deployment; repository-aware URLs, newest Keymind manifests, primary/proxy/validated-cache fallback, exact-board official utility fallback and newest-first versions; every raw publication route checked in CI |
 | ESP32/S2/C3/S3/C6 | Validated application updates and merged installs; chip/security/MAC/capacity and silicon-revision checks; factory-only/non-OTA updates and larger OTA metadata partitions supported |
 | Merged ESP32 installs | Populate missing secondary OTA slots from the exact embedded app, with independent readback; refuse ambiguous source boundaries rather than guessing |
 | ESP components | Checksum-valid bootloader/component image, explicit address and action-specific button confirmation; never guess an offset |
@@ -739,7 +739,7 @@ download URL**, with the existing payload, board and destructive-write checks.
 
 Bootloader recommendations use the latest stable release of our
 `mikecarper/Adafruit_nRF52_Bootloader_OTAFIX` fork, refreshed with the catalog
-on deployment and daily. Its checksum-verified release manifest supplies exact
+on deployment and every four hours. Its checksum-verified release manifest supplies exact
 MeshCore hardware mappings and serial DFU ZIPs; the page checks the selected
 ZIP's published size and SHA-256 before loading. Selecting exact hardware can
 populate its single normal bootloader ZIP without choosing an application

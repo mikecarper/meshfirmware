@@ -8,7 +8,7 @@ on:
     paths: ['web/**', 'tools/meshcore_partition_expansion*', 'tools/generate_partition_helper_manifest.py', 'tests/test_partition_helper_manifest.py', 'tools/meshcore_backup.py', '.github/workflows/web-flasher.yml']
   workflow_dispatch:
   schedule:
-    - cron: '17 10 * * *'
+    - cron: '17 */4 * * *'
 
 permissions:
   contents: read
