@@ -45,7 +45,7 @@ export class SerialLink {
     }
   }
   async write(data) { const writer = this.port.writable.getWriter(); try { await writer.write(data); } finally { writer.releaseLock(); } }
-  async read(ms = 500) { const until = Date.now() + ms; while (!this.buffer.length && !this.error && Date.now() < until) await sleep(10); if (this.error && !this.buffer.length) throw this.error; return Uint8Array.from(this.buffer.splice(0)); }
+  async read(ms = 500, maxBytes = Infinity) { const until = Date.now() + ms; while (!this.buffer.length && !this.error && Date.now() < until) await sleep(10); if (this.error && !this.buffer.length) throw this.error; return Uint8Array.from(this.buffer.splice(0,maxBytes)); }
   async close() { if (this.reader) await this.reader.cancel().catch(() => {}); await this.readTask; await this.port.close().catch(() => {}); }
   async command(command, ms = 800) { this.buffer.length = 0; await this.write(new TextEncoder().encode(command + '\r\n')); await sleep(ms); return new TextDecoder().decode(await this.read(50)); }
 }

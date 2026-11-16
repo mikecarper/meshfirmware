@@ -1,3 +1,4 @@
+import { rippleCoverage } from './ripple-backup.js';
 // Presentation only: callers validate/seal archives before displaying coverage.
 // Never copy archived values, raw replies or arbitrary error text into the UI.
 import { commonCliReplyState } from './common-cli.js';
@@ -70,6 +71,7 @@ const replyText=value=>typeof value==='string'?value:value&&typeof value==='obje
 const lookup=(map,key)=>Object.hasOwn(map,key)?map[key]:null;
 
 export function backupCoverage(archive,nativeArchive=null){
+  if(archive?.payload?.role==='ripple')return rippleCoverage(archive.payload);
   const native=nativeArchive?.payload?.sections?nativeArchive.payload:archive?.payload?.sections?archive.payload:null;
   const payload=archive?.payload?.sections?{}:archive?.payload||{};
   const common=payload.role==='common-cli'||native?.source?.capture_api==='meshcore-cli-common-cli';
@@ -138,6 +140,11 @@ export function backupCoverage(archive,nativeArchive=null){
     else if(region.state!=='error')add(sections.regions,'unsupported',4,'Tree, home and default-scope data were not all captured.');
   }
   const included=[],notIncluded=baseline.map(item=>({...item})),failed=[];
+  if(payload.wadamesh){
+    if(payload.wadamesh.files.length)included.push(`${payload.wadamesh.files.length} original Wadamesh settings files (offline copyback)`);
+    else notIncluded.push({label:'UI and saved Wi-Fi preferences',reason:'Add the original meshcomod or prefs folder to preserve settings not exposed over USB.'});
+    notIncluded.push({label:'Maps, tracks and files beyond the folder/size limits',reason:`${payload.wadamesh.filesExcluded} selected files excluded. These are separate storage content.`});
+  }
   for(const value of records.values()){
     if(value.state==='complete'){included.push(value.label);continue;}
     if(value.state==='not_applicable')continue;

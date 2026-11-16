@@ -14,6 +14,9 @@ importers:
       '@noble/hashes':
         specifier: 2.4.0
         version: 2.4.0
+      '@probe-web/client':
+        specifier: 0.6.0
+        version: 0.6.0
       esptool-js:
         specifier: 0.7.0
         version: 0.7.0
@@ -47,6 +50,9 @@ packages:
 
   '@oxc-project/types@0.155.0':
     resolution: {integrity: sha512-SeE8JPwW1xs1tHeNycjUtUBdhorRa8o4jlvjwk49R7/Z291i+4DQa7JJIgOm/TaYQZx+QrPQbVJ/9c8dMIZN8Q==}
+
+  '@probe-web/client@0.6.0':
+    resolution: {integrity: sha512-tBX/I62+YwA/6JisZihRUEZyYu/VGHLW+kr8dd2T82Sgn0swjZtK/oHt+olefU681hk4i7zF7nwiJfvOtSj+HA==}
 
   '@rolldown/binding-android-arm-eabi@1.2.15':
     resolution: {integrity: sha512-aLcgK9gIJ3YRvrrtfSBbRa27F5WrpiTaPulnFpsHPxpUHgFlSgnU4854MHwoRGEBhfRJDWCS2WQ7lIjskE9Olw==}
@@ -357,6 +363,8 @@ snapshots:
   '@noble/hashes@2.4.0': {}
 
   '@oxc-project/types@0.155.0': {}
+
+  '@probe-web/client@0.6.0': {}
 
   '@rolldown/binding-android-arm-eabi@1.2.15':
     optional: true

@@ -3,6 +3,12 @@ Source: https://github.com/mikecarper/meshfirmware/tree/main/web
 Repository license: LGPL-2.1 (see repository LICENSE).
 
 Runtime dependencies are pinned in package.json / pnpm-lock.yaml:
+  @probe-web/client 0.6.0 - probe-web contributors - MIT OR Apache-2.0
+    Copyright (c) 2019 probe-rs. Distributed under the MIT option.
+    https://github.com/beriberikix/probe-web/tree/v0.6.0
+    Unmodified JavaScript and WebAssembly; loaded on demand for Ripple USB.
+    Includes probe-rs and its WebUSB port, MIT OR Apache-2.0:
+    https://github.com/beriberikix/probe-rs/tree/webusb/nusb-0.2.7
   esptool-js 0.7.0 — Espressif Systems — Apache-2.0
     https://github.com/espressif/esptool-js
   @noble/curves 1.9.7 and @noble/hashes 2.4.0 — Paul Miller — MIT

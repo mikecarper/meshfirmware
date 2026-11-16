@@ -94,6 +94,10 @@ supported local USB identity API. Choose the exact hardware manually in that
 case. Permission, disconnection and port-open errors remain connection errors;
 USB VID/PID alone does not establish the board or running firmware.
 
+For Ripple identity backup, open **Backup & restore** and use its dedicated
+**Ripple standalone backup** option below. It has its own read-only USB
+identification and does not guess the board from an unresponsive serial API.
+
 ### Narrowing ESP32 board choices
 
 A reviewed native ESP USB identity narrows the list to ESP32-family targets,
@@ -862,7 +866,7 @@ that an application or the new bootloader has started successfully.
 
 ### Backup compatibility and physical-target checks
 
-New browser downloads use `org.meshfirmware.meshcore-backup/v1`, the native
+Ordinary MeshCore browser downloads use `org.meshfirmware.meshcore-backup/v1`, the native
 script archive format. The exact Python serializer seals the archive inside
 WebAssembly; the exact validator verifies it before download. Existing script
 archives and older browser-format archives still import into this page.
@@ -894,6 +898,122 @@ identity and channel secrets. Use **Clear text** to remove the displayed copies;
 the prompt's copy is cleared when it closes. Copying is not proof that a private
 file was saved, and clearing the text does not recall anything already copied
 to the system clipboard or delete a downloaded backup.
+
+### Wadamesh backup and restore
+
+Open **Backup & restore -> Wadamesh settings backup**. Choose the running
+device's application USB port and click **Back up Wadamesh**. Normal automatic
+backup also recognizes the reviewed Wadamesh/Meshcomod protocol profile.
+The private identity is checked against the public key. The backup preserves:
+
+- Identity, node name, channels and channel secrets, contacts and route paths.
+- Frequency, bandwidth, spreading factor, coding rate, signed TX power,
+  advertised position, location policy, telemetry modes and multiple ACKs.
+- BLE PIN, client repeat, path hash mode, manual/automatic contact-add rules
+  and maximum hops, radio tuning, default flood scope and exposed custom/sensor
+  settings such as GPS enable/interval, when the firmware provides them.
+- Device/firmware information, battery/storage diagnostics and individually
+  reported optional CLI settings. Unsupported settings are listed explicitly.
+
+Current Wadamesh builds hold 2,000 contacts and 40 channels, but the one-byte
+capacity reply wraps to 464. The browser supports the full 2,000 only when the
+exact reviewed layout and firmware's own Meshcomod/Wadamesh version reply
+agree. Restore independently checks the live target, existing contacts and
+combined capacity before writing. Large USB bursts are read in bounded chunks.
+The older generic eight-line `get` summary is not mistaken for support for
+Bluetooth names, logging, credentials or other individual preferences.
+
+Wadamesh downloads keep the browser's `org.meshfirmware.web-backup/v1` archive
+with role `companion` and a versioned `wadamesh` saved-files record, preserving
+the full contact inventory and original files. Use **Import JSON**, review the
+preview and click **Review & restore settings** to restore over USB. Changed
+identity requires explicit replacement; a different board requires migration
+selection. Supported writes are checked by reading them back, including repeat
+and path hash. A failed readback stops the restore; earlier writes may already
+have applied. Unexposed settings are never guessed or sent as arbitrary commands.
+
+**Add Wadamesh data folder** preserves display, keyboard, language, theme,
+notification, GPS/UI and saved Wi-Fi preferences as original files. Select the
+`meshcomod` folder from the SD card, or an exported `prefs` folder from internal
+storage. Both roots can be added, one at a time. The original primary identity
+file, when included, must match the USB identity; it can supply the private key
+if USB export was disabled. Files keep their original paths, bytes and SHA-256
+hashes. Maps, message history, tracks, logs and files outside these roots are
+excluded, with limits of 256 files, 1 MiB per file and 4 MiB total. Smaller
+settings files are prioritized when limits are reached, and exclusions are
+reported. A folder capture replaces a previous snapshot of that same root.
+
+These UI/Wi-Fi files are not exposed by the current USB API. Use **Download
+saved files**, extract the ZIP and copy the original folders back while the
+device is off, on the same device and storage layout. The page does not write
+internal filesystems or raw flash to restore them, and does not claim USB
+restored those preferences. Older NVS-only settings require a firmware-side
+export/migration before they can be included as files.
+
+**Download Wadamesh settings** makes `meshcore-backup.json` for Wadamesh's
+on-device **Import settings**: identity, name, radio, position, channel slots
+and contacts. Empty channel slots are retained to preserve channel numbering.
+That importer does not restore routes, BLE PIN, repeat/path hash, telemetry,
+sensor settings or original UI files; keep the browser archive for the fuller
+USB restore. Backups may contain private keys, channel secrets and Wi-Fi
+credentials. They stay in page memory and downloaded files; keep them private.
+This is a settings backup, not a firmware or whole-flash image. The Wadamesh
+workflow is covered by protocol and browser tests; a live Wadamesh device
+restore has not yet been verified.
+
+### Ripple standalone backup and Wadamesh identity restore
+
+Open **Backup & restore**, then **Ripple standalone backup**. Keep Ripple
+running normally and click **Back up Ripple**. Choose its built-in USB device
+in desktop Chrome or Edge. This path uses WebUSB on ESP32-S3, not the
+Companion export commands. It reads the chip MAC, identifies the running
+Ripple build and recovers the loaded identity. The 64-byte expanded private
+key must reproduce the public key stored beside it. Different matching
+identities stop the operation instead of selecting one arbitrarily.
+
+The device restarts normally before key searching and file handling. The
+USB debug library temporarily disables watchdogs on attach; a normal restart
+lets firmware initialization restore the runtime settings. If restart fails,
+backup reports the failure and asks for a manual restart before retrying.
+No firmware image is installed, no flash is erased and no radio parameters
+are changed. The general memory capture is discarded; it is not placed in
+the backup or operation log. USB backup needs accessible built-in USB/JTAG;
+an external USB/UART adapter and locked debug access cannot provide it.
+If USB backup is unavailable, use **Add Ripple SD folder** with the card
+connected to the computer. A file-only backup also requires a verified
+private/public identity pair in the selected original files.
+
+**Add Ripple SD folder** can enrich the USB backup with original settings,
+contacts and channel files. The USB identity must match an identity found on
+the card when one is present. These files stay in their original format;
+the page does not guess undocumented Ripple layouts or convert preferences
+to Companion settings. Maps, tracks and files outside the Ripple folder are
+excluded. Limits are 256 files, 1 MiB each and 4 MiB in total. Every included
+file has a size and SHA-256 check. **Download SD files** produces a ZIP with
+the original `ripple/` paths for copying to the card while the device is off.
+
+Ripple downloads use `org.meshfirmware.web-backup/v1` with role `ripple`,
+not the native script archive. **Import JSON** verifies the archive and key
+before offering an identity-only restore to MeshCore Companion or Wadamesh.
+Replacing another identity requires the existing replacement checkbox and
+restore confirmation. The target's public key is read again after import;
+an acknowledgement alone does not count as success. This uses the same
+private-key import command that Wadamesh enables in its Companion API.
+
+**Download Wadamesh identity** is an alternative for Wadamesh's on-device
+**Import settings**. Copy the downloaded `meshcore-backup.json` to its SD
+card. The file contains only `public_key` and `private_key`; absent radio,
+position, contact and channel sections leave those settings untouched.
+**Download private key** exports the verified 128-character expanded key.
+Both downloads contain secrets; keep them privately on your computer.
+
+To use a USB Ripple backup before flashing, select its backup interface in
+the override and prepare the update. The factory MAC in the backup must
+match the connected ESP32 before preparation and again before writing.
+An SD-only backup cannot establish that physical USB identity. Backups are
+kept only in page memory and downloads, never uploaded or stored in browser
+preferences. A key-only backup is explicitly distinguished from saved SD
+files and is never labelled a complete flash or whole-device backup.
 
 ### Import JSON and restore repeater settings
 

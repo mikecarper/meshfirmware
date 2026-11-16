@@ -4,7 +4,10 @@ import { SerialLink, flashNrf, touch1200 } from './serial.js';
 import { EspSession, validateEspWriteRecovery } from './esp.js';
 import {espSlotChoices} from './esp-slots.js';
 import { getCatalog, catalogProvider, catalogItemKey, httpsUrl, compareVersions } from './catalog.js';
-import { MeshCore, backupCommonCli, verifyBackup, parseBackup, enterCompanionBinary, detectMeshCore, backupSummary, cleanCliReply } from './meshcore.js';
+import { MeshCore, backupCommonCli, verifyBackup, sealBackup, parseBackup, enterCompanionBinary, detectMeshCore, backupSummary, cleanCliReply } from './meshcore.js';
+import { chooseRippleUsbDevice, captureRippleUsb } from './ripple-usb.js';
+import { ripplePayload, addRippleSdFiles, rippleSavedFilesZip, restoreRippleIdentity, wadameshIdentityImport } from './ripple-backup.js';
+import { addWadameshFiles, wadameshFilesZip, wadameshSettingsImport } from './wadamesh-backup.js';
 import { detectApplication } from './application-detection.js';
 import { detectMeshtasticBoard } from './meshtastic-boards.js';
 import { parseBootloaderInfo, detectBootloaderBoard } from './bootloader-info.js';
@@ -66,6 +69,8 @@ state.backupApplicationRequest=null;
 state.nrfPrepareResume=null;
 state.connectionTrial=null;
 state.restorePreview=null;
+state.rippleBackup=null;
+state.wadameshBackup=null;
 state.bootloaderInfo=null;state.applicationProbeFailed=false;
 state.bootloaderCatalog=null;
 state.catalogScope='';
@@ -658,7 +663,17 @@ function controls() {
   $('discard-esp-recovery').disabled ||= !state.espRecovery;
   $('restore').disabled ||= !state.restore || !state.restorePreview || !state.port || restoreWorkflowBlocked() || $('already-bootloader').checked || dfuIds.has(portId(state.port));
   $('restore').disabled ||= state.restore?.payload?.role==='common-cli'&&!state.restorePreview?.operations?.length&&!($('replace-identity').checked&&state.restorePreview?.privateIdentity);
-  for (const id of ['touch','probe','backup','send-command','binary-mode','verify-app']) $(id).disabled ||= !state.port;
+  for (const id of ['touch','probe','send-command','binary-mode','verify-app']) $(id).disabled ||= !state.port;
+  $('backup').disabled ||= !state.port&&$('backup-role').value!=='ripple';
+  $('ripple-usb').disabled ||= restoreWorkflowBlocked()||!navigator.usb;
+  $('ripple-sd').disabled ||= restoreWorkflowBlocked();
+  $('ripple-key').disabled ||= !state.rippleBackup;
+  $('ripple-wadamesh').disabled ||= !state.rippleBackup;
+  $('ripple-files').disabled ||= !state.rippleBackup?.archive.payload.files.length;
+  $('wadamesh-usb').disabled ||= !state.port||restoreWorkflowBlocked()||isNonMeshCore();
+  $('wadamesh-folder').disabled ||= !state.wadameshBackup||restoreWorkflowBlocked();
+  $('wadamesh-settings').disabled ||= !state.wadameshBackup?.archive.payload.privateKey;
+  $('wadamesh-files').disabled ||= !state.wadameshBackup?.archive.payload.wadamesh?.files.length;
   if(isNonMeshCore())for(const id of ['backup','restore','send-command','binary-mode'])$(id).disabled=true;
   updateQuickSettingsControls();
   syncRadioDefaultsControls();
@@ -707,6 +722,7 @@ async function operation(callback) {
       notice(`${error.message} `+(fresh?'Chunked retry cannot continue: use Discard ESP retry record, then explicitly inspect and authorize a fresh write/wipe. Any partition migration remains pending.':"Select the SAME physical radio's waiting ROM port without resetting, inspect the original image, then acknowledge a bounded chunked retry."),true);
     }else notice(error.message || String(error),!error.backupApplicationRequired&&!(error.code==='APPLICATION_UNIDENTIFIED'&&error.usbSerialAvailable===true));
     log(`${error.code==='APPLICATION_UNIDENTIFIED'&&error.usbSerialAvailable===true?'USB open; application unidentified':error.backupApplicationRequired?'Backup waiting':'Stopped'}: ${error.message || error}`);
+    if(error.rippleRestartDetail)log('Ripple USB restart: '+error.rippleRestartDetail);
     if(state.flashResult&&$('flash-progress-dialog').open){
       state.flashResult.failed=true;$('flash-progress-dialog').classList.toggle('flash-complete',false);$('flash-progress-dialog').classList.toggle('flash-result-error',true);
       $('flash-progress-title').textContent='DONE — check required';
@@ -1124,7 +1140,49 @@ async function tryBackupApplication(){
   try{return await readBackupApplicationPort(known.port,{expectedPublicKey:known.publicKey});}
   catch(error){if(!recoverableBackupConnectionError(error))throw error;showBackupApplicationHelp(`The application connection could not be reused: ${error.message} No DFU reset or activation command was sent.`);return false;}
 }
-async function captureBackup() {
+function saveRippleBackup(payload) {
+  const archive=sealBackup(payload);verifyBackup(archive);
+  const filename=`ripple.config_backup.${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
+  const json=JSON.stringify(archive,null,2).replace(/[\u007f-\uffff]/g,char=>'\\u'+char.charCodeAt(0).toString(16).padStart(4,'0'));
+  const coverage=backupCoverage(archive),summary=backupSummary(archive);
+  const result={archive,summary,coverage,filename,json,port:state.port};
+  state.rippleBackup=result;state.backup=result;state.backupApproved=null;
+  $('backup-role').value='ripple';$('backup-json').value=json;$('backup-json-view').hidden=false;
+  $('ripple-summary').textContent=`Verified Ripple identity ${payload.publicKey.slice(0,12)}. ${coverage.summaryText}`;
+  $('backup-summary').textContent=`Ripple backup verified. Download requested: ${filename}. ${coverage.notIncludedText} Keep it private.`;
+  download(filename,json,'application/json');
+  notice('Ripple backup verified and ready. Keep the JSON private.');
+  return result;
+}
+async function captureRippleBackup() {
+  if(restoreWorkflowBlocked())fail('Finish the pending write, reset, migration or recovery before reading Ripple.');
+  if(state.esp||$('already-bootloader').checked)fail('Start Ripple normally before reading its loaded identity. USB backup cannot read the key while the device is in the bootloader.');
+  const selected=chooseRippleUsbDevice();
+  clearBackupJson();state.backup=null;state.backupApproved=null;
+  const capture=await captureRippleUsb(await selected,{progress});
+  return saveRippleBackup(ripplePayload(capture));
+}
+function rememberWadameshBackup(result) {
+  state.wadameshBackup=result;
+  const p=result.archive.payload;
+  $('wadamesh-summary').textContent=`Verified identity ${p.publicKey.slice(0,12)}: ${p.contacts.length} contacts, ${p.channels.length} channel slots, ${p.wadamesh.files.length} original settings files. `+(p.wadamesh.files.length?'Saved files require offline copyback to the same device/storage layout. ':'Add meshcomod or prefs for UI and Wi-Fi preferences unavailable over USB. ')+`${p.wadamesh.filesExcluded} selected files excluded.`;
+}
+function saveWadameshBackup(archive,{port=null}={}) {
+  verifyBackup(archive);
+  const filename=`wadamesh.config_backup.web.${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
+  const json=JSON.stringify(archive,null,2).replace(/[\u007f-\uffff]/g,char=>'\\u'+char.charCodeAt(0).toString(16).padStart(4,'0'));
+  const result={archive,summary:backupSummary(archive),coverage:backupCoverage(archive),filename,json,port};
+  state.backup=result;state.backupApproved=null;rememberWadameshBackup(result);
+  $('backup-json').value=json;$('backup-json-view').hidden=false;
+  $('backup-summary').textContent=`Wadamesh backup verified. Download requested: ${filename}. ${result.coverage.summaryText} ${result.coverage.notIncludedText} Keep it private.`;
+  download(filename,json,'application/json');notice('Wadamesh backup verified and ready. Keep the JSON private.');return result;
+}
+async function captureBackup({wadamesh=false}={}) {
+  if(wadamesh){
+    if(restoreWorkflowBlocked())fail('Finish the pending device operation before backing up Wadamesh.');
+    $('backup-role').value='companion';
+  }
+  if($('backup-role').value==='ripple')return captureRippleBackup();
   if(dfuIds.has(portId(state.port))||$('already-bootloader').checked){if(!await tryBackupApplication())throw backupApplicationRequired();}
   requireMeshCoreApplication();
   clearBackupJson();state.backup=null;state.backupApproved=null;
@@ -1135,6 +1193,11 @@ async function captureBackup() {
     requireMeshCoreApplication();
     return (device?.role||$('backup-role').value)==='common-cli'?backupCommonCli(link,progress):new MeshCore(link).backup(progress);
   });
+  if(state.port!==port||state.generation!==generation)fail('Selected port changed during backup. Select and back up the intended radio again.');
+  if(wadamesh||archive.payload.wadamesh){
+    if(archive.payload.role!=='companion')fail('Wadamesh backup requires a verified companion response.');
+    return saveWadameshBackup(archive.payload.wadamesh?archive:sealBackup({...verifyBackup(archive),wadamesh:{version:1,files:[],filesExcluded:0}}),{port});
+  }
   const info=port.getInfo(),native=await exportNativeBackup(archive,{usbIdentity:{vendor_id:info.usbVendorId??null,product_id:info.usbProductId??null},deviceHint:state.device?.model||$('hardware').value,sealNative:args=>(state.planner ||=new BrowserPlanner()).call('sealBackup',args)});
   if(state.port!==port||state.generation!==generation)fail('Selected port changed during backup. No saved-backup approval was retained; select and back up the intended radio again.');
   const summary=backupSummary(archive),completeness=native.payload?.completeness;if(completeness){summary.complete=completeness.status==='api-snapshot-complete';summary.reasons=[...new Set([...summary.reasons,...(completeness.missing_required||[]).map(n=>'Missing '+n),...(completeness.optional_errors||[]).map(n=>'Query failed: '+n)])];}
@@ -1150,6 +1213,19 @@ async function ensureBackup() {
   if(state.skipBackupForOperation){
     if(!state.port)fail('Choose the intended radio’s USB port before continuing without backup.');
     state.backupApproved={sha256:state.pkg?.sha256||'touch',port:state.port,publicKey:state.device?.publicKey||null,skipped:true,...(isMeshtasticMigration()?{sourceFirmware:'meshtastic'}:{})};
+    return;
+  }
+  if($('backup-role').value==='ripple'){
+    const result=state.rippleBackup;
+    if(!result)fail('Use Back up Ripple first, then prepare the update.');
+    const payload=verifyBackup(result.archive);
+    if(payload.source.method!=='usb-jtag')fail('An SD-file backup does not identify the selected USB chip. Make a Ripple USB backup before automatic preparation, or keep the SD backup and explicitly choose Skip backup.');
+    const port=state.port,generation=state.generation,pkg=state.pkg;
+    const answer=await choose('Ripple backup JSON','The verified key belongs to '+payload.source.mac+'. The selected USB chip must match before any firmware write.',[['stop','Stop'],['continue','Continue with flashing']],{backupJson:result.json,backupDetails:result.coverage.notIncludedText});
+    if(answer!=='continue')fail('Preparation stopped before reset or flash.');
+    if(state.port!==port||state.generation!==generation||state.pkg!==pkg||state.rippleBackup!==result)fail('Selected device, firmware or Ripple backup changed. Prepare again.');
+    state.backup={...result,port};
+    state.backupApproved={sha256:state.pkg?.sha256||'touch',port,publicKey:payload.publicKey,sourceMac:payload.source.mac,sourceFirmware:'ripple'};
     return;
   }
   const bootloader=dfuIds.has(portId(state.port))||$('already-bootloader').checked;
@@ -2049,6 +2125,7 @@ async function prepareSelectedFirmware({waitForRom=false}={}) {
     }
     if(state.migration && (state.migration.sha256!==pkg.sha256 || state.migration.mac!==info.mac)) fail('A migration is pending. Select its original firmware and the same physical chip.');
     if(state.espRecovery&&info.mac!==state.espRecovery.mac)fail('Different physical ESP32 chip: the interrupted write belongs to another MAC.');
+    if(state.backupApproved?.sourceMac&&info.mac!==state.backupApproved.sourceMac)fail('Different physical chip: the Ripple backup belongs to '+state.backupApproved.sourceMac+'. No firmware write was performed.');
     const planner = pkg.merged || pkg.expert || wadameshSelected() ? null : (state.planner ||= new BrowserPlanner());
     const packageFile=$('migration-package').files[0],setFile=$('usb-set').files[0];
     if((packageFile?.size||0)>(32<<20) || (setFile?.size||0)>(32<<20)) fail('Migration artifact exceeds 32 MiB.');
@@ -2195,6 +2272,7 @@ async function flashPreparedFirmware() {
     progress(1,'UF2 copy completed. Bootloader activation and application startup remain unverified.'); state.plan=null;state.finishedFirmware={sha256:pkg.sha256,verified:false}; notice('UF2 copy completed. A disappearing drive can indicate reboot; it is not proof the intended firmware started.');
   } else if (pkg.architecture === 'esp32') {
     if(plan.needed && !plan.verified) { state.migration={mac:plan.mac,sha256:pkg.sha256,uart:!!plan.uart_completion_status,settled:false,phase:'writing'}; localStorage.setItem('meshfirmware.pendingMigration',JSON.stringify(state.migration)); }
+    if(state.backupApproved?.sourceMac&&plan.mac!==state.backupApproved.sourceMac)fail('The prepared chip does not match the Ripple backup. No firmware write was performed.');
     await withFlashProgress(bridge?'USB expansion bridge for '+pkg.name:pkg.name,plan.merged?'Erasing and writing ESP32 firmware…':'Preparing ESP32 transfer and readback…',()=>state.esp.flash(pkg,progress,{allowRevisionMismatch,chunkedRecovery:!!plan.chunkedRecovery}),{keepOpen:!bridge,sha256:bridge?null:pkg.sha256,startupAdvice:bridge?'':firstStartupAdvice(pkg)}); plan.written = true;
     if(approval&&state.migrationApproval===approval){if(bridge)approval.bridgeVerified(pkg,plan);else approval.finalVerified(pkg,plan);}
     state.espRecovery=null;persistEspRecovery();
@@ -2350,6 +2428,54 @@ $('stop-migration-auto').onclick=()=>{
   notice('Automatic continuation stopped. Any active operation finishes at its safe boundary; pending migration and verified-write records remain available for manual recovery.');controls();
 };
 $('flash-stop-auto').onclick=()=>{if(state.flashProgress&&state.migrationApproval)$('stop-migration-auto').onclick();};
+$('ripple-usb').onclick=()=>operation(async()=>{revealPanel('backups');await captureRippleBackup();});
+$('ripple-sd').onclick=()=>{if(!state.busy&&!restoreWorkflowBlocked()){$('ripple-sd-files').value='';$('ripple-sd-files').click();}};
+$('ripple-sd-files').onchange=()=>operation(async()=>{
+  if(restoreWorkflowBlocked())fail('Finish the pending device operation before adding SD files.');
+  const files=$('ripple-sd-files').files;if(!files.length)return;
+  const payload=await addRippleSdFiles(files,state.rippleBackup?.archive.payload||null,progress);
+  saveRippleBackup(payload);
+});
+$('ripple-key').onclick=()=>operation(async()=>{
+  if(!state.rippleBackup)fail('Create or import a Ripple backup first.');
+  const payload=verifyBackup(state.rippleBackup.archive);
+  download(`ripple.private_key.${payload.publicKey.slice(0,12)}.hex`,payload.privateKey+'\n','text/plain');
+  notice('Verified private key download requested. Keep it private.');
+});
+$('ripple-files').onclick=()=>operation(async()=>{
+  if(!state.rippleBackup)fail('Create or import a Ripple backup first.');
+  download('ripple.sd-files.zip',rippleSavedFilesZip(verifyBackup(state.rippleBackup.archive)),'application/zip');
+  notice('Original Ripple files downloaded. Copy the ripple folder back to the SD card while the device is off.');
+});
+$('ripple-wadamesh').onclick=()=>operation(async()=>{
+  if(!state.rippleBackup)fail('Create or import a Ripple backup first.');
+  const payload=verifyBackup(state.rippleBackup.archive);
+  download('meshcore-backup.json',JSON.stringify(wadameshIdentityImport(payload),null,2),'application/json');
+  notice('Wadamesh identity import file downloaded. Copy it to the SD card and use Import settings on Wadamesh. This file contains the identity only.');
+});
+$('wadamesh-usb').onclick=()=>operation(async()=>{revealPanel('backups');await captureBackup({wadamesh:true});});
+$('wadamesh-folder').onclick=()=>{if(!state.busy&&!restoreWorkflowBlocked()){$('wadamesh-folder-files').value='';$('wadamesh-folder-files').click();}};
+$('wadamesh-folder-files').onchange=()=>operation(async()=>{
+  if(restoreWorkflowBlocked())fail('Finish the pending device operation before adding settings files.');
+  if(!state.wadameshBackup)fail('Create or import the Wadamesh backup first.');
+  const files=$('wadamesh-folder-files').files;if(!files.length)return;
+  const saved=state.wadameshBackup;
+  const payload=await addWadameshFiles(verifyBackup(saved.archive),files,progress);
+  if(state.wadameshBackup!==saved)fail('The selected Wadamesh backup changed. Add its settings folder again.');
+  saveWadameshBackup(sealBackup(payload));
+});
+$('wadamesh-settings').onclick=()=>operation(async()=>{
+  if(!state.wadameshBackup)fail('Create or import a Wadamesh backup first.');
+  const payload=verifyBackup(state.wadameshBackup.archive);
+  const json=JSON.stringify(wadameshSettingsImport(payload),null,2).replace(/[\u007f-\uffff]/g,char=>'\\u'+char.charCodeAt(0).toString(16).padStart(4,'0'));
+  download('meshcore-backup.json',json,'application/json');
+  notice('Wadamesh settings file downloaded for on-device Import settings. Keep the browser backup for the fuller USB restore.');
+});
+$('wadamesh-files').onclick=()=>operation(async()=>{
+  if(!state.wadameshBackup)fail('Create or import a Wadamesh backup first.');
+  download('wadamesh.saved-settings.zip',wadameshFilesZip(verifyBackup(state.wadameshBackup.archive)),'application/zip');
+  notice('Original Wadamesh settings files downloaded. Copy back while the device is off, using the same device and storage layout.');
+});
 $('backup').onclick = () => operation(async () => {
   await captureBackup();
 });
@@ -2437,6 +2563,11 @@ function showRestorePreview(){
   }else if(p.role==='companion'){
     state.restorePreview={role:'companion'};$('restore-summary').textContent=`Companion backup: ${p.channels.length} channels and ${p.contacts.length} contacts. No settings have been written.`;
     $('restore-report').textContent='Identity, channels, contacts and supported settings will be checked against the selected companion before writing. Firmware versions are diagnostic only.';
+    if(p.wadamesh)$('restore-report').textContent+=' Repeat, path hash, BLE PIN, telemetry, auto-add, tuning, scope and custom variables are restored when captured and supported. UI and Wi-Fi files are restored separately using Download saved files and offline copyback to the same device/storage layout.';
+  }else if(p.role==='ripple'){
+    state.restorePreview={role:'ripple',privateIdentity:true};
+    $('restore-summary').textContent=`Verified Ripple identity ${p.publicKey.slice(0,12)}. Restore moves only this identity to a MeshCore companion or Wadamesh.`;
+    $('restore-report').textContent=p.files.length?`${p.files.length} original SD files are preserved. Use Download SD files to restore them to Ripple. Contacts, channels and preferences are not converted to companion settings.`:'Saved contacts, channels and preferences were not captured. Add the Ripple SD folder to preserve its original files.';
   }else fail('This backup role is not supported for restore.');
 }
 $('import-backup-json').onclick=()=>{if(!state.busy){$('backup-file').value='';$('backup-file').click();}};
@@ -2448,8 +2579,10 @@ $('backup-file').onchange = () => operation(async () => {
   const raw=await file.text();
   notice('Validating backup integrity locally…');
   const archive=await parseBackup(raw,{validatePython:args=>(state.planner ||=new BrowserPlanner()).call('validateBackup',args)}),p=verifyBackup(archive);state.restore=archive;
+  if(p.role==='ripple'){state.backupApproved=null;state.rippleBackup={archive,json:raw,summary:backupSummary(archive),coverage:backupCoverage(archive),filename:file.name,port:null};$('ripple-summary').textContent=`Imported verified Ripple identity ${p.publicKey.slice(0,12)}. ${p.files.length} original SD files.`;}
+  if(p.role==='companion'&&p.wadamesh)rememberWadameshBackup({archive,json:raw,summary:backupSummary(archive),coverage:backupCoverage(archive),filename:file.name,port:null});
   try{showRestorePreview();}catch(error){state.restore=null;state.restorePreview=null;$('restore-preview').hidden=true;throw error;}
-  $('backup-summary').textContent=p.role==='companion'?`Verified local archive: ${p.publicKey.slice(0,12)} · ${p.channels.length} channels · ${p.contacts.length} contacts. Nothing uploaded or restored.`:'Verified CommonCLI JSON. Review supported settings, then restore through the serial console. Nothing uploaded or written.';
+  $('backup-summary').textContent=p.role==='ripple'?'Verified Ripple backup. Download its private key or original SD files, or review identity restore. Nothing uploaded or written.':p.role==='companion'?`Verified local archive: ${p.publicKey.slice(0,12)} - ${p.channels.length} channels - ${p.contacts.length} contacts. Nothing uploaded or restored.`:'Verified CommonCLI JSON. Review supported settings, then restore through the serial console. Nothing uploaded or written.';
 });
 $('restore').onclick = () => {
   if(state.busy)return;
@@ -2459,28 +2592,32 @@ $('restore').onclick = () => {
   requireMeshCoreApplication();
   if(!state.port||dfuIds.has(portId(state.port))||$('already-bootloader').checked)fail('Select the radio’s application USB port before restoring settings; restore cannot run in ROM/DFU.');
   const archive=state.restore,generation=state.generation,port=state.port,pkg=state.pkg,plan=state.plan,installMode=state.installMode,p=verifyBackup(archive),options={newHardware:$('new-hardware').checked,replaceIdentity:$('replace-identity').checked};
-  const common=p.role==='common-cli',preview=common?commonCliRestorePreview(p,options):null;
-  if(!common&&p.role!=='companion')fail('This backup role is not supported for restore.');
+  const common=p.role==='common-cli',ripple=p.role==='ripple',preview=common?commonCliRestorePreview(p,options):null;
+  if(!common&&!ripple&&p.role!=='companion')fail('This backup role is not supported for restore.');
   if(common&&!preview.operations.length&&!(options.replaceIdentity&&preview.privateIdentity))fail('This JSON has no supported settings selected for restore. Review the skipped-settings report.');
   const current=()=>state.restore===archive&&state.port===port&&state.generation===generation&&state.pkg===pkg&&state.plan===plan&&state.installMode===installMode&&$('new-hardware').checked===options.newHardware&&$('replace-identity').checked===options.replaceIdentity&&!restoreWorkflowBlocked()&&!$('already-bootloader').checked;
   const detail=`Backup identity ${p.publicKey}. Different hardware: ${options.newHardware?'YES':'NO'}. Replace identity: ${options.replaceIdentity?'YES':'NO'}.`+(common?` ${preview.operations.length} serial settings will be reviewed; unsupported settings are reported, not replayed.`:'');
   const warning=['This writes only supported configuration values. It is not atomic. Firmware versions, partition layout, messages and logs are never restored. The previous startup reminder and prepared flash approval will be cleared. Keep power connected.',...(preview?.warnings||[])].join('\n');
-  if(!await confirm(common?'Restore settings through the serial console?':'Restore companion settings?',detail,warning,`RESTORE ${p.publicKey.slice(0,8)}`))return;
+  if(!await confirm(ripple?'Restore Ripple identity to MeshCore or Wadamesh?':common?'Restore settings through the serial console?':'Restore companion settings?',detail,warning,`RESTORE ${p.publicKey.slice(0,8)}`))return;
   if(!current())fail('Selected device, backup or restore options changed during confirmation. Nothing was written.');
   verifyBackup(archive);if(state.verification)clearVerification();invalidateApplicationEvidence();invalidateFirmwareSelection();const approvedGeneration=state.generation;
   const assertCurrent=()=>{if(state.restore!==archive||state.port!==port||state.generation!==approvedGeneration||$('new-hardware').checked!==options.newHardware||$('replace-identity').checked!==options.replaceIdentity||restoreWorkflowBlocked()||$('already-bootloader').checked)fail('Selected device, backup or restore options changed. Restore stopped; earlier settings may already have been applied.');};
   const report=(value,message)=>{progress(value,message);$('restore-summary').textContent=`${Number.isFinite(value)?Math.round(Math.max(0,Math.min(1,value))*100):0}% · ${message}`;log('Restore: '+message);};
   let result;try{result=await linkOperation(async link=>{
     assertCurrent();const guarded={};for(const method of ['command','read','write'])guarded[method]=async(...args)=>{assertCurrent();const value=await link[method](...args);assertCurrent();return value;};
-    return common?restoreCommonCli(guarded,p,{...options,assertCurrent},report):new MeshCore(guarded).restore(archive,options,report);
+    return ripple?restoreRippleIdentity(new MeshCore(guarded),p,{...options,assertCurrent}):common?restoreCommonCli(guarded,p,{...options,assertCurrent},report):new MeshCore(guarded).restore(archive,options,report);
   });}catch(error){$('restore-summary').textContent='Restore stopped. Earlier settings may already have changed; see the operation log before retrying.';throw error;}
   assertCurrent();
   if(result?.warnings?.length)log(result.warnings.join('\n'));
+  if(ripple){$('restore-summary').textContent=result.identityChanged?'Ripple identity restored and verified.':'The companion already has this verified identity.';$('restore-report').textContent='Only the identity was imported. Original Ripple SD files remain available through Download SD files.';notice('Ripple identity verified on the companion.');return;}
   if(common){
     const restored=result?.restored||[],skipped=result?.skipped||[];$('restore-summary').textContent=`${restored.length} settings restored; ${skipped.length} skipped.`;
     $('restore-report').textContent=[...restored.map(item=>'Restored: '+item.label),...skipped.map(item=>`Skipped: ${item.label||item.id} — ${item.reason}`),...(result?.warnings||[])].join('\n');
     notice(result?.identityPendingReboot?'Supported settings restored. The replacement identity is saved but requires a manual reboot; its running identity has not yet been verified.':!restored.length?'No settings were changed. Review the skipped-settings report.':result?.restartRequired?'Supported settings saved and checked. A manual restart is required to apply some changes; see the restore report.':`Supported serial settings restored and checked. ${skipped.length} skipped; see the restore report${result?.warnings?.length?' for limitations and any manual restart requirements':''}.`);
-  }else notice('Supported companion settings restored and read back. '+(result?.warnings?.length?result.warnings.join(' ')+' ':'')+'Review optional CLI snapshots separately.');
+  }else {
+    if(p.wadamesh){$('restore-summary').textContent='Supported Wadamesh mesh settings restored and read back.';$('restore-report').textContent=(result?.warnings||[]).join('\n')+'\nUI and Wi-Fi preferences require Download saved files and offline copyback to the same device/storage layout. These files were not written over USB.';}
+    notice('Supported companion settings restored and read back. '+(result?.warnings?.length?result.warnings.join(' ')+' ':'')+(p.wadamesh?'Restore saved UI and Wi-Fi files separately while the device is off.':'Review optional CLI snapshots separately.'));
+  }
   });
 };
 $('send-command').onclick = () => operation(async () => {requireMeshCoreApplication();const command=$('command').value.trim();if(!command||/[\r\n\x00]/.test(command))fail('Enter one command.');invalidateApplicationEvidence();try{await linkOperation(async link=>{const role=$('backup-role').value==='auto'?(await readApplication(link)).role:$('backup-role').value;requireMeshCoreApplication();log(role==='common-cli'?await link.command(command):await new MeshCore(link).cli(command));});}finally{invalidateApplicationEvidence();}});

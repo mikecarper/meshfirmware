@@ -1,3 +1,6 @@
+import { validateRipplePayload, rippleCoverage } from './ripple-backup.js';
+import { validateWadameshFiles } from './wadamesh-backup.js';
+import { companionContactCapacity, isLargeWadameshLayout, isWadameshProtocolProfile } from './wadamesh-profile.js';
 // MeshCore USB companion protocol. No message-queue consumption or host helper.
 import { ed25519 } from '@noble/curves/ed25519';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
@@ -73,7 +76,7 @@ function validateCompanion(p) {
   if (Math.abs(lat)>90 || Math.abs(lon)>180 || freq<100 || freq>3000 || bw<1 || bw>1000 || self[56]<5 || self[56]>12 || self[57]<5 || self[57]>8 || self[44]>3 || self[45]>3 || self[46]>63 || self[47]>1) fail('Invalid companion settings.');
   const pin=new DataView(info.buffer,info.byteOffset,info.byteLength).getUint32(4,true); if (pin !== 0 && (pin<100000 || pin>999999)) fail('Invalid BLE PIN.');
   if (key && (key.length !== 65 || key[0] !== 14 || publicFromPrivate(key.subarray(1)) !== p.publicKey)) fail('Private/public identity verification failed.');
-  if (!Array.isArray(p.channels) || p.channels.length !== info[3] || !Array.isArray(p.contacts) || p.contacts.length > info[2]*2 || !p.options || typeof p.options !== 'object' || !p.cli || typeof p.cli !== 'object') fail('Incomplete or invalid backup inventories.');
+  if (!Array.isArray(p.channels) || p.channels.length !== info[3] || !Array.isArray(p.contacts) || p.contacts.length > companionContactCapacity(info,p.cli?.version) || !p.options || typeof p.options !== 'object' || !p.cli || typeof p.cli !== 'object') fail('Incomplete or invalid backup inventories.');
   p.channels.forEach((row,index) => { const b = record(row,18,[50],'channel'); if (b[1] !== index) fail('Channel inventory invalid.');wireName(b.subarray(2,34),'channel name'); });
   const keys=new Set(); p.contacts.forEach(row => { const b=contactRecord(row),id=bytesToHex(b.subarray(1,33));if(keys.has(id))fail('Duplicate contact.');keys.add(id); });
   for (const [name,code,lengths] of [['autoadd',25,[2,3]],['tuning',23,[9]],['scope',28,[1,48]]]) if (typeof p.options[name] === 'string') record(p.options[name],code,lengths,name);
@@ -102,10 +105,12 @@ export function verifyBackup(archive) {
   const {sha256,...covered} = archive;
   if (hash(encode(canonical(covered))) !== sha256) fail('Backup SHA-256 mismatch.');
   const p = archive.payload;
-  if (!p || !['companion','common-cli'].includes(p.role) || p.safeForWipe !== false) fail('Invalid backup metadata.');
+  if (!p || !['companion','common-cli','ripple'].includes(p.role) || p.safeForWipe !== false) fail('Invalid backup metadata.');
+  if(p.role==='ripple')return validateRipplePayload(p);
   if(p.capabilities!==undefined)validateSettingCapabilityRecord(p.capabilities);
   if (p.role === 'companion') {
     validateCompanion(p);
+    if(p.wadamesh!==undefined)validateWadameshFiles(p.wadamesh);
   } else {
     if(typeof p.publicKey!=='string'||!/^[a-f0-9]{64}$/i.test(p.publicKey)||!p.replies||typeof p.replies!=='object'||Array.isArray(p.replies))fail('Invalid CommonCLI identity or settings.');
     if(Object.keys(p.replies).length>128||Object.entries(p.replies).some(([command,value])=>command.length>80||/[\x00-\x1f\x7f]/.test(command)||typeof value!=='string'||value.length>8192))fail('Invalid CommonCLI reply snapshot.');
@@ -213,7 +218,7 @@ export class MeshCore {
         if (this.bytes.length < n + 3) break;
         return Uint8Array.from(this.bytes.splice(0,n + 3).slice(3));
       }
-      const chunk=await this.link.read(100);if(this.bytes.length+chunk.length>16384)fail('MeshCore framing limit exceeded. Check USB logging/text mode.');this.bytes.push(...chunk);
+      const chunk=await this.link.read(100,4096);if(this.bytes.length+chunk.length>16384)fail('MeshCore framing limit exceeded. Check USB logging/text mode.');for(const byte of chunk)this.bytes.push(byte);
     }
     fail('No MeshCore companion response. Device may be in DFU/ROM, text mode, or using another port.');
   }
@@ -226,7 +231,8 @@ export class MeshCore {
   async self() { const result = await this.request([1,3,32,32,32,32,32,32,...encode('meshfirmware-web')],5); if (result.length < 58) fail('Truncated SELF_INFO.'); return result; }
   async info() { const result = await this.request([22,3],13); if (result.length < 80 || result[1] < 3) fail('Unsupported DEVICE_INFO.'); return result; }
   async cli(command) { if (/[\r\n\x00]/.test(command)) fail('CLI commands must be a single line.'); return text((await this.request([66,...encode(command)],29)).subarray(1)); }
-  async contacts() {
+  async contacts({maxContacts=510,onProgress=()=>{}}={}) {
+    if(!Number.isInteger(maxContacts)||maxContacts<1||maxContacts>2000)fail('Invalid contact inventory limit.');
     if(this.busy)fail('Another MeshCore command is active.');this.busy=true;
     try {
       await this.send([4]);let first;const startUntil=Date.now()+this.timeoutMs;
@@ -237,15 +243,15 @@ export class MeshCore {
         if(frame[0]!==2||frame.length!==5)fail('Contact inventory did not start.');first=frame;break;
       }
       if(!first)fail('Contact inventory start timed out.');
-      const count=new DataView(first.buffer,first.byteOffset,first.byteLength).getUint32(1,true);if(count>510)fail('Contact inventory limit exceeded.');
-      const rows=[],keys=new Set(),until=Date.now()+30000;
+      const count=new DataView(first.buffer,first.byteOffset,first.byteLength).getUint32(1,true);if(count>maxContacts)fail('Contact inventory limit exceeded.');
+      const rows=[],keys=new Set(),until=Date.now()+Math.max(30000,count*100);
       while(Date.now()<until){
-        const row=await this.frame(Math.min(3000,Math.max(1,until-Date.now())));
+        const row=await this.frame(Math.min(this.timeoutMs,Math.max(1,until-Date.now())));
         if([1,15].includes(row[0]))throw rejectedCommand(4,row);
         if(row[0]>=0x80)continue;
         if(row[0]===4){if(row.length!==5||rows.length!==count)fail('Incomplete contact inventory.');return rows;}
         if(row[0]!==3||row.length!==148||rows.length>=count)fail('Unexpected contact record.');
-        const key=bytesToHex(row.subarray(1,33));if(keys.has(key))fail('Duplicate contact.');keys.add(key);rows.push(row);
+        const key=bytesToHex(row.subarray(1,33));if(keys.has(key))fail('Duplicate contact.');keys.add(key);rows.push(row);onProgress(rows.length,count);
       }
       fail('Contact inventory timed out.');
     } finally {this.busy=false;}
@@ -256,13 +262,15 @@ export class MeshCore {
     const p = { role: 'companion', publicKey, self: bytesToHex(self), info: bytesToHex(info), channels: [], contacts: [], options: {}, cli: {}, safeForWipe: false, excluded: ['Unread messages (not consumed)', 'Firmware/bootloader', 'Unexposed or unsupported preferences'] };
     p.capabilities=await captureSettingCapabilities({command:command=>this.cli(command)});
     try { const key = await this.request([23],14); if (key.length !== 65 || publicFromPrivate(key.subarray(1)) !== publicKey) fail('Exported identity is inconsistent.'); p.privateKey = bytesToHex(key); } catch (error) { p.identityWarning = error.message; }
-    p.contacts = (await this.contacts()).map(bytesToHex);
+    try {p.cli.version=await this.cli('version');}catch{p.cli.version=null;}
+    if(isWadameshProtocolProfile(info,p.cli.version))p.wadamesh={version:1,files:[],filesExcluded:0};
+    p.contacts = (await this.contacts({maxContacts:companionContactCapacity(info,p.cli.version),onProgress:(received,total)=>progress(total?received/total*.25:0,`Reading contacts ${received}/${total}`)})).map(bytesToHex);
     for (let i = 0; i < info[3]; i++) { const row = await this.request([31,i],18); if (row.length !== 50 || row[1] !== i) fail('Channel response mismatch.'); p.channels.push(bytesToHex(row)); progress(i / info[3],`Reading channel ${i + 1}/${info[3]}`); }
     for (const [name,command,response] of [['autoadd',59,25],['tuning',43,23],['custom',40,21],['scope',64,28]]) {
       try { p.options[name] = bytesToHex(await this.request([command],response)); } catch (error) { p.options[name] = { unavailable: error.message }; }
     }
     try { const battery=await this.request([20],12); if(![3,11].includes(battery.length))fail('Invalid battery/storage response.');const view=new DataView(battery.buffer,battery.byteOffset,battery.byteLength);p.batteryAndStorage={level:view.getUint16(1,true)};if(battery.length===11){p.batteryAndStorage.used_kb=view.getUint32(3,true);p.batteryAndStorage.total_kb=view.getUint32(7,true);if(p.batteryAndStorage.used_kb>p.batteryAndStorage.total_kb)fail('Storage counters are internally inconsistent.');}}catch(error){p.batteryAndStorage={unavailable:error.message};}
-    for (const command of ['version','get bluetooth.name','get usb.logging','get usb.logging.always','get usb.debug','get system.watchdog','get bluetooth','get radio.cad','get radio.rxgain','get radio.fem.rxgain','get radio.fem.txgain','get display.rotation','get powersaving','get radio.rxps.config','get radio.rxps.rfrx_disabled','get radio2','get radio2.cross','get storage.layout','get radio.preamble']) {
+    for (const command of ['get bluetooth.name','get usb.logging','get usb.logging.always','get usb.debug','get system.watchdog','get bluetooth','get radio.cad','get radio.rxgain','get radio.fem.rxgain','get radio.fem.txgain','get display.rotation','get powersaving','get radio.rxps.config','get radio.rxps.rfrx_disabled','get radio2','get radio2.cross','get storage.layout','get radio.preamble']) {
       if(shouldSkipSetting(p.capabilities,command))continue;
       try { p.cli[command] = await this.cli(command); } catch { p.cli[command] = null; }
     }
@@ -275,7 +283,13 @@ export class MeshCore {
     const p = verifyBackup(archive); if (p.role !== 'companion') fail('CommonCLI captures are partial and cannot be automatically restored.');
     const live = await this.self(), info = await this.info(), source = unhex(p.info), saved = unhex(p.self);
     if (live[1] !== 1 || (!newHardware && text(info.subarray(20,60)) !== text(source.subarray(20,60)))) fail('Different hardware: explicitly enable migration to a new board.');
-    if (info[2] * 2 < p.contacts.length || p.channels.slice(info[3]).some(row => unhex(row)[2] !== 0)) fail('Target cannot hold all populated contacts/channels.');
+    let targetVersion=null;
+    if(isLargeWadameshLayout(info)){
+      try{targetVersion=await this.cli('version');}
+      catch(error){if(!(error.meshcoreCommand===66&&error.meshcoreResponseCode===1&&error.meshcoreErrorCode===1))throw error;}
+    }
+    const targetContactCapacity=companionContactCapacity(info,targetVersion);
+    if (targetContactCapacity < p.contacts.length || p.channels.slice(info[3]).some(row => unhex(row)[2] !== 0)) fail('Target cannot hold all populated contacts/channels.');
     // SELF_INFO exposes the raw uint8 wire representation, while the firmware
     // interprets CMD_SET_RADIO_TX_POWER as int8 (-9..MAX_LORA_TX_POWER).
     // Preserve that raw byte for the write/readback and native JSON export.
@@ -283,20 +297,20 @@ export class MeshCore {
     if(desiredTx < -9 || maximumTx < -9 || desiredTx>maximumTx) fail('Saved TX power is outside this hardware range (-9 dBm to its reported maximum).');
     // Capacity includes contacts already present: do not discover a full table
     // only after writing an identity or some channels.
-    const existing=await this.contacts(), union=new Set([...existing.map(row=>bytesToHex(row.subarray(1,33))),...p.contacts.map(row=>row.slice(2,66))]);
-    if(union.size>info[2]*2) fail('Existing plus restored contacts exceed target capacity. Nothing was written.');
+    const existing=await this.contacts({maxContacts:targetContactCapacity}), union=new Set([...existing.map(row=>bytesToHex(row.subarray(1,33))),...p.contacts.map(row=>row.slice(2,66))]);
+    if(union.size>targetContactCapacity) fail('Existing plus restored contacts exceed target capacity. Nothing was written.');
     const vars=typeof p.options.custom==='string'?customVars(p.options.custom):new Map();
     if(vars.size) { const target=customVars(bytesToHex(await this.request([40],21)));if([...vars.keys()].some(key=>!target.has(key))) fail('This hardware does not expose all saved custom variables. Nothing was written.'); }
     const sameIdentity=bytesToHex(live.subarray(4,36))===p.publicKey;
     if(!sameIdentity&&(!replaceIdentity||!p.privateKey))fail('Identity differs. Explicit replacement and a verified private-key backup are required. Nothing was written.');
     const result={warnings:[],optional:{usbLogging:{state:'not-requested'},bluetooth:{state:'not-requested'},bluetoothName:{state:'not-in-backup'},radioCad:{state:'not-in-backup'},radioPreamble:{state:'not-in-backup'}}};
-    let cliAvailable=info[1]>=14;
+    let cliAvailable=info[1]>=14||isWadameshProtocolProfile(info,targetVersion);
     const optionalCli=async(command,label,key)=>{
       let reason;
       if(!cliAvailable)reason='This companion protocol does not expose the optional CLI API.';
       else try {
         const reply=await this.cli(command);
-        if(command==='get bluetooth.name'?unsupportedBluetoothNameReply(reply):unsupportedCliReply(reply))reason='The target does not expose this optional command.';
+        if(command==='get bluetooth.name'?unsupportedBluetoothNameReply(reply):unsupportedCliReply(reply)||commonCliReplyState(reply,command).state==='unsupported')reason='The target does not expose this optional command.';
         else return {supported:true,reply};
       }catch(error){
         // Code 1 is UNSUPPORTED_CMD, not a timeout/I/O/bad-state error. Only
@@ -348,12 +362,19 @@ export class MeshCore {
       progress(i / Math.max(1,p.channels.length) * .4,`Restoring channel ${i + 1}`);
     }
     for (const [i,row] of p.contacts.entries()) { await this.request([9,...unhex(row).subarray(1,144)],0); progress(.4 + i / Math.max(1,p.contacts.length) * .3,'Restoring contacts'); }
-    const currentContacts = new Map((await this.contacts()).map(row => [bytesToHex(row.subarray(1,33)),bytesToHex(row.subarray(0,144))]));
+    const currentContacts = new Map((await this.contacts({maxContacts:targetContactCapacity})).map(row => [bytesToHex(row.subarray(1,33)),bytesToHex(row.subarray(0,144))]));
     if (p.contacts.some(row => currentContacts.get(row.slice(2,66)) !== row.slice(0,288))) fail('Contact readback failed.');
     await this.request([8,...saved.subarray(58)],0);
     await this.request([14,...saved.subarray(36,44),...words(0)],0);
     await this.request([12,saved[2]],0);
-    await this.request([11,...saved.subarray(48,58)],0);
+    // Repeat is an optional trailing byte of SET_RADIO_PARAMS, not part of
+    // SELF_INFO. Omitting it resets repeat to false on Wadamesh and upstream.
+    const desiredRepeat=source[1]>=9?source[80]:null;
+    if(desiredRepeat===1&&info[1]<9)result.warnings.push('Client repeating was not restored: the target protocol does not support it.');
+    await this.request([11,...saved.subarray(48,58),...(desiredRepeat===1&&info[1]>=9?[1]:[])],0);
+    const desiredPathMode=source[1]>=10?source[81]:null;
+    if(desiredPathMode!==null&&info[1]>=10&&info[81]!==desiredPathMode)await this.request([61,0,desiredPathMode],0);
+    else if(desiredPathMode>0&&info[1]<10)result.warnings.push('Path hash mode was not restored: the target protocol does not support it.');
     if(preambleSupported){
       const view=new DataView(saved.buffer,saved.byteOffset,saved.byteLength),tuple=[view.getUint32(48,true)/1000,view.getUint32(52,true)/1000,saved[56],saved[57]];
       const reply=await this.cli(`set radio ${tuple.join(',')},${desiredPreamble}`);
@@ -363,7 +384,10 @@ export class MeshCore {
     }
     await this.request([38,saved[47],saved[46],saved[45],saved[44]],0);
     await this.request([37,...source.subarray(4,8)],0);
-    if(bytesToHex((await this.info()).subarray(4,8))!==bytesToHex(source.subarray(4,8))) fail('BLE PIN readback failed.');
+    const verifiedInfo=await this.info();
+    if(bytesToHex(verifiedInfo.subarray(4,8))!==bytesToHex(source.subarray(4,8))) fail('BLE PIN readback failed.');
+    if(desiredRepeat!==null&&info[1]>=9&&verifiedInfo[80]!==desiredRepeat)fail('Client repeating readback failed.');
+    if(desiredPathMode!==null&&info[1]>=10&&verifiedInfo[81]!==desiredPathMode)fail('Path hash mode readback failed.');
     for (const [name,command,response] of [['autoadd',58,25],['tuning',21,23]]) if (typeof p.options[name] === 'string') {
       const record = unhex(p.options[name]); if (record[0] !== response || (name === 'tuning' ? record.length !== 9 : ![2,3].includes(record.length))) fail('Invalid optional settings record.');
       await this.request([command,...record.subarray(1)],0);
@@ -428,6 +452,7 @@ export async function backupCommonCli(link, progress = () => {}) {
 
 export function backupSummary(archive) {
   const p=verifyBackup(archive),missing=[];
+  if(p.role==='ripple')return {role:'ripple',complete:false,privateIdentity:true,reasons:rippleCoverage(p).notIncluded.map(item=>item.label),safeForWipe:false};
   if(p.role==='common-cli'){
     const states=Object.entries(p.replies).map(([command,raw])=>({command,...commonCliReplyState(raw,command)})),errors=states.filter(row=>row.state==='error'),unsupported=states.filter(row=>row.state==='unsupported');
     return {role:p.role,complete:false,privateIdentity:!!/(?<![a-f0-9])[a-f0-9]{128}(?![a-f0-9])/i.exec(p.replies?.['get prv.key']||''),reasons:['CommonCLI exports exposed settings, not an atomic or whole-flash backup.',...errors.map(row=>`${row.command}: ${row.reason||'query failed'}`),...unsupported.map(row=>`${row.command}: unsupported by this firmware`),...(p.regions?.state==='complete'?[]:[`Regions: ${p.regions?.reason||'No complete typed region snapshot was captured.'}`])],safeForWipe:false,queryErrors:errors.map(row=>row.command),unsupportedQueries:unsupported.map(row=>row.command)};
@@ -437,6 +462,7 @@ export function backupSummary(archive) {
   for(const name of ['autoadd','tuning','custom','scope'])if(typeof p.options[name]!=='string')missing.push(`${name} settings unavailable.`);
   for(const [command,value] of Object.entries(p.cli))if(value===null||typeof value==='string'&&/^\s*(?:->\s*)?error/i.test(value))missing.push(`${command} unavailable.`);
   if(!p.batteryAndStorage || p.batteryAndStorage.unavailable)missing.push('Battery/storage diagnostics unavailable.');
+  if(p.wadamesh)missing.push(p.wadamesh.files.length?'Saved UI and Wi-Fi files require separate offline copyback to the same device/storage layout.':'UI and Wi-Fi preferences require adding the original meshcomod or prefs folder.');
   return {role:p.role,complete:!missing.length,privateIdentity:!!p.privateKey,reasons:missing,safeForWipe:false};
 }
 

@@ -28,6 +28,10 @@ import {createPostFlashSettingsPlan,applyPostFlashSettings} from '../src/post-fl
 import {createPostFlashCompanionRequest} from '../src/post-flash-companion.js';
 import {MigrationApproval} from '../src/migration-approval.js';
 import {cleanCliReply} from '../src/meshcore.js';
+import {sealBackup as sealWebBackup,verifyBackup as verifyWebBackup,backupSummary as webBackupSummary,publicFromPrivate} from '../src/meshcore.js';
+import {ripplePayload,wadameshIdentityImport} from '../src/ripple-backup.js';
+import {addWadameshFiles,wadameshFilesZip,wadameshSettingsImport} from '../src/wadamesh-backup.js';
+import {sha512} from '@noble/hashes/sha2.js';
 import {assessBootloaderVersion} from '../src/bootloader-version.js';
 import {fetchFirmwareBytes as verifiedDownload} from '../src/downloads.js';
 import {firmwareFilesLinks} from '../src/firmware-links.js';
@@ -5140,5 +5144,98 @@ test('removing or changing the slot target during storage-layout reading cannot 
     const ui=await queuedSettingsVerificationWorkbench();ui.context.expected.espSlot={selection:'a',label:'app0',offset:0x10000,size:0x100000};const original=ui.context.SerialLink.prototype.command;
     ui.context.SerialLink.prototype.command=async function(command,...args){const reply=await original.call(this,command,...args);if(command==='get storage.layout')mutate(ui.context.expected);return reply;};
     await assert.rejects(ui.evaluate('verifyApplication();'),/Single-slot verification target changed/);assert.equal(ui.evaluate('state.finishedFirmware'),null);assert.ok(ui.evaluate('state.verification'));assert.equal(ui.evaluate('state.postFlashSettingsApproval.attempted'),false);assert.ok(!ui.calls.some(call=>call.startsWith('set ')));assert.ok(!ui.calls.includes('get boot.slot'));
+  }
+});
+
+function rippleUiFixture(ui){
+  const key=sha512(new Uint8Array(32).fill(42));key[0]&=248;key[31]=(key[31]&63)|64;
+  const capture={publicKey:publicFromPrivate(key),privateKey:Buffer.from(key).toString('hex'),source:{mac:'00:11:22:33:44:55',usbSerial:'00:11:22:33:44:55',usbVendorId:0x303a,usbProductId:0x1001,chip:'ESP32-S3',version:'v8.3',environment:'TPager_GeoQwerty_sx1262_SD',radio:'SX1262',storage:'sd-card'}};
+  ui.context.ripplePayload=ripplePayload;ui.context.sealBackup=sealWebBackup;ui.context.verifyBackup=verifyWebBackup;ui.context.backupSummary=webBackupSummary;ui.context.wadameshIdentityImport=wadameshIdentityImport;
+  ui.context.navigator.usb={};ui.context.chooseRippleUsbDevice=()=>{ui.calls.push('ripple-chooser');return Promise.resolve({chosen:true});};
+  ui.context.captureRippleUsb=async device=>{assert.equal(device.chosen,true);ui.calls.push('ripple-read');return capture;};
+  ui.downloads=[];ui.context.download=(name,data,type)=>ui.downloads.push({name,data,type});
+  return capture;
+}
+
+test('Ripple backup works without a serial port, downloads a verified archive and never logs the key',async()=>{
+  const ui=workbench();await Promise.resolve();const capture=rippleUiFixture(ui);
+  assert.equal(ui.evaluate('state.port'),null);
+  await ui.elements.get('ripple-usb').onclick();
+  assert.deepEqual(ui.calls,['ripple-chooser','ripple-read']);assert.equal(ui.downloads.length,1);
+  const archive=JSON.parse(ui.downloads[0].data);assert.equal(verifyWebBackup(archive).privateKey,capture.privateKey);
+  assert.equal(ui.elements.get('backup-role').value,'ripple');assert.equal(ui.elements.get('ripple-key').disabled,false);
+  assert.equal(ui.elements.get('ripple-files').disabled,true);assert.equal(ui.elements.get('ripple-wadamesh').disabled,false);
+  assert.match(ui.elements.get('backup-summary').textContent,/Ripple backup verified/);
+  assert.equal(ui.elements.get('log').textContent.includes(capture.privateKey),false);
+  assert.equal(ui.elements.get('backup-summary').textContent.includes(capture.privateKey),false);
+});
+
+test('pending firmware operations block Ripple USB before permission or device access',async()=>{
+  for(const pending of ['state.migration={pending:true}','state.espRecovery={pending:true}','state.plan={written:true}','state.handoff=true']){
+    const ui=workbench();await Promise.resolve();rippleUiFixture(ui);ui.evaluate(pending);
+    await assert.rejects(ui.evaluate('captureRippleBackup()'),/Finish the pending/);assert.deepEqual(ui.calls,[]);
+  }
+});
+
+test('Ripple prepare approval binds the selected backup to its USB MAC and never reads serial settings',async()=>{
+  const ui=workbench();await Promise.resolve();const capture=rippleUiFixture(ui);
+  await ui.elements.get('ripple-usb').onclick();ui.calls.length=0;
+  ui.context.selectedPort=ui.port;ui.context.choose=async()=> 'continue';
+  ui.evaluate("state.port=selectedPort;state.pkg={sha256:'a'.repeat(64)};");
+  await ui.evaluate('ensureBackup()');
+  assert.equal(ui.evaluate('state.backupApproved.sourceMac'),capture.source.mac);
+  assert.equal(ui.evaluate('state.backupApproved.sourceFirmware'),'ripple');assert.equal(ui.evaluate('state.backupApproved.port'),ui.port);
+  assert.deepEqual(ui.calls,[]);
+  ui.evaluate('state.backupApproved=null;state.rippleBackup=null;');
+  await assert.rejects(ui.evaluate('ensureBackup()'),/Back up Ripple first/);assert.deepEqual(ui.calls,[]);
+});
+
+test('Wadamesh identity download contains no settings inventories and opens no device',async()=>{
+  const ui=workbench();await Promise.resolve();const capture=rippleUiFixture(ui);
+  await ui.elements.get('ripple-usb').onclick();ui.calls.length=0;ui.downloads.length=0;
+  await ui.elements.get('ripple-wadamesh').onclick();
+  assert.deepEqual(ui.calls,[]);assert.equal(ui.downloads.length,1);assert.equal(ui.downloads[0].name,'meshcore-backup.json');
+  const native=JSON.parse(ui.downloads[0].data);
+  assert.deepEqual(Object.keys(native).sort(),['private_key','public_key']);assert.equal(native.private_key,capture.privateKey);
+});
+
+async function wadameshUiFixture(){
+  const ui=workbench();await Promise.resolve();const id=rippleUiFixture(ui);serialMock(ui);
+  const self=new Uint8Array(62),info=new Uint8Array(82),channel=new Uint8Array(50),view=new DataView(self.buffer);
+  self.set([5,1,20,22]);self.set(Buffer.from(id.publicKey,'hex'),4);self.set([10,5],56);self.set(new TextEncoder().encode('test'),58);view.setUint32(48,910525,true);view.setUint32(52,125000,true);
+  info.set([13,14,2,1]);channel[0]=18;
+  const hex=value=>Buffer.from(value).toString('hex');
+  ui.payload={role:'companion',safeForWipe:false,publicKey:id.publicKey,privateKey:'0e'+id.privateKey,self:hex(self),info:hex(info),channels:[hex(channel)],contacts:[],options:{},cli:{},wadamesh:{version:1,files:[],filesExcluded:0}};
+  ui.context.selectedPort=ui.port;ui.evaluate("state.port=selectedPort;state.device={role:'companion',model:'Test board'};");
+  ui.context.MeshCore=class{async backup(){ui.calls.push('wadamesh-capture');return sealWebBackup(ui.payload);}};
+  ui.context.exportNativeBackup=()=>assert.fail('The Wadamesh archive must retain its own full inventory and saved files');
+  ui.context.addWadameshFiles=addWadameshFiles;ui.context.wadameshFilesZip=wadameshFilesZip;ui.context.wadameshSettingsImport=wadameshSettingsImport;
+  return ui;
+}
+test('dedicated Wadamesh capture overrides stale Ripple selection and keeps its fuller browser archive',async()=>{
+  const ui=await wadameshUiFixture();ui.elements.get('backup-role').value='ripple';
+  await ui.elements.get('wadamesh-usb').onclick();
+  assert.ok(ui.calls.includes('wadamesh-capture'));assert.ok(!ui.calls.includes('ripple-chooser'));assert.equal(ui.downloads.length,1);
+  const p=verifyWebBackup(JSON.parse(ui.downloads[0].data));assert.ok(p.wadamesh);assert.equal(p.privateKey,ui.payload.privateKey);
+  assert.equal(ui.elements.get('wadamesh-folder').disabled,false);assert.equal(ui.elements.get('wadamesh-settings').disabled,false);assert.equal(ui.elements.get('wadamesh-files').disabled,true);
+  ui.calls.length=0;ui.downloads.length=0;await ui.elements.get('wadamesh-settings').onclick();
+  assert.deepEqual(ui.calls,[]);assert.equal(JSON.parse(ui.downloads[0].data).private_key,p.privateKey.slice(2));
+  assert.ok(!ui.elements.get('log').textContent.includes(p.privateKey));
+});
+test('Wadamesh saved-folder enrichment and import preserve original UI files without accessing a device',async()=>{
+  const ui=await wadameshUiFixture();await ui.elements.get('wadamesh-usb').onclick();ui.calls.length=0;ui.downloads.length=0;
+  const bytes=new TextEncoder().encode('screen and keyboard fixture');ui.elements.get('wadamesh-folder-files').files=[{name:'touch.kv',webkitRelativePath:'meshcomod/touch.kv',size:bytes.length,arrayBuffer:async()=>bytes.slice().buffer}];
+  await ui.elements.get('wadamesh-folder-files').onchange();
+  assert.deepEqual(ui.calls,[]);assert.equal(ui.downloads.length,1);assert.equal(verifyWebBackup(JSON.parse(ui.downloads[0].data)).wadamesh.files.length,1);
+  assert.equal(ui.elements.get('wadamesh-files').disabled,false);
+  const raw=ui.downloads[0].data;ui.context.parseBackup=async text=>JSON.parse(text);ui.elements.get('backup-file').files=[{name:'wadamesh.json',size:raw.length,text:async()=>raw}];
+  await ui.elements.get('backup-file').onchange();assert.deepEqual(ui.calls,[]);
+  assert.match(ui.elements.get('restore-report').textContent,/UI and Wi-Fi.*separately/);assert.equal(ui.elements.get('replace-identity').checked,false);
+  await ui.elements.get('wadamesh-files').onclick();assert.equal(ui.downloads.at(-1).type,'application/zip');assert.deepEqual(ui.calls,[]);
+});
+test('pending firmware operations block dedicated Wadamesh capture before device access',async()=>{
+  for(const pending of ['state.migration={pending:true}','state.espRecovery={pending:true}','state.plan={written:true}','state.handoff=true']){
+    const ui=await wadameshUiFixture();ui.evaluate(pending);
+    await assert.rejects(ui.evaluate('captureBackup({wadamesh:true})'),/Finish the pending/);assert.deepEqual(ui.calls,[]);
   }
 });
