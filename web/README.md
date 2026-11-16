@@ -94,6 +94,10 @@ supported local USB identity API. Choose the exact hardware manually in that
 case. Permission, disconnection and port-open errors remain connection errors;
 USB VID/PID alone does not establish the board or running firmware.
 
+For Ripple identity backup, open **Backup & restore** and use its dedicated
+**Ripple standalone backup** option below. It has its own read-only USB
+identification and does not guess the board from an unresponsive serial API.
+
 ### Narrowing ESP32 board choices
 
 A reviewed native ESP USB identity narrows the list to ESP32-family targets,
@@ -894,6 +898,60 @@ identity and channel secrets. Use **Clear text** to remove the displayed copies;
 the prompt's copy is cleared when it closes. Copying is not proof that a private
 file was saved, and clearing the text does not recall anything already copied
 to the system clipboard or delete a downloaded backup.
+
+### Ripple standalone backup and Wadamesh identity restore
+
+Open **Backup & restore**, then **Ripple standalone backup**. Keep Ripple
+running normally and click **Back up Ripple**. Choose its built-in USB device
+in desktop Chrome or Edge. This path uses WebUSB on ESP32-S3, not the
+Companion export commands. It reads the chip MAC, identifies the running
+Ripple build and recovers the loaded identity. The 64-byte expanded private
+key must reproduce the public key stored beside it. Different matching
+identities stop the operation instead of selecting one arbitrarily.
+
+The device restarts normally before key searching and file handling. The
+USB debug library temporarily disables watchdogs on attach; a normal restart
+lets firmware initialization restore the runtime settings. If restart fails,
+backup reports the failure and asks for a manual restart before retrying.
+No firmware image is installed, no flash is erased and no radio parameters
+are changed. The general memory capture is discarded; it is not placed in
+the backup or operation log. USB backup needs accessible built-in USB/JTAG;
+an external USB/UART adapter and locked debug access cannot provide it.
+If USB backup is unavailable, use **Add Ripple SD folder** with the card
+connected to the computer. A file-only backup also requires a verified
+private/public identity pair in the selected original files.
+
+**Add Ripple SD folder** can enrich the USB backup with original settings,
+contacts and channel files. The USB identity must match an identity found on
+the card when one is present. These files stay in their original format;
+the page does not guess undocumented Ripple layouts or convert preferences
+to Companion settings. Maps, tracks and files outside the Ripple folder are
+excluded. Limits are 256 files, 1 MiB each and 4 MiB in total. Every included
+file has a size and SHA-256 check. **Download SD files** produces a ZIP with
+the original `ripple/` paths for copying to the card while the device is off.
+
+Ripple downloads use `org.meshfirmware.web-backup/v1` with role `ripple`,
+not the native script archive. **Import JSON** verifies the archive and key
+before offering an identity-only restore to MeshCore Companion or Wadamesh.
+Replacing another identity requires the existing replacement checkbox and
+restore confirmation. The target's public key is read again after import;
+an acknowledgement alone does not count as success. This uses the same
+private-key import command that Wadamesh enables in its Companion API.
+
+**Download Wadamesh identity** is an alternative for Wadamesh's on-device
+**Import settings**. Copy the downloaded `meshcore-backup.json` to its SD
+card. The file contains only `public_key` and `private_key`; absent radio,
+position, contact and channel sections leave those settings untouched.
+**Download private key** exports the verified 128-character expanded key.
+Both downloads contain secrets; keep them privately on your computer.
+
+To use a USB Ripple backup before flashing, select its backup interface in
+the override and prepare the update. The factory MAC in the backup must
+match the connected ESP32 before preparation and again before writing.
+An SD-only backup cannot establish that physical USB identity. Backups are
+kept only in page memory and downloads, never uploaded or stored in browser
+preferences. A key-only backup is explicitly distinguished from saved SD
+files and is never labelled a complete flash or whole-device backup.
 
 ### Import JSON and restore repeater settings
 

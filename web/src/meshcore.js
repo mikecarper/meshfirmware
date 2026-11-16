@@ -1,3 +1,4 @@
+import { validateRipplePayload, rippleCoverage } from './ripple-backup.js';
 // MeshCore USB companion protocol. No message-queue consumption or host helper.
 import { ed25519 } from '@noble/curves/ed25519';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
@@ -102,7 +103,8 @@ export function verifyBackup(archive) {
   const {sha256,...covered} = archive;
   if (hash(encode(canonical(covered))) !== sha256) fail('Backup SHA-256 mismatch.');
   const p = archive.payload;
-  if (!p || !['companion','common-cli'].includes(p.role) || p.safeForWipe !== false) fail('Invalid backup metadata.');
+  if (!p || !['companion','common-cli','ripple'].includes(p.role) || p.safeForWipe !== false) fail('Invalid backup metadata.');
+  if(p.role==='ripple')return validateRipplePayload(p);
   if(p.capabilities!==undefined)validateSettingCapabilityRecord(p.capabilities);
   if (p.role === 'companion') {
     validateCompanion(p);
@@ -428,6 +430,7 @@ export async function backupCommonCli(link, progress = () => {}) {
 
 export function backupSummary(archive) {
   const p=verifyBackup(archive),missing=[];
+  if(p.role==='ripple')return {role:'ripple',complete:false,privateIdentity:true,reasons:rippleCoverage(p).notIncluded.map(item=>item.label),safeForWipe:false};
   if(p.role==='common-cli'){
     const states=Object.entries(p.replies).map(([command,raw])=>({command,...commonCliReplyState(raw,command)})),errors=states.filter(row=>row.state==='error'),unsupported=states.filter(row=>row.state==='unsupported');
     return {role:p.role,complete:false,privateIdentity:!!/(?<![a-f0-9])[a-f0-9]{128}(?![a-f0-9])/i.exec(p.replies?.['get prv.key']||''),reasons:['CommonCLI exports exposed settings, not an atomic or whole-flash backup.',...errors.map(row=>`${row.command}: ${row.reason||'query failed'}`),...unsupported.map(row=>`${row.command}: unsupported by this firmware`),...(p.regions?.state==='complete'?[]:[`Regions: ${p.regions?.reason||'No complete typed region snapshot was captured.'}`])],safeForWipe:false,queryErrors:errors.map(row=>row.command),unsupportedQueries:unsupported.map(row=>row.command)};

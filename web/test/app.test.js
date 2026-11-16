@@ -28,6 +28,9 @@ import {createPostFlashSettingsPlan,applyPostFlashSettings} from '../src/post-fl
 import {createPostFlashCompanionRequest} from '../src/post-flash-companion.js';
 import {MigrationApproval} from '../src/migration-approval.js';
 import {cleanCliReply} from '../src/meshcore.js';
+import {sealBackup as sealWebBackup,verifyBackup as verifyWebBackup,backupSummary as webBackupSummary,publicFromPrivate} from '../src/meshcore.js';
+import {ripplePayload,wadameshIdentityImport} from '../src/ripple-backup.js';
+import {sha512} from '@noble/hashes/sha2.js';
 import {assessBootloaderVersion} from '../src/bootloader-version.js';
 import {fetchFirmwareBytes as verifiedDownload} from '../src/downloads.js';
 import {firmwareFilesLinks} from '../src/firmware-links.js';
@@ -5141,4 +5144,56 @@ test('removing or changing the slot target during storage-layout reading cannot 
     ui.context.SerialLink.prototype.command=async function(command,...args){const reply=await original.call(this,command,...args);if(command==='get storage.layout')mutate(ui.context.expected);return reply;};
     await assert.rejects(ui.evaluate('verifyApplication();'),/Single-slot verification target changed/);assert.equal(ui.evaluate('state.finishedFirmware'),null);assert.ok(ui.evaluate('state.verification'));assert.equal(ui.evaluate('state.postFlashSettingsApproval.attempted'),false);assert.ok(!ui.calls.some(call=>call.startsWith('set ')));assert.ok(!ui.calls.includes('get boot.slot'));
   }
+});
+
+function rippleUiFixture(ui){
+  const key=sha512(new Uint8Array(32).fill(42));key[0]&=248;key[31]=(key[31]&63)|64;
+  const capture={publicKey:publicFromPrivate(key),privateKey:Buffer.from(key).toString('hex'),source:{mac:'00:11:22:33:44:55',usbSerial:'00:11:22:33:44:55',usbVendorId:0x303a,usbProductId:0x1001,chip:'ESP32-S3',version:'v8.3',environment:'TPager_GeoQwerty_sx1262_SD',radio:'SX1262',storage:'sd-card'}};
+  ui.context.ripplePayload=ripplePayload;ui.context.sealBackup=sealWebBackup;ui.context.verifyBackup=verifyWebBackup;ui.context.backupSummary=webBackupSummary;ui.context.wadameshIdentityImport=wadameshIdentityImport;
+  ui.context.navigator.usb={};ui.context.chooseRippleUsbDevice=()=>{ui.calls.push('ripple-chooser');return Promise.resolve({chosen:true});};
+  ui.context.captureRippleUsb=async device=>{assert.equal(device.chosen,true);ui.calls.push('ripple-read');return capture;};
+  ui.downloads=[];ui.context.download=(name,data,type)=>ui.downloads.push({name,data,type});
+  return capture;
+}
+
+test('Ripple backup works without a serial port, downloads a verified archive and never logs the key',async()=>{
+  const ui=workbench();await Promise.resolve();const capture=rippleUiFixture(ui);
+  assert.equal(ui.evaluate('state.port'),null);
+  await ui.elements.get('ripple-usb').onclick();
+  assert.deepEqual(ui.calls,['ripple-chooser','ripple-read']);assert.equal(ui.downloads.length,1);
+  const archive=JSON.parse(ui.downloads[0].data);assert.equal(verifyWebBackup(archive).privateKey,capture.privateKey);
+  assert.equal(ui.elements.get('backup-role').value,'ripple');assert.equal(ui.elements.get('ripple-key').disabled,false);
+  assert.equal(ui.elements.get('ripple-files').disabled,true);assert.equal(ui.elements.get('ripple-wadamesh').disabled,false);
+  assert.match(ui.elements.get('backup-summary').textContent,/Ripple backup verified/);
+  assert.equal(ui.elements.get('log').textContent.includes(capture.privateKey),false);
+  assert.equal(ui.elements.get('backup-summary').textContent.includes(capture.privateKey),false);
+});
+
+test('pending firmware operations block Ripple USB before permission or device access',async()=>{
+  for(const pending of ['state.migration={pending:true}','state.espRecovery={pending:true}','state.plan={written:true}','state.handoff=true']){
+    const ui=workbench();await Promise.resolve();rippleUiFixture(ui);ui.evaluate(pending);
+    await assert.rejects(ui.evaluate('captureRippleBackup()'),/Finish the pending/);assert.deepEqual(ui.calls,[]);
+  }
+});
+
+test('Ripple prepare approval binds the selected backup to its USB MAC and never reads serial settings',async()=>{
+  const ui=workbench();await Promise.resolve();const capture=rippleUiFixture(ui);
+  await ui.elements.get('ripple-usb').onclick();ui.calls.length=0;
+  ui.context.selectedPort=ui.port;ui.context.choose=async()=> 'continue';
+  ui.evaluate("state.port=selectedPort;state.pkg={sha256:'a'.repeat(64)};");
+  await ui.evaluate('ensureBackup()');
+  assert.equal(ui.evaluate('state.backupApproved.sourceMac'),capture.source.mac);
+  assert.equal(ui.evaluate('state.backupApproved.sourceFirmware'),'ripple');assert.equal(ui.evaluate('state.backupApproved.port'),ui.port);
+  assert.deepEqual(ui.calls,[]);
+  ui.evaluate('state.backupApproved=null;state.rippleBackup=null;');
+  await assert.rejects(ui.evaluate('ensureBackup()'),/Back up Ripple first/);assert.deepEqual(ui.calls,[]);
+});
+
+test('Wadamesh identity download contains no settings inventories and opens no device',async()=>{
+  const ui=workbench();await Promise.resolve();const capture=rippleUiFixture(ui);
+  await ui.elements.get('ripple-usb').onclick();ui.calls.length=0;ui.downloads.length=0;
+  await ui.elements.get('ripple-wadamesh').onclick();
+  assert.deepEqual(ui.calls,[]);assert.equal(ui.downloads.length,1);assert.equal(ui.downloads[0].name,'meshcore-backup.json');
+  const native=JSON.parse(ui.downloads[0].data);
+  assert.deepEqual(Object.keys(native).sort(),['private_key','public_key']);assert.equal(native.private_key,capture.privateKey);
 });

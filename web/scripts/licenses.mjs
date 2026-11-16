@@ -20,6 +20,9 @@ async function visit(name,from) {
 }
 const pkg=JSON.parse(await readFile(new URL('../package.json',import.meta.url),'utf8'));
 for(const name of Object.keys(pkg.dependencies)) await visit(name,new URL('../package.json',import.meta.url));
+// The published probe-web package omits its root copyright/license file.
+// Preserve the exact upstream v0.6.0 notice alongside its unchanged wasm.
+await writeFile(new URL('probe-web-0.6.0-MIT.txt',out),await readFile(new URL('../licenses/probe-web-0.6.0-MIT.txt',import.meta.url)));
 for(const raw of ids) {
   const id=['GPL-3.0','GPLV3'].includes(raw)?'GPL-3.0-only':raw==='GPL-2.0'?'GPL-2.0-only':raw;
   const response=await fetch(`https://raw.githubusercontent.com/spdx/license-list-data/main/text/${id}.txt`,{signal:AbortSignal.timeout(30000)});
