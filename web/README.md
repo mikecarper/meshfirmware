@@ -866,7 +866,7 @@ that an application or the new bootloader has started successfully.
 
 ### Backup compatibility and physical-target checks
 
-New browser downloads use `org.meshfirmware.meshcore-backup/v1`, the native
+Ordinary MeshCore browser downloads use `org.meshfirmware.meshcore-backup/v1`, the native
 script archive format. The exact Python serializer seals the archive inside
 WebAssembly; the exact validator verifies it before download. Existing script
 archives and older browser-format archives still import into this page.
@@ -898,6 +898,68 @@ identity and channel secrets. Use **Clear text** to remove the displayed copies;
 the prompt's copy is cleared when it closes. Copying is not proof that a private
 file was saved, and clearing the text does not recall anything already copied
 to the system clipboard or delete a downloaded backup.
+
+### Wadamesh backup and restore
+
+Open **Backup & restore -> Wadamesh settings backup**. Choose the running
+device's application USB port and click **Back up Wadamesh**. Normal automatic
+backup also recognizes the reviewed Wadamesh/Meshcomod protocol profile.
+The private identity is checked against the public key. The backup preserves:
+
+- Identity, node name, channels and channel secrets, contacts and route paths.
+- Frequency, bandwidth, spreading factor, coding rate, signed TX power,
+  advertised position, location policy, telemetry modes and multiple ACKs.
+- BLE PIN, client repeat, path hash mode, manual/automatic contact-add rules
+  and maximum hops, radio tuning, default flood scope and exposed custom/sensor
+  settings such as GPS enable/interval, when the firmware provides them.
+- Device/firmware information, battery/storage diagnostics and individually
+  reported optional CLI settings. Unsupported settings are listed explicitly.
+
+Current Wadamesh builds hold 2,000 contacts and 40 channels, but the one-byte
+capacity reply wraps to 464. The browser supports the full 2,000 only when the
+exact reviewed layout and firmware's own Meshcomod/Wadamesh version reply
+agree. Restore independently checks the live target, existing contacts and
+combined capacity before writing. Large USB bursts are read in bounded chunks.
+The older generic eight-line `get` summary is not mistaken for support for
+Bluetooth names, logging, credentials or other individual preferences.
+
+Wadamesh downloads keep the browser's `org.meshfirmware.web-backup/v1` archive
+with role `companion` and a versioned `wadamesh` saved-files record, preserving
+the full contact inventory and original files. Use **Import JSON**, review the
+preview and click **Review & restore settings** to restore over USB. Changed
+identity requires explicit replacement; a different board requires migration
+selection. Supported writes are checked by reading them back, including repeat
+and path hash. A failed readback stops the restore; earlier writes may already
+have applied. Unexposed settings are never guessed or sent as arbitrary commands.
+
+**Add Wadamesh data folder** preserves display, keyboard, language, theme,
+notification, GPS/UI and saved Wi-Fi preferences as original files. Select the
+`meshcomod` folder from the SD card, or an exported `prefs` folder from internal
+storage. Both roots can be added, one at a time. The original primary identity
+file, when included, must match the USB identity; it can supply the private key
+if USB export was disabled. Files keep their original paths, bytes and SHA-256
+hashes. Maps, message history, tracks, logs and files outside these roots are
+excluded, with limits of 256 files, 1 MiB per file and 4 MiB total. Smaller
+settings files are prioritized when limits are reached, and exclusions are
+reported. A folder capture replaces a previous snapshot of that same root.
+
+These UI/Wi-Fi files are not exposed by the current USB API. Use **Download
+saved files**, extract the ZIP and copy the original folders back while the
+device is off, on the same device and storage layout. The page does not write
+internal filesystems or raw flash to restore them, and does not claim USB
+restored those preferences. Older NVS-only settings require a firmware-side
+export/migration before they can be included as files.
+
+**Download Wadamesh settings** makes `meshcore-backup.json` for Wadamesh's
+on-device **Import settings**: identity, name, radio, position, channel slots
+and contacts. Empty channel slots are retained to preserve channel numbering.
+That importer does not restore routes, BLE PIN, repeat/path hash, telemetry,
+sensor settings or original UI files; keep the browser archive for the fuller
+USB restore. Backups may contain private keys, channel secrets and Wi-Fi
+credentials. They stay in page memory and downloaded files; keep them private.
+This is a settings backup, not a firmware or whole-flash image. The Wadamesh
+workflow is covered by protocol and browser tests; a live Wadamesh device
+restore has not yet been verified.
 
 ### Ripple standalone backup and Wadamesh identity restore
 

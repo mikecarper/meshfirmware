@@ -33,6 +33,10 @@ export function commonCliReplyState(raw,command=''){
   if(typeof raw!=='string'||raw.length>8192||control.test(raw.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'')))return {state:'error',text:'',reason:'Invalid or oversized serial reply.'};
   const clean=raw.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,''),lines=clean.split(/[\r\n]+/).map(line=>line.trim().replace(/^(?:->\s*)+/,''));
   let text=lines.filter(line=>line!==command.trim()&&!(command===''&&allowedCommands.has(line))).map(line=>line.replace(/^>\s?/,'' )).filter(Boolean).join('\n').trim();
+  // Wadamesh/Meshcomod's older CLI treats every "get <setting>" as the
+  // general "get" command. Its eight-line summary is not proof that the
+  // requested preference exists (or a safe value to replay as that setting).
+  if(command.startsWith('get ')&&/^name: [^\n]*\nfreq: [^\n]+ MHz\nbw: [^\n]+ kHz\nsf: \d+\ncr: \d+\ntx: -?\d+ dBm\nlat: -?[\d.]+\nlon: -?[\d.]+$/i.test(text))return {state:'unsupported',text,reason:'Firmware returned its general settings summary instead of this preference.'};
   if(credentialQueries.has(command)){
     const values=clean.split(/[\r\n]+/).filter(line=>line.trim()&&line.trim()!==command).map(line=>{const match=/^\s*(?:->\s*)?> ?(.*)$/.exec(line);return match?match[1]:line;}).filter(line=>line!=='>');
     if(values.length===1)text=values[0];else if(values.length>1)return {state:'error',text:'',reason:'Ambiguous credential reply.'};

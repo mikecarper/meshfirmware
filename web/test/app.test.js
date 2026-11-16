@@ -30,6 +30,7 @@ import {MigrationApproval} from '../src/migration-approval.js';
 import {cleanCliReply} from '../src/meshcore.js';
 import {sealBackup as sealWebBackup,verifyBackup as verifyWebBackup,backupSummary as webBackupSummary,publicFromPrivate} from '../src/meshcore.js';
 import {ripplePayload,wadameshIdentityImport} from '../src/ripple-backup.js';
+import {addWadameshFiles,wadameshFilesZip,wadameshSettingsImport} from '../src/wadamesh-backup.js';
 import {sha512} from '@noble/hashes/sha2.js';
 import {assessBootloaderVersion} from '../src/bootloader-version.js';
 import {fetchFirmwareBytes as verifiedDownload} from '../src/downloads.js';
@@ -5196,4 +5197,45 @@ test('Wadamesh identity download contains no settings inventories and opens no d
   assert.deepEqual(ui.calls,[]);assert.equal(ui.downloads.length,1);assert.equal(ui.downloads[0].name,'meshcore-backup.json');
   const native=JSON.parse(ui.downloads[0].data);
   assert.deepEqual(Object.keys(native).sort(),['private_key','public_key']);assert.equal(native.private_key,capture.privateKey);
+});
+
+async function wadameshUiFixture(){
+  const ui=workbench();await Promise.resolve();const id=rippleUiFixture(ui);serialMock(ui);
+  const self=new Uint8Array(62),info=new Uint8Array(82),channel=new Uint8Array(50),view=new DataView(self.buffer);
+  self.set([5,1,20,22]);self.set(Buffer.from(id.publicKey,'hex'),4);self.set([10,5],56);self.set(new TextEncoder().encode('test'),58);view.setUint32(48,910525,true);view.setUint32(52,125000,true);
+  info.set([13,14,2,1]);channel[0]=18;
+  const hex=value=>Buffer.from(value).toString('hex');
+  ui.payload={role:'companion',safeForWipe:false,publicKey:id.publicKey,privateKey:'0e'+id.privateKey,self:hex(self),info:hex(info),channels:[hex(channel)],contacts:[],options:{},cli:{},wadamesh:{version:1,files:[],filesExcluded:0}};
+  ui.context.selectedPort=ui.port;ui.evaluate("state.port=selectedPort;state.device={role:'companion',model:'Test board'};");
+  ui.context.MeshCore=class{async backup(){ui.calls.push('wadamesh-capture');return sealWebBackup(ui.payload);}};
+  ui.context.exportNativeBackup=()=>assert.fail('The Wadamesh archive must retain its own full inventory and saved files');
+  ui.context.addWadameshFiles=addWadameshFiles;ui.context.wadameshFilesZip=wadameshFilesZip;ui.context.wadameshSettingsImport=wadameshSettingsImport;
+  return ui;
+}
+test('dedicated Wadamesh capture overrides stale Ripple selection and keeps its fuller browser archive',async()=>{
+  const ui=await wadameshUiFixture();ui.elements.get('backup-role').value='ripple';
+  await ui.elements.get('wadamesh-usb').onclick();
+  assert.ok(ui.calls.includes('wadamesh-capture'));assert.ok(!ui.calls.includes('ripple-chooser'));assert.equal(ui.downloads.length,1);
+  const p=verifyWebBackup(JSON.parse(ui.downloads[0].data));assert.ok(p.wadamesh);assert.equal(p.privateKey,ui.payload.privateKey);
+  assert.equal(ui.elements.get('wadamesh-folder').disabled,false);assert.equal(ui.elements.get('wadamesh-settings').disabled,false);assert.equal(ui.elements.get('wadamesh-files').disabled,true);
+  ui.calls.length=0;ui.downloads.length=0;await ui.elements.get('wadamesh-settings').onclick();
+  assert.deepEqual(ui.calls,[]);assert.equal(JSON.parse(ui.downloads[0].data).private_key,p.privateKey.slice(2));
+  assert.ok(!ui.elements.get('log').textContent.includes(p.privateKey));
+});
+test('Wadamesh saved-folder enrichment and import preserve original UI files without accessing a device',async()=>{
+  const ui=await wadameshUiFixture();await ui.elements.get('wadamesh-usb').onclick();ui.calls.length=0;ui.downloads.length=0;
+  const bytes=new TextEncoder().encode('screen and keyboard fixture');ui.elements.get('wadamesh-folder-files').files=[{name:'touch.kv',webkitRelativePath:'meshcomod/touch.kv',size:bytes.length,arrayBuffer:async()=>bytes.slice().buffer}];
+  await ui.elements.get('wadamesh-folder-files').onchange();
+  assert.deepEqual(ui.calls,[]);assert.equal(ui.downloads.length,1);assert.equal(verifyWebBackup(JSON.parse(ui.downloads[0].data)).wadamesh.files.length,1);
+  assert.equal(ui.elements.get('wadamesh-files').disabled,false);
+  const raw=ui.downloads[0].data;ui.context.parseBackup=async text=>JSON.parse(text);ui.elements.get('backup-file').files=[{name:'wadamesh.json',size:raw.length,text:async()=>raw}];
+  await ui.elements.get('backup-file').onchange();assert.deepEqual(ui.calls,[]);
+  assert.match(ui.elements.get('restore-report').textContent,/UI and Wi-Fi.*separately/);assert.equal(ui.elements.get('replace-identity').checked,false);
+  await ui.elements.get('wadamesh-files').onclick();assert.equal(ui.downloads.at(-1).type,'application/zip');assert.deepEqual(ui.calls,[]);
+});
+test('pending firmware operations block dedicated Wadamesh capture before device access',async()=>{
+  for(const pending of ['state.migration={pending:true}','state.espRecovery={pending:true}','state.plan={written:true}','state.handoff=true']){
+    const ui=await wadameshUiFixture();ui.evaluate(pending);
+    await assert.rejects(ui.evaluate('captureBackup({wadamesh:true})'),/Finish the pending/);assert.deepEqual(ui.calls,[]);
+  }
 });

@@ -140,6 +140,11 @@ export function backupCoverage(archive,nativeArchive=null){
     else if(region.state!=='error')add(sections.regions,'unsupported',4,'Tree, home and default-scope data were not all captured.');
   }
   const included=[],notIncluded=baseline.map(item=>({...item})),failed=[];
+  if(payload.wadamesh){
+    if(payload.wadamesh.files.length)included.push(`${payload.wadamesh.files.length} original Wadamesh settings files (offline copyback)`);
+    else notIncluded.push({label:'UI and saved Wi-Fi preferences',reason:'Add the original meshcomod or prefs folder to preserve settings not exposed over USB.'});
+    notIncluded.push({label:'Maps, tracks and files beyond the folder/size limits',reason:`${payload.wadamesh.filesExcluded} selected files excluded. These are separate storage content.`});
+  }
   for(const value of records.values()){
     if(value.state==='complete'){included.push(value.label);continue;}
     if(value.state==='not_applicable')continue;
