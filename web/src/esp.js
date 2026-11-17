@@ -137,15 +137,21 @@ export async function stabilizeS3Jtag(loader) {
   await loader.writeReg(0x600080b8,0);
 }
 
-export function appWriteOrder(parts, otaBytes = null) {
+function appWritePlan(parts, otaBytes = null, {allowUnknown=false} = {}) {
   const apps=parts.filter(part=>part.type===0),factories=apps.filter(part=>part.subtype===0),otaApps=apps.filter(part=>part.subtype>=0x10&&part.subtype<=0x1f),otas=parts.filter(part=>part.type===1&&part.subtype===0);
   if(!apps.length||factories.length>1||new Set(apps.map(part=>part.subtype)).size!==apps.length||apps.length!==factories.length+otaApps.length) fail('Application layout has missing, duplicate or unsupported slot identities.');
   let active;
-  if(otaApps.length) {if(otas.length!==1||otas[0].size<8192||!(otaBytes instanceof Uint8Array)||otaBytes.length!==8192)fail('Actual OTA metadata is required to safely order application writes.');active=activeOta(parts,otaBytes);}
+  if(otaApps.length) {if(otas.length!==1||otas[0].size<8192||!(otaBytes instanceof Uint8Array)||otaBytes.length!==8192)fail('Actual OTA metadata is required to safely order application writes.');active=activeOta(parts,otaBytes,{allowUnknown});}
   else if(factories.length===1)active=factories[0].offset;
   else fail('No supported bootable application slot.');
-  return apps.slice().sort((a,b)=>a.subtype-b.subtype).map(part=>part.offset).filter(offset=>offset!==active).concat(active);
+  if(active===null){
+    if(apps.length!==2||factories.length||otaApps.length!==2)fail('Unknown boot selection requires exactly two OTA application slots.');
+    const ordered=apps.slice().sort((a,b)=>a.subtype-b.subtype).map(part=>part.offset);
+    return {addresses:ordered.reverse(),bootAddress:null};
+  }
+  return {addresses:apps.slice().sort((a,b)=>a.subtype-b.subtype).map(part=>part.offset).filter(offset=>offset!==active).concat(active),bootAddress:active};
 }
+export function appWriteOrder(parts,otaBytes=null){return appWritePlan(parts,otaBytes).addresses;}
 
 export function mergedMirrorSegments(pkg, parts, populated) {
   const fileOffset=pkg.flashOffset??0;
@@ -326,13 +332,14 @@ export class EspSession {
         if(nvs.length>1 || ota.length>1 || nvs.some(part=>part.size>(1<<20)) || ota.some(part=>part.size<8192)) fail('Ambiguous NVS/OTA layout. Browser migration cannot proceed.');
         if(resume&&(nvs.length!==1||ota.length!==1))fail('Migration completion requires its exact NVS and OTA snapshots.');
         const snapshots={table:await this.loader.readFlash(0x8000,4096),nvs:nvs.length?await this.loader.readFlash(nvs[0].offset,nvs[0].size):null,ota:ota.length?await this.loader.readFlash(ota[0].offset,8192):null,mac:this.mac};
-        slotBootAddress=appWriteOrder(parts,snapshots.ota).at(-1);
+        const needsExpansion=parts.some(part=>part.type===0&&pkg.payload.length>part.size);
+        const inspected=appWritePlan(parts,snapshots.ota,{allowUnknown:!needsExpansion&&!resume&&(!recovery||recovery.stage==='application')});slotBootAddress=inspected.bootAddress;
         // The exact native helper decides whether the unchanged source table
         // needs a bridge rewrite or the expanded target needs completion proof.
         // A UI pending marker alone must never force target-table verification.
-        const needsExpansion=parts.some(part=>part.type===0&&pkg.payload.length>part.size);
         const firmwareName=needsExpansion&&!packageBytes&&typeof resolveFirmwareName==='function'?await resolveFirmwareName(pkg):pkg.name;
-        let result=await planner.call('plan',{...snapshots,name:firmwareName||pkg.name,image:pkg.payload,chip:this.loader.chip.CHIP_NAME,flashBytes:this.flashBytes,package:packageBytes,usbSet:usbSetBytes});
+        let result=await planner.call('plan',{...snapshots,name:firmwareName||pkg.name,image:pkg.payload,chip:this.loader.chip.CHIP_NAME,flashBytes:this.flashBytes,package:packageBytes,usbSet:usbSetBytes,allowUnknownBoot:slotBootAddress===null});
+        if(slotBootAddress===null&&(result.needed||result.verified||result.active_offset!==null||JSON.stringify(result.app_offsets)!==JSON.stringify(inspected.addresses)))fail('Unknown OTA selection cannot be used for partition migration or a different application layout.');
         if((result.needed&&result.resume===true)||(resume&&!result.needed))result=await planner.call('verify',{...snapshots,image:pkg.payload,sha256:pkg.sha256});
         this.planner=planner;
         return this.recordCompatiblePlan(pkg,{...result,sha256:pkg.sha256,payloadHash:pkg.payloadHash,mac:this.mac,addresses:result.app_offsets,slotBootAddress,merged:false,parts},recovery);
@@ -344,8 +351,8 @@ export class EspSession {
       if(nvs.length) {const state = await this.loader.readFlash(nvs[0].offset,nvs[0].size);if (text(state).includes('mesh-pt-migrate')) fail('NVS has partition migration records, and this chip/layout has no reviewed completion verifier.');}
       const ota = parts.filter(p => p.type === 1 && p.subtype === 0);
       if (ota.length > 1 || ota.some(part=>part.size<8192)) fail('Ambiguous OTA metadata layout.');
-      addresses = appWriteOrder(parts,ota.length?await this.loader.readFlash(ota[0].offset,8192):null);
-      slotBootAddress=addresses.at(-1);
+      const inspected=appWritePlan(parts,ota.length?await this.loader.readFlash(ota[0].offset,8192):null,{allowUnknown:!resume&&(!recovery||recovery.stage==='application')});
+      addresses=inspected.addresses;slotBootAddress=inspected.bootAddress;
     }
     return this.recordCompatiblePlan(pkg,{ sha256: pkg.sha256, payloadHash: pkg.payloadHash, mac: this.mac, addresses,slotBootAddress, merged: pkg.merged, parts },recovery);
   }

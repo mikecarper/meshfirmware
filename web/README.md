@@ -61,10 +61,12 @@ queue MeshCore USB settings or change the downloaded firmware defaults.
 
 ### ESP32 slot choice
 
-The final flash popup offers **Slot A**, **Slot B**, or **Both slots (default)**
-for inspected application updates with exactly two fitting OTA partitions.
-A means `ota_0` and B means `ota_1`; the popup shows their actual addresses.
-Both preserves the normal inactive-first, boot-selected-last write order.
+The final flash popup offers **Slot A**, **Slot B**, or **Both slots** for
+inspected application updates with exactly two fitting OTA partitions. It
+defaults to the slot selected by the board's OTA metadata, or Slot A if the
+boot selection cannot be determined. A means `ota_0` and B means `ota_1`; the
+popup shows their actual addresses. Both preserves the normal inactive-first,
+boot-selected-last write order when that order is known.
 
 Selecting one slot does not change OTA boot selection. Writing only the slot
 not selected for boot leaves the existing application selected; the popup
@@ -78,8 +80,9 @@ exact running partition. An unsupported getter or fallback to the untouched
 slot leaves startup unverified and prevents queued settings from being sent.
 Both-slot updates retain the existing startup checks.
 
-Merged/full installs, component writes, partition expansion and its approved
-final write retain their required targets. Interrupted-write recovery retains
+Merged/full installs hide the slot controls and retain their required targets.
+Component writes, partition expansion and its approved final write also retain
+their required targets. Interrupted-write recovery retains
 the exact original subset; it cannot silently change a single-slot retry to
 Both. Changing a selection rechecks compatibility and chip identity before any
 write. Cancelling or changing the image/device invalidates the approval.

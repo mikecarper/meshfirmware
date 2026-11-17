@@ -56,6 +56,15 @@ test('browser service plans fitting app, keeps snapshots volatile, rejects unsaf
   await assert.rejects(service.call('plan', { ...data, mac: '../../escape', flashBytes: 16 << 20, chip: 'ESP32-S3' }), /physical device MAC/);
 });
 
+test('browser planner passes through explicit unknown OTA fallback to the shared validator',async()=>{
+  const fixtures=JSON.parse(py.runPython(`json.dumps({'image': list(suite_module.esp_image(1024)), 'table': list(suite_module.table(suite_module.legacy_entries())), 'nvs': list(b'\\xff' * 0x5000), 'ota': list(b'\\x00' * 8192)})`));
+  const data=Object.fromEntries(Object.entries(fixtures).map(([key,value])=>[key,new Uint8Array(value)]));
+  const options={...data,name:'image.bin',mac:'aa:bb:cc:dd:ee:ff',flashBytes:16<<20,chip:'ESP32-S3'};
+  await assert.rejects(service.call('plan',options),/no valid active sequence/);
+  const result=await service.call('plan',{...options,allowUnknownBoot:true});
+  assert.equal(result.needed,false);assert.equal(result.active_offset,null);assert.deepEqual(result.app_offsets,[0x150000,0x10000]);
+});
+
 test('browser service validates download inputs before accepting artifacts', async () => {
   await assert.rejects(service.call('download', { url: 'http://example.test/x', bytes: new Uint8Array(1) }), /public HTTPS/);
   await assert.rejects(service.call('download', { url: 'https://u:p@example.test/x', bytes: new Uint8Array(1) }), /public HTTPS/);

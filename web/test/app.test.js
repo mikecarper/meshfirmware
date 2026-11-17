@@ -87,14 +87,24 @@ async function espSlotWorkbench({selection='both',boot=0x210000}={}){
 function pickModalSlot(ui,value){for(const choice of ['a','b','both'])ui.elements.get('confirm-esp-slot-'+choice).checked=choice===value;ui.elements.get('confirm-esp-slot-'+value).onchange();}
 function closeConfirm(ui,value='confirm'){const dialog=ui.elements.get('confirm-dialog');dialog.returnValue=value;dialog.emit('close');}
 
-test('ESP32 final modal defaults to both real OTA slots and holds edits until confirmation',async()=>{
-  const ui=await espSlotWorkbench();ui.context.slotControls=ui.context.openSlots();
-  const pending=ui.evaluate('confirm("Write this firmware?","file","warning","FLASH",{espSlots:slotControls})');
-  assert.equal(ui.elements.get('confirm-esp-slots').hidden,false);assert.equal(ui.elements.get('confirm-esp-slot-both').checked,true);
-  assert.match(ui.elements.get('confirm-esp-slot-a-label').textContent,/Slot A.*0x10000/);assert.match(ui.elements.get('confirm-esp-slot-b-label').textContent,/Slot B.*0x210000/);
-  pickModalSlot(ui,'a');assert.match(ui.elements.get('confirm-esp-slot-summary').textContent,/0x10000.*does not update the boot-selected application.*verification.*will not run/);
-  assert.equal(ui.evaluate('state.plan.slotSelection'),'both');assert.equal(ui.context.slotControls.selection,'both');
-  closeConfirm(ui);assert.equal(await pending,true);assert.equal(ui.context.slotControls.selection,'a');assert.equal(ui.evaluate('state.plan.slotSelection'),'both');assert.equal(ui.elements.get('confirm-esp-slots').hidden,true);assert.deepEqual(ui.calls,[]);
+test('ESP32 final modal defaults to the boot-selected slot and holds edits until confirmation',async()=>{
+  for(const [boot,expected] of [[0x10000,'a'],[0x210000,'b']]){
+    const ui=await espSlotWorkbench({boot});ui.context.slotControls=ui.context.openSlots();
+    const pending=ui.evaluate('confirm("Write this firmware?","file","warning","FLASH",{espSlots:slotControls})');
+    assert.equal(ui.elements.get('confirm-esp-slots').hidden,false);assert.equal(ui.elements.get('confirm-esp-slot-'+expected).checked,true);
+    assert.match(ui.elements.get('confirm-esp-slot-a-label').textContent,/Slot A.*0x10000/);assert.match(ui.elements.get('confirm-esp-slot-b-label').textContent,/Slot B.*0x210000/);
+    const inactive=expected==='a'?'b':'a';pickModalSlot(ui,inactive);assert.match(ui.elements.get('confirm-esp-slot-summary').textContent,/does not update the boot-selected application.*verification.*will not run/);
+    assert.equal(ui.evaluate('state.plan.slotSelection'),'both');assert.equal(ui.context.slotControls.selection,expected);
+    closeConfirm(ui);assert.equal(await pending,true);assert.equal(ui.context.slotControls.selection,inactive);assert.equal(ui.evaluate('state.plan.slotSelection'),'both');assert.equal(ui.elements.get('confirm-esp-slots').hidden,true);assert.deepEqual(ui.calls,[]);
+  }
+});
+
+test('ESP32 final modal defaults to slot A when the boot slot cannot be established',async()=>{
+  const ui=await espSlotWorkbench();ui.evaluate('delete state.plan.slotBootAddress;delete state.plan.active_offset');ui.context.slotControls=ui.context.openSlots();
+  const pending=ui.evaluate('confirm("Write","file","warning","FLASH",{espSlots:slotControls})');
+  assert.equal(ui.elements.get('confirm-esp-slots').hidden,false);assert.equal(ui.elements.get('confirm-esp-slot-a').checked,true);
+  assert.match(ui.elements.get('confirm-esp-slot-reason').textContent,/unknown|not (?:known|verified)|(?:cannot|could not) (?:be )?(?:identified|determined)/i);
+  closeConfirm(ui,'cancel');assert.equal(await pending,false);assert.deepEqual(ui.calls,[]);
 });
 
 test('cancel, stale scope and forged radio combinations cannot approve a slot change',async()=>{
@@ -102,21 +112,27 @@ test('cancel, stale scope and forged radio combinations cannot approve a slot ch
     const ui=await espSlotWorkbench();ui.context.slotControls=ui.context.openSlots();const pending=ui.evaluate('confirm("Write","file","warning","FLASH",{espSlots:slotControls})');pickModalSlot(ui,'b');
     if(outcome==='generation')ui.evaluate('state.generation++');if(outcome==='image')ui.evaluate('state.pkg={...state.pkg}');if(outcome==='plan')ui.evaluate('state.plan={...state.plan}');
     if(outcome==='multiple')ui.elements.get('confirm-esp-slot-a').checked=true;if(outcome==='none')ui.elements.get('confirm-esp-slot-b').checked=false;
-    closeConfirm(ui,outcome==='cancel'?'cancel':'confirm');assert.equal(await pending,false,outcome);assert.equal(ui.context.slotControls.selection,'both',outcome);assert.deepEqual(ui.calls,[]);
+    closeConfirm(ui,outcome==='cancel'?'cancel':'confirm');assert.equal(await pending,false,outcome);assert.equal(ui.context.slotControls.selection,'b',outcome);assert.deepEqual(ui.calls,[]);
   }
 });
 
 test('slot controls reset for each ordinary final approval and stay hidden in unrelated confirmations',async()=>{
-  const ui=await espSlotWorkbench({selection:'a'});ui.context.slotControls=ui.context.openSlots();assert.equal(ui.context.slotControls.selection,'both');
-  const pending=ui.evaluate('confirm("Write","file","warning","FLASH",{espSlots:slotControls})');assert.equal(ui.elements.get('confirm-esp-slot-both').checked,true);closeConfirm(ui,'cancel');await pending;
+  const ui=await espSlotWorkbench({selection:'a'});ui.context.slotControls=ui.context.openSlots();assert.equal(ui.context.slotControls.selection,'b');
+  const pending=ui.evaluate('confirm("Write","file","warning","FLASH",{espSlots:slotControls})');assert.equal(ui.elements.get('confirm-esp-slot-b').checked,true);closeConfirm(ui,'cancel');await pending;
   const other=ui.evaluate('confirm("Board warning","file","warning","FLASH UNVERIFIED BOARD")');assert.equal(ui.elements.get('confirm-esp-slots').hidden,true);closeConfirm(ui,'cancel');await other;
   ui.evaluate('state.pkg={...state.pkg,architecture:"nrf52"}');assert.equal(ui.context.openSlots(),null);assert.deepEqual(ui.calls,[]);
 });
 
-test('merged, migration and interrupted writes retain their fixed approved targets',async()=>{
-  for(const locked of ['merged','migration','approval','recovery','verified']){
+test('merged install confirmation hides the application slot controls',async()=>{
+  const ui=await espSlotWorkbench();ui.evaluate('state.pkg={...state.pkg,merged:true};state.plan.merged=true');
+  ui.context.slotControls=ui.context.openSlots();assert.equal(ui.context.slotControls,null);
+  const pending=ui.evaluate('confirm("Write","file","warning","FLASH",{espSlots:slotControls})');assert.equal(ui.elements.get('confirm-esp-slots').hidden,true);closeConfirm(ui);assert.equal(await pending,true);assert.deepEqual(ui.calls,[]);
+});
+
+test('migration and interrupted writes retain their fixed approved targets',async()=>{
+  for(const locked of ['migration','approval','recovery','verified']){
     const ui=await espSlotWorkbench({selection:locked==='recovery'?'a':'both'});
-    if(locked==='merged')ui.evaluate('state.pkg={...state.pkg,merged:true}');if(locked==='migration')ui.evaluate('state.migration={mac:"test"}');if(locked==='approval')ui.evaluate('state.migrationApproval={}');if(locked==='recovery')ui.evaluate('state.espRecovery={};state.plan.chunkedRecovery=true');if(locked==='verified')ui.evaluate('state.plan.verified=true');
+    if(locked==='migration')ui.evaluate('state.migration={mac:"test"}');if(locked==='approval')ui.evaluate('state.migrationApproval={}');if(locked==='recovery')ui.evaluate('state.espRecovery={};state.plan.chunkedRecovery=true');if(locked==='verified')ui.evaluate('state.plan.verified=true');
     ui.context.slotControls=ui.context.openSlots();assert.equal(ui.context.slotControls.canSelect,false,locked);const expected=locked==='recovery'?'a':'both';assert.equal(ui.context.slotControls.selection,expected,locked);
     const pending=ui.evaluate('confirm("Write","file","warning","FLASH",{espSlots:slotControls})');assert.equal(ui.elements.get('confirm-esp-slot-'+expected).disabled,true);assert.equal(ui.elements.get('confirm-esp-slot-'+expected).checked,true);closeConfirm(ui);assert.equal(await pending,true,locked);assert.deepEqual(ui.calls,[]);
   }
@@ -125,7 +141,14 @@ test('merged, migration and interrupted writes retain their fixed approved targe
 test('queued post-flash settings prevent approving an inactive-only write, even with a forged checked input',async()=>{
   const ui=await espSlotWorkbench();ui.evaluate('state.radioDefaults={postFlashPlan:{mediaMesh:{preset:"off"}}}');ui.context.slotControls=ui.context.openSlots();
   const pending=ui.evaluate('confirm("Write","file","warning","FLASH",{espSlots:slotControls})');assert.equal(ui.elements.get('confirm-esp-slot-a').disabled,true);assert.equal(ui.elements.get('confirm-esp-slot-b').disabled,false);assert.match(ui.elements.get('confirm-esp-slot-reason').textContent,/Queued USB settings/);
-  pickModalSlot(ui,'a');closeConfirm(ui);assert.equal(await pending,false);assert.equal(ui.context.slotControls.selection,'both');assert.deepEqual(ui.calls,[]);
+  pickModalSlot(ui,'a');closeConfirm(ui);assert.equal(await pending,false);assert.equal(ui.context.slotControls.selection,'b');assert.deepEqual(ui.calls,[]);
+});
+
+test('unknown boot slot prevents queued settings from being approved for any target',async()=>{
+  const ui=await espSlotWorkbench();ui.evaluate('delete state.plan.slotBootAddress;delete state.plan.active_offset;state.radioDefaults={postFlashPlan:{mediaMesh:{preset:"off"}}}');ui.context.slotControls=ui.context.openSlots();
+  const pending=ui.evaluate('confirm("Write","file","warning","FLASH",{espSlots:slotControls})');
+  for(const value of ['a','b','both'])assert.equal(ui.elements.get('confirm-esp-slot-'+value).disabled,true,value);
+  closeConfirm(ui);assert.equal(await pending,false);assert.deepEqual(ui.calls,[]);
 });
 
 test('final ESP32 approval reseals the chosen slot before writing and queues startup only for boot-slot writes',async()=>{
@@ -137,6 +160,23 @@ test('final ESP32 approval reseals the chosen slot before writing and queues sta
     await ui.evaluate('flashPreparedFirmware()');assert.deepEqual(ui.calls,selection==='both'?['approve','write']:['approve','select:'+selection,'write']);
     assert.equal(ui.evaluate('state.plan.written'),true);assert.equal(!!ui.evaluate('state.verification'),selection!=='a');assert.equal(ui.elements.get('flash-progress-dialog').open,true);
     if(selection==='a')assert.match(ui.elements.get('flash-progress-advice').textContent,/Only slot A.*boot.*not changed/i);
+  }
+});
+
+test('unknown boot defaults to slot A without claiming startup verification',async()=>{
+  const ui=await espSlotWorkbench();ui.evaluate('delete state.plan.slotBootAddress;delete state.plan.active_offset;state.plan.parts[0].offset=0x310000;state.plan.parts[1].offset=0x610000;state.plan.addresses=[0x610000,0x310000]');
+  ui.context.confirm=async(_title,_detail,_warning,_action,options)=>{assert.equal(options.espSlots.selection,'a');return true;};
+  ui.evaluate('state.esp={}');ui.evaluate('state.esp').selectSlots=async(pkg,choice)=>selectEspWriteSlots(pkg,ui.evaluate('state.plan'),choice);
+  ui.evaluate('state.esp').flash=async()=>{assert.deepEqual(Array.from(ui.evaluate('state.plan.addresses')),[0x310000]);assert.equal(ui.evaluate('state.plan.writesBootSlot'),null);};
+  await ui.evaluate('flashPreparedFirmware()');assert.equal(ui.evaluate('state.verification'),null);assert.match(ui.elements.get('flash-progress-advice').textContent,/boot-selected slot could not be determined.*startup.*unverified/i);
+});
+
+test('forged approval cannot write unknown boot targets while USB settings are queued',async()=>{
+  for(const [initial,selection] of [['both','a'],['both','b'],['both','both'],['a','a']]){
+    const ui=await espSlotWorkbench({selection:initial});ui.evaluate('delete state.plan.slotBootAddress;delete state.plan.active_offset;state.radioDefaults={postFlashPlan:{mediaMesh:{preset:"off"}}}');
+    ui.context.confirm=async(_title,_detail,_warning,_action,options)=>{options.espSlots.selection=selection;return true;};
+    ui.evaluate('state.esp={}');ui.evaluate('state.esp').selectSlots=async()=>{ui.calls.push('select');throw Error('unexpected selection')};ui.evaluate('state.esp').flash=async()=>ui.calls.push('write');
+    await assert.rejects(ui.evaluate('flashPreparedFirmware()'),/slot choice|boot.selected|unknown.boot|queued.*settings/i,`${initial}->${selection}`);assert.equal(ui.calls.includes('write'),false,`${initial}->${selection}`);
   }
 });
 

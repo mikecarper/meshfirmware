@@ -779,15 +779,17 @@ function confirmationActionLabel(action,pkg=null,plan=null) {
   return 'Confirm operation';
 }
 function inactiveEspSlotAdvice(plan=state.plan){
+  if(plan?.writesBootSlot===null)return `The boot-selected slot could not be determined. ${plan.slotSelection==='both'?'Both slots were':`Slot ${String(plan.slotSelection||'').toUpperCase()} was`} written, but the running application and startup are unverified. No post-flash settings will be sent.`;
   if(plan?.writesBootSlot!==false)return '';
   return `Only slot ${String(plan.slotSelection||'').toUpperCase()} was written. OTA boot selection was not changed; the other slot remains selected for boot. The newly written firmware's startup is not verified, and no post-flash settings are sent to the old application.`;
 }
 function flashSlotControls(pkg,plan,settingsPlan){
-  if(pkg?.architecture!=='esp32')return null;
+  if(pkg?.architecture!=='esp32'||pkg.merged||plan?.merged)return null;
   const choices=espSlotChoices(pkg,plan),fixed=!!(state.migrationApproval||state.migration||state.espRecovery||plan.needed||plan.verified||plan.chunkedRecovery);
-  return {...choices,canSelect:choices.canSelect&&!fixed,selection:choices.canSelect&&!fixed?'both':choices.selected,
-    reason:[choices.reason,choices.canSelect||choices.selected!=='both'?'Single-slot startup verification needs firmware support for get boot.slot; otherwise only the transfer is verified.':'',settingsPlan?'Queued USB settings require writing and verifying the boot-selected slot; an inactive-only write is unavailable.':''].filter(Boolean).join(' '),
-    options:choices.options.map(option=>({...option,available:option.available&&!(settingsPlan&&option.writesBootSlot===false)}))};
+  const bootChoice=choices.options.find(option=>option.value!=='both'&&option.addresses.includes(choices.bootAddress));
+  return {...choices,canSelect:choices.canSelect&&!fixed,selection:choices.canSelect&&!fixed?(bootChoice?.value||'a'):choices.selected,
+    reason:[choices.reason,choices.canSelect||choices.selected!=='both'?'Single-slot startup verification needs firmware support for get boot.slot; otherwise only the transfer is verified.':'',settingsPlan?'Queued USB settings require writing and verifying the boot-selected slot; an inactive-only or unknown-boot write is unavailable.':''].filter(Boolean).join(' '),
+    options:choices.options.map(option=>({...option,available:option.available&&!(settingsPlan&&option.writesBootSlot!==true)}))};
 }
 function confirmSlotSelection(context){
   const selected=['a','b','both'].filter(value=>$('confirm-esp-slot-'+value).checked);
@@ -800,12 +802,12 @@ function renderConfirmSlots(context){
   for(const value of ['a','b','both']){
     const input=$('confirm-esp-slot-'+value),option=context?.options.find(option=>option.value===value);
     input.checked=value===(context?.selection||'both');input.disabled=!context?.canSelect||!option?.available;
-    $('confirm-esp-slot-'+value+'-label').textContent=option?.label||(value==='both'?'Both (default)':`Slot ${value.toUpperCase()}`);
+    $('confirm-esp-slot-'+value+'-label').textContent=option?.label||(value==='both'?'Both slots':`Slot ${value.toUpperCase()}`);
     input.onchange=()=>{
       const choice=context&&confirmSlotSelection(context),selected=context?.options.find(option=>option.value===choice);
       if(!selected)return;
       const addresses=selected.addresses.map(offset=>'0x'+offset.toString(16)).join(', ');
-      $('confirm-esp-slot-summary').textContent=`Write targets: ${addresses||'the fixed verified plan'}. `+(selected.writesBootSlot===false?'Boot selection is unchanged. This does not update the boot-selected application; startup verification and post-flash settings will not run.':'OTA boot selection is unchanged. Each selected write is read back and verified.');
+      $('confirm-esp-slot-summary').textContent=`Write targets: ${addresses||'the fixed verified plan'}. `+(selected.writesBootSlot===null?'The boot-selected slot is unknown. Startup verification and post-flash settings will not run.':selected.writesBootSlot===false?'Boot selection is unchanged. This does not update the boot-selected application; startup verification and post-flash settings will not run.':'OTA boot selection is unchanged. Each selected write is read back and verified.');
     };
   }
   $('confirm-esp-slot-reason').textContent=context?.reason||'';
@@ -1354,7 +1356,7 @@ function verificationModelMatches(expected,device){
   const legacy=['Seeed Wio Tracker L1','Seeed SenseCAP Indicator'].includes(expected.model),target=canonicalHardware(expected.hardware||'');
   return !!(legacy&&target&&/^[a-f0-9]{64}$/i.test(expected.publicKey||'')&&device.publicKey===expected.publicKey&&after.hardware===target&&before.candidates.includes(target));
 }
-function queueVerification(pkg,options){if(wadameshSelected()||state.plan?.writesBootSlot===false){clearVerification();return;}state.verification=verificationRecord(pkg,options);persistFlow('verification','meshfirmware.verifyApplication');}
+function queueVerification(pkg,options){if(wadameshSelected()||state.plan?.writesBootSlot===false||state.plan?.writesBootSlot===null){clearVerification();return;}state.verification=verificationRecord(pkg,options);persistFlow('verification','meshfirmware.verifyApplication');}
 function completeNrfTransfer(pkg){
   const completionAdvice=postFlashBleAdvice(pkg,state.item),startupAdvice=firstStartupAdvice(pkg);
   state.finishedFirmware={sha256:pkg.sha256,verified:false,kind:pkg.erase?'erase':selectedRecovery(pkg)?'temporary-recovery':pkg.kind,...(completionAdvice?{completionAdvice}:{}),...(startupAdvice?{startupAdvice}:{})};
@@ -2244,9 +2246,13 @@ async function flashPreparedFirmware() {
   if (plan.generation !== state.generation || plan.port !== state.port) fail('Device disconnected or selection changed during confirmation.');
   assertBoardScope();
   if((state.radioDefaults?.postFlashPlan||null)!==settingsPlan)fail('Post-flash settings changed during confirmation. Review the operation again.');
+  if(slots){
+    const option=slots.options.find(option=>option.value===slots.selection);
+    if(!option?.available||(!slots.canSelect&&slots.selection!==slots.selected)||settingsPlan&&option.writesBootSlot!==true)fail('This slot choice is not available for the approved operation. Review the flash plan again.');
+  }
   if(slots&&slots.selection!==slots.selected){
     const option=slots.options.find(option=>option.value===slots.selection);
-    if(!slots.canSelect||!option?.available||settingsPlan&&option.writesBootSlot===false)fail('This slot choice is not available for the approved operation. Review the flash plan again.');
+    if(!slots.canSelect||!option?.available||settingsPlan&&option.writesBootSlot!==true)fail('This slot choice is not available for the approved operation. Review the flash plan again.');
     const session=state.esp;if(!session||typeof session.selectSlots!=='function')fail('A verified ESP32 session is required to select application slots.');
     const selectedPlan=await session.selectSlots(pkg,slots.selection);assertBoardScope();
     if(state.esp!==session)fail('ESP32 session changed during slot selection. No write was authorized.');

@@ -216,7 +216,7 @@ class ExpansionTests(unittest.TestCase):
         return EXP.make_plan(kwargs.pop("firmware", self.firmware), kwargs.pop("table_path", self.old),
                              self.flash, self.cache, kwargs.pop("package_path", self.package),
                              kwargs.pop("ota_path", self.ota), kwargs.pop("device_mac", self.mac),
-                             kwargs.pop("nvs_path", self.nvs), kwargs.pop("usb_set_path", None))
+                             kwargs.pop("nvs_path", self.nvs), kwargs.pop("usb_set_path", None), **kwargs)
 
     def started_plan(self) -> dict:
         result = self.plan()
@@ -249,6 +249,36 @@ class ExpansionTests(unittest.TestCase):
         self.assertFalse(result["needed"])
         self.assertEqual(result["app_offsets"], [0x650000, 0x10000])
         self.assertFalse(self.cache.exists())
+
+    def test_unknown_ota_fallback_keeps_migration_and_nvs_checks(self):
+        self.ota.write_bytes(b"\x00" * EXP.OTA_SIZE)
+        with self.assertRaises(EXP.UnknownOtaSelection):
+            self.plan(table_path=self.new, package_path=None)
+        result = self.plan(table_path=self.new, package_path=None, allow_unknown_boot=True)
+        self.assertFalse(result["needed"])
+        self.assertIsNone(result["active_offset"])
+        self.assertEqual(result["app_offsets"], [0x650000, 0x10000])
+        with self.assertRaises(EXP.UnknownOtaSelection):
+            self.plan(allow_unknown_boot=True)  # image requires expansion
+        self.nvs.write_bytes(finished_nvs(config_pending=1))
+        with self.assertRaisesRegex(EXP.ExpansionError, "unfinished partition migration"):
+            self.plan(table_path=self.new, package_path=None, allow_unknown_boot=True)
+        self.nvs.write_bytes(finished_nvs())
+        self.ota.write_bytes(ota_data())
+        self.started_plan()
+        self.ota.write_bytes(b"\x00" * EXP.OTA_SIZE)
+        with self.assertRaisesRegex(EXP.ExpansionError, "pending partition expansion"):
+            self.plan(table_path=self.new, package_path=None, allow_unknown_boot=True)
+
+    def test_pending_verification_slot_is_unknown_for_fitting_update(self):
+        self.ota.write_bytes(ota_data(2, state=1))
+        with self.assertRaisesRegex(EXP.UnknownOtaSelection, "pending verification"):
+            self.plan(table_path=self.new, package_path=None)
+        result = self.plan(table_path=self.new, package_path=None, allow_unknown_boot=True)
+        self.assertIsNone(result["active_offset"])
+        self.assertEqual(result["app_offsets"], [0x650000, 0x10000])
+        with self.assertRaisesRegex(EXP.UnknownOtaSelection, "pending verification"):
+            self.plan(allow_unknown_boot=True)  # migration still requires verified selection
 
     def test_wifi_only_or_mislabelled_usb_package_is_not_substituted(self):
         for metadata in (None, {}, {"format": "meshcore-usb-partition-migration-v1",

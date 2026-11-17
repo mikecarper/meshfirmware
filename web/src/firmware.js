@@ -146,20 +146,23 @@ export function partitionTable(data, flashBytes = 128 << 20) {
   if (!parts.some(p => p.type === 0)) fail('Partition table has no application.');
   return parts;
 }
-export function activeOta(parts, data) {
+export function activeOta(parts, data, {allowUnknown=false} = {}) {
   if (data.length !== 8192) fail('OTA metadata must be 8192 bytes.');
   const apps = parts.filter(p => p.type === 0 && p.subtype >= 0x10 && p.subtype <= 0x1f).sort((a,b) => a.subtype - b.subtype);
   if (!apps.length || apps.some((p, i) => p.subtype !== 0x10 + i)) fail('OTA slots are ambiguous; no safe application write order can be established.');
-  const v = new DataView(data.buffer, data.byteOffset, data.byteLength), seqs = [];
+  const v = new DataView(data.buffer, data.byteOffset, data.byteLength), seqs = [], pending = new Set();
   for (const off of [0, 4096]) {
     const seq = v.getUint32(off, true), state = v.getUint32(off + 24, true), crc = v.getUint32(off + 28, true);
-    if (seq && seq !== 0xffffffff && ![3,4].includes(state) && crc === crc32(data.subarray(off,off+4), 0xffffffff)) seqs.push(seq);
+    if (seq && seq !== 0xffffffff && ![3,4].includes(state) && crc === crc32(data.subarray(off,off+4), 0xffffffff)) {seqs.push(seq);if(state===1)pending.add(seq);}
   }
   if (!seqs.length) {
-    if (![...data.subarray(0,32),...data.subarray(4096,4128)].every(b => b === 255)) fail('OTA metadata has no verified active sequence.');
+    if (![...data.subarray(0,32),...data.subarray(4096,4128)].every(b => b === 255)) {if(allowUnknown)return null;fail('OTA metadata has no verified active sequence.');}
     return parts.find(p => p.type === 0 && p.subtype === 0)?.offset ?? apps[0].offset;
   }
-  let newest = seqs[0]; for (const seq of seqs.slice(1)) { const delta = (seq - newest) >>> 0; if (delta === 0x80000000) fail('Ambiguous OTA sequence order.'); if (delta && delta < 0x80000000) newest = seq; }
+  let newest = seqs[0]; for (const seq of seqs.slice(1)) { const delta = (seq - newest) >>> 0; if (delta === 0x80000000) {if(allowUnknown)return null;fail('Ambiguous OTA sequence order.');} if (delta && delta < 0x80000000) newest = seq; }
+  // A pending-verification image may be rolled back on the next boot. It is
+  // not evidence that this slot will remain the boot-selected application.
+  if(pending.has(newest)){if(allowUnknown)return null;fail('OTA selected image is pending verification; its next boot slot is uncertain.');}
   return apps[(newest - 1) % apps.length].offset;
 }
 export function inspectFirmware(name, bytes) {

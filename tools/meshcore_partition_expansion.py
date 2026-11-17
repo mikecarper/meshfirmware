@@ -30,6 +30,10 @@ class ExpansionError(Exception):
     """A fail-closed plan/verification result safe to show to the user."""
 
 
+class UnknownOtaSelection(ExpansionError):
+    """The inspected OTA records cannot identify the selected boot slot."""
+
+
 REPOSITORY = "mikecarper/MeshCore"
 PUBLISHED_USB_SET_URL = "https://github.com/mikecarper/MeshCore/releases/download/utility-usb-partition-v1-3d3d5827/meshcore-usb-partition-bridges.zip"
 PUBLISHED_USB_SET_SHA256 = "187cac4f3f716d5df50e123a03ba51da637356874a434a72a60d9eb99d988ed8"
@@ -503,7 +507,7 @@ def atomic_json(path: Path, value: dict) -> None:
             os.unlink(temporary)
 
 
-def app_write_order(parts: list[dict], ota_path: Path | None) -> tuple[list[int], int, dict | None]:
+def app_write_order(parts: list[dict], ota_path: Path | None, *, allow_unknown_boot: bool = False) -> tuple[list[int], int | None, dict | None]:
     apps = [part for part in parts if part["type"] == 0]
     factories = [part for part in apps if part["subtype"] == 0]
     ota_apps = [part for part in apps if 0x10 <= part["subtype"] <= 0x1F]
@@ -514,20 +518,28 @@ def app_write_order(parts: list[dict], ota_path: Path | None) -> tuple[list[int]
     if ota_apps:
         if len(otas) != 1 or otas[0]["size"] < OTA_SIZE or ota_path is None:
             raise ExpansionError("An actual OTA metadata snapshot is required to safely order ESP32 writes.")
-        active = active_ota_offset(parts, read_file(ota_path, OTA_SIZE))
+        try:
+            active = active_ota_offset(parts, read_file(ota_path, OTA_SIZE))
+        except UnknownOtaSelection:
+            if not allow_unknown_boot or len(apps) != 2 or factories or {part["subtype"] for part in ota_apps} != {0x10, 0x11}:
+                raise
+            active = None
         ota = otas[0]
     elif len(factories) == 1:
         active, ota = factories[0]["offset"], None
     else:
         raise ExpansionError("ESP32 layout has no supported bootable app slot.")
     ordered = sorted(apps, key=lambda part: part["subtype"])
+    if active is None:
+        return [part["offset"] for part in reversed(ordered)], None, ota
     return [part["offset"] for part in ordered if part["offset"] != active] + [active], active, ota
 
 
 def make_plan(firmware: Path, table_path: Path, flash_output: Path,
               output_dir: Path, package_path: Path | None = None,
               ota_path: Path | None = None, device_mac: str | None = None,
-              nvs_path: Path | None = None, usb_set_path: Path | None = None) -> dict:
+              nvs_path: Path | None = None, usb_set_path: Path | None = None,
+              *, allow_unknown_boot: bool = False) -> dict:
     image = read_file(firmware)
     table = read_file(table_path, TABLE_SIZE)
     try:
@@ -540,7 +552,8 @@ def make_plan(firmware: Path, table_path: Path, flash_output: Path,
     if chip != rom_chip or image_flash > flash_bytes:
         raise ExpansionError("Selected application does not match the connected ESP32 chip/flash capacity.")
     app_slots = [part for part in parts if part["type"] == 0]
-    app_offsets, active, ota = app_write_order(parts, ota_path)
+    fits = all(len(image) <= part["size"] for part in app_slots)
+    app_offsets, active, ota = app_write_order(parts, ota_path, allow_unknown_boot=allow_unknown_boot and fits)
     nvss = [part for part in parts if part["type"] == 1 and part["subtype"] == 2]
     if len(nvss) > 1:
         raise ExpansionError("ESP32 table has ambiguous NVS partitions for migration-state verification.")
@@ -561,7 +574,6 @@ def make_plan(firmware: Path, table_path: Path, flash_output: Path,
     firmware_hash = digest(image)
     output_dir = output_dir.resolve()
     plan_path = output_dir / firmware_hash / "plan.json"
-    fits = all(len(image) <= part["size"] for part in app_slots)
     # The caller supplies a cache directory specific to the verified ROM MAC.
     # Merely preparing a plan does not create a blocking pending migration;
     # `begin` marks it immediately before the first actual bridge write.
@@ -573,6 +585,8 @@ def make_plan(firmware: Path, table_path: Path, flash_output: Path,
         if existing.get("started") is True and existing.get("completed") is not True:
             pending.append((candidate, existing))
     if pending:
+        if active is None:
+            raise ExpansionError("A pending partition expansion requires a verified OTA boot selection.")
         if len(pending) != 1:
             raise ExpansionError("Device has ambiguous pending partition expansion state.")
         candidate, existing = pending[0]
@@ -809,6 +823,7 @@ def active_ota_offset(parts: list[dict], data: bytes) -> int:
     if not apps or [part["subtype"] for part in apps] != list(range(0x10, 0x10 + len(apps))):
         raise ExpansionError("OTA table does not have unique contiguous OTA slot identities.")
     sequences = []
+    pending = set()
     for offset in (0, 0x1000):
         entry = data[offset:offset + 32]
         sequence = struct.unpack_from("<I", entry)[0]
@@ -816,19 +831,23 @@ def active_ota_offset(parts: list[dict], data: bytes) -> int:
         expected = zlib.crc32(struct.pack("<I", sequence), 0xFFFFFFFF) & 0xFFFFFFFF
         if sequence not in (0, 0xFFFFFFFF) and crc == expected and state not in (3, 4):
             sequences.append(sequence)
+            if state == 1:
+                pending.add(sequence)
     if not sequences:
         # Erased initial otadata without a factory partition boots ota_0.
         if data[:32] != b"\xff" * 32 or data[4096:4128] != b"\xff" * 32:
-            raise ExpansionError("OTA metadata has no valid active sequence and is not erased initial data.")
+            raise UnknownOtaSelection("OTA metadata has no valid active sequence and is not erased initial data.")
         factory = next((part for part in parts if part["type"] == 0 and part["subtype"] == 0), None)
         return factory["offset"] if factory else apps[0]["offset"]
     newest = sequences[0]
     for sequence in sequences[1:]:
         delta = (sequence - newest) & 0xFFFFFFFF
         if delta == 0x80000000:
-            raise ExpansionError("OTA active sequence ordering is ambiguous.")
+            raise UnknownOtaSelection("OTA active sequence ordering is ambiguous.")
         if 0 < delta < 0x80000000:
             newest = sequence
+    if newest in pending:
+        raise UnknownOtaSelection("OTA selected image is pending verification; its next boot slot is uncertain.")
     return apps[(newest - 1) % len(apps)]["offset"]
 
 

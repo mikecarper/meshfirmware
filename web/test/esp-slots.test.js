@@ -66,6 +66,51 @@ test('malformed or incomplete capability snapshots do not throw or invent an ava
     const options=espSlotChoices(pkg,plan);assert.equal(options.canSelect,false);assert.equal(options.options.length,3);assert.ok(options.options.filter(option=>option.value!=='both').every(option=>option.available===false));
   }
 });
+test('unknown boot selection remains unknown and permits a conservative slot A choice',()=>{
+  const pkg={architecture:'esp32',payload:new Uint8Array(64)},plan={addresses:[0x110000,0x10000],parts:[{type:0,subtype:0x10,offset:0x10000,size:0x100000},{type:0,subtype:0x11,offset:0x110000,size:0x100000}]};
+  const slots=espSlotChoices(pkg,plan);
+  assert.equal(slots.canSelect,true);assert.equal(slots.bootKnown,false);assert.equal(slots.bootAddress,null);assert.equal(slots.writesBootSlot,null);
+  assert.match(slots.reason,/could not be determined.*Slot A/);
+  assert.ok(slots.options.every(option=>option.writesBootSlot===null));
+  const chosen=selectEspWriteSlots(pkg,plan,'a');assert.deepEqual(chosen.addresses,[0x10000]);assert.equal(chosen.slotBootAddress,null);assert.equal(chosen.writesBootSlot,null);
+  const mismatch=espSlotChoices(pkg,{...plan,slotBootAddress:0x210000});assert.equal(mismatch.canSelect,false);assert.match(mismatch.reason,/does not match/);
+});
+test('unreadable OTA selection falls back only to inspected A and preserves exact retry',async()=>{
+  const pkg=inspectFirmware('large.bin',image({size:0xb000})),first=fixture({failWrite:true});
+  first.memory.fill(0,0xe000,0x10000);
+  const plan=await first.s.prepare(pkg),slots=espSlotChoices(pkg,plan);
+  assert.equal(slots.bootKnown,false);assert.equal(slots.bootAddress,null);assert.equal(slots.canSelect,true);
+  const selected=await first.s.selectSlots(pkg,'a');assert.deepEqual(selected.addresses,[0x10000]);assert.equal(selected.writesBootSlot,null);
+  let error;try{await first.s.flash(pkg,()=>{});}catch(failure){error=failure;}
+  assert.ok(error?.recovery);assert.deepEqual(error.recovery.segments.map(segment=>segment.address),[0x10000]);
+  const retry=fixture({memory:first.memory}),replanned=await retry.s.prepare(pkg,{recovery:structuredClone(error.recovery)});
+  assert.equal(replanned.slotSelection,'a');assert.equal(replanned.writesBootSlot,null);assert.deepEqual(replanned.addresses,[0x10000]);
+  await assert.rejects(retry.s.selectSlots(pkg,'both'),/Interrupted-write recovery/);
+  await retry.s.flash(pkg,()=>{},{chunkedRecovery:true});assert.ok(retry.writes.every(write=>write.fileArray[0].address>=0x10000&&write.fileArray[0].address<0x10000+pkg.payload.length));
+});
+test('unknown selection never bypasses OTA transport failures or invalid layouts',async()=>{
+  const pkg=inspectFirmware('app.bin',image()),f=fixture();f.s.loader.readFlash=async(at)=>{if(at===0xe000)throw Error('OTA USB read failed');return f.memory.slice(at,at+4096);};
+  await assert.rejects(f.s.prepare(pkg),/OTA USB read failed/);assert.deepEqual(f.writes,[]);
+  const invalid=fixture();invalid.memory[0x8000+32+3]=0x12;await assert.rejects(invalid.s.prepare(pkg),/OTA slots are ambiguous/);assert.deepEqual(invalid.writes,[]);
+});
+test('pending-verification OTA metadata is unknown, not a proven next boot slot',async()=>{
+  const pkg=inspectFirmware('app.bin',image()),f=fixture({sequence:2});
+  new DataView(f.memory.buffer).setUint32(0xe000+24,1,true);
+  const plan=await f.s.prepare(pkg),choices=espSlotChoices(pkg,plan);
+  assert.equal(choices.bootKnown,false);assert.equal(choices.bootAddress,null);
+  const selected=await f.s.selectSlots(pkg,'a');assert.equal(selected.writesBootSlot,null);assert.deepEqual(selected.addresses,[0x10000]);
+  await assert.rejects(fixture({memory:f.memory}).s.prepare(pkg,{resume:true}),/pending verification/);
+});
+test('fitting app with unknown OTA uses checked planner fallback and rejects migration plans',async()=>{
+  const pkg=inspectFirmware('app.bin',image());
+  for(const bad of [false,true]){
+    const f=fixture();f.memory.fill(0,0xe000,0x10000);let called=0;
+    const planner={call:async(op,data)=>{assert.equal(op,'plan');assert.equal(data.allowUnknownBoot,true);assert.equal(data.ota.length,8192);called++;return {needed:bad,active_offset:null,app_offsets:[0x110000,0x10000]};}};
+    if(bad){await assert.rejects(f.s.prepare(pkg,{planner}),/Unknown OTA selection cannot be used for partition migration/);assert.deepEqual(f.writes,[]);}
+    else{const plan=await f.s.prepare(pkg,{planner});assert.equal(plan.slotBootAddress,null);assert.equal(espSlotChoices(pkg,plan).bootKnown,false);assert.equal((await f.s.selectSlots(pkg,'a')).writesBootSlot,null);}
+    assert.equal(called,1);
+  }
+});
 test('invalid values, missing source identities and arbitrary target addresses are rejected',async()=>{
   const pkg=inspectFirmware('app.bin',image()),f=fixture(),plan=await f.s.prepare(pkg);
   for(const selection of ['A','B','',null,'0x10000','factory'])await assert.rejects(f.s.selectSlots(pkg,selection),/Choose ESP32 slot/);
