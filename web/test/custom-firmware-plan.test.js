@@ -58,19 +58,18 @@ test('an oversized standalone app stops without a Keymind bridge or write when m
   assert.deepEqual(writes,[]);assert.equal(s.plan,null);
 });
 
-test('nonzero-origin merged writes preserve the entire input, mirror the exact app and erase only once',async()=>{
+test('nonzero-origin merged writes preserve the entire input and erase only once',async()=>{
   const fixture=nonzeroMerged(),before=fixture.bytes.slice(),pkg=inspectFirmware('custom.bin',fixture.bytes);
   const {s,writes,reads,readbacks}=session({chip:0});
   const plan=await s.prepare(pkg,{planner:{call:unused},resolveFirmwareName:unused});
-  assert.equal(plan.merged,true);assert.equal(plan.mirroredSlots,1);assert.deepEqual(plan.addresses,[0x1000,0x110000]);
-  assert.equal(plan.segments[0].sourceOffset,0);assert.equal(plan.segments[1].sourceOffset,0xf000);
+  assert.equal(plan.merged,true);assert.deepEqual(plan.addresses,[0x1000]);
+  assert.equal(plan.segments[0].sourceOffset,0);assert.equal(plan.segments.length,1);
   assert.deepEqual(reads,[],'Merged table and OTA metadata come from the file, not the current layout');
   await s.flash(pkg,()=>{});
-  assert.equal(writes.length,2);assert.equal(writes[0].fileArray[0].address,0x1000);
-  assert.equal(writes[0].eraseAll,true);assert.equal(writes[1].eraseAll,false);
+  assert.equal(writes.length,1);assert.equal(writes[0].fileArray[0].address,0x1000);
+  assert.equal(writes[0].eraseAll,true);
   assert.deepEqual(writes[0].fileArray[0].data,before);assert.equal(writes[0].fileArray[0].data.length,before.length);
-  assert.deepEqual(writes[1].fileArray[0].data,before.subarray(0xf000));
-  assert.deepEqual(readbacks,[[0x1000,before.length],[0x110000,before.length-0xf000]]);
+  assert.deepEqual(readbacks,[[0x1000,before.length]]);
   assert.equal(hash(pkg.payload),pkg.payloadHash);assert.equal(pkg.sha256,hash(before));assert.deepEqual(fixture.bytes,before);
 });
 

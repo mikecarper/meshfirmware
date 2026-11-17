@@ -22,17 +22,18 @@ test('factory write order has no fake OTA requirement but rejects unsupported la
   assert.throws(()=>appWriteOrder([{type:0,subtype:2,offset:0x10000}]),/unsupported/);
   assert.throws(()=>appWriteOrder([{type:0,subtype:0x10,offset:0x10000}]),/Actual OTA/);
 });
-test('merged install mirrors the exact embedded app and verifies each secondary slot',async()=>{
+test('merged install writes and verifies the original image once without generating a secondary application',async()=>{
   const bytes=new Uint8Array(0x10000+64+56).fill(255);bytes.set(image({app:false}),0);bytes.set(dual(),0x8000);bytes.set(image(),0x10000);bytes.set(encode('EndF-preserve-the-exact-trailer'),0x10000+64);
   const pkg=inspectFirmware('full-merged.bin',bytes),{s,calls}=session();const plan=await s.prepare(pkg);
-  assert.equal(plan.mirroredSlots,1);assert.deepEqual(plan.addresses,[0,0x110000]);await s.flash(pkg,()=>{});
-  const writes=calls.filter(row=>row[0]==='write').map(row=>row[1]);assert.equal(writes.length,2);assert.equal(writes[0].eraseAll,true);assert.equal(writes[1].eraseAll,false);assert.deepEqual(writes[1].fileArray[0].data,bytes.subarray(0x10000));
-  assert.equal(hash(writes[1].fileArray[0].data),plan.segments[1].payloadHash);
+  assert.deepEqual(plan.addresses,[0]);assert.equal(plan.segments.length,1);await s.flash(pkg,()=>{});
+  const writes=calls.filter(row=>row[0]==='write').map(row=>row[1]);assert.equal(writes.length,1);assert.equal(writes[0].eraseAll,true);assert.equal(writes[0].fileArray[0].address,0);assert.deepEqual(writes[0].fileArray[0].data,bytes);
+  assert.equal(hash(writes[0].fileArray[0].data),plan.segments[0].payloadHash);
 });
-test('merged mirroring refuses guessing past the primary boundary and refuses modified segment proof',async()=>{
+test('merged writes preserve all included bytes and reject altered plans and missing boot applications',async()=>{
   const bytes=new Uint8Array(0x10000+64).fill(255);bytes.set(image({app:false}),0);bytes.set(dual(),0x8000);bytes.set(image(),0x10000);const pkg=inspectFirmware('full-merged.bin',bytes),{s,calls}=session();await s.prepare(pkg);
-  s.plan.segments=[{address:0,sourceOffset:0,length:bytes.length,payloadHash:hash(bytes)}];await assert.rejects(s.flash(pkg,()=>{}),/plan changed/);assert.equal(calls.filter(row=>row[0]==='write').length,0);
-  const oversized=new Uint8Array(0x110000+1).fill(255);oversized.set(bytes);const other=session();await assert.rejects(other.s.prepare(inspectFirmware('full-merged.bin',oversized)),/boundary/);
+  s.plan.segments=[{address:0,sourceOffset:0,length:bytes.length-1,payloadHash:hash(bytes)}];await assert.rejects(s.flash(pkg,()=>{}),/plan changed/);assert.equal(calls.filter(row=>row[0]==='write').length,0);
+  const withBoth=new Uint8Array(0x110000+64).fill(255);withBoth.set(bytes);withBoth.set(image(),0x110000);const included=session(),complete=inspectFirmware('full-merged.bin',withBoth),plan=await included.s.prepare(complete);assert.deepEqual(plan.addresses,[0]);await included.s.flash(complete,()=>{});assert.equal(included.calls.filter(row=>row[0]==='write').length,1);assert.deepEqual(included.calls.filter(row=>row[0]==='write')[0][1].fileArray[0].data,withBoth);
+  const missing=bytes.slice();missing.fill(255,0x10000);const invalid=session();await assert.rejects(invalid.s.prepare(inspectFirmware('full-merged.bin',missing)),/boot-selected partition/);assert.equal(invalid.calls.filter(row=>row[0]==='write').length,0);
 });
 test('actual WASM shared validator accepts factory/no-NVS and larger OTA metadata layouts',async()=>{
   const {loadPyodide}=await import('pyodide'),{fileURLToPath}=await import('node:url'),{readFile}=await import('node:fs/promises'),{createPlannerService}=await import('../src/planner-runtime.js');

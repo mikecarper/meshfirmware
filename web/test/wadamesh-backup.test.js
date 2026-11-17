@@ -4,7 +4,7 @@ import { sha512 } from '@noble/hashes/sha2.js';
 import { unzipSync } from 'fflate';
 import { MeshCore, publicFromPrivate, sealBackup, verifyBackup, parseBackup, backupSummary } from '../src/meshcore.js';
 import { SerialLink } from '../src/serial.js';
-import { companionContactCapacity } from '../src/wadamesh-profile.js';
+import { companionContactCapacity,isWadameshTakTouchProfile } from '../src/wadamesh-profile.js';
 import { commonCliReplyState } from '../src/common-cli.js';
 import { backupCoverage } from '../src/backup-coverage.js';
 import { addWadameshFiles, wadameshFilesZip, wadameshSettingsImport } from '../src/wadamesh-backup.js';
@@ -59,6 +59,12 @@ function device(p,{repeat=0,pathMode=0,stuckRepeat=false,stuckPath=false,cliVers
 test('generic Wadamesh get summaries do not claim optional settings, including credentials',()=>{
   for(const command of ['get bluetooth.name','get usb.logging','get bluetooth','get password','get wifi.pwd'])assert.equal(commonCliReplyState(summary,command).state,'unsupported');
   assert.equal(commonCliReplyState(summary,'get').state,'complete');
+});
+test('TAK touch profile requires the exact reviewed wire layout and matching version reply',()=>{
+  const info=new Uint8Array(82);info.set([13,27,232,40]);info.set(enc('v1.18.0.1-touch'),60);
+  const reply='v1.18.0.1-touch (Build: Nov 17 2026)';assert.equal(isWadameshTakTouchProfile(info,reply),true);
+  for(const index of [0,1,2,3,60]){const changed=info.slice();changed[index]^=1;assert.equal(isWadameshTakTouchProfile(changed,reply),false);}
+  for(const bad of ['v1.18.0.1-touch','v1.18.0.1 (Build: Nov 17 2026)','Unknown command','v1.18.0.1-touch (Build: Nov 17 2026)\nextra'])assert.equal(isWadameshTakTouchProfile(info,bad),false);
 });
 test('Wadamesh capture preserves a 2,000-contact inventory and unsupported queries without native schema truncation',async()=>{
   const p=payload(2000),{core}=device(p);

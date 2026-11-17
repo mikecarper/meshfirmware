@@ -9,6 +9,16 @@ export function isLargeWadameshLayout(info) {
 export function isWadameshProtocolProfile(info, version) {
   return isLargeWadameshLayout(info) && typeof version === 'string' && /^(?:>\s*)?(?:Meshcomod|Wadamesh)\s+\S+/i.test(version.trim());
 }
+// The reviewed TAK beta_105.8 touch builds identify themselves using the
+// Companion `ver` reply rather than Meshcomod's `version` command. This is a
+// compatible protocol fingerprint, not proof of an exact release or board.
+// Source: jade-on-mesh/wadamesh-tak tag tak-beta_105.8, MyMesh.cpp/.h and platformio.ini.
+export function isWadameshTakTouchProfile(info, version) {
+  if (!isLargeWadameshLayout(info) || info[1] !== 27 || info.length < 80 || typeof version !== 'string') return false;
+  const field = info.subarray(60, 80), end = field.indexOf(0);
+  const identity = new TextDecoder().decode(end < 0 ? field : field.subarray(0, end));
+  return identity === 'v1.18.0.1-touch' && /^v1\.18\.0\.1-touch\s+\(Build: [^\r\n]{1,64}\)$/i.test(version.trim());
+}
 export function companionContactCapacity(info, version) {
   return isWadameshProtocolProfile(info, version) ? 2000 : info[2] * 2;
 }

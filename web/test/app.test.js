@@ -23,6 +23,8 @@ import {hash as firmwareHash,md5hex,partitionTable as parsePartitionTable,crc32,
 import {assessFirmwareBoard} from '../src/firmware-board.js';
 import {espSlotChoices,selectEspWriteSlots} from '../src/esp-slots.js';
 import {isWadamesh,wadameshDisplayAssessment,WADAMESH_STARTUP_NOTICE} from '../src/wadamesh.js';
+import {isWadameshProtocolProfile,isWadameshTakTouchProfile} from '../src/wadamesh-profile.js';
+import {prepareWadameshConfig,applyWadameshConfig} from '../src/wadamesh-config.js';
 import {inspectRadioDefaults,customizeRadioDefaults} from '../src/radio-defaults.js';
 import {createPostFlashSettingsPlan,applyPostFlashSettings} from '../src/post-flash-settings.js';
 import {createPostFlashCompanionRequest} from '../src/post-flash-companion.js';
@@ -67,10 +69,11 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
   context.assessFirmwareBoard=()=>({status:'match',requiresOverride:false,reason:'Test board identity.'});context.espSlotChoices=espSlotChoices;
   context.quickHotspotUrl=quickHotspotUrl;context.postFlashBleAdvice=postFlashBleAdvice;context.createNrfActivationCheck=()=>null;
   context.inspectRadioDefaults=inspectRadioDefaults;context.customizeRadioDefaults=customizeRadioDefaults;
+  context.prepareWadameshConfig=prepareWadameshConfig;context.applyWadameshConfig=applyWadameshConfig;
   context.createPostFlashSettingsPlan=createPostFlashSettingsPlan;context.applyPostFlashSettings=applyPostFlashSettings;context.createPostFlashCompanionRequest=createPostFlashCompanionRequest;context.loadRadioPresets=async()=>({presets:[],source:'bundled',warning:'Test preset inventory.'});
   context.detectApplication=(...args)=>context.detectMeshCore(...args);context.detectMeshtasticBoard=detectMeshtasticBoard;
   context.parseBootloaderInfo=parseBootloaderInfo;context.detectBootloaderBoard=detectBootloaderBoard;context.xiaoInstalledStatus=xiaoInstalledStatus;context.xiaoInfoProfile=xiaoInfoProfile;context.xiaoBootloaderItem=xiaoBootloaderItem;context.chooseBootloaderInfoFile=async()=>{calls.push('file-picker');throw Error('Unexpected file chooser');};
-  context.selectionLink=selectionLink;context.nrfBoardCandidates=nrfBoardCandidates;context.espBoardCandidates=espBoardCandidates;context.isWadamesh=isWadamesh;context.wadameshDisplayAssessment=wadameshDisplayAssessment;context.WADAMESH_STARTUP_NOTICE=WADAMESH_STARTUP_NOTICE;context.defaultFirmwareProvider=defaultFirmwareProvider;
+  context.selectionLink=selectionLink;context.nrfBoardCandidates=nrfBoardCandidates;context.espBoardCandidates=espBoardCandidates;context.isWadamesh=isWadamesh;context.wadameshDisplayAssessment=wadameshDisplayAssessment;context.isWadameshProtocolProfile=isWadameshProtocolProfile;context.isWadameshTakTouchProfile=isWadameshTakTouchProfile;context.WADAMESH_STARTUP_NOTICE=WADAMESH_STARTUP_NOTICE;context.defaultFirmwareProvider=defaultFirmwareProvider;
   vm.runInContext(source,context);
   return {context,elements,calls,port,serialEvents,windowEvents,evaluate:code=>vm.runInContext(code,context)};
 }
@@ -279,6 +282,11 @@ async function queuedSettingsVerificationWorkbench(){
 test('post-flash settings run once through the verified owned application link and are read back before completion',async()=>{
   const ui=await queuedSettingsVerificationWorkbench();await ui.evaluate('verifyApplication()');assert.equal(ui.radio.frequency,910.525);assert.equal(ui.radio.preamble,'32');assert.equal(ui.evaluate('state.postFlashSettingsResult.complete'),true);assert.equal(ui.evaluate('state.postFlashSettingsApproval.attempted'),true);assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.calls.filter(c=>c.startsWith('set radio ')).length,1);assert.ok(ui.calls.indexOf('ver')<ui.calls.indexOf('get radio'));assert.match(ui.elements.get('notice').textContent,/settings applied and read back/);
   ui.evaluate('state.verification=expected;');await ui.evaluate('verifyApplication()');assert.equal(ui.calls.filter(c=>c.startsWith('set radio ')).length,1);assert.equal(ui.calls.filter(c=>c==='application-open').length,2);
+});
+test('manual Verify and configure shows common settings after verification without sending settings',async()=>{
+  const ui=await storageVerificationWorkbench('common-cli','int:esp32=8192K');let shown=0;ui.elements.get('quick-settings').scrollIntoView=()=>{shown++;};
+  await ui.evaluate('verifyApplication()');assert.equal(shown,1);assert.equal(ui.evaluate('state.finishedFirmware.verified'),true);assert.equal(ui.calls.some(call=>call.startsWith('set ')),false);
+  const automatic=await storageVerificationWorkbench('common-cli','int:esp32=8192K');automatic.elements.get('quick-settings').scrollIntoView=()=>{throw Error('Automatic continuation must not move the page');};await automatic.evaluate('verifyApplication({automaticReconnect:true})');
 });
 test('a verified source catalog version with a release suffix matches the running numeric firmware before settings apply',async()=>{
   const ui=await queuedSettingsVerificationWorkbench();ui.context.expected.version='v1.18.0.1-halo-keymind-cascade-dev-03214a16';await ui.evaluate('verifyApplication()');assert.equal(ui.evaluate('state.postFlashSettingsResult.complete'),true);assert.equal(ui.evaluate('state.finishedFirmware.verified'),true);
@@ -5025,7 +5033,7 @@ test('selecting Wadamesh defaults to merged installation and displays its limits
   const ui=workbench({catalogPromise:Promise.resolve(linkedCatalog([v4Item,{...v4Item,provider:'Keymind Cascade'},wadaItem(),wadaItem(true)]))});await new Promise(resolve=>setImmediate(resolve));
   assert.equal(ui.elements.get('provider').value,'Keymind Cascade');ui.elements.get('provider').value='Wadamesh TAK';await ui.elements.get('provider').onchange();
   assert.equal(ui.evaluate('state.installMode'),'install');assert.equal(ui.elements.get('install-mode-install').checked,true);assert.equal(ui.elements.get('wadamesh-info').hidden,false);assert.equal(ui.elements.get('radio-defaults').hidden,true);
-  assert.match(ui.elements.get('workflow-guidance').textContent,/No Keymind expansion or post-flash settings/);assert.match(ui.elements.get('install-mode-hint').textContent,/Wadamesh first install.*whole-chip erase/);
+  assert.match(ui.elements.get('workflow-guidance').textContent,/No Keymind expansion or automatic post-flash settings/);assert.match(ui.elements.get('install-mode-hint').textContent,/Wadamesh first install.*whole-chip erase/);
   assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.deepEqual(ui.calls,[]);
 });
 test('a saved Wadamesh provider defaults to first install while an explicit Update selection link is honored',async()=>{
@@ -5075,9 +5083,105 @@ test('standalone firmware does not queue MeshCore USB settings or claim MeshCore
   await ui.evaluate('loadFirmware(wada.name,image,wada);');ui.evaluate('state.radioDefaults.inspection={supported:false};queueVerification(state.pkg);');
   assert.equal(ui.evaluate('radioSettingsAvailable()'),false);assert.equal(ui.evaluate('state.verification'),null);
   await assert.rejects(ui.evaluate('inspectSelectedRadioDefaults();'),/Configure Wadamesh TAK.*on the device/);assert.deepEqual(ui.calls,[]);
-  ui.evaluate('state.esp={port:{getInfo:()=>({})},finish:async()=>{},close:async()=>{}};state.plan={written:true,sha256:state.pkg.sha256,transportMode:"no_reset"};');
+  ui.evaluate('state.handoff=true;state.esp={port:{getInfo:()=>({})},finish:async()=>{},close:async()=>{}};state.plan={written:true,sha256:state.pkg.sha256,transportMode:"no_reset"};');
   await ui.evaluate('finishVerifiedEsp();');assert.equal(ui.evaluate('state.finishedFirmware.provider'),'Wadamesh TAK');assert.equal(ui.evaluate('state.finishedFirmware.verified'),false);assert.equal(ui.evaluate('state.verification'),null);
+  assert.equal(ui.evaluate('state.handoff'),false);
   assert.match(ui.elements.get('notice').textContent,/not verified.*No MeshCore startup check or settings commands/s);assert.deepEqual(ui.calls,[]);
+});
+
+function wadameshSelf(key=1){const self=new Uint8Array(58);self.set([5,1,20,22]);self.fill(key,4,36);return self;}
+test('Wadamesh Step 5 checks the selected application even without a prior verification record',async()=>{
+  const ui=workbench();await Promise.resolve();ui.elements.get('provider').value='Wadamesh TAK';ui.context.port=ui.port;
+  ui.evaluate('state.port=port;state.item={provider:"Wadamesh TAK"};state.finishedFirmware={sha256:"a".repeat(64),provider:"Wadamesh TAK",verified:false};controls();');
+  assert.equal(ui.elements.get('verify-app').disabled,false);
+  ui.context.SerialLink=class{constructor(port){assert.equal(port,ui.port);}async open(baud,options){assert.equal(baud,115200);assert.equal(options.application,true);ui.calls.push('open');}async close(){ui.calls.push('close');}};
+  ui.context.MeshCore=class{async self(){ui.calls.push('self');return wadameshSelf();}async info(){ui.calls.push('info');return Uint8Array.from([13,12,232,40]);}async cli(command){ui.calls.push(command);return 'Meshcomod v2.4';}};
+  await ui.evaluate('verifyApplication();');
+  assert.deepEqual(ui.calls,['open','self','info','version','close']);
+  assert.match(ui.elements.get('notice').textContent,/Wadamesh-compatible application responded.*exact TAK release, physical board, running slot and screen are not verified/);
+  assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.evaluate('state.finishedFirmware.verified'),false);
+});
+
+test('Wadamesh Step 5 rejects unrecognized profiles and changed ports without claiming verification',async()=>{
+  for(const failure of ['profile','port']){
+    const ui=workbench();await Promise.resolve();ui.elements.get('provider').value='Wadamesh TAK';ui.context.port=ui.port;ui.evaluate('state.port=port;state.item={provider:"Wadamesh TAK"};');
+    ui.context.SerialLink=class{async open(){ui.calls.push('open');}async close(){ui.calls.push('close');}};
+    ui.context.MeshCore=class{async self(){return wadameshSelf();}async info(){if(failure==='port')ui.evaluate('state.generation++');return Uint8Array.from([13,12,232,40]);}async cli(){return failure==='profile'?'Other firmware':'Wadamesh v1';}};
+    await assert.rejects(ui.evaluate('verifyApplication();'),/profile|changed/);assert.deepEqual(ui.calls,['open','close']);
+    assert.equal(ui.evaluate('state.verification'),null);assert.equal(ui.evaluate('state.finishedFirmware'),null);
+  }
+});
+
+test('Wadamesh Step 5 recognizes the reviewed touch profile using ver when version is unsupported',async()=>{
+  const ui=workbench();await Promise.resolve();ui.elements.get('provider').value='Wadamesh TAK';ui.context.port=ui.port;ui.evaluate('state.port=port;state.item={provider:"Wadamesh TAK"};');
+  ui.context.SerialLink=class{async open(){ui.calls.push('open');}async close(){ui.calls.push('close');}};
+  ui.context.MeshCore=class{async self(){ui.calls.push('self');return wadameshSelf();}async info(){ui.calls.push('info');const info=new Uint8Array(82);info.set([13,27,232,40]);info.set(new TextEncoder().encode('v1.18.0.1-touch'),60);return info;}async cli(command){ui.calls.push(command);return command==='version'?'Unknown command':'v1.18.0.1-touch (Build: Nov 17 2026)';}};
+  await ui.evaluate('verifyApplication();');assert.deepEqual(ui.calls,['open','self','info','version','ver','close']);
+  assert.match(ui.elements.get('notice').textContent,/Wadamesh-compatible application responded/);assert.equal(ui.evaluate('state.finishedFirmware'),null);
+});
+
+test('Wadamesh Step 5 stays disabled during pending recovery and does not touch the radio',async()=>{
+  const ui=workbench();await Promise.resolve();ui.elements.get('provider').value='Wadamesh TAK';ui.context.port=ui.port;
+  ui.evaluate('state.port=port;state.item={provider:"Wadamesh TAK"};state.espRecovery={};controls();');assert.equal(ui.elements.get('verify-app').disabled,true);
+  await assert.rejects(ui.evaluate('verifyApplication();'),/pending write or recovery/);assert.deepEqual(ui.calls,[]);
+});
+
+async function wadameshConfigWorkbench(){
+  const ui=workbench();await Promise.resolve();ui.elements.get('provider').value='Wadamesh TAK';ui.context.port=ui.port;
+  ui.evaluate('state.port=port;state.item={provider:"Wadamesh TAK"};');
+  const radio={key:1,frequency:'915.000',power:20,media:false,cross:'auto',failTx:false};ui.radio=radio;
+  ui.context.SerialLink=class{constructor(port){assert.equal(port,ui.port);}async open(){ui.calls.push('open');}async close(){ui.calls.push('close');}};
+  ui.context.MeshCore=class{
+    async self(){ui.calls.push('self');return wadameshSelf(radio.key);}
+    async info(){ui.calls.push('info');const info=new Uint8Array(82);info.set([13,27,232,40]);info.set(new TextEncoder().encode('v1.18.0.1-touch'),60);return info;}
+    async cli(command){
+      ui.calls.push(command);
+      if(command==='version')return 'Unknown command';if(command==='ver')return 'v1.18.0.1-touch (Build: Nov 17 2026)';
+      if(command==='get radio')return `${radio.frequency},125.000,7,5`;if(command==='get tx')return String(radio.power);
+      if(command==='get radio2')return radio.media?'911.150,250.000,7,5,rxtx,12 (auto)':'off';
+      if(command==='get radio2.cross')return radio.cross;if(command==='get tempradio2')return 'off';
+      if(command==='get radioat2'||command==='get tempradioat2')return 'slots:';
+      if(command.startsWith('set radio ')){radio.frequency='910.525';return 'OK - reboot to apply';}
+      if(command.startsWith('set tx ')){if(radio.failTx)throw Error('device disconnected');radio.power=15;return 'OK';}
+      if(command.startsWith('set radio2.cross ')){radio.cross='on';return 'OK';}
+      if(command.startsWith('set radio2 ')){radio.media=true;return 'OK - radio2 rxtx; preamble=12';}
+      throw Error(`Unexpected command ${command}`);
+    }
+  };
+  await ui.evaluate('verifyApplication();');
+  for(const [id,value]of [['frequency','910.525'],['bandwidth','125000'],['sf','7'],['cr','5'],['tx','15'],['media','mediamesh'],['cross','on']])ui.elements.get('wadamesh-config-'+id).value=value;
+  ui.elements.get('wadamesh-config-primary').checked=true;ui.calls.length=0;return ui;
+}
+
+test('Wadamesh Verify and configure offers controls and applies only explicitly approved settings with readback',async()=>{
+  const ui=await wadameshConfigWorkbench();assert.equal(ui.elements.get('wadamesh-live-config').hidden,false);
+  ui.context.confirm=async(title,detail,warning)=>{ui.calls.push('confirm');assert.match(title,/Apply these Wadamesh settings/);assert.match(detail,/Primary radio.*MediaMesh/s);assert.match(detail,/915 MHz \/ 125 kHz \/ SF7 \/ CR4\/5 → 910\.525 MHz/);assert.match(detail,/MediaMesh: Off → 911\.15 MHz/);assert.doesNotMatch(detail,/frequencyHz|bandwidthHz|\{"/);assert.match(warning,/manual reboot/);return true;};
+  await ui.evaluate('configureWadamesh();');
+  assert.ok(ui.calls.indexOf('confirm')<ui.calls.findIndex(call=>call.startsWith('set ')));
+  assert.deepEqual(ui.calls.filter(call=>call.startsWith('set ')),['set radio 910.525,125,7,5','set tx 15','set radio2 911.15,250,7,5,rxtx,auto','set radio2.cross on']);
+  assert.match(ui.elements.get('wadamesh-config-status').textContent,/saved and read back.*Restart the radio manually/);
+  assert.equal(ui.evaluate('state.finishedFirmware?.verified'),undefined);assert.equal(ui.evaluate('state.verification'),null);
+});
+
+test('Wadamesh configuration cancellation, changed port, and changed identity never send setters',async()=>{
+  for(const outcome of ['cancel','port','identity']){
+    const ui=await wadameshConfigWorkbench();ui.context.confirm=async()=>{if(outcome==='port')ui.evaluate('state.generation++');if(outcome==='identity')ui.radio.key=2;return outcome!=='cancel';};
+    if(outcome==='cancel')await ui.evaluate('configureWadamesh();');else await assert.rejects(ui.evaluate('configureWadamesh();'),/changed/);
+    assert.equal(ui.calls.some(call=>call.startsWith('set ')),false,outcome);
+  }
+});
+
+test('Wadamesh configuration reports partial writes and never retries failures',async()=>{
+  const ui=await wadameshConfigWorkbench();ui.radio.failTx=true;ui.context.confirm=async()=>true;
+  await ui.evaluate('configureWadamesh();');
+  assert.deepEqual(ui.calls.filter(call=>call.startsWith('set ')),['set radio 910.525,125,7,5','set tx 15']);
+  assert.match(ui.elements.get('wadamesh-config-status').textContent,/not fully confirmed.*Earlier changes may have been saved.*nothing will be retried/i);
+  assert.match(ui.elements.get('wadamesh-config-status').textContent,/restart the radio manually/i);
+});
+
+test('Wadamesh configuration without a selected setting never opens USB',async()=>{
+  const ui=await wadameshConfigWorkbench();ui.elements.get('wadamesh-config-primary').checked=false;ui.elements.get('wadamesh-config-media').value='unchanged';ui.elements.get('wadamesh-config-cross').value='unchanged';
+  await assert.rejects(ui.evaluate('configureWadamesh();'),/Select radio or MediaMesh/);assert.deepEqual(ui.calls,[]);
 });
 
 test('an opened USB port with an unsupported application is informational and requires an exact manual board',async()=>{

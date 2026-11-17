@@ -153,22 +153,6 @@ function appWritePlan(parts, otaBytes = null, {allowUnknown=false} = {}) {
 }
 export function appWriteOrder(parts,otaBytes=null){return appWritePlan(parts,otaBytes).addresses;}
 
-export function mergedMirrorSegments(pkg, parts, populated) {
-  const fileOffset=pkg.flashOffset??0;
-  const ota=parts.filter(part=>part.type===0&&part.subtype>=0x10&&part.subtype<=0x1f).sort((a,b)=>a.subtype-b.subtype);
-  const missing=ota.filter(part=>!populated.has(part.offset));
-  if(ota.length<2||!missing.length)return [];
-  if(ota.map(part=>part.subtype).some((subtype,index)=>subtype!==0x10+index))fail('Merged OTA identities are not unique and contiguous.');
-  const source=ota[0];
-  if(!populated.has(source.offset)||fileOffset+pkg.payload.length>source.offset+source.size)fail('Cannot safely identify the exact merged primary application boundary for fallback mirroring. Select a complete compatible merged image.');
-  // As in the Linux flasher, preserve the entire original app including its
-  // EndF trailer/padding; never invent a boundary from only the ESP checksum.
-  const sourceOffset=source.offset-fileOffset,app=pkg.payload.subarray(sourceOffset);
-  validateEspImage(app);
-  if(missing.some(part=>app.length>part.size))fail('Embedded application does not fit every secondary OTA slot.');
-  return missing.map(part=>({address:part.offset,sourceOffset,length:app.length,payloadHash:hash(app)}));
-}
-
 export async function readVerifiedFlash(loader,address,size,onPacketReceived=null) {
   if(loader.IS_STUB!==true)fail('Verified flash reads require a running ESP flasher stub.');
   if(!Number.isInteger(address)||address<0||address>0xffffffff||!Number.isInteger(size)||size<0||size>(128<<20)||address+size>0x100000000)fail('Invalid ESP flash read range.');
@@ -322,8 +306,8 @@ export class EspSession {
         bootable=activeOta(proposed,metadata);
       }
       if(bootable===undefined || !populated.has(bootable)) fail('Merged install does not contain a valid application in its boot-selected partition.');
-      const mirrors=mergedMirrorSegments(pkg,proposed,populated),segments=[{address:fileOffset,sourceOffset:0,length:pkg.payload.length,payloadHash:pkg.payloadHash},...mirrors];
-      return this.recordCompatiblePlan(pkg,{sha256:pkg.sha256,payloadHash:pkg.payloadHash,mac:this.mac,addresses:segments.map(segment=>segment.address),slotBootAddress:bootable,merged:true,parts,segments,mirroredSlots:mirrors.length},recovery);
+      const segments=[{address:fileOffset,sourceOffset:0,length:pkg.payload.length,payloadHash:pkg.payloadHash}];
+      return this.recordCompatiblePlan(pkg,{sha256:pkg.sha256,payloadHash:pkg.payloadHash,mac:this.mac,addresses:[fileOffset],slotBootAddress:bootable,merged:true,parts,segments},recovery);
     } else {
       // The shared expansion helper reviews ESP32/C3/S3 only. Other supported
       // chips may update fitting slots, never run an unreviewed migration.
@@ -419,7 +403,7 @@ export class EspSession {
       }else{
         // In pinned esptool-js 0.7.0 the first progress callback occurs only
         // after eraseAll and flashDeflBegin have returned successfully.
-        await this.loader.writeFlash({ fileArray: [{ data, address }], flashMode: 'keep', flashFreq: 'keep', flashSize: 'keep', eraseAll: plan.merged && i === 0, compress: true, calculateMD5Hash: md5hex, reportProgress: (_,written,total) => {if(plan.merged&&i===0)eraseComplete=true;progress((i + written / total) / plan.addresses.length, `Writing + verifying ${bridge?'USB bridge':i&&plan.merged?'fallback application':'application'} 0x${address.toString(16)}`);} });
+        await this.loader.writeFlash({ fileArray: [{ data, address }], flashMode: 'keep', flashFreq: 'keep', flashSize: 'keep', eraseAll: plan.merged && i === 0, compress: true, calculateMD5Hash: md5hex, reportProgress: (_,written,total) => {if(plan.merged&&i===0)eraseComplete=true;progress((i + written / total) / plan.addresses.length, `Writing + verifying ${bridge?'USB bridge':plan.merged?'merged image':'application'} 0x${address.toString(16)}`);} });
         if(plan.merged&&i===0)eraseComplete=true;
       }
       if ((await this.loader.flashMd5sum(address,data.length)).toLowerCase() !== md5hex(data)) fail('Target MD5 readback differs from the validated bytes. No automatic reset.');

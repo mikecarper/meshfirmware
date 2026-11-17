@@ -497,7 +497,7 @@ test('one visible Update or Erase/new-install switch precedes the build list and
 test('USB, backup and flash are primary actions while optional verification keeps its stable step 5 label',()=>{
   for(const [id,number]of [['select-port','1'],['prepare','3'],['flash','4'],['verify-app','5']]){
     const button=get(id),badge=button.children.find(node=>hasClass(node,'action-number')),label=nodes.find(node=>inside(node,button)&&hasClass(node,'action-label'));
-    if(id==='verify-app'){assert.ok(hasClass(button,'secondary'),'Optional verification must use the secondary style');assert.ok(!hasClass(button,'primary'));assert.equal(button.attrs['aria-label'],'Optional step 5: Verify running application');}
+    if(id==='verify-app'){assert.ok(hasClass(button,'secondary'),'Optional verification must use the secondary style');assert.ok(!hasClass(button,'primary'));assert.equal(button.attrs['aria-label'],'Optional step 5: Verify and Configure');}
     else{assert.ok(hasClass(button,'primary'),`#${id} must use the dark primary style`);assert.ok(!hasClass(button,'secondary'),`#${id} cannot use the light secondary style`);}
     assert.ok(hasClass(button,'step-button'),id);assert.ok(badge,`#${id} needs a persistent number badge`);assert.ok(label,`#${id} needs a separate editable label`);
     assert.equal(badge.attrs['aria-hidden'],'true');assert.equal(/^<[^>]+>([^<]*)</.exec(html.slice(badge.start))?.[1].trim(),number,id);

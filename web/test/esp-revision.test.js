@@ -56,7 +56,7 @@ test('merged bootloader revision mismatch stops before whole-chip erase or any s
   const bytes=new Uint8Array(0x10000+64).fill(255);bytes.set(image({min:1}),0);bytes.set(partitionTable(),0x8000);bytes.set(image({app:true}),0x10000);
   const pkg=inspectFirmware('merged.bin',bytes),{s,writes}=session(),plan=await s.prepare(pkg);assert.equal(plan.requiresRevisionOverride,true);assert.ok(plan.compatibilityWarnings.some(w=>w.startsWith('BOOTLOADER')));
   await assert.rejects(s.flash(pkg,()=>{}),/FORCE CHIP REVISION/);assert.equal(writes.length,0);
-  await s.flash(pkg,()=>{},{allowRevisionMismatch:true});assert.equal(writes.length,2);assert.equal(writes[0].eraseAll,true);assert.equal(writes[1].eraseAll,false);
+  await s.flash(pkg,()=>{},{allowRevisionMismatch:true});assert.equal(writes.length,1);assert.equal(writes[0].eraseAll,true);assert.equal(writes[0].fileArray[0].address,0);
 });
 test('application mismatches are explicitly labelled advisory-class rather than bootloader errors',async()=>{
   const pkg=inspectFirmware('app.bin',image({app:true,min:1})),{s}=session();const plan={addresses:[0x10000],parts:[]},result=await assessEspCompatibility(s.loader,pkg,plan);assert.equal(result.requiresRevisionOverride,true);assert.ok(result.compatibilityWarnings.every(w=>w.startsWith('APPLICATION')));

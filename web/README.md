@@ -54,10 +54,13 @@ does not apply to this erase flow. **Update** is an explicit option only for
 an existing matching Wadamesh layout; offsets and slot capacity are read from
 the actual radio. A Keymind partition-expansion bridge is never substituted.
 
-Firmware transfer readback is verified, but Wadamesh startup is not claimed
-verified through MeshCore's USB protocol. After reset, check the device screen.
-Configure radio/MediaMesh settings in Wadamesh itself; this provider does not
-queue MeshCore USB settings or change the downloaded firmware defaults.
+Firmware transfer readback is verified. After reset, choose the running
+application port and use **Verify and configure** to check for a reviewed
+Wadamesh-compatible USB response and open radio settings. This response does
+not prove the exact release, physical board, running slot or screen; check the
+device screen separately. Changes require a separate review and confirmation.
+Primary radio changes may need a manual restart; unavailable or unsafe
+MediaMesh changes are reported rather than assumed to have been applied.
 
 ### ESP32 slot choice
 
@@ -700,7 +703,7 @@ writing; no blind retry or 1200-baud fallback follows an uncertain handoff.
 | --- | --- |
 | MeshCore / Keymind catalog | Rebuilt every four hours/on deployment; repository-aware URLs, newest Keymind manifests, primary/proxy/validated-cache fallback, exact-board official utility fallback and newest-first versions; every raw publication route checked in CI |
 | ESP32/S2/C3/S3/C6 | Validated application updates and merged installs; chip/security/MAC/capacity and silicon-revision checks; factory-only/non-OTA updates and larger OTA metadata partitions supported |
-| Merged ESP32 installs | Populate missing secondary OTA slots from the exact embedded app, with independent readback; refuse ambiguous source boundaries rather than guessing |
+| Merged ESP32 installs | Write and verify the supplied merged image at its inspected origin; no additional application-slot copy |
 | ESP components | Checksum-valid bootloader/component image, explicit address and action-specific button confirmation; never guess an offset |
 | nRF52 | Serial DFU like `adafruit-nrfutil`: application, bootloader, SoftDevice or combined SD/bootloader ZIP; guided erase/reconnect/final-write; no mounted-drive workflow or generic Nordic secure-DFU substitution |
 | Other UF2 boards | Validated blocks; explicitly chosen bootloader directory and identity recheck; nRF52 UF2 is refused in favor of serial DFU ZIP |

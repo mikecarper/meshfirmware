@@ -43,6 +43,8 @@ import { createNrfActivationCheck } from './nrf-activation.js';
 import { inspectRadioDefaults, customizeRadioDefaults } from './radio-defaults.js';
 import { resolveCustomFirmwareName } from './custom-firmware.js';
 import {isWadamesh,wadameshDisplayAssessment,WADAMESH_STARTUP_NOTICE} from './wadamesh.js';
+import {isWadameshProtocolProfile,isWadameshTakTouchProfile} from './wadamesh-profile.js';
+import {prepareWadameshConfig,applyWadameshConfig} from './wadamesh-config.js';
 import { createPostFlashSettingsPlan, applyPostFlashSettings } from './post-flash-settings.js';
 import { createPostFlashCompanionRequest } from './post-flash-companion.js';
 import { loadRadioPresets } from './radio-presets.js';
@@ -85,6 +87,7 @@ state.quickSettingsMessage=null;
 // reuse a previous radio's defaults draft or treat a local hash as published.
 state.radioDefaults=null;
 state.postFlashSettingsApproval=null;state.postFlashSettingsResult=null;
+state.wadameshConfigTarget=null;
 state.radioPresets=null;
 const radioDefaultsFields=['radio-defaults-frequency','radio-defaults-bandwidth','radio-defaults-sf','radio-defaults-cr','radio-defaults-preamble','radio-defaults-power'];
 const mediaMeshFields=['media-mesh-frequency','media-mesh-bandwidth','media-mesh-sf','media-mesh-cr','media-mesh-mode','media-mesh-preamble'];
@@ -656,7 +659,7 @@ function controls() {
   if(state.backupApplicationRequest)for(const id of ['prepare','flash','touch'])$(id).disabled=true;
   $('skip-backup').disabled ||= isMeshtasticMigration()||!!completedFirmwareSelection()||!!state.verification||!!state.plan?.written||!!state.migrationApproval;
   $('skip-backup-warning').hidden=!$('skip-backup').checked;$('skip-backup-option').classList.toggle('enabled',$('skip-backup').checked);
-  $('workflow-guidance').textContent=wadameshSelected()?'Wadamesh uses its own partition layout. First install needs the merged image; app-only updates require an existing matching layout. No Keymind expansion or post-flash settings run.':isMeshtasticMigration()?'Step 4 downloads and checks firmware before confirmation. Meshtastic settings are not backed up or converted.':'Step 3 backs up settings. Skip backup goes straight to step 4. Required partition expansion and the final firmware run together after approval.';
+  $('workflow-guidance').textContent=wadameshSelected()?'Wadamesh uses its own partition layout. First install needs the merged image; app-only updates require an existing matching layout. No Keymind expansion or automatic post-flash settings run. Step 5 can check the USB profile and offer supported settings.':isMeshtasticMigration()?'Step 4 downloads and checks firmware before confirmation. Meshtastic settings are not backed up or converted.':'Step 3 backs up settings. Skip backup goes straight to step 4. Required partition expansion and the final firmware run together after approval.';
   $('finish').disabled ||= !state.esp || !state.plan?.written;
   $('wait-migration').disabled ||= !state.port || !state.migration?.uart || state.migration?.settled;
   $('recover-bridge').disabled ||= !state.port || !state.pkg || !state.migration;
@@ -677,7 +680,8 @@ function controls() {
   if(isNonMeshCore())for(const id of ['backup','restore','send-command','binary-mode'])$(id).disabled=true;
   updateQuickSettingsControls();
   syncRadioDefaultsControls();
-  $('verify-app').disabled ||= !state.verification||!!state.esp||!!state.plan?.written||$('already-bootloader').checked||dfuIds.has(portId(state.port))||!!state.migration||!!state.recovery||!!state.espRecovery;
+  $('wadamesh-live-config').hidden=!wadameshConfigTargetCurrent(state.wadameshConfigTarget);
+  $('verify-app').disabled ||= (!state.verification&&!canVerifyWadameshProfile())||!!state.esp||!!state.plan?.written||$('already-bootloader').checked||dfuIds.has(portId(state.port))||!!state.migration||!!state.recovery||!!state.espRecovery;
   $('fetch-firmware').disabled ||= !$('artifact').value;
   $('load-bootloader').disabled ||= !$('bootloader-source').value;
   $('load-recovery').disabled ||= !state.recoveryCatalog||!$('recovery-profile').value;
@@ -1403,7 +1407,91 @@ function requestAutomaticVerification(){
     }finally{state.autoVerificationRunning=false;}
   });
 }
+function canVerifyWadameshProfile(){
+  return wadameshSelected()&&!!state.port&&!state.verification&&!state.backupApplicationRequest&&!state.nrfPrepareResume&&!restoreWorkflowBlocked()&&!$('already-bootloader').checked&&!dfuIds.has(portId(state.port));
+}
+function wadameshConfigTargetCurrent(target){
+  return !!target&&state.wadameshConfigTarget===target&&state.port===target.port&&state.generation===target.generation&&state.pkg===target.pkg&&state.item===target.item&&$('provider').value===target.provider&&state.finishedFirmware===target.finished&&canVerifyWadameshProfile();
+}
+async function readWadameshProfile(core,assertCurrent){
+  const self=await core.self();assertCurrent();
+  if(self.length<58||self[1]!==1)fail('The selected USB interface is not a compatible companion application.');
+  const info=await core.info();assertCurrent();
+  let version=await core.cli('version');assertCurrent();
+  if(/^unknown command[.!]?$/i.test(cleanCliReply(version,'version'))){version=await core.cli('ver');assertCurrent();}
+  const touch=isWadameshTakTouchProfile(info,cleanCliReply(version,'ver'));
+  if(!isWadameshProtocolProfile(info,version)&&!touch)fail('The selected USB interface did not provide the reviewed Wadamesh-compatible profile. The running firmware remains unidentified.');
+  const publicKey=Array.from(self.subarray(4,36),byte=>byte.toString(16).padStart(2,'0')).join('');
+  if(!/^[a-f0-9]{64}$/.test(publicKey)||/^0+$/.test(publicKey))fail('The application did not report a valid public identity.');
+  return {publicKey,maxTxDbm:self[3]<=40?self[3]:null,touch};
+}
+async function verifyWadameshProfile(){
+  if(!canVerifyWadameshProfile())fail('Choose the running Wadamesh application USB port and finish any pending write or recovery before checking it.');
+  const port=state.port,generation=state.generation,pkg=state.pkg,item=state.item,provider=$('provider').value,finished=state.finishedFirmware,link=new SerialLink(port);
+  const assertCurrent=()=>{if(state.port!==port||state.generation!==generation||state.pkg!==pkg||state.item!==item||$('provider').value!==provider||state.finishedFirmware!==finished||!canVerifyWadameshProfile())fail('The selected radio or firmware changed during the Wadamesh check. No result was retained.');};
+  state.wadameshConfigTarget=null;$('wadamesh-live-config').hidden=true;
+  notice('Checking the selected application port for a Wadamesh-compatible USB response…');
+  let profile;
+  try{
+    await link.open(115200,{application:true});assertCurrent();
+    profile=await readWadameshProfile(new MeshCore(link),assertCurrent);
+  }finally{await link.close();}
+  assertCurrent();
+  if(profile.touch){state.wadameshConfigTarget={port,generation,pkg,item,provider,finished,publicKey:profile.publicKey,maxTxDbm:profile.maxTxDbm};$('wadamesh-live-config').hidden=false;$('wadamesh-config-status').textContent='Choose the settings to review. Nothing has been changed.';}
+  progress(1,'A Wadamesh-compatible application responded over USB.');
+  notice('A Wadamesh-compatible application responded over USB. The exact TAK release, physical board, running slot and screen are not verified. Check the device screen.'+(profile.touch?' Choose radio settings below if desired.':' Radio configuration is not available for this unreviewed profile.'));
+  log('Wadamesh-compatible application profile answered. No settings or firmware were changed.');
+}
+const wadameshConfigFields=['wadamesh-config-frequency','wadamesh-config-bandwidth','wadamesh-config-sf','wadamesh-config-cr','wadamesh-config-tx','wadamesh-config-media','wadamesh-config-cross','wadamesh-config-media-frequency','wadamesh-config-media-bandwidth','wadamesh-config-media-sf','wadamesh-config-media-cr','wadamesh-config-media-mode','wadamesh-config-media-preamble'];
+function wadameshConfigFingerprint(){return JSON.stringify([$('wadamesh-config-primary').checked,...wadameshConfigFields.map(id=>$(id).value)]);}
+function selectedWadameshConfig(){
+  const number=id=>{const raw=$(id).value.trim();if(!raw)fail('Enter all required settings for the selected radio.');const value=Number(raw);if(!Number.isFinite(value))fail('Enter valid numeric radio settings.');return value;};
+  const hz=id=>{const mhz=number(id),value=Math.round(mhz*1e6);if(Math.abs(value/1e6-mhz)>1e-9)fail('Frequency must be a whole number of Hz.');return value;};
+  const primary=$('wadamesh-config-primary').checked?{enabled:true,frequencyHz:hz('wadamesh-config-frequency'),bandwidthHz:number('wadamesh-config-bandwidth'),spreadingFactor:number('wadamesh-config-sf'),codingRate:number('wadamesh-config-cr'),preambleSymbols:null,txPowerDbm:$('wadamesh-config-tx').value.trim()?number('wadamesh-config-tx'):null}:null;
+  const preset=$('wadamesh-config-media').value,cross=$('wadamesh-config-cross').value;
+  const mediaMesh=preset==='custom'?{preset,cross,frequencyHz:hz('wadamesh-config-media-frequency'),bandwidthHz:number('wadamesh-config-media-bandwidth'),spreadingFactor:number('wadamesh-config-media-sf'),codingRate:number('wadamesh-config-media-cr'),mode:$('wadamesh-config-media-mode').value,preambleSymbols:number('wadamesh-config-media-preamble')}:{preset,cross};
+  const plan=createPostFlashSettingsPlan({primary,mediaMesh});
+  if(!plan.summary)fail('Select radio or MediaMesh settings to change.');
+  return plan;
+}
+function describeWadameshChange(change){
+  const radio=value=>`${value.frequencyHz===undefined?value.frequencyMHz:value.frequencyHz/1e6} MHz / ${value.bandwidthHz===undefined?value.bandwidthKHz:value.bandwidthHz/1000} kHz / SF${value.spreadingFactor} / CR4/${value.codingRate}`;
+  const media=value=>value.mode==='off'||value.preset==='off'?'Off':`${radio(value)} / ${value.mode==='rx'?'receive only':'receive & transmit'} / preamble ${value.preambleSymbols===0?'auto':value.preambleSymbols}`;
+  if(change.setting==='radio')return `Primary radio: ${radio(change.before)} → ${radio(change.after)}`;
+  if(change.setting==='tx')return `TX power: ${change.before} → ${change.after} dBm`;
+  if(change.setting==='radio2')return `MediaMesh: ${media(change.before)} → ${media(change.after)}`;
+  if(change.setting==='cross')return `Crossing: ${change.before} → ${change.after}`;
+  fail('Unsupported Wadamesh setting in the review plan.');
+}
+async function configureWadamesh(){
+  const target=state.wadameshConfigTarget;if(!wadameshConfigTargetCurrent(target))fail('Run Verify and configure on the intended Wadamesh application port first.');
+  const plan=selectedWadameshConfig(),fingerprint=wadameshConfigFingerprint(),link=new SerialLink(target.port);
+  const isCurrent=()=>wadameshConfigTargetCurrent(target)&&wadameshConfigFingerprint()===fingerprint;
+  const assertCurrent=()=>{if(!isCurrent())fail('The selected radio or settings changed. No further settings were sent.');};
+  try{
+    notice('Checking the selected radio and reviewing supported settings…');
+    await link.open(115200,{application:true});assertCurrent();
+    const core=new MeshCore(link),profile=await readWadameshProfile(core,assertCurrent);
+    if(!profile.touch||profile.publicKey!==target.publicKey)fail('The connected application identity or reviewed profile changed. No settings were sent.');
+    const request=async command=>{assertCurrent();const reply=await core.cli(command);assertCurrent();return reply;};
+    const prepared=await prepareWadameshConfig(plan,{request,isCurrent,maxTxDbm:profile.maxTxDbm});assertCurrent();
+    const skipped=prepared.skipped.map(row=>row.reason),warnings=prepared.warnings||[];
+    if(!prepared.changes.length){const message=skipped.length?`No settings changed. ${skipped.join(' ')}`:'The selected settings already match. No changes were sent.';$('wadamesh-config-status').textContent=message;notice(message);return;}
+    const changes=prepared.changes.map(describeWadameshChange).join('\n');
+    const accepted=await confirm('Apply these Wadamesh settings?',`${prepared.summary}\n\n${changes}`,[...skipped,...warnings,'The connected application profile answered, but the exact release and physical board are not independently verified. Earlier changes may be saved if a later command fails.'].join(' '),'APPLY SETTINGS');
+    assertCurrent();if(!accepted){$('wadamesh-config-status').textContent='Settings changes cancelled. Nothing was changed.';return;}
+    const fresh=await readWadameshProfile(core,assertCurrent);
+    if(!fresh.touch||fresh.publicKey!==target.publicKey||fresh.maxTxDbm!==profile.maxTxDbm)fail('The application identity or limits changed. No settings were sent.');
+    const result=await applyWadameshConfig(prepared,{request,isCurrent});
+    const details=[...result.skipped.map(row=>row.reason),...result.errors.map(row=>row.reason),...(result.warnings||[])];
+    const message=result.errors.length?`Settings were not fully confirmed. ${details.join(' ')} Earlier changes may have been saved; nothing will be retried automatically.${result.rebootRequired?' If primary radio settings were saved, restart the radio manually to apply them.':''}`:result.complete?`Selected settings were saved and read back.${result.rebootRequired?' Restart the radio manually to apply primary radio settings.':''}${details.length?' '+details.join(' '):''}`:`Some settings were saved and read back; others were not changed. ${details.join(' ')}${result.rebootRequired?' Restart the radio manually to apply primary radio settings.':''}`;
+    $('wadamesh-config-status').textContent=message;notice(message,!!result.errors.length);log(message);
+  }finally{await link.close();}
+}
+$('wadamesh-config-media').onchange=()=>{$('wadamesh-config-custom').hidden=$('wadamesh-config-media').value!=='custom';};
+$('wadamesh-config-apply').onclick=()=>operation(configureWadamesh);
 async function verifyApplication({automaticApproval=null,automaticReconnect=false}={}) {
+  if(!state.verification&&wadameshSelected())return verifyWadameshProfile();
   const expected=state.verification;if(!expected)fail('No flashed application is awaiting verification.');
   if(state.esp||state.plan?.written)fail('Finish the pending ESP32 session/reset before verifying the running application.');
   if($('already-bootloader').checked)fail('Choose the running application interface, not ROM/DFU, before verifying startup.');
@@ -1476,6 +1564,7 @@ async function verifyApplication({automaticApproval=null,automaticReconnect=fals
     }
     throw Object.assign(new Error(error.message||String(error)),{startupVerifiedSha256:expected.sha256});
   }
+  if(!automaticApproval&&!automaticReconnect)$('quick-settings').scrollIntoView?.({behavior:'smooth',block:'start'});
 }
 function invalidateFirmwareSelection() {
   // Invalidate before fetch, file I/O or validation can fail. A failed attempt
@@ -2154,7 +2243,7 @@ async function prepareSelectedFirmware({waitForRom=false}={}) {
     $('device-name').textContent = `${info.chip} · ${info.mac}`; $('device-meta').textContent = `${size(info.flashBytes)} physical flash · ROM security checks passed`;
     if(prepared.chunkedRecovery)notice('Exact ESP32 write recovery plan verified for this MAC and image. Review & flash offers separately acknowledged 16 KiB writes with independent readback; no whole-chip erase is repeated.');
     else if(prepared.needed) { $('migration-status').textContent=`Verified USB migration for ${prepared.board}; exact firmware ${prepared.firmware_version}. Keep this tab open until final verification.`; notice(prepared.resume===false&&state.migration?'Original source layout verified. The partial bridge can be rewritten safely before it is started; review and acknowledge the migration again.':'Partition expansion is needed. Review & flash writes the verified USB bridge first. No application or bridge has been written yet.'); }
-    else notice(`Read-only plan ready for ${info.mac}. Offsets: ${state.plan.addresses.map(n => '0x' + n.toString(16)).join(', ')}.${prepared.mirroredSlots?' Missing fallback slots will be populated and independently verified.':''}`);
+    else notice(`Read-only plan ready for ${info.mac}. Offsets: ${state.plan.addresses.map(n => '0x' + n.toString(16)).join(', ')}.`);
   }
   catch (error) {
     try{await closeEsp();}catch(closeError){log(`Serial close: ${closeError.message}`);}
@@ -2225,7 +2314,7 @@ async function flashPreparedFirmware() {
   if(plan.erasePkg){await acknowledgeFirmwareBoard(plan.erasePkg,assertBoardScope);assertBoardScope();}
   const token = pkg.expert ? `WRITE 0x${plan.addresses[0].toString(16)}` : pkg.destructive||plan.erasePkg ? 'WIPE WITHOUT BACKUP' : 'FLASH';
   const detail = `${pkg.name}\nSHA-256 ${pkg.sha256}\nBoard check: ${boardCheck.reason}\n${radioDefaultsSummary() ? radioDefaultsSummary()+'\nSource SHA-256 '+state.radioDefaults.sourceSha256+'\n':''}${plan.mac ? 'Verified chip MAC ' + plan.mac : plan.uf2Info || 'Physical board identity is not independently verified.'}${selectedBootloader(pkg)?'\nOur OTAFIX '+selectedBootloader(pkg).version+' · '+selectedBootloader(pkg).profile+'\n'+bootloaderReinstallWarning:''}${plan.erasePkg?'\nERASE FIRST: '+plan.erasePkg.name+'\nSHA-256 '+plan.erasePkg.sha256+'\n'+plan.erasePkg.warnings.join(' '):''}`;
-  const providerWarning=wadameshSelected()?(pkg.merged?'Wadamesh TAK standalone installation: this flasher erases the whole chip, including identity, contacts, channels and settings. Configure radio/MediaMesh on the device afterward. ':'Wadamesh TAK application update: continue only if this radio already has the matching Wadamesh partition layout. Fitting app slots alone do not prove filesystem compatibility. No Keymind partition expansion or post-flash USB settings will run. '):'';
+  const providerWarning=wadameshSelected()?(pkg.merged?'Wadamesh TAK standalone installation: this flasher erases the whole chip, including identity, contacts, channels and settings. After startup, configure supported radio/MediaMesh settings in Step 5 or on the device. ':'Wadamesh TAK application update: continue only if this radio already has the matching Wadamesh partition layout. Fitting app slots alone do not prove filesystem compatibility. No Keymind partition expansion or automatic USB settings will run. '):'';
   const backupWarning=providerWarning+(isMeshtasticMigration()?'Meshtastic will be replaced. Its settings, channels and identity are not backed up or converted to MeshCore. ':$('skip-backup').checked?'You chose to skip backup. No new logical backup was created. ':'');
   if(state.migrationApproval&&(plan.requiresRevisionOverride||plan.chunkedRecovery))fail('The new plan needs an unapproved compatibility override or interrupted-write recovery. Automatic continuation stopped. Inspect and acknowledge it manually.');
   let allowRevisionMismatch=false;
@@ -2362,6 +2451,7 @@ async function finishVerifiedEsp(){
   else {
     state.port=null;state.generation++;$('already-bootloader').checked=false;
     if(standalone||slotAdvice){
+      if(standalone)state.handoff=false;
       clearVerification();state.finishedFirmware={sha256:pkg.sha256,name:pkg.name,...(standalone?{provider:'Wadamesh TAK'}:{}),verified:false,...(slotAdvice?{startupAdvice:slotAdvice}:{})};
       progress(1,slotAdvice?'Selected slot transfer verified; boot selection is unchanged.':'Wadamesh TAK transfer verified; restart requested. Check the device screen.');notice((slotAdvice||WADAMESH_STARTUP_NOTICE)+' No MeshCore startup check or settings commands were sent.');return;
     }

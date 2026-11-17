@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EspSession, validateEspWriteRecovery } from '../src/esp.js';
-import { inspectFirmware, md5hex } from '../src/firmware.js';
+import { hash, inspectFirmware, md5hex } from '../src/firmware.js';
 
 function image({size=0xb000,app=true,min=0}={}){
   const bytes=new Uint8Array(size),view=new DataView(bytes.buffer);bytes.set([0xe9,1]);view.setUint16(12,9,true);bytes[14]=min;view.setUint32(28,size-48,true);bytes.fill(0x45,32,size-16);if(app)view.setUint32(32,0xabcd5432,true);
@@ -51,6 +51,16 @@ test('confirmed merged erase is never repeated by chunk recovery; uncertain eras
   const pkg=inspectFirmware('full-merged.bin',merged()),first=await interrupted(pkg);assert.equal(first.recovery.eraseComplete,true);assert.equal(first.calls[0].eraseAll,true);
   const retry=session(first.memory);await retry.s.prepare(pkg,{recovery:first.recovery});await retry.s.flash(pkg,()=>{},{chunkedRecovery:true});assert.ok(retry.calls.every(c=>c.eraseAll===false));assert.equal(md5hex(retry.memory.subarray(0,pkg.payload.length)),md5hex(pkg.payload));
   const uncertain=await interrupted(pkg,{failErase:true});assert.equal(uncertain.recovery.eraseComplete,false);const stopped=session(uncertain.memory);await assert.rejects(stopped.s.prepare(pkg,{recovery:uncertain.recovery}),/erase was not confirmed/);assert.equal(stopped.calls.length,0);
+});
+
+test('a legacy merged retry with a second-slot mirror is refused without writing either segment',async()=>{
+  const pkg=inspectFirmware('full-merged.bin',merged()),first=await interrupted(pkg),legacy=structuredClone(first.recovery);
+  const app=pkg.payload.subarray(0x10000);
+  legacy.segments.push({address:0x110000,sourceOffset:0x10000,length:app.length,payloadHash:hash(app)});
+  validateEspWriteRecovery(legacy);
+  const retry=session(first.memory),before=structuredClone(legacy);
+  await assert.rejects(retry.s.prepare(pkg,{recovery:legacy}),/different chip, firmware, partition layout or write stage/);
+  assert.deepEqual(legacy,before);assert.equal(retry.calls.length,0);assert.equal(retry.signals.length,0);
 });
 
 test('every interrupted chunk retry stops for a new explicit session, bounded to three recovery rounds',async()=>{
