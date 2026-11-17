@@ -57,6 +57,8 @@ const modelAliases=[
   ['LILYGO T-LoRa V2.1-1.6',['LilyGo LoRa32 V2.1_1.6']],
   ['LilyGo T-Impulse-Plus',['LilyGo T-Impulse Plus nRF52840']],
   ['LilyGO T-ETH Elite',['LilyGo T-ETH Elite (SX1262)']],
+  // Both TAK pager builds report this same name; it does not identify the radio.
+  ['LilyGo T-LoRa Pager',['LilyGo T-Lora Pager (SX1262)','LilyGo T-Lora Pager (LR1121)']],
   ['Unit C6L',['M5Stack Unit C6L']],
   ['Ikoka Handheld E22 30dBm (Xiao_nrf52)',['Ikoka Handheld nRF E22 30 dBm']],
   ['Waveshare RP2040-LoRa',['Waveshare RP2040-LoRa-HF/LF']],
@@ -64,7 +66,7 @@ const modelAliases=[
 const aliases=new Map(modelAliases.map(([model,hardware])=>[normalize(model),hardware.map(name=>normalize(canonicalHardware(name)))]));
 // Older firmware used these same names for genuinely different targets.
 // A provider/catalog filter cannot turn missing runtime evidence into proof.
-const sharedModels=new Set(['Seeed Wio Tracker L1','Seeed SenseCAP Indicator'].map(normalize));
+const sharedModels=new Set(['Seeed Wio Tracker L1','Seeed SenseCAP Indicator','LilyGo T-LoRa Pager'].map(normalize));
 
 // These exact PIDs are useful hints only. Firmware/bootloaders can have been
 // installed on the wrong board and several boards deliberately share IDs.

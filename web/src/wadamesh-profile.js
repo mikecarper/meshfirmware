@@ -17,7 +17,9 @@ export function isWadameshTakTouchProfile(info, version) {
   if (!isLargeWadameshLayout(info) || info[1] !== 27 || info.length < 80 || typeof version !== 'string') return false;
   const field = info.subarray(60, 80), end = field.indexOf(0);
   const identity = new TextDecoder().decode(end < 0 ? field : field.subarray(0, end));
-  return identity === 'v1.18.0.1-touch' && /^v1\.18\.0\.1-touch\s+\(Build: [^\r\n]{1,64}\)$/i.test(version.trim());
+  const reply=version.trim(),release=/^(wadamesh-tak beta_\d+(?:\.\d+){0,3})\s+\(Build: [^\r\n]{1,64}\)$/i.exec(reply);
+  if(release)return identity===release[1].slice(0,19);
+  return identity === 'v1.18.0.1-touch' && /^v1\.18\.0\.1-touch\s+\(Build: [^\r\n]{1,64}\)$/i.test(reply);
 }
 export function companionContactCapacity(info, version) {
   return isWadameshProtocolProfile(info, version) ? 2000 : info[2] * 2;

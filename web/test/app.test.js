@@ -13,7 +13,8 @@ import {nrfBoardCandidates} from '../src/nrf-board-candidates.js';
 import {espBoardCandidates} from '../src/esp-board-candidates.js';
 import {parseBootloaderInfo,detectBootloaderBoard} from '../src/bootloader-info.js';
 import {xiaoInstalledStatus,xiaoInfoProfile,xiaoBootloaderItem} from '../src/xiao-bootloader.js';
-import {chooseFirmware,defaultFirmwareProvider,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode} from '../src/automatic.js';
+import {chooseFirmware,defaultFirmwareProvider,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,isRunningWadameshTak} from '../src/automatic.js';
+import {rememberPagerVariant,recallPagerVariant,forgetPagerVariant,PAGER_VARIANTS_KEY} from '../src/remembered-pager.js';
 import {chooseConnection,parseUsbMode} from '../src/connection-choice.js';
 import {lookupUsbConnectionMap} from '../src/usb-connection-map.js';
 import {createNextStepScroller} from '../src/next-step-scroll.js';
@@ -66,7 +67,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
     fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,parseUsbMode,MigrationApproval,cleanCliReply,assessBootloaderVersion,firmwareFilesLinks,fetch:async()=>{throw Error('Unexpected network request');},fetchFirmwareBytes:(url,options)=>verifiedDownload(url,{...options,mirrorBase:'https://mirror.example.test/firmware/',pageOrigin:'https://mirror.example.test',fetchImpl:(target,init)=>target==='https://mirror.example.test/firmware/index.json'?Promise.resolve({ok:false,status:404}):options.fetchImpl(target,init)}),assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),commonCliRestorePreview:()=>({operations:[],skipped:[],warnings:[]}),restoreCommonCli:async()=>{throw Error('Unexpected CommonCLI restore');},
     backupCoverage,createNextStepScroller,tryNativeUsbFallback,xiaoS3ManualBootAdvice,SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
   });
-  context.assessFirmwareBoard=()=>({status:'match',requiresOverride:false,reason:'Test board identity.'});context.espSlotChoices=espSlotChoices;
+  context.assessFirmwareBoard=()=>({status:'match',requiresOverride:false,reason:'Test board identity.'});context.espSlotChoices=espSlotChoices;context.isRunningWadameshTak=isRunningWadameshTak;context.rememberPagerVariant=rememberPagerVariant;context.recallPagerVariant=recallPagerVariant;context.forgetPagerVariant=forgetPagerVariant;
   context.quickHotspotUrl=quickHotspotUrl;context.postFlashBleAdvice=postFlashBleAdvice;context.createNrfActivationCheck=()=>null;
   context.inspectRadioDefaults=inspectRadioDefaults;context.customizeRadioDefaults=customizeRadioDefaults;
   context.prepareWadameshConfig=prepareWadameshConfig;context.applyWadameshConfig=applyWadameshConfig;
@@ -4922,6 +4923,25 @@ const takDefaultItems=(hardware='LilyGo T-Deck')=>[
   {...v4Item,provider:'Keymind Cascade',hardware,role:'companionFull',action:'flash-wipe',name:'keymind-board-merged.bin'},
   ...[false,true].map(merged=>({...wadaItem(merged),hardware,requiredDisplay:hardware.startsWith('Heltec v4')?'tft':undefined}))
 ];
+test('running TAK selects provider and remembers a user-confirmed pager variant for that identity',async()=>{
+  const sx='LilyGo T-Lora Pager (SX1262)',lr='LilyGo T-Lora Pager (LR1121)';
+  const pagerItems=[...takDefaultItems(sx).slice(2).map(item=>({...item,wadameshBuild:'tlora-pager-sx1262',requiredDisplay:undefined})),...takDefaultItems(lr).slice(2).map(item=>({...item,wadameshBuild:'tlora-pager-lr1121',requiredDisplay:undefined}))];
+  const device={firmwareFamily:'meshcore',role:'companion',version:'wadamesh-tak beta_1',model:'LilyGo T-LoRa Pager',architecture:'esp32',publicKey:'ab'.repeat(32)};
+  const create=async(saved,key=device.publicKey,fresh=true)=>{const ui=workbench({productionDefaults:true,catalogPromise:Promise.resolve(linkedCatalog(pagerItems))});await new Promise(resolve=>setImmediate(resolve));if(saved)ui.context.localStorage.setItem(PAGER_VARIANTS_KEY,saved);ui.context.device={...device,publicKey:key};ui.context.selectedPort=ui.port;ui.context.freshEvidence=fresh;ui.evaluate('state.port=selectedPort;state.device=device;state.portLabelEvidence=freshEvidence?{port:state.port,device:state.device}:null;selectDetectedBoard();');return ui;};
+  const first=await create();assert.equal(first.elements.get('provider').value,'Wadamesh TAK');assert.equal(first.elements.get('hardware').value,'');assert.equal(first.evaluate('state.installMode'),'update');assert.equal(first.elements.get('artifact').value,'');assert.match(first.elements.get('board-detection').textContent,/SX1262.*LR1121|LR1121.*SX1262/);
+  first.elements.get('hardware').value=sx;await first.elements.get('hardware').onchange();const saved=first.context.localStorage.getItem(PAGER_VARIANTS_KEY);assert.ok(saved);assert.equal(first.evaluate('state.installMode'),'update');
+  const again=await create(saved);assert.equal(again.elements.get('provider').value,'Wadamesh TAK');assert.equal(again.elements.get('hardware').value,sx);assert.equal(again.evaluate('state.installMode'),'update');assert.match(again.elements.get('board-detection').textContent,/earlier choice.*Confirm the physical radio/);assert.deepEqual(again.calls,[]);
+  const different=await create(saved,'cd'.repeat(32));assert.equal(different.elements.get('provider').value,'Wadamesh TAK');assert.equal(different.elements.get('hardware').value,'');assert.equal(different.evaluate('state.installMode'),'update');
+  const stale=await create(saved,device.publicKey,false);assert.equal(stale.elements.get('hardware').value,'');stale.elements.get('hardware').value=lr;await stale.elements.get('hardware').onchange();assert.equal(JSON.parse(stale.context.localStorage.getItem(PAGER_VARIANTS_KEY)).entries[0].hardware,sx,'stale device evidence must not overwrite the remembered variant');
+  again.elements.get('hardware').value='';await again.elements.get('hardware').onchange();assert.deepEqual(JSON.parse(again.context.localStorage.getItem(PAGER_VARIANTS_KEY)).entries,[]);
+});
+test('detecting an installed TAK cancels a provider-derived erase default but preserves explicit erase choices',async()=>{
+  const ui=workbench({productionDefaults:true,catalogPromise:Promise.resolve(linkedCatalog(takDefaultItems()))});await new Promise(resolve=>setImmediate(resolve));
+  ui.elements.get('provider').value='Wadamesh TAK';await ui.elements.get('provider').onchange();assert.equal(ui.evaluate('state.installMode'),'install');assert.equal(ui.evaluate('installModeSource.kind'),'provider');
+  ui.context.selectedPort=ui.port;ui.evaluate('state.port=selectedPort;state.device={firmwareFamily:"meshcore",role:"companion",model:"LilyGo T-Deck",architecture:"esp32",version:"wadamesh-tak beta_1"};selectDetectedBoard();');
+  assert.equal(ui.evaluate('state.installMode'),'update');assert.equal(ui.elements.get('provider').value,'Wadamesh TAK');
+  await ui.evaluate('setInstallMode("install")');assert.equal(ui.evaluate('installModeSource.kind'),'manual');ui.evaluate('selectDetectedBoard();');assert.equal(ui.evaluate('state.installMode'),'install');assert.deepEqual(ui.calls,[]);
+});
 test('detected supported hardware defaults to Wadamesh merged install instead of preserving the old MeshCore role',async()=>{
   const ui=workbench({productionDefaults:true,catalogPromise:Promise.resolve(linkedCatalog(takDefaultItems()))});await new Promise(resolve=>setImmediate(resolve));
   assert.equal(ui.elements.get('provider').value,'Keymind Cascade');assert.equal(ui.evaluate('state.manualSelections.provider'),undefined);
@@ -5133,10 +5153,10 @@ async function wadameshConfigWorkbench(){
   ui.context.SerialLink=class{constructor(port){assert.equal(port,ui.port);}async open(){ui.calls.push('open');}async close(){ui.calls.push('close');}};
   ui.context.MeshCore=class{
     async self(){ui.calls.push('self');return wadameshSelf(radio.key);}
-    async info(){ui.calls.push('info');const info=new Uint8Array(82);info.set([13,27,232,40]);info.set(new TextEncoder().encode('v1.18.0.1-touch'),60);return info;}
+    async info(){ui.calls.push('info');const info=new Uint8Array(82);info.set([13,27,232,40]);info.set(new TextEncoder().encode('wadamesh-tak beta_105.8'.slice(0,19)),60);return info;}
     async cli(command){
       ui.calls.push(command);
-      if(command==='version')return 'Unknown command';if(command==='ver')return 'v1.18.0.1-touch (Build: Nov 17 2026)';
+      if(command==='version')return 'Unknown command';if(command==='ver')return 'wadamesh-tak beta_105.8 (Build: Nov 17 2026)';
       if(command==='get radio')return `${radio.frequency},125.000,7,5`;if(command==='get tx')return String(radio.power);
       if(command==='get radio2')return radio.media?'911.150,250.000,7,5,rxtx,12 (auto)':'off';
       if(command==='get radio2.cross')return radio.cross;if(command==='get tempradio2')return 'off';

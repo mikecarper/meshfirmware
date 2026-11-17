@@ -49,6 +49,13 @@ function nrfBundledComponents(item){
   const component='(?:bootloader|softdevice)',version='(?:(?:OTAFIX|Adafruit)\\s+)?(?:v?\\d+(?:\\.\\d+){1,3}\\s+)?';
   return new RegExp(`(?:\\b(?:includes?|bundles?|carries|embeds?)\\s+(?:the\\s+)?(?:exact[- ]board\\s+)?|\\+\\s*)${version}${component}\\b(?!\\s+(?:support|compatibility|requirements?))`,'i').test(description);
 }
+// DEVICE_INFO's 20-byte version field can truncate an installed TAK release,
+// e.g. "wadamesh-tak beta_1". This is only a provider suggestion from an
+// identified application, never evidence of an exact board or radio variant.
+export function isRunningWadameshTak(device){
+  if(device?.firmwareFamily!=='meshcore'||device?.role!=='companion')return false;
+  return [device.version,device.shortVersion].some(value=>/^wadamesh-tak beta_\d+(?:\.\d+){0,3}(?:\s+\(Build: [^\r\n]{1,64}\))?$/i.test(text(value)));
+}
 export function matchesInstallMode(item,installMode='update'){
   if(!['update','install'].includes(installMode))return false;
   if(!item||item.project!=='MeshCore'||!applicationRoles.has(item.role)||typeof item.name!=='string'||typeof item.version!=='string'||typeof item.url!=='string')return false;
@@ -68,6 +75,13 @@ export function matchesInstallMode(item,installMode='update'){
 // configuration qualifies, never an OLED/headless report or bootloader file.
 export function defaultFirmwareProvider({items=[],device={},hardware='',role='',version='',architecture=''}={}){
   const board=canonicalHardware(text(hardware)),selectedRole=text(role),selectedVersion=text(version);
+  // A running TAK application can identify its provider even when its model
+  // is shared by multiple physical boards/radio chips. Do not infer the board,
+  // role override, or exact installed release from that report.
+  if(isRunningWadameshTak(device)&&(!architecture||architecture==='esp32')&&(!selectedRole||selectedRole==='gui')&&items.some(item=>
+    isWadamesh(item)&&item.architecture==='esp32'&&item.role==='gui'
+    &&(!selectedVersion||item.version===selectedVersion)
+    &&(matchesInstallMode(item,'update')||matchesInstallMode(item,'install'))))return 'Wadamesh TAK';
   if(!board||board==='Heltec v4')return 'Keymind Cascade';
   if(board==='Heltec v4 R8'&&(device?.firmwareFamily==='bootloader'||device?.role==='bootloader'
     ||!/^Heltec[ _-]+V4(?:\.[23])?[ _-]+R8[ _-]+TFT$/i.test(text(device?.model))))return 'Keymind Cascade';

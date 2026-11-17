@@ -48,11 +48,20 @@ ESP32-P4 variants remain unavailable in this flasher; use the
 [MediaMesh Flasher](https://cascadiamesh.org/mediamesh-flasher/) for those.
 
 Selecting this provider defaults to **Erase & new install** and its merged
-image at `0x0`. This flasher erases the whole chip, including identity,
+image at `0x0`, unless the connected application reports it is already running
+Wadamesh TAK, in which case the default remains **Update**. An explicit user
+mode choice takes precedence. This flasher erases the whole chip, including identity,
 contacts, channels and settings. The upstream installer's preservation promise
 does not apply to this erase flow. **Update** is an explicit option only for
 an existing matching Wadamesh layout; offsets and slot capacity are read from
 the actual radio. A Keymind partition-expansion bridge is never substituted.
+
+The running T-LoRa Pager reports a shared model name for SX1262 and LR1121.
+Choose its radio variant once; this browser remembers that choice against the
+full public node identity and suggests it on later connections. The suggestion
+is not physical-board proof: confirm the radio before writing. If the node
+identity changes, choose its variant again; clearing the hardware choice
+removes the remembered variant for that identity.
 
 Firmware transfer readback is verified. After reset, choose the running
 application port and use **Verify and configure** to check for a reviewed
@@ -351,7 +360,9 @@ Cascade with no board, role, version or build selected. Browsers report normal
 and hard refreshes as the same `reload` navigation, so both reset the selection.
 Explicit shared-link selections still apply. Unfinished recovery, migration or
 startup-verification workflows keep their saved selections and recovery records;
-a refresh never authorizes another reset, erase or write.
+a refresh never authorizes another reset, erase or write. An explicitly remembered
+Pager variant is stored separately and can be reused only after that same public
+identity responds on a selected port.
 
 These links select catalog options only. They do not download firmware,
 request a USB port, reset a radio or authorize a write. Existing pending

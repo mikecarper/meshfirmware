@@ -22,7 +22,8 @@ import { BrowserPlanner } from './planner.js';
 import { waitForMigration } from './migration.js';
 import { recoveryPackage } from './bootloader-recovery.js';
 import { detectBoard, detectRecoveryProfile } from './board-detection.js';
-import { chooseFirmware, defaultFirmwareProvider, firmwareVersionWarning, matchesCatalogInstallMode } from './automatic.js';
+import { chooseFirmware, defaultFirmwareProvider, firmwareVersionWarning, matchesCatalogInstallMode, isRunningWadameshTak } from './automatic.js';
+import { rememberPagerVariant, recallPagerVariant, forgetPagerVariant } from './remembered-pager.js';
 import { chooseConnection, parseUsbMode } from './connection-choice.js';
 import { lookupUsbConnectionMap } from './usb-connection-map.js';
 import usbConnectionMap from './data/usb-connection-map.json';
@@ -401,9 +402,15 @@ function syncInstallMode(){
   if(!locked&&!component&&wadameshSelected())$('install-mode-hint').textContent=state.installMode==='install'?'Wadamesh first install writes its merged image after whole-chip erase. Identity, contacts, channels and settings are deleted.':'Update requires an existing matching Wadamesh layout. App offsets and slot sizes are checked; no Keymind expansion bridge runs.';
   $('install-mode-hint').classList.toggle('mode-warning',state.installMode==='install'||!!component);
 }
-function applyWadameshInstallDefault({explicitMode=false,port=state.port,automatic=false}={}){
+function applyWadameshInstallDefault({explicitMode=false,port=state.port}={}){
   if(!isWadamesh($('provider').value)||explicitMode||installModeLocked())return;
-  state.installMode='install';installModeSource={kind:automatic?'provider':'manual',port};syncInstallMode();
+  // An identified running TAK device is already installed; keep the update
+  // path unless the user explicitly chose an erase/new installation.
+  if(isRunningWadameshTak(state.device)){
+    if(installModeSource?.kind==='provider'){state.installMode='update';installModeSource=null;syncInstallMode();}
+    return;
+  }
+  state.installMode='install';installModeSource={kind:'provider',port};syncInstallMode();
 }
 function applyDefaultProvider(hardware=$('hardware').value){
   // Only defaults follow the board. A deliberate provider or shared selection
@@ -411,7 +418,7 @@ function applyDefaultProvider(hardware=$('hardware').value){
   if(state.manualSelections.provider||$('provider').value==='Custom'||state.pkg||state.esp||installModeLocked()||continuingDeviceFlow())return;
   const provider=defaultFirmwareProvider({items:state.items,device:state.device||{},hardware,role:state.manualSelections.role,version:state.manualSelections.version,architecture:catalogArchitecture()});
   if($('provider').value===provider){
-    if(isWadamesh(provider)&&state.installMode!=='install'){
+    if(isWadamesh(provider)){
       const priorMode=state.installMode;
       applyWadameshInstallDefault({automatic:true,explicitMode:installModeSource?.kind==='manual'});
       if(state.installMode!==priorMode)filterCatalog('provider');
@@ -861,6 +868,7 @@ function bootloaderInfoAvailable(){
 }
 function updateBootloaderInfoPanel(){const available=bootloaderInfoAvailable();$('bootloader-info-fallback').hidden=!available;$('read-bootloader-info').disabled=state.busy||!available;const result=isBootloaderInfo()?applicationBoard():null;$('bootloader-info-status').textContent=result?[result.hardware?`Read INFO_UF2.TXT; selected ${result.hardware}.`:result.reason,result.candidates.length>1?'Candidates: '+result.candidates.join(', ')+'.':'',bootloaderInfoWarning].filter(Boolean).join(' '):'Optional: only use this if the radio exposes a bootloader drive with INFO_UF2.TXT. No drive mounted? Choose Hardware instead. Serial DFU flashing needs no drive.';}
 function applicationBoard(device=state.device){return isBootloaderInfo(device)?detectBootloaderBoard({items:state.items,info:state.bootloaderInfo?.info,usbInfo:state.port?.getInfo()||{}}):isMeshtastic(device)?detectMeshtasticBoard({items:state.items,hwModel:device.meshtasticHardware,pioEnv:device.meshtasticPioEnv}):detectBoard({items:state.items,deviceModel:device?.model||'',usbInfo:state.port?.getInfo()||{}});}
+function currentApplicationEvidence(){return !!state.port&&state.portLabelEvidence?.port===state.port&&state.portLabelEvidence?.device===state.device&&!continuingDeviceFlow();}
 function requireMeshCoreApplication(){if(isBootloaderInfo())fail('Only bootloader information has been read. Select the running MeshCore application before backup, restore or serial-console commands.');if(isMeshtastic())fail('Meshtastic is running. MeshCore backup, restore and serial commands are available after MeshCore is installed. Export Meshtastic settings separately with a Meshtastic client.');}
 async function readSelectedBootloaderInfo(){
   if(!bootloaderInfoAvailable())fail('Select an unidentified radio or its DFU USB port first. Finish any pending write, recovery or verification before reading a bootloader file.');
@@ -930,7 +938,10 @@ async function readApplication(link) {
   return device;
 }
 function selectDetectedBoard() {
-  const result=applicationBoard();
+  const result=applicationBoard();let rememberedHardware='';
+  if(isRunningWadameshTak(state.device)&&isWadamesh($('provider').value)&&installModeSource?.kind==='provider'&&!installModeLocked()&&!continuingDeviceFlow()){
+    state.installMode='update';installModeSource=null;syncInstallMode();filterCatalog('provider');
+  }
   if(result.hardware){
     state.detectedHardware=result.hardware;
     const architectures=new Set(state.items.filter(i=>i.hardware===result.hardware).map(i=>i.architecture));
@@ -946,12 +957,17 @@ function selectDetectedBoard() {
     if(previousAutomaticHardware&&!continuingDeviceFlow())resetAutomaticBoardSelection(result.reason);
     else {
       if(state.pkg&&state.item?.role&&!continuingDeviceFlow())invalidateFirmwareSelection();
-      updateFirmwareSelectionSummary({reason:result.reason+(state.pkg?` Manual file ${state.pkg.name} remains loaded; review it explicitly.`:' Choose the exact hardware manually.')});
     }
+    if(isRunningWadameshTak(state.device))applyDefaultProvider();
+    const saved=!state.manualSelections.hardware&&currentApplicationEvidence()&&isWadamesh($('provider').value)?recallPagerVariant({storage:localStorage,device:state.device,items:state.items}):null;
+    if(saved&&[...$('hardware').options].some(option=>option.value===saved)){
+      rememberedHardware=saved;state.manualSelections.hardware=saved;$('hardware').value=saved;filterCatalog('hardware');
+    }
+    updateFirmwareSelectionSummary({reason:result.reason+(state.pkg?` Manual file ${state.pkg.name} remains loaded; review it explicitly.`:' Choose the exact hardware manually.')});
     $('firmware-choices').open=true;
   }
-  $('board-detection').textContent=result.hardware?`Selected ${result.hardware} from ${isBootloaderInfo()?'the selected INFO_UF2.TXT file':isMeshtastic()?'the connected Meshtastic node’s hardware report':"the running firmware's model"}. Check the physical board before writing; an incorrectly installed firmware or file from another device can report the wrong model. No image was loaded.`:`${result.reason}${result.candidates.length?' Candidates: '+result.candidates.join(', ')+'.':''}`;
-  if($('auto-detect-board').checked&&result.hardware)applyAutomaticSelections();
+  $('board-detection').textContent=rememberedHardware?`Selected ${rememberedHardware} from your earlier choice for this public identity. Confirm the physical radio variant before writing; an identity can be moved to another board. No image was loaded.`:result.hardware?`Selected ${result.hardware} from ${isBootloaderInfo()?'the selected INFO_UF2.TXT file':isMeshtastic()?'the connected Meshtastic node’s hardware report':"the running firmware's model"}. Check the physical board before writing; an incorrectly installed firmware or file from another device can report the wrong model. No image was loaded.`:`${result.reason}${result.candidates.length?' Candidates: '+result.candidates.join(', ')+'.':''}`;
+  if($('auto-detect-board').checked&&(result.hardware||rememberedHardware))applyAutomaticSelections();
   else if(!$('auto-detect-board').checked)updateFirmwareSelectionSummary();
   updateConnectionChoice();
   return result;
@@ -2059,6 +2075,7 @@ $('load-recovery').onclick=()=>operation(async()=>{
 });
 for (const id of ['project','provider','hardware','role','version']) $(id).onchange = () => operation(async()=>{
   await clearFirmwareSelection();state.manualSelections[id]=$(id).value;
+  if(id==='hardware'&&currentApplicationEvidence()&&!rememberPagerVariant({storage:localStorage,device:state.device,hardware:$(id).value,items:state.items}))forgetPagerVariant({storage:localStorage,device:state.device});
   if(id==='project'||id==='provider'){for(const next of ['hardware','role','version'])delete state.manualSelections[next];}
   else if(id==='hardware')delete state.manualSelections.role;
   if(id==='provider'){

@@ -3,6 +3,14 @@ import assert from 'node:assert/strict';
 import {detectBoard,detectRecoveryProfile} from '../src/board-detection.js';
 const item=(hardware,more={})=>({project:'MeshCore',hardware,...more});
 
+test('shared T-LoRa Pager model lists both radio variants without choosing one',()=>{
+  const sx='LilyGo T-Lora Pager (SX1262)',lr='LilyGo T-Lora Pager (LR1121)';
+  for(const inventory of [[sx,lr],[sx],[lr]]){
+    const result=detectBoard({items:inventory.map(name=>item(name)),deviceModel:'LilyGo T-LoRa Pager'});
+    assert.equal(result.hardware,null);assert.deepEqual(result.candidates,[...inventory].sort());
+  }
+});
+
 test('exact complete application model selects hardware despite duplicate provider releases',()=>{
   const result=detectBoard({items:[item('Heltec v4'),item('Heltec v4'),item('Heltec v4 R8')],deviceModel:' HELTEC_V4 '});
   assert.equal(result.hardware,'Heltec v4');assert.equal(result.source,'application-model');assert.deepEqual(result.candidates,['Heltec v4']);

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {chooseFirmware,defaultFirmwareProvider,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode} from '../src/automatic.js';
+import {chooseFirmware,defaultFirmwareProvider,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,isRunningWadameshTak} from '../src/automatic.js';
 const app=(more={})=>({project:'MeshCore',hardware:'Heltec v4',provider:'MeshCore',architecture:'esp32',role:'repeater',version:'v1.18.0',action:'flash-update',name:'heltec_v4_repeater-v1.18.0.bin',url:'https://example.test/heltec_v4_repeater-v1.18.0.bin',...more});
 test('Keymind chooses 1.18.0.2 for a running 1.18.0.1 node unless an older version is explicitly chosen',()=>{
   const old=app({provider:'Keymind Cascade',version:'v1.18.0.1',name:'old-v1.18.0.1.bin',url:'https://example.test/old.bin'});
@@ -65,6 +65,25 @@ test('explicit Wadamesh defaults to its standalone role and never automatically 
 });
 
 const wadaInstall=(hardware,more={})=>app({hardware,provider:'Wadamesh TAK',role:'gui',action:'flash-wipe',version:'tak-beta_103.1',name:'wadamesh-board-merged.bin',url:'https://example.test/wadamesh-board-merged.bin',...more});
+test('running TAK selects only its provider when its reported pager model has ambiguous radio variants',()=>{
+  const install=wadaInstall('LilyGo T-Lora Pager (SX1262)'),lr=wadaInstall('LilyGo T-Lora Pager (LR1121)'),device={firmwareFamily:'meshcore',role:'companion',model:'LilyGo T-LoRa Pager',version:'wadamesh-tak beta_1',shortVersion:'wadamesh-tak beta_1'};
+  const input={items:[install,lr],device,hardware:'',architecture:'esp32'};
+  assert.equal(isRunningWadameshTak(device),true);
+  assert.equal(defaultFirmwareProvider(input),'Wadamesh TAK');
+  const selected=chooseFirmware({...input,installMode:'update'});
+  assert.equal(selected.selections.provider,'Wadamesh TAK');assert.equal(selected.selections.hardware,'');assert.equal(selected.artifactIndex,null);
+  assert.equal(defaultFirmwareProvider({...input,role:'repeater'}),'Keymind Cascade');
+  assert.equal(defaultFirmwareProvider({...input,version:'unavailable'}),'Keymind Cascade');
+  assert.equal(defaultFirmwareProvider({...input,items:[]}),'Keymind Cascade');
+  assert.equal(defaultFirmwareProvider({...input,architecture:'nrf52'}),'Keymind Cascade');
+});
+test('TAK provider detection requires an anchored application version from the companion',()=>{
+  const base={firmwareFamily:'meshcore',role:'companion'};
+  for(const version of ['wadamesh-tak beta_1','Wadamesh-TAK beta_105.8','wadamesh-tak beta_105.8 (Build: Nov 17 2026)'])assert.equal(isRunningWadameshTak({...base,version}),true,version);
+  for(const version of ['Wadamesh','Meshcomod v2.4','other wadamesh-tak beta_105.8','wadamesh-tak beta_1 extra','wadamesh-tak beta_','wadamesh-tak beta_1\nother'])assert.equal(isRunningWadameshTak({...base,version}),false,version);
+  for(const device of [{...base,role:'common-cli',version:'wadamesh-tak beta_1'},{...base,firmwareFamily:'meshtastic',version:'wadamesh-tak beta_1'},{version:'wadamesh-tak beta_1'}])assert.equal(isRunningWadameshTak(device),false);
+  assert.equal(isRunningWadameshTak({...base,version:'other',shortVersion:'wadamesh-tak beta_1'}),true);
+});
 test('Wadamesh defaults for exact supported catalog boards with usable merged installs',()=>{
   const boards=['LilyGo T-Deck','Elecrow ThinkNode M9','LilyGo T-Lora Pager (SX1262)','LilyGo T-Lora Pager (LR1121)','Seeed Wio Tracker L2','Elecrow CrowPanel Advance 3.5','Elecrow CrowPanel Advance 5.0'];
   const items=boards.map(hardware=>wadaInstall(hardware));

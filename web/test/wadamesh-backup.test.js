@@ -66,6 +66,11 @@ test('TAK touch profile requires the exact reviewed wire layout and matching ver
   for(const index of [0,1,2,3,60]){const changed=info.slice();changed[index]^=1;assert.equal(isWadameshTakTouchProfile(changed,reply),false);}
   for(const bad of ['v1.18.0.1-touch','v1.18.0.1 (Build: Nov 17 2026)','Unknown command','v1.18.0.1-touch (Build: Nov 17 2026)\nextra'])assert.equal(isWadameshTakTouchProfile(info,bad),false);
 });
+test('TAK release profile accepts its truncated device-info field only when the full version agrees',()=>{
+  const info=new Uint8Array(82);info.set([13,27,232,40]);info.set(enc('wadamesh-tak beta_105.8'.slice(0,19)),60);
+  assert.equal(isWadameshTakTouchProfile(info,'wadamesh-tak beta_105.8 (Build: Nov 17 2026)'),true);
+  for(const version of ['wadamesh-tak beta_205.8 (Build: Nov 17 2026)','other beta_105.8 (Build: Nov 17 2026)','wadamesh-tak beta_105.8','wadamesh-tak beta_105.8 (Build: x)\nextra'])assert.equal(isWadameshTakTouchProfile(info,version),false);
+});
 test('Wadamesh capture preserves a 2,000-contact inventory and unsupported queries without native schema truncation',async()=>{
   const p=payload(2000),{core}=device(p);
   const archive=await core.backup(),captured=verifyBackup(archive);
