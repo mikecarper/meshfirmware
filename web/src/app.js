@@ -643,10 +643,10 @@ function controls() {
   if(state.catalogScope!==scope){state.catalogScope=scope;filterCatalog('project',{preserveArtifact:true});return;}
   const candidates=catalogCandidates(),architecture=catalogArchitecture(),nrf=architecture==='nrf52',esp=architecture==='esp32',chip=currentEspChipInfo();
   $('show-all-nrf-option').hidden=!nrf||!candidates.candidates.length;
-  $('show-all-esp-option').hidden=!esp||!candidates.excluded?.length;
+  $('show-all-esp-option').hidden=!esp||(!candidates.excluded?.length&&!pagerModelCandidates().length);
   $('inspect-esp-chip').hidden=!canInspectEspChip()||!!chip;
   $('hardware-filter-status').hidden=!nrf&&!esp;
-  $('hardware-filter-status').textContent=nrf?$('show-all-nrf').checked?'Showing all nRF52 boards. Confirm the physical hardware before flashing.':candidates.candidates.length?candidates.source==='identified-hardware'?'Showing the previously identified nRF52 hardware.':`Showing ${candidates.candidates.length} matching nRF52 board candidates. The USB bootloader identity may be shared; choose the physical board.`:'Showing nRF52 boards only. The exact hardware has not been identified.':esp?($('show-all-esp').checked?'Showing all ESP32 boards; chip compatibility checks still apply. ':candidates.source==='rom-chip'?`Showing ${candidates.candidates.length} possible ${candidates.chipFamily} boards. `:'Showing ESP32-family boards from the USB/application hint. Exact chip and board are not identified. ')+(chip?.flashBytes?`${size(chip.flashBytes)} physical flash. `:'')+(candidates.source==='rom-chip'?'Boards with unknown chip metadata remain available. Flash size, PSRAM and screen resolution are not used to guess the model.':'Read the ESP32 chip to narrow further; this briefly restarts the radio.') :'';
+  $('hardware-filter-status').textContent=esp&&!$('show-all-esp').checked&&pagerModelCandidates().length?'The running firmware reports a T-LoRa Pager. Choose its SX1262 or LR1121 radio variant; the model name does not identify the radio.':nrf?$('show-all-nrf').checked?'Showing all nRF52 boards. Confirm the physical hardware before flashing.':candidates.candidates.length?candidates.source==='identified-hardware'?'Showing the previously identified nRF52 hardware.':`Showing ${candidates.candidates.length} matching nRF52 board candidates. The USB bootloader identity may be shared; choose the physical board.`:'Showing nRF52 boards only. The exact hardware has not been identified.':esp?($('show-all-esp').checked?'Showing all ESP32 boards; chip compatibility checks still apply. ':candidates.source==='rom-chip'?`Showing ${candidates.candidates.length} possible ${candidates.chipFamily} boards. `:'Showing ESP32-family boards from the USB/application hint. Exact chip and board are not identified. ')+(chip?.flashBytes?`${size(chip.flashBytes)} physical flash. `:'')+(candidates.source==='rom-chip'?'Boards with unknown chip metadata remain available. Flash size, PSRAM and screen resolution are not used to guess the model.':'Read the ESP32 chip to narrow further; this briefly restarts the radio.') :'';
   document.querySelectorAll('[data-lock]').forEach(el => { el.disabled = state.busy; });
   $('show-all-nrf').disabled ||= continuingDeviceFlow()||!!state.plan?.written;
   $('show-all-esp').disabled ||= continuingDeviceFlow()||!!state.plan?.written;
@@ -959,6 +959,7 @@ function selectDetectedBoard() {
       if(state.pkg&&state.item?.role&&!continuingDeviceFlow())invalidateFirmwareSelection();
     }
     if(isRunningWadameshTak(state.device))applyDefaultProvider();
+    filterCatalog('provider');
     const saved=!state.manualSelections.hardware&&currentApplicationEvidence()&&isWadamesh($('provider').value)?recallPagerVariant({storage:localStorage,device:state.device,items:state.items}):null;
     if(saved&&[...$('hardware').options].some(option=>option.value===saved)){
       rememberedHardware=saved;state.manualSelections.hardware=saved;$('hardware').value=saved;filterCatalog('hardware');
@@ -1689,9 +1690,9 @@ function options(id, values, placeholder) {
   // Keep an explicit older-version choice visible even when the selected
   // board/role has no matching build. Never silently substitute another image.
   if(id==='version'&&state.manualSelections.version)values=[...values,state.manualSelections.version];
-  // A detected physical target remains visible even when the chosen provider
-  // has no build for it. In that case no firmware artifact is selected.
-  if(id==='hardware'&&state.detectedHardware&&(!catalogArchitecture()||catalogHardwareAllowed(state.detectedHardware)))values=[...values,state.detectedHardware];
+  // Keep a detected target visible when the selected provider offers it.
+  // A provider with no build for that target must not offer it as a choice.
+  if(id==='hardware'&&state.detectedHardware&&(!$('provider').value||$('provider').value==='Custom'||state.items.some(item=>item.provider===$('provider').value&&item.hardware===state.detectedHardware))&&(!catalogArchitecture()||catalogHardwareAllowed(state.detectedHardware)))values=[...values,state.detectedHardware];
   select.replaceChildren(new Option(placeholder,''),...Array.from(new Set(values)).filter(Boolean).sort(id==='version'?compareVersions:undefined).map(v => new Option(id==='provider'&&v==='MeshCore'?'MeshCore (stock)':id==='provider'&&v==='Custom'?'Custom firmware':id==='role'&&isWadamesh($('provider').value)&&v==='gui'?'Standalone (GUI)':v,v)));
   if ([...select.options].some(o => o.value === prior)) select.value = prior;
 }
@@ -1744,17 +1745,38 @@ function catalogArchitecture(){
   if(state.device?.architecture==='esp32')return 'esp32';
   return espBoardCandidates({items:[],chipInfo:currentEspChipInfo(),usbInfo:state.port.getInfo()||{}}).architecture;
 }
-function catalogCandidates(){const architecture=catalogArchitecture();return architecture==='nrf52'?nrfBoardCandidates({items:state.items,usbInfo:state.port?.getInfo()||{},hardware:state.detectedHardware||''}):architecture==='esp32'?espBoardCandidates({items:state.items,chipInfo:currentEspChipInfo(),usbInfo:state.port?.getInfo()||{}}):{candidates:[],source:'unknown'};}
+function catalogCandidates(){
+  const architecture=catalogArchitecture();
+  if(architecture==='nrf52')return nrfBoardCandidates({items:state.items,usbInfo:state.port?.getInfo()||{},hardware:state.detectedHardware||''});
+  if(architecture!=='esp32')return {candidates:[],source:'unknown'};
+  const result=espBoardCandidates({items:state.items,chipInfo:currentEspChipInfo(),usbInfo:state.port?.getInfo()||{}}),pager=pagerModelCandidates();
+  if(!pager.length)return result;
+  const base=result.architecture?result.candidates:[...new Set(state.items.filter(item=>item.project==='MeshCore'&&item.architecture==='esp32').map(item=>item.hardware))];
+  const allowed=base.filter(name=>pager.includes(name)||name===state.manualSelections.hardware);
+  return {...result,candidates:allowed,excluded:[...new Set([...result.excluded,...base.filter(name=>!allowed.includes(name))])],source:'pager-model'};
+}
+// The shared Pager model identifies a board family, never its radio variant.
+// Bind this hint to the freshly selected port and running application.
+function pagerModelCandidates(){
+  if(!currentApplicationEvidence()||!/^lilygo t-lora pager$/i.test((state.device?.model||'').trim()))return [];
+  const result=applicationBoard(),allowed=new Set(['LilyGo T-Lora Pager (SX1262)','LilyGo T-Lora Pager (LR1121)']);
+  return result.source==='application-model'&&!result.hardware?result.candidates.filter(name=>allowed.has(name)):[];
+}
 function showAllChipBoards(){return catalogArchitecture()==='nrf52'?$('show-all-nrf').checked:$('show-all-esp').checked;}
-function catalogScopeKey(){return catalogArchitecture()?JSON.stringify([catalogArchitecture(),showAllChipBoards()?[]:catalogCandidates().candidates]):'';}
-function catalogHardwareAllowed(hardware){const candidates=catalogCandidates().candidates;return state.items.some(item=>item.hardware===hardware&&item.architecture===catalogArchitecture())&&(showAllChipBoards()||!candidates.length||candidates.includes(hardware));}
+function catalogScopeKey(){const scope=catalogCandidates();return catalogArchitecture()?JSON.stringify([catalogArchitecture(),showAllChipBoards()?'all':scope.source,showAllChipBoards()?[]:scope.candidates]):'';}
+function catalogHardwareAllowed(hardware){const candidates=catalogCandidates().candidates;return state.items.some(item=>item.hardware===hardware&&item.architecture===catalogArchitecture())&&(showAllChipBoards()||(!candidates.length&&catalogCandidates().source!=='pager-model')||candidates.includes(hardware));}
 function filterCatalog(changed = 'project',{preserveArtifact=false}={}) {
-  const architecture=catalogArchitecture(),priorArtifact=$('artifact').value,candidates=catalogCandidates().candidates,narrow=architecture&&!showAllChipBoards()&&candidates.length>0;
+  const architecture=catalogArchitecture(),priorArtifact=$('artifact').value,candidateScope=catalogCandidates(),candidates=candidateScope.candidates,narrow=architecture&&!showAllChipBoards()&&(candidates.length>0||candidateScope.source==='pager-model');
   let items = state.items.filter(i => i.project === $('project').value&&(!architecture||i.architecture===architecture)&&(!narrow||candidates.includes(i.hardware)));
   const compatibleHardware=new Set(items.map(item=>item.hardware));
   if(architecture&&state.manualSelections.hardware&&!compatibleHardware.has(state.manualSelections.hardware))for(const key of ['hardware','role','version'])delete state.manualSelections[key];
-  const hardwareItems=items;
-  for (const id of ['provider','hardware','role','version']) { if (['project','provider','hardware','role','version'].indexOf(id) > ['project','provider','hardware','role','version'].indexOf(changed)) options(id,(id==='hardware'&&!state.manualSelections.provider&&$('provider').value!=='Custom'?hardwareItems:items).map(i => i[id]),id==='hardware'&&narrow?`Matching ${architecture==='nrf52'?'nRF52':catalogCandidates().chipFamily||'ESP32'} boards`:`All ${id === 'hardware' ? architecture==='nrf52'?'nRF52 boards':architecture==='esp32'?'ESP32 boards':'boards' : id + 's'}`); if ($(id).value&&!(id==='provider'&&$(id).value==='Custom')) items = items.filter(i => i[id] === $(id).value); }
+  for (const id of ['provider','hardware','role','version']) {
+    if (['project','provider','hardware','role','version'].indexOf(id) > ['project','provider','hardware','role','version'].indexOf(changed)) {
+      // Hardware choices come from the selected provider and device scope.
+      options(id,items.map(i => i[id]),id==='hardware'&&narrow?`Matching ${architecture==='nrf52'?'nRF52':catalogCandidates().chipFamily||'ESP32'} boards`:`All ${id === 'hardware' ? architecture==='nrf52'?'nRF52 boards':architecture==='esp32'?'ESP32 boards':'boards' : id + 's'}`);
+    }
+    if ($(id).value&&!(id==='provider'&&$(id).value==='Custom')) items = items.filter(i => i[id] === $(id).value);
+  }
   if($('provider').value==='Custom'){items=[];$('custom-firmware').hidden=false;$('custom-firmware').open=true;}
   items=items.filter(item=>matchesCatalogInstallMode(item,state.installMode));
   items.sort((a,b)=>compareVersions(a.version,b.version));

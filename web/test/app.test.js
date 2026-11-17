@@ -1928,12 +1928,12 @@ test('a headless V4 connected before the catalog arrives is selected automatical
 });
 
 const xiaoRepeaterItem=(more={})=>({...v4Item,provider:'MeshCore',hardware:'Seeed Studio Xiao nRF52 WIO',architecture:'nrf52',version:'v1.18.0.1',name:'Xiao_nrf52_repeater-v1.18.0.1.zip',action:'flash',url:'https://example.test/xiao.zip',...more});
-test('a detected board without a Keymind build stays selected without falling back to stock; stock can be chosen explicitly',async()=>{
+test('a detected board without a provider build is not offered until its provider is chosen',async()=>{
   const ui=workbench({productionDefaults:true});await Promise.resolve();ui.context.inventory=[headlessV4Item(),xiaoRepeaterItem()];
   ui.evaluate("state.items=inventory;state.device={model:'Seeed Xiao-nrf52',catalogRole:'repeater',version:'v1.17.0'};filterCatalog();selectDetectedBoard();");
-  assert.equal(ui.elements.get('hardware').value,'Seeed Studio Xiao nRF52 WIO');assert.equal(ui.elements.get('provider').value,'Keymind Cascade');assert.equal(ui.elements.get('artifact').value,'');assert.match(ui.elements.get('automatic-summary').textContent,/No write-only application update/);assert.equal(ui.elements.get('prepare').disabled,true);
+  assert.equal(ui.elements.get('hardware').value,'');assert.equal(ui.elements.get('provider').value,'Keymind Cascade');assert.equal(ui.elements.get('artifact').value,'');assert.equal(ui.elements.get('prepare').disabled,true);
   ui.elements.get('provider').value='MeshCore';await ui.elements.get('provider').onchange();
-  assert.equal(ui.elements.get('provider').value,'MeshCore');assert.equal(ui.elements.get('hardware').value,'Seeed Studio Xiao nRF52 WIO');assert.equal(ui.elements.get('artifact').value,'1');assert.deepEqual(ui.calls,[]);
+  assert.equal(ui.elements.get('provider').value,'MeshCore');assert.ok(hardwareChoices(ui).includes('Seeed Studio Xiao nRF52 WIO'));ui.elements.get('hardware').value='Seeed Studio Xiao nRF52 WIO';await ui.elements.get('hardware').onchange();assert.equal(ui.elements.get('artifact').value,'1');assert.deepEqual(ui.calls,[]);
 });
 
 test('manual board changes refresh the right-side summary even with automatic setup off',async()=>{
@@ -4935,6 +4935,33 @@ test('running TAK selects provider and remembers a user-confirmed pager variant 
   const stale=await create(saved,device.publicKey,false);assert.equal(stale.elements.get('hardware').value,'');stale.elements.get('hardware').value=lr;await stale.elements.get('hardware').onchange();assert.equal(JSON.parse(stale.context.localStorage.getItem(PAGER_VARIANTS_KEY)).entries[0].hardware,sx,'stale device evidence must not overwrite the remembered variant');
   again.elements.get('hardware').value='';await again.elements.get('hardware').onchange();assert.deepEqual(JSON.parse(again.context.localStorage.getItem(PAGER_VARIANTS_KEY)).entries,[]);
 });
+test('a reported Pager family narrows hardware to its available radio variants until Show all is chosen',async()=>{
+  const sx='LilyGo T-Lora Pager (SX1262)',lr='LilyGo T-Lora Pager (LR1121)',other='LilyGo T-Deck';
+  const items=[...takDefaultItems(sx).slice(2),...takDefaultItems(lr).slice(2),...takDefaultItems(other)];
+  const ui=workbench({productionDefaults:true,catalogPromise:Promise.resolve(linkedCatalog(items))});await new Promise(resolve=>setImmediate(resolve));
+  ui.context.selectedPort=ui.port;ui.evaluate('state.port=selectedPort;state.device={firmwareFamily:"meshcore",role:"companion",version:"wadamesh-tak beta_1",model:"LilyGo T-LoRa Pager",architecture:"esp32"};state.portLabelEvidence={port:state.port,device:state.device};selectDetectedBoard();');
+  assert.equal(ui.elements.get('provider').value,'Wadamesh TAK');assert.deepEqual(hardwareChoices(ui),[lr,sx].sort());assert.equal(ui.elements.get('hardware').value,'');
+  ui.port.getInfo=()=>({usbVendorId:0x10c4,usbProductId:0xea60});ui.evaluate('filterCatalog();');assert.deepEqual(hardwareChoices(ui),[lr,sx].sort(),'generic serial adapters do not discard application model candidates');
+  assert.equal(ui.elements.get('show-all-esp-option').hidden,false);assert.match(ui.elements.get('hardware-filter-status').textContent,/SX1262 or LR1121/);
+  ui.elements.get('show-all-esp').checked=true;await ui.elements.get('show-all-esp').onchange();assert.ok(hardwareChoices(ui).includes(other));
+  ui.elements.get('hardware').value=other;await ui.elements.get('hardware').onchange();ui.elements.get('show-all-esp').checked=false;await ui.elements.get('show-all-esp').onchange();
+  assert.equal(ui.elements.get('hardware').value,other,'a deliberate hardware choice remains available');assert.deepEqual(hardwareChoices(ui),[lr,sx,other].sort());
+  ui.elements.get('hardware').value='';await ui.elements.get('hardware').onchange();ui.evaluate('filterCatalog();');assert.deepEqual(hardwareChoices(ui),[lr,sx].sort());
+  ui.evaluate('state.portLabelEvidence=null;filterCatalog();');assert.ok(hardwareChoices(ui).includes(other),'stale application evidence does not constrain a different radio');
+  assert.deepEqual(ui.calls,[]);
+});
+test('Wadamesh hardware choices only include its catalog builds for automatic and explicit providers',async()=>{
+  const supported='LilyGo T-Deck',unsupported='Seeed Studio SenseCAP Indicator LoRa';
+  const items=[...takDefaultItems(supported),{...v4Item,provider:'Keymind Cascade',hardware:unsupported}];
+  for(const explicit of [false,true]){
+    const ui=workbench({productionDefaults:true,catalogPromise:Promise.resolve(linkedCatalog(items))});await new Promise(resolve=>setImmediate(resolve));
+    if(explicit){ui.elements.get('provider').value='Wadamesh TAK';await ui.elements.get('provider').onchange();}
+    else {ui.context.selectedPort=ui.port;ui.evaluate('state.port=selectedPort;state.device={firmwareFamily:"meshcore",role:"companion",version:"wadamesh-tak beta_1",model:"LilyGo T-LoRa Pager",architecture:"esp32"};state.portLabelEvidence={port:state.port,device:state.device};selectDetectedBoard();');}
+    assert.equal(ui.elements.get('provider').value,'Wadamesh TAK');assert.ok(hardwareChoices(ui).includes(supported));assert.ok(!hardwareChoices(ui).includes(unsupported));
+    ui.context.unsupported=unsupported;ui.evaluate('state.detectedHardware=unsupported;filterCatalog();');assert.ok(!hardwareChoices(ui).includes(unsupported),'an unavailable detected board is not offered as a Wadamesh build');
+    ui.elements.get('hardware').value=supported;await ui.elements.get('hardware').onchange();assert.ok([...ui.elements.get('version').options].some(option=>option.value),'the offered board has a version');
+  }
+});
 test('detecting an installed TAK cancels a provider-derived erase default but preserves explicit erase choices',async()=>{
   const ui=workbench({productionDefaults:true,catalogPromise:Promise.resolve(linkedCatalog(takDefaultItems()))});await new Promise(resolve=>setImmediate(resolve));
   ui.elements.get('provider').value='Wadamesh TAK';await ui.elements.get('provider').onchange();assert.equal(ui.evaluate('state.installMode'),'install');assert.equal(ui.evaluate('installModeSource.kind'),'provider');
@@ -4949,9 +4976,10 @@ test('detected supported hardware defaults to Wadamesh merged install instead of
   assert.equal(ui.elements.get('provider').value,'Wadamesh TAK');assert.equal(ui.elements.get('role').value,'gui');assert.equal(ui.elements.get('artifact').value,'3');assert.equal(ui.evaluate('state.installMode'),'install');assert.equal(ui.evaluate('installModeSource.kind'),'provider');
   assert.equal(ui.evaluate('state.pkg'),null);assert.equal(ui.evaluate('state.plan'),null);assert.equal(JSON.parse(ui.context.localStorage.getItem('meshfirmware.selections')).providerExplicit,false);assert.deepEqual(ui.calls,[]);
 });
-test('implicit provider hardware menu includes Wadamesh-only boards and switches provider even with automatic artifact selection off',async()=>{
+test('choosing a provider exposes its hardware even with automatic artifact selection off',async()=>{
   const hardware='Elecrow CrowPanel Advance 3.5',items=[...takDefaultItems().slice(0,2),...takDefaultItems(hardware).slice(2)],ui=workbench({catalogPromise:Promise.resolve(linkedCatalog(items))});await new Promise(resolve=>setImmediate(resolve));
-  assert.ok(ui.elements.get('hardware').options.some(option=>option.value===hardware));
+  assert.ok(!ui.elements.get('hardware').options.some(option=>option.value===hardware));
+  ui.elements.get('provider').value='Wadamesh TAK';await ui.elements.get('provider').onchange();assert.ok(ui.elements.get('hardware').options.some(option=>option.value===hardware));
   ui.elements.get('hardware').value=hardware;await ui.elements.get('hardware').onchange();
   assert.equal(ui.elements.get('provider').value,'Wadamesh TAK');assert.equal(ui.elements.get('hardware').value,hardware);assert.equal(ui.evaluate('state.installMode'),'install');assert.deepEqual(artifactChoices(ui),['3']);assert.equal(ui.elements.get('artifact').value,'');assert.deepEqual(ui.calls,[]);
 });
