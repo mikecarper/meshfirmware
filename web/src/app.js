@@ -2655,7 +2655,14 @@ if ('serial' in navigator) {
     if(state.knownApplicationPort?.port===disconnected)state.knownApplicationPort.available=false;
     if(event.target===state.port||event.port===state.port){clearBootloaderInfoEvidence();state.applicationProbeFailed=false;state.port=null;state.generation++;state.plan=null;state.boardDetected=false;state.recoveryManual=false;state.recoveryDetectionRequested=false;$('recovery-profile').value='';$('installed-identity').value='';$('recovery-detection').textContent='';$('board-detection').textContent='Selected port disconnected; detect again after selecting the same radio.';if(!state.handoff&&!state.recovery&&!state.migration){state.device=null;state.backupApproved=null;}$('port-status').textContent='Disconnected';log('Selected USB port disconnected. No different port will be substituted.');controls();}
   });
-} else { $('browser-status').textContent = 'Web Serial unavailable'; notice('Use a browser with Web Serial support (typically desktop Chrome or Edge). Catalog browsing and local file inspection still work.',true); }
+} else {
+  const status=$('browser-status');
+  status.textContent='Web Serial unavailable';status.href='https://github.com/mikecarper/meshfirmware';status.title='Get the Windows/Linux flasher';status.target='_blank';status.rel='noopener noreferrer';
+  notice('Use a browser with Web Serial support (typically desktop Chrome or Edge), or ',true);
+  const link=document.createElement('a');
+  link.href='https://github.com/mikecarper/meshfirmware';link.textContent='download the Windows/Linux flasher';link.target='_blank';link.rel='noopener noreferrer';
+  $('notice').append(link,'. Catalog browsing and local file inspection still work.');
+}
 getCatalog().then(catalog => {
   state.items=catalog.items.map(item=>{const hardware=canonicalHardware(item.hardware);return hardware===item.hardware?item:{...item,hardware};});state.bootloaderCatalog=catalog.bootloaderCatalog||null;state.recoveryCatalog=catalog.recoveryCatalog||null;updateRecoveryChoices();
   $('catalog-status').textContent=`${state.items.length.toLocaleString()} artifacts · snapshot ${new Date(catalog.generatedAt).toLocaleString()} · ${catalog.warnings.length} provider warnings${catalog.cached?' · cached':''}`;
