@@ -84,12 +84,14 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
   return {context,elements,calls,port,serialEvents,windowEvents,evaluate:code=>vm.runInContext(code,context)};
 }
 
-test('RAK dropdown defaults to four merged choices and the older-build switch restores exact files',async()=>{
+test('RAK dropdown defaults to three merged choices and the older-build switch restores exact files',async()=>{
   const items=rakCatalogItems(),ui=workbench({catalogPromise:Promise.resolve({items,warnings:[],generatedAt:new Date().toISOString()}),
     search:'?'+new URLSearchParams({provider:'Keymind Cascade',hardware:rakHardware,role:'repeater',version:rakVersion})});
   await new Promise(resolve=>setImmediate(resolve));
   const choices=()=>ui.elements.get('artifact').options.filter(option=>option.value!=='');
-  assert.equal(choices().length,4);
+  assert.equal(choices().length,3);
+  assert.equal(choices().filter(option=>option.text.startsWith('(PICK THIS) ')).length,1);
+  assert(choices().find(option=>option.text.includes('Ethernet')).text.includes('Full sensors'));
   assert(choices().every(option=>/Repeater \/ (Unified|Ethernet) - /.test(option.text)));
   assert(choices().every(option=>!option.text.includes('RAK_4631')),'normal labels describe the choices without repeating filenames');
   assert.equal(ui.elements.get('older-builds-option').hidden,false);
@@ -99,7 +101,7 @@ test('RAK dropdown defaults to four merged choices and the older-build switch re
   assert.deepEqual(new Set(choices().map(option=>items[Number(option.value)].name)),new Set(items.map(item=>item.name)));
   ui.elements.get('show-older-builds').checked=false;
   await ui.elements.get('show-older-builds').onchange();
-  assert.equal(choices().length,4);
+  assert.equal(choices().length,3);
   assert(!ui.calls.some(call=>['serial','rom','chooser'].includes(call)),'browsing never touches a radio');
 });
 
@@ -108,7 +110,7 @@ test('an exact shared legacy RAK build remains selected without showing every ol
     search:'?'+new URLSearchParams({provider:'Keymind Cascade',hardware:rakHardware,role:'repeater',version:rakVersion,build:items[0].name})});
   await new Promise(resolve=>setImmediate(resolve));
   const options=ui.elements.get('artifact').options.filter(option=>option.value!=='');
-  assert.equal(options.length,5);
+  assert.equal(options.length,4);
   assert.equal(ui.elements.get('artifact').value,'0');
   assert.equal(ui.elements.get('download-selected-build').href,items[0].url);
 });
@@ -120,7 +122,7 @@ test('a running exact RAK UART1 target retains both sensor profiles in the norma
   ui.context.runningRakTarget=rakLegacy;
   ui.evaluate('state.device={firmwareTarget:runningRakTarget};filterCatalog("version");');
   const names=ui.elements.get('artifact').options.filter(option=>option.value!=='').map(option=>items[Number(option.value)].name);
-  assert.equal(names.length,6);
+  assert.equal(names.length,5);
   assert(names.includes(items[0].name)&&names.includes(items[1].name));
 });
 

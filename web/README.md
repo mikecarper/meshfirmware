@@ -322,10 +322,13 @@ visible. The top navigation opens the corresponding tools without touching USB.
 Keymind Cascade RAK4631 and RAK3401 repeater choices prefer a published Unified
 build over the older storage-specific profiles from the same release and sensor
 policy. RAK4631 also folds the separate serial-port profiles into that default
-list. Full and reduced sensor builds remain separate, as does Ethernet.
+list. Unified keeps separate full and reduced sensor builds. Ethernet defaults
+to Full when it is published for the same release. Reduced sensor builds across
+all boards and roles are labelled **(PICK THIS)**, including bundled bootloaders.
 **Show older hardware-specific builds** exposes the original files. Exact
-installed targets, selected files and shared build links stay visible, including
-legacy UART1 wiring; filtering never changes a download or migrates a device.
+installed storage/serial targets, selected files and shared build links stay
+visible, including legacy UART1 wiring; filtering never changes a download or
+migrates a device.
 
 ### Shared selection links
 

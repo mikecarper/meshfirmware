@@ -16,34 +16,45 @@ function rakProfile(item) {
   if(!match||boards.get(item.hardware)!==match[2]||item.version!==match[5])return null;
   const targets=[...(item.releaseNotes||'').matchAll(/(?:^|\n)\s*EXACT TARGET\s*-\s*([A-Za-z0-9_-]+)(?:[.\s]|$)/g)];
   if(targets.length!==1||targets[0][1]!==match[1])return null;
+  const releaseKey=JSON.stringify([catalogProvider(item.provider),item.hardware,item.role,item.action,item.version]);
   return {target:match[1],family:match[2],variant:match[3],sensors:match[4],
-    key:JSON.stringify([catalogProvider(item.provider),item.hardware,item.role,item.action,item.version,match[4]])};
+    releaseKey,key:`${releaseKey}:${match[4]}`};
 }
 
 // Presentation only: retain every original catalog entry and its stable index.
-// A replacement must be published for the same board, source, and sensor policy.
-// Ethernet is separate; exact installed targets and shared build links remain
-// visible, including legacy UART1 wiring which unified firmware cannot migrate.
+// Storage/serial replacements match the board, source, and sensor policy.
+// Ethernet prefers Full for the same board/release. Exact storage/serial targets
+// and shared links remain visible, including legacy UART1 wiring.
 export function firmwareChoices(items,{showOlder=false,installedTarget='',keepNames=[]}={}) {
-  const profiles=new Map(items.map(item=>[item,rakProfile(item)])),unified=new Map();
-  for(const [item,profile] of profiles)if(profile?.variant==='unified_lora_ota'){
-    const group=unified.get(profile.key)||[];group.push(item);unified.set(profile.key,group);
+  const profiles=new Map(items.map(item=>[item,rakProfile(item)])),unified=new Map(),fullEthernet=new Map();
+  for(const [item,profile] of profiles){
+    if(profile?.variant==='unified_lora_ota'){
+      const group=unified.get(profile.key)||[];group.push(item);unified.set(profile.key,group);
+    }
+    if(profile?.variant==='ethernet'&&profile.sensors==='full')
+      fullEthernet.set(profile.releaseKey,(fullEthernet.get(profile.releaseKey)||0)+1);
   }
   const older=new Set();
-  for(const [item,profile] of profiles)if(profile
-    &&(storage.has(profile.variant)||(profile.family==='4631'&&bridges.has(profile.variant)))
-    &&unified.get(profile.key)?.length===1)older.add(item);
+  for(const [item,profile] of profiles){
+    if(profile&&(storage.has(profile.variant)||(profile.family==='4631'&&bridges.has(profile.variant)))
+      &&unified.get(profile.key)?.length===1)older.add(item);
+    if(profile?.variant==='ethernet'&&profile.sensors==='reduced'
+      &&fullEthernet.get(profile.releaseKey)===1)older.add(item);
+  }
   const names=new Set(keepNames.filter(Boolean));
-  return {olderCount:older.size,items:items.filter(item=>showOlder||!older.has(item)
-    ||names.has(item.name)||profiles.get(item)?.target===installedTarget)};
+  return {olderCount:older.size,items:items.filter(item=>{
+    const profile=profiles.get(item);
+    return showOlder||!older.has(item)||names.has(item.name)
+      ||(profile?.target===installedTarget&&profile.variant!=='ethernet');
+  })};
 }
 
 export function firmwareChoiceLabel(item,{showHardware=false,showVersion=false}={}) {
-  const profile=rakProfile(item);
+  const profile=rakProfile(item),recommendation=/-reduced-ota-v\d/i.test(item.name||'')?'(PICK THIS) ':'';
   if(profile&&['unified_lora_ota','ethernet'].includes(profile.variant)){
     const kind=profile.variant==='unified_lora_ota'?'Unified':'Ethernet';
     const sensors=profile.sensors==='full'?'Full sensors':'Reduced optional sensors';
-    return `${showHardware?item.hardware+' / ':''}Repeater / ${kind} - ${sensors} + LoRa OTA${showVersion?' - '+item.version:''}`;
+    return `${recommendation}${showHardware?item.hardware+' / ':''}Repeater / ${kind} - ${sensors} + LoRa OTA${showVersion?' - '+item.version:''}`;
   }
-  return `${[item.title,item.subtitle].filter(Boolean).join(' / ')} - ${item.name} - ${item.action}`;
+  return `${recommendation}${[item.title,item.subtitle].filter(Boolean).join(' / ')} - ${item.name} - ${item.action}`;
 }
