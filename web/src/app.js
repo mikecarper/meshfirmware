@@ -49,6 +49,7 @@ import {prepareWadameshConfig,applyWadameshConfig} from './wadamesh-config.js';
 import { createPostFlashSettingsPlan, applyPostFlashSettings } from './post-flash-settings.js';
 import { createPostFlashCompanionRequest } from './post-flash-companion.js';
 import { loadRadioPresets } from './radio-presets.js';
+import { browserTimezonePresetSuggestions } from './timezone-presets.js';
 
 const $ = id => document.getElementById(id);
 const usbChooserCancelled=Symbol('usb-chooser-cancelled');
@@ -90,8 +91,12 @@ state.radioDefaults=null;
 state.postFlashSettingsApproval=null;state.postFlashSettingsResult=null;
 state.wadameshConfigTarget=null;
 state.radioPresets=null;
+state.radioPresetsWarning=null;
+state.radioPresetsSource=null;
 const radioDefaultsFields=['radio-defaults-frequency','radio-defaults-bandwidth','radio-defaults-sf','radio-defaults-cr','radio-defaults-preamble','radio-defaults-power'];
 const mediaMeshFields=['media-mesh-frequency','media-mesh-bandwidth','media-mesh-sf','media-mesh-cr','media-mesh-mode','media-mesh-preamble'];
+const activeMediaMesh=preset=>['mediamesh','mediamesh-range','custom'].includes(preset);
+function selectMediaMesh(presetId,crossId){$(crossId).value=activeMediaMesh($(presetId).value)?'off':'unchanged';}
 function wadameshImageMetadata(pkg=state.pkg){
   if(isWadamesh(state.item)&&(!pkg||pkg===state.pkg))return state.item;
   // A renamed local BIN can still be identified by its complete validated
@@ -140,6 +145,7 @@ function syncRadioDefaultsControls(){
   $('radio-preset').disabled=state.busy||locked||!supported;
   for(const id of ['radio-defaults-enabled','radio-defaults-apply',...radioDefaultsFields])$(id).disabled=state.busy||locked||!supported||(radioDefaultsFields.includes(id)&&!$('radio-defaults-enabled').checked);
   for(const id of ['media-mesh-preset','media-mesh-cross',...mediaMeshFields])$(id).disabled=state.busy||locked||!supported||(mediaMeshFields.includes(id)&&$('media-mesh-preset').value!=='custom');
+  $('media-mesh-cross').disabled ||= $('media-mesh-preset').value!=='custom';
   $('media-mesh-custom').hidden=$('media-mesh-preset').value!=='custom';
   $('radio-defaults-enable-label').textContent=editable?'Customize factory defaults inside this firmware':'Set primary radio after flashing';
   $('radio-defaults-preamble-label').textContent=editable?'Preamble symbols (0 = auto)':'Preamble symbols (blank = firmware default, 0 = auto)';
@@ -171,12 +177,18 @@ async function inspectSelectedRadioDefaults(){
   fillRadioDefaults(draft.appliedSettings||inspection.settings);
   if(!inspection.supported&&!draft.appliedSettings)$('radio-defaults-preamble').value='';
   $('radio-defaults-status').textContent=inspection.supported?(draft.provenance?'Custom defaults are included. Saved settings still take precedence.':'This build supports editable factory defaults. MediaMesh settings are applied after flashing.'):radioSettingsAvailable()?'This image stays unchanged. Selected settings will be applied over USB after startup verification.':(inspection.reason||'This component cannot configure application radio settings.');
-  if(radioSettingsAvailable()&&!state.radioPresets){
-    $('radio-preset-status').textContent='Loading community radio presets… (up to 5 seconds)';
-    const loaded=await loadRadioPresets();
-    state.radioPresets=loaded.presets;
-    $('radio-preset').replaceChildren(new Option('Custom','custom'),...loaded.presets.map(p=>new Option(`${p.title} · ${p.frequencyHz/1e6} MHz / ${p.bandwidthHz/1000} kHz / SF${p.spreadingFactor} / CR4/${p.codingRate}`,p.id)));
-    $('radio-preset-status').textContent=loaded.warning||'Community presets from api.meshcore.nz. Confirm the correct settings for your radio and region.';
+  if(radioSettingsAvailable()){
+    if(!state.radioPresets){
+      $('radio-preset-status').textContent='Loading community radio presets… (up to 5 seconds)';
+      const loaded=await loadRadioPresets();
+      state.radioPresets=loaded.presets;
+      state.radioPresetsWarning=loaded.warning;
+      state.radioPresetsSource=loaded.source;
+    }
+    const prior=$('radio-preset').value;
+    $('radio-preset').replaceChildren(new Option('Custom','custom'),...state.radioPresets.map(p=>new Option(`${p.title} · ${p.frequencyHz/1e6} MHz / ${p.bandwidthHz/1000} kHz / SF${p.spreadingFactor} / CR4/${p.codingRate}`,p.id)));
+    if([...$('radio-preset').options].some(option=>option.value===prior))$('radio-preset').value=prior;
+    $('radio-preset-status').textContent=state.radioPresetsWarning||'Community presets from api.meshcore.nz. Confirm the correct settings for your radio and region.';
   }
 }
 function editRadioDefaults(){
@@ -687,6 +699,7 @@ function controls() {
   if(isNonMeshCore())for(const id of ['backup','restore','send-command','binary-mode'])$(id).disabled=true;
   updateQuickSettingsControls();
   syncRadioDefaultsControls();
+  $('wadamesh-config-cross').disabled ||= $('wadamesh-config-media').value!=='custom';
   $('wadamesh-live-config').hidden=!wadameshConfigTargetCurrent(state.wadameshConfigTarget);
   $('verify-app').disabled ||= (!state.verification&&!canVerifyWadameshProfile())||!!state.esp||!!state.plan?.written||$('already-bootloader').checked||dfuIds.has(portId(state.port))||!!state.migration||!!state.recovery||!!state.espRecovery;
   $('fetch-firmware').disabled ||= !$('artifact').value;
@@ -1454,12 +1467,37 @@ async function verifyWadameshProfile(){
     profile=await readWadameshProfile(new MeshCore(link),assertCurrent);
   }finally{await link.close();}
   assertCurrent();
-  if(profile.touch){state.wadameshConfigTarget={port,generation,pkg,item,provider,finished,publicKey:profile.publicKey,maxTxDbm:profile.maxTxDbm};$('wadamesh-live-config').hidden=false;$('wadamesh-config-status').textContent='Choose the settings to review. Nothing has been changed.';}
+  if(profile.touch){state.wadameshConfigTarget={port,generation,pkg,item,provider,finished,publicKey:profile.publicKey,maxTxDbm:profile.maxTxDbm};$('wadamesh-live-config').hidden=false;$('wadamesh-config-status').textContent='Choose the settings to review. Nothing has been changed.';void loadWadameshRadioPresets(state.wadameshConfigTarget);}
   progress(1,'A Wadamesh-compatible application responded over USB.');
   notice('A Wadamesh-compatible application responded over USB. The exact TAK release, physical board, running slot and screen are not verified. Check the device screen.'+(profile.touch?' Choose radio settings below if desired.':' Radio configuration is not available for this unreviewed profile.'));
   log('Wadamesh-compatible application profile answered. No settings or firmware were changed.');
 }
 const wadameshConfigFields=['wadamesh-config-frequency','wadamesh-config-bandwidth','wadamesh-config-sf','wadamesh-config-cr','wadamesh-config-tx','wadamesh-config-media','wadamesh-config-cross','wadamesh-config-media-frequency','wadamesh-config-media-bandwidth','wadamesh-config-media-sf','wadamesh-config-media-cr','wadamesh-config-media-mode','wadamesh-config-media-preamble'];
+const wadameshPresetBandwidths=new Set([62500,125000,250000,500000]);
+async function loadWadameshRadioPresets(target){
+  $('wadamesh-config-preset').replaceChildren(new Option('Custom','custom'));
+  $('wadamesh-config-timezone').hidden=true;$('wadamesh-config-timezone').textContent='';
+  $('wadamesh-config-preset-status').textContent='Loading community radio presets… (up to 5 seconds)';
+  const loaded=state.radioPresets?{presets:state.radioPresets,warning:state.radioPresetsWarning,source:state.radioPresetsSource}:await loadRadioPresets();
+  if(!wadameshConfigTargetCurrent(target))return;
+  state.radioPresets=loaded.presets;state.radioPresetsWarning=loaded.warning;state.radioPresetsSource=loaded.source;
+  const compatible=loaded.presets.filter(p=>wadameshPresetBandwidths.has(p.bandwidthHz));
+  $('wadamesh-config-preset').replaceChildren(new Option('Custom','custom'),...compatible.map(p=>new Option(`${p.title} · ${p.frequencyHz/1e6} MHz / ${p.bandwidthHz/1000} kHz / SF${p.spreadingFactor} / CR4/${p.codingRate}`,p.id)));
+  const suggestions=browserTimezonePresetSuggestions(compatible);
+  if(suggestions.length){$('wadamesh-config-timezone').textContent=`Possible presets based on this browser's time zone: ${suggestions.map(p=>p.title).join(', ')}. A time zone does not identify your location; choose the correct local preset above.`;$('wadamesh-config-timezone').hidden=false;}
+  const omitted=loaded.presets.length-compatible.length;
+  $('wadamesh-config-preset-status').textContent=[loaded.source==='live'?'Live community presets from api.meshcore.nz. Confirm the correct settings for your radio and region.':loaded.warning||'Community presets from api.meshcore.nz. Confirm the correct settings for your radio and region.',loaded.source==='live'?loaded.warning:'',omitted?`${omitted} preset${omitted===1?' uses':'s use'} bandwidths unavailable in this form.`:''].filter(Boolean).join(' ');
+}
+function chooseWadameshRadioPreset(){
+  if(state.busy||!wadameshConfigTargetCurrent(state.wadameshConfigTarget))return;
+  const preset=state.radioPresets?.find(p=>p.id===$('wadamesh-config-preset').value&&wadameshPresetBandwidths.has(p.bandwidthHz));
+  if(!preset)return;
+  $('wadamesh-config-primary').checked=true;
+  for(const [id,value]of [['frequency',preset.frequencyHz/1e6],['bandwidth',preset.bandwidthHz],['sf',preset.spreadingFactor],['cr',preset.codingRate]])$('wadamesh-config-'+id).value=String(value);
+  $('wadamesh-config-preset-status').textContent=[`${preset.title}: radio values filled for review. Nothing has been changed.`,preset.notes,state.radioPresetsSource==='live'?'Live community presets from api.meshcore.nz.':'',state.radioPresetsWarning].filter(Boolean).join(' ');
+}
+$('wadamesh-config-preset').onchange=chooseWadameshRadioPreset;
+for(const id of ['wadamesh-config-frequency','wadamesh-config-bandwidth','wadamesh-config-sf','wadamesh-config-cr'])$(id).addEventListener('input',()=>{$('wadamesh-config-preset').value='custom';});
 function wadameshConfigFingerprint(){return JSON.stringify([$('wadamesh-config-primary').checked,...wadameshConfigFields.map(id=>$(id).value)]);}
 function selectedWadameshConfig(){
   const number=id=>{const raw=$(id).value.trim();if(!raw)fail('Enter all required settings for the selected radio.');const value=Number(raw);if(!Number.isFinite(value))fail('Enter valid numeric radio settings.');return value;};
@@ -1505,7 +1543,7 @@ async function configureWadamesh(){
     $('wadamesh-config-status').textContent=message;notice(message,!!result.errors.length);log(message);
   }finally{await link.close();}
 }
-$('wadamesh-config-media').onchange=()=>{$('wadamesh-config-custom').hidden=$('wadamesh-config-media').value!=='custom';};
+$('wadamesh-config-media').onchange=()=>{selectMediaMesh('wadamesh-config-media','wadamesh-config-cross');$('wadamesh-config-cross').disabled=state.busy||$('wadamesh-config-media').value!=='custom';$('wadamesh-config-custom').hidden=$('wadamesh-config-media').value!=='custom';};
 $('wadamesh-config-apply').onclick=()=>operation(configureWadamesh);
 async function verifyApplication({automaticApproval=null,automaticReconnect=false}={}) {
   if(!state.verification&&wadameshSelected())return verifyWadameshProfile();
@@ -2049,7 +2087,7 @@ $('radio-defaults-load').onclick=()=>operation(inspectSelectedRadioDefaults);
 $('radio-defaults-apply').onclick=()=>operation(applyRadioDefaults);
 $('radio-preset').onchange=chooseRadioPreset;
 $('radio-defaults-download').onclick=()=>operation(async()=>{const draft=state.radioDefaults;if(!draft?.provenance||!draft.customizedBytes||draft.dirty||hash(draft.customizedBytes)!==state.pkg?.sha256)fail('Apply valid defaults before saving the customized firmware.');download('custom-defaults-'+draft.name,draft.customizedBytes);notice('Customized firmware download started. This does not flash the radio.');});
-for(const id of ['radio-defaults-enabled',...radioDefaultsFields,'media-mesh-preset','media-mesh-cross',...mediaMeshFields]){const edited=()=>{if(radioDefaultsFields.includes(id))$('radio-preset').value='custom';editRadioDefaults();};$(id).onchange=edited;$(id).oninput=edited;}
+for(const id of ['radio-defaults-enabled',...radioDefaultsFields,'media-mesh-preset','media-mesh-cross',...mediaMeshFields]){const edited=()=>{if(id==='media-mesh-preset')selectMediaMesh('media-mesh-preset','media-mesh-cross');if(radioDefaultsFields.includes(id))$('radio-preset').value='custom';editRadioDefaults();};$(id).onchange=edited;$(id).oninput=edited;}
 $('bootloader-source').onchange=controls;
 async function loadBootloaderFirmware({assertContext=()=>{}}={}){
   const url=$('bootloader-source').value,source=bootloaderItem(),item=source?{...source,bootloader:[...(source.bootloader||[])],...(source.bootloaderInfo?{bootloaderInfo:{...source.bootloaderInfo}}:{})}:null,info=item?.bootloaderInfo;

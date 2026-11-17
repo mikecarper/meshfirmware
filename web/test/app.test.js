@@ -43,6 +43,7 @@ import {backupCoverage} from '../src/backup-coverage.js';
 import {quickSettingPlan,quickHotspotUrl} from '../src/quick-settings.js';
 import {commonCliReplyState} from '../src/common-cli.js';
 import {postFlashBleAdvice} from '../src/post-flash-advice.js';
+import {browserTimezonePresetSuggestions} from '../src/timezone-presets.js';
 import {gzipSync} from 'node:zlib';
 const html=await readFile(new URL('../index.html',import.meta.url),'utf8');
 const source=(await readFile(new URL('../src/app.js',import.meta.url),'utf8')).replace(/^import .*;\r?$/gm,'');
@@ -70,6 +71,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
   context.assessFirmwareBoard=()=>({status:'match',requiresOverride:false,reason:'Test board identity.'});context.espSlotChoices=espSlotChoices;context.isRunningWadameshTak=isRunningWadameshTak;context.rememberPagerVariant=rememberPagerVariant;context.recallPagerVariant=recallPagerVariant;context.forgetPagerVariant=forgetPagerVariant;
   context.quickHotspotUrl=quickHotspotUrl;context.postFlashBleAdvice=postFlashBleAdvice;context.createNrfActivationCheck=()=>null;
   context.inspectRadioDefaults=inspectRadioDefaults;context.customizeRadioDefaults=customizeRadioDefaults;
+  context.browserTimezonePresetSuggestions=browserTimezonePresetSuggestions;
   context.prepareWadameshConfig=prepareWadameshConfig;context.applyWadameshConfig=applyWadameshConfig;
   context.createPostFlashSettingsPlan=createPostFlashSettingsPlan;context.applyPostFlashSettings=applyPostFlashSettings;context.createPostFlashCompanionRequest=createPostFlashCompanionRequest;context.loadRadioPresets=async()=>({presets:[],source:'bundled',warning:'Test preset inventory.'});
   context.detectApplication=(...args)=>context.detectMeshCore(...args);context.detectMeshtasticBoard=detectMeshtasticBoard;
@@ -253,6 +255,12 @@ test('changed source bytes cannot be customized or pass as their previously veri
 });
 test('uneditable application builds stay unchanged and expose the post-flash settings fallback',async()=>{
   const ui=await radioDefaultsWorkbench();ui.context.inspectRadioDefaults=()=>({supported:false,settings:null,reason:'No editable block in this older build.'});await ui.elements.get('radio-defaults-load').onclick();assert.equal(ui.elements.get('radio-defaults-editor').hidden,false);assert.equal(ui.evaluate('state.radioDefaults.dirty'),false);assert.match(ui.elements.get('radio-defaults-status').textContent,/image stays unchanged.*over USB/);assert.equal(ui.evaluate('state.pkg.sha256'),firmwareHash(ui.context.originalImage));assert.deepEqual(ui.calls,[]);
+});
+test('firmware defaults require custom MediaMesh to choose crossing',async()=>{
+  const ui=await radioDefaultsWorkbench(),media=ui.elements.get('media-mesh-preset'),cross=ui.elements.get('media-mesh-cross');
+  for(const preset of ['mediamesh','mediamesh-range']){media.value=preset;cross.value='on';media.onchange();assert.equal(cross.value,'off');assert.equal(cross.disabled,true);}
+  media.value='custom';media.onchange();assert.equal(cross.value,'off');assert.equal(cross.disabled,false);cross.value='on';
+  media.value='off';media.onchange();assert.equal(cross.value,'unchanged');assert.equal(cross.disabled,true);assert.deepEqual(ui.calls,[]);
 });
 test('uneditable primary and custom MediaMesh values queue without changing the firmware or sending USB commands',async()=>{
   const ui=await radioDefaultsWorkbench();ui.context.inspectRadioDefaults=()=>({supported:false,settings:null,reason:'Older release'});await ui.elements.get('radio-defaults-load').onclick();chooseRadioDefaults(ui);ui.elements.get('radio-defaults-preamble').value='';
@@ -5191,24 +5199,95 @@ async function wadameshConfigWorkbench(){
       if(command==='get radioat2'||command==='get tempradioat2')return 'slots:';
       if(command.startsWith('set radio ')){radio.frequency='910.525';return 'OK - reboot to apply';}
       if(command.startsWith('set tx ')){if(radio.failTx)throw Error('device disconnected');radio.power=15;return 'OK';}
-      if(command.startsWith('set radio2.cross ')){radio.cross='on';return 'OK';}
+      if(command.startsWith('set radio2.cross ')){radio.cross=command.split(' ').at(-1);return 'OK';}
       if(command.startsWith('set radio2 ')){radio.media=true;return 'OK - radio2 rxtx; preamble=12';}
       throw Error(`Unexpected command ${command}`);
     }
   };
   await ui.evaluate('verifyApplication();');
-  for(const [id,value]of [['frequency','910.525'],['bandwidth','125000'],['sf','7'],['cr','5'],['tx','15'],['media','mediamesh'],['cross','on']])ui.elements.get('wadamesh-config-'+id).value=value;
+  for(const [id,value]of [['frequency','910.525'],['bandwidth','125000'],['sf','7'],['cr','5'],['tx','15'],['media','mediamesh']])ui.elements.get('wadamesh-config-'+id).value=value;
+  ui.elements.get('wadamesh-config-media').onchange();
   ui.elements.get('wadamesh-config-primary').checked=true;ui.calls.length=0;return ui;
 }
+
+test('Wadamesh community presets fill only supported primary radio fields without touching the radio',async()=>{
+  const ui=await wadameshConfigWorkbench();
+  ui.context.presetRows=[{id:'usa',title:'USA',frequencyHz:910525000,bandwidthHz:62500,spreadingFactor:7,codingRate:5,notes:'Additional network settings are not changed.'},{id:'narrow',title:'Unsupported bandwidth',frequencyHz:910525000,bandwidthHz:31250,spreadingFactor:7,codingRate:5}];
+  ui.evaluate('state.radioPresets=presetRows;state.radioPresetsWarning="Live presets are unavailable. Showing bundled community presets.";');
+  await ui.evaluate('loadWadameshRadioPresets(state.wadameshConfigTarget);');
+  assert.deepEqual(ui.elements.get('wadamesh-config-preset').options.map(option=>option.value),['custom','usa']);
+  assert.match(ui.elements.get('wadamesh-config-preset-status').textContent,/bundled.*1 preset uses bandwidths/);
+  ui.elements.get('wadamesh-config-primary').checked=false;ui.elements.get('wadamesh-config-preset').value='usa';ui.elements.get('wadamesh-config-preset').onchange();
+  assert.equal(ui.elements.get('wadamesh-config-primary').checked,true);
+  assert.deepEqual(['frequency','bandwidth','sf','cr','tx','media','cross'].map(id=>ui.elements.get('wadamesh-config-'+id).value),['910.525','62500','7','5','15','mediamesh','off']);
+  assert.match(ui.elements.get('wadamesh-config-preset-status').textContent,/Nothing has been changed.*bundled/);assert.deepEqual(ui.calls,[]);
+  ui.elements.get('wadamesh-config-frequency').emit('input');assert.equal(ui.elements.get('wadamesh-config-preset').value,'custom');
+});
+
+test('timezone suggestions are local, optional, and do not change a manual choice or send commands',async()=>{
+  const ui=await wadameshConfigWorkbench();
+  const rows=[{id:'usa',title:'USA',frequencyHz:910525000,bandwidthHz:62500,spreadingFactor:7,codingRate:5},{id:'socal',title:'USA - Southern California',frequencyHz:927875000,bandwidthHz:62500,spreadingFactor:7,codingRate:5}];
+  ui.context.presetRows=rows;ui.context.browserTimezonePresetSuggestions=presets=>presets;
+  ui.evaluate('state.radioPresets=presetRows;state.radioPresetsSource="live";');
+  const frequency=ui.elements.get('wadamesh-config-frequency'),primary=ui.elements.get('wadamesh-config-primary');
+  frequency.value='915.123';primary.checked=false;
+  await ui.evaluate('loadWadameshRadioPresets(state.wadameshConfigTarget);');
+  assert.match(ui.elements.get('wadamesh-config-timezone').textContent,/USA, USA - Southern California.*does not identify your location/);
+  assert.equal(ui.elements.get('wadamesh-config-timezone').hidden,false);assert.equal(frequency.value,'915.123');assert.equal(primary.checked,false);
+  assert.equal(ui.elements.get('wadamesh-config-preset').value,'custom');assert.deepEqual(ui.calls,[]);
+  ui.context.browserTimezonePresetSuggestions=()=>[];await ui.evaluate('loadWadameshRadioPresets(state.wadameshConfigTarget);');
+  assert.equal(ui.elements.get('wadamesh-config-timezone').hidden,true);assert.equal(frequency.value,'915.123');assert.deepEqual(ui.calls,[]);
+});
+
+test('a late Wadamesh preset response cannot update the form for a different radio',async()=>{
+  const ui=await wadameshConfigWorkbench();let finish;ui.context.loadRadioPresets=()=>new Promise(resolve=>{finish=resolve;});
+  ui.evaluate('state.radioPresets=null;');const pending=ui.evaluate('loadWadameshRadioPresets(state.wadameshConfigTarget);');
+  ui.evaluate('state.generation++;');finish({presets:[{id:'usa',title:'USA',frequencyHz:910525000,bandwidthHz:62500,spreadingFactor:7,codingRate:5}],source:'live',warning:null});await pending;
+  assert.deepEqual(ui.elements.get('wadamesh-config-preset').options.map(option=>option.value),['custom']);assert.equal(ui.evaluate('state.radioPresets'),null);assert.deepEqual(ui.calls,[]);
+});
+
+test('a late timezone suggestion does not overwrite edits made while presets load',async()=>{
+  const ui=await wadameshConfigWorkbench();let finish;ui.context.loadRadioPresets=()=>new Promise(resolve=>{finish=resolve;});
+  ui.context.browserTimezonePresetSuggestions=presets=>presets;
+  ui.evaluate('state.radioPresets=null;');const pending=ui.evaluate('loadWadameshRadioPresets(state.wadameshConfigTarget);');
+  ui.elements.get('wadamesh-config-frequency').value='915.345';ui.elements.get('wadamesh-config-primary').checked=false;
+  finish({presets:[{id:'usa',title:'USA',frequencyHz:910525000,bandwidthHz:62500,spreadingFactor:7,codingRate:5}],source:'live',warning:null});await pending;
+  assert.equal(ui.elements.get('wadamesh-config-frequency').value,'915.345');assert.equal(ui.elements.get('wadamesh-config-primary').checked,false);
+  assert.equal(ui.elements.get('wadamesh-config-preset').value,'custom');assert.match(ui.elements.get('wadamesh-config-timezone').textContent,/USA/);assert.deepEqual(ui.calls,[]);
+});
+
+test('presets cached by Wadamesh are also offered when inspecting ordinary firmware',async()=>{
+  const ui=await wadameshConfigWorkbench();ui.context.presetRows=[{id:'usa',title:'USA',frequencyHz:910525000,bandwidthHz:62500,spreadingFactor:7,codingRate:5}];
+  ui.evaluate('state.radioPresets=presetRows;state.radioPresetsSource="live";');await ui.evaluate('loadWadameshRadioPresets(state.wadameshConfigTarget);');
+  ui.context.hash=firmwareHash;ui.context.inspectFirmware=inspectFirmwareBytes;ui.context.originalImage=radioDefaultsImage();ui.context.originalItem={hardware:'Heltec v4',architecture:'esp32',role:'companionFull',name:'board.bin',sha256:firmwareHash(ui.context.originalImage)};
+  ui.elements.get('provider').value='MeshCore';ui.elements.get('expected-sha').value=ui.context.originalItem.sha256;ui.evaluate('state.port=null;state.generation++;');
+  await ui.evaluate('loadFirmware("board.bin",originalImage,originalItem)');await ui.elements.get('radio-defaults-load').onclick();
+  assert.ok(ui.elements.get('radio-preset').options.some(option=>option.value==='usa'));assert.deepEqual(ui.calls,[]);
+});
 
 test('Wadamesh Verify and configure offers controls and applies only explicitly approved settings with readback',async()=>{
   const ui=await wadameshConfigWorkbench();assert.equal(ui.elements.get('wadamesh-live-config').hidden,false);
   ui.context.confirm=async(title,detail,warning)=>{ui.calls.push('confirm');assert.match(title,/Apply these Wadamesh settings/);assert.match(detail,/Primary radio.*MediaMesh/s);assert.match(detail,/915 MHz \/ 125 kHz \/ SF7 \/ CR4\/5 → 910\.525 MHz/);assert.match(detail,/MediaMesh: Off → 911\.15 MHz/);assert.doesNotMatch(detail,/frequencyHz|bandwidthHz|\{"/);assert.match(warning,/manual reboot/);return true;};
   await ui.evaluate('configureWadamesh();');
   assert.ok(ui.calls.indexOf('confirm')<ui.calls.findIndex(call=>call.startsWith('set ')));
-  assert.deepEqual(ui.calls.filter(call=>call.startsWith('set ')),['set radio 910.525,125,7,5','set tx 15','set radio2 911.15,250,7,5,rxtx,auto','set radio2.cross on']);
+  assert.deepEqual(ui.calls.filter(call=>call.startsWith('set ')),['set radio 910.525,125,7,5','set tx 15','set radio2.cross off','set radio2 911.15,250,7,5,rxtx,auto']);
   assert.match(ui.elements.get('wadamesh-config-status').textContent,/saved and read back.*Restart the radio manually/);
   assert.equal(ui.evaluate('state.finishedFirmware?.verified'),undefined);assert.equal(ui.evaluate('state.verification'),null);
+});
+
+test('standard MediaMesh presets force crossing off; custom permits a choice',async()=>{
+  const ui=await wadameshConfigWorkbench(),media=ui.elements.get('wadamesh-config-media'),cross=ui.elements.get('wadamesh-config-cross');
+  for(const preset of ['mediamesh','mediamesh-range']){
+    cross.value='on';media.value=preset;media.onchange();
+    assert.equal(cross.value,'off');assert.equal(cross.disabled,true);assert.deepEqual(ui.calls,[]);
+  }
+  media.value='custom';media.onchange();assert.equal(cross.value,'off');assert.equal(cross.disabled,false);
+  for(const [id,value] of [['frequency','911.150'],['bandwidth','250000'],['sf','7'],['cr','5'],['mode','rxtx'],['preamble','0']])ui.elements.get('wadamesh-config-media-'+id).value=value;
+  cross.value='on';assert.equal(ui.evaluate('selectedWadameshConfig().mediaMesh.cross'),'on');
+  media.value='unchanged';media.onchange();assert.equal(cross.value,'unchanged');assert.equal(cross.disabled,true);
+  media.value='off';media.onchange();assert.equal(cross.value,'unchanged');assert.equal(cross.disabled,true);
+  media.value='mediamesh';media.onchange();cross.value='on';
+  assert.throws(()=>ui.evaluate('selectedWadameshConfig();'),/crossing must be off/);assert.deepEqual(ui.calls,[]);
 });
 
 test('Wadamesh configuration cancellation, changed port, and changed identity never send setters',async()=>{

@@ -32,7 +32,7 @@ function target({preamble=true,radio2=true,tx=true,change=null,radioReply=null}=
 const setters=target=>target.calls.filter(command=>command.startsWith('set '));
 
 test('plans are strict, normalized, immutable and never contain executable user commands',()=>{
-  const plan=createPostFlashSettingsPlan({primary,mediaMesh:{preset:'mediamesh-range',cross:'on'}});assert.ok(Object.isFrozen(plan));assert.ok(Object.isFrozen(plan.primary));assert.ok(Object.isFrozen(plan.mediaMesh));assert.equal(typeof plan.summary,'string');assert.match(plan.summary,/910\.525 MHz/);assert.equal(plan.mediaMesh.bandwidthHz,125000);assert.equal(plan.mediaMesh.mode,'rxtx');assert.equal(plan.mediaMesh.preambleSymbols,0);
+  const plan=createPostFlashSettingsPlan({primary,mediaMesh:{preset:'mediamesh-range',cross:'off'}});assert.ok(Object.isFrozen(plan));assert.ok(Object.isFrozen(plan.primary));assert.ok(Object.isFrozen(plan.mediaMesh));assert.equal(typeof plan.summary,'string');assert.match(plan.summary,/910\.525 MHz/);assert.equal(plan.mediaMesh.bandwidthHz,125000);assert.equal(plan.mediaMesh.mode,'rxtx');assert.equal(plan.mediaMesh.preambleSymbols,0);
   assert.deepEqual(createPostFlashSettingsPlan().mediaMesh,{preset:'unchanged',cross:'unchanged'});assert.equal(createPostFlashSettingsPlan().primary,null);assert.equal(createPostFlashSettingsPlan({primary:{enabled:false}}).primary,null);
   const original={...primary};createPostFlashSettingsPlan({primary:original});assert.deepEqual(original,primary);
   for(const input of [null,[],{command:'reboot'},{primary:{...primary,command:'reset'}},{primary:{...primary,frequencyHz:'910.525\nreboot'}},{primary:{...primary,frequencyHz:910525001}},{primary:{...primary,frequencyHz:149999000}},{primary:{...primary,bandwidthHz:126000}},{primary:{...primary,spreadingFactor:4}},{primary:{...primary,codingRate:9}},{primary:{...primary,preambleSymbols:7}},{primary:{...primary,txPowerDbm:41}},{primary:{...primary,enabled:false}},{mediaMesh:{preset:'off',frequencyHz:911150000}},{mediaMesh:{preset:'custom'}},{mediaMesh:{preset:'mediamesh',mode:'rx\nreboot'}},{mediaMesh:{preset:'mediamesh',cross:'all'}}])assert.throws(()=>createPostFlashSettingsPlan(input));
@@ -41,8 +41,35 @@ test('primary tuple, explicit preamble and optional TX power are preflighted, wr
   const t=target(),result=await applyPostFlashSettings(createPostFlashSettingsPlan({primary:{...primary,txPowerDbm:-9}}),t);
   assert.equal(result.complete,true);assert.deepEqual(t.calls.slice(0,3),['get radio','get radio.preamble','get tx']);assert.deepEqual(setters(t),['set radio 910.525,62.5,7,5,32','set tx -9']);assert.equal(result.applied[0].preambleVerified,true);assert.equal(result.applied[0].txPowerVerified,true);assert.equal(result.errors.length,0);assert.equal(result.writes.length,2);
 });
+test('standard MediaMesh requires crossing off and rejects previously approved mismatched plans',async()=>{
+  for(const preset of ['mediamesh','mediamesh-range']){
+    const mediaMesh={preset};
+    assert.equal(createPostFlashSettingsPlan({mediaMesh}).mediaMesh.cross,'off');
+    for(const cross of ['on','auto','unchanged'])assert.throws(()=>createPostFlashSettingsPlan({mediaMesh:{...mediaMesh,cross}}),/crossing must be off/);
+    const plan=createPostFlashSettingsPlan({mediaMesh}),forged={...plan,mediaMesh:{...plan.mediaMesh,cross:'on'}},t=target();
+    await assert.rejects(applyPostFlashSettings(forged,t),/crossing must be off/);assert.deepEqual(t.calls,[]);
+  }
+  const custom={preset:'custom',frequencyHz:911150000,bandwidthHz:250000,spreadingFactor:7,codingRate:5};
+  for(const cross of ['on','auto','unchanged','off'])assert.equal(createPostFlashSettingsPlan({mediaMesh:{...custom,cross}}).mediaMesh.cross,cross);
+  for(const preset of ['off','unchanged'])for(const cross of ['on','auto'])assert.throws(()=>createPostFlashSettingsPlan({mediaMesh:{preset,cross}}),/only be enabled for custom/);
+});
 test('all requested primary and MediaMesh getters run before the first mutation',async()=>{
-  const t=target(),result=await applyPostFlashSettings(createPostFlashSettingsPlan({primary,mediaMesh:{preset:'mediamesh',cross:'on'}}),t);assert.equal(result.complete,true);assert.deepEqual(t.calls.slice(0,4),['get radio','get radio.preamble','get radio2','get radio2.cross']);assert.deepEqual(setters(t),['set radio 910.525,62.5,7,5,32','set radio2 mediamesh','set radio2.cross on']);assert.equal(t.state.permission,true);assert.equal(t.state.cross,'on');assert.equal(result.applied.length,2);
+  const t=target();t.state.cross='on';const result=await applyPostFlashSettings(createPostFlashSettingsPlan({primary,mediaMesh:{preset:'mediamesh',cross:'off'}}),t);assert.equal(result.complete,true);assert.deepEqual(t.calls.slice(0,4),['get radio','get radio.preamble','get radio2','get radio2.cross']);assert.deepEqual(setters(t),['set radio 910.525,62.5,7,5,32','set radio2.cross off','set radio2 mediamesh']);assert.equal(t.state.permission,true);assert.equal(t.state.cross,'off');assert.equal(result.applied.length,2);
+});
+test('MediaMesh is never enabled when forcing crossing off cannot be verified',async()=>{
+  for(const fail of ['reject','readback']){
+    let reads=0;const t=target({change:command=>command==='set radio2.cross off'&&fail==='reject'?'Error: rejected':command==='get radio2.cross'&&fail==='readback'&&++reads>=3?'> on':undefined});t.state.cross='on';
+    const result=await applyPostFlashSettings(createPostFlashSettingsPlan({mediaMesh:{preset:'mediamesh'}}),t);
+    assert.equal(result.complete,false);assert.equal(setters(t).some(command=>command.startsWith('set radio2 ')),false);assert.equal(t.state.permission,false);
+  }
+});
+test('custom crossing on and auto are written after radio2; unchanged is preserved',async()=>{
+  for(const cross of ['on','auto','unchanged']){
+    const t=target(),mediaMesh={preset:'custom',frequencyHz:911150000,bandwidthHz:250000,spreadingFactor:7,codingRate:5,cross};
+    const result=await applyPostFlashSettings(createPostFlashSettingsPlan({mediaMesh}),t);assert.equal(result.complete,true);
+    assert.equal(setters(t)[0],'set radio2 mediamesh');
+    assert.deepEqual(setters(t).filter(command=>command.startsWith('set radio2.cross ')),cross==='unchanged'?[]:[`set radio2.cross ${cross}`]);
+  }
 });
 test('null preamble preserves a readable saved value, with no explicit new preamble claim',async()=>{
   const t=target();t.state.primary.preambleSymbols=64;const result=await applyPostFlashSettings(createPostFlashSettingsPlan({primary:{...primary,preambleSymbols:null}}),t);assert.equal(result.complete,true);assert.deepEqual(setters(t),['set radio 910.525,62.5,7,5,64']);assert.equal(t.state.primary.preambleSymbols,64);assert.equal(result.applied[0].preambleVerified,true);assert.equal(t.calls.includes('get tx'),false);
@@ -59,7 +86,7 @@ test('unsupported power or radio2 yields explicit skipped sections without a sil
   const partial=target({radio2:false}),p=await applyPostFlashSettings(createPostFlashSettingsPlan({primary,mediaMesh:{preset:'mediamesh'}}),partial);assert.equal(p.complete,false);assert.deepEqual(p.applied.map(row=>row.section),['primary']);assert.deepEqual(p.skipped.map(row=>row.section),['mediaMesh']);
 });
 test('MediaMesh custom RF always establishes the preset permission first, then verifies each tuple and crossing',async()=>{
-  const t=target(),mediaMesh={preset:'custom',frequencyHz:911300000,bandwidthHz:500000,spreadingFactor:8,codingRate:7,preambleSymbols:32,mode:'rx',cross:'auto'},result=await applyPostFlashSettings(createPostFlashSettingsPlan({mediaMesh}),t);assert.equal(result.complete,true);assert.deepEqual(setters(t),['set radio2 mediamesh','set radio2 911.3,500,8,7,rx,32','set radio2.cross auto']);assert.equal(t.state.permission,true);assert.deepEqual(t.calls.filter(command=>command==='get radio2'),['get radio2','get radio2','get radio2']);assert.equal(result.applied[0].preset,'custom');
+  const t=target();t.state.cross='auto';const mediaMesh={preset:'custom',frequencyHz:911300000,bandwidthHz:500000,spreadingFactor:8,codingRate:7,preambleSymbols:32,mode:'rx',cross:'off'},result=await applyPostFlashSettings(createPostFlashSettingsPlan({mediaMesh}),t);assert.equal(result.complete,true);assert.deepEqual(setters(t),['set radio2.cross off','set radio2 mediamesh','set radio2 911.3,500,8,7,rx,32']);assert.equal(t.state.permission,true);assert.deepEqual(t.calls.filter(command=>command==='get radio2'),['get radio2','get radio2','get radio2']);assert.equal(result.applied[0].preset,'custom');
 });
 test('preset RF overrides retain that preset as the permission base; off is explicitly written even from automatic off',async()=>{
   const t=target(),result=await applyPostFlashSettings(createPostFlashSettingsPlan({mediaMesh:{preset:'mediamesh-range',preambleSymbols:32,mode:'rx'}}),t);assert.equal(result.complete,true);assert.deepEqual(setters(t),['set radio2 mediamesh-range','set radio2 911.15,125,7,5,rx,32']);
@@ -68,9 +95,9 @@ test('preset RF overrides retain that preset as the permission base; off is expl
 test('already matching primary settings avoid writes, while preset intent is still explicitly saved',async()=>{
   const t=target();t.state.primary={...primary};t.state.radio2=preset();const result=await applyPostFlashSettings(createPostFlashSettingsPlan({primary,mediaMesh:{preset:'mediamesh'}}),t);assert.equal(result.complete,true);assert.equal(result.applied[0].unchanged,true);assert.deepEqual(setters(t),['set radio2 mediamesh']);
 });
-test('cross-only choices do not rewrite RF, and unchanged crossing is checked rather than silently changed',async()=>{
-  const t=target(),result=await applyPostFlashSettings(createPostFlashSettingsPlan({mediaMesh:{cross:'on'}}),t);assert.equal(result.complete,true);assert.deepEqual(setters(t),['set radio2.cross on']);
-  let crossReads=0;const bad=target({change:command=>command==='get radio2.cross'&&++crossReads===2?'> on':undefined}),r=await applyPostFlashSettings(createPostFlashSettingsPlan({mediaMesh:{preset:'mediamesh'}}),bad);assert.equal(r.complete,false);assert.match(r.errors[0].reason,/crossing changed unexpectedly/);assert.deepEqual(setters(bad),['set radio2 mediamesh']);
+test('cross-only off does not rewrite RF, and unchanged crossing is checked rather than silently changed',async()=>{
+  const t=target();t.state.cross='on';const result=await applyPostFlashSettings(createPostFlashSettingsPlan({mediaMesh:{cross:'off'}}),t);assert.equal(result.complete,true);assert.deepEqual(setters(t),['set radio2.cross off']);
+  let crossReads=0;const bad=target({change:command=>command==='get radio2.cross'&&++crossReads===2?'> on':undefined}),r=await applyPostFlashSettings(createPostFlashSettingsPlan({mediaMesh:{preset:'off'}}),bad);assert.equal(r.complete,false);assert.match(r.errors[0].reason,/crossing changed unexpectedly/);assert.deepEqual(setters(bad),['set radio2 off']);
 });
 test('preflight transport failures, malformed replies and automatically owned/pending profiles stop before all writes',async()=>{
   for(const reply of ['> 911.15,250,7,5,rxtx,32 (auto); auto-owned','> radio2 change pending storage commit','> off; MediaMesh scope save pending','> 911.15,250,7,5,rxtx,32 (auto); @123-456','> malformed','> off\n> off']){const t=target({change:command=>command==='get radio2'?reply:undefined}),r=await applyPostFlashSettings(createPostFlashSettingsPlan({primary,mediaMesh:{preset:'mediamesh'}}),t);assert.equal(r.complete,false);assert.equal(r.errors[0].stage,'preflight');assert.deepEqual(setters(t),[]);}

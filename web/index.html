@@ -80,7 +80,7 @@
             <div><label for="media-mesh-mode">MediaMesh mode</label><select id="media-mesh-mode" data-lock><option value="rxtx">Receive &amp; transmit</option><option value="rx">Receive only</option></select></div>
             <div><label for="media-mesh-preamble">MediaMesh preamble (0 = auto)</label><input id="media-mesh-preamble" type="number" min="0" max="65528" step="1" value="0" data-lock></div>
           </div>
-          <p class="hint">MediaMesh requires radio2 support. Presets enable its forwarding region where needed; crossing is changed only if selected.</p>
+          <p class="hint">MediaMesh requires radio2 support. Standard presets set crossing to Off; custom MediaMesh lets you choose crossing.</p>
           <button id="radio-defaults-apply" class="secondary" type="button" data-lock>Use these settings</button>
           <p id="radio-defaults-provenance" class="hint digest" hidden></p>
           <button id="radio-defaults-download" class="secondary" type="button" hidden>Save customized firmware</button>
@@ -97,6 +97,10 @@
       <section id="wadamesh-live-config" class="radio-defaults" hidden aria-label="Configure Wadamesh radio">
         <h3>Configure Wadamesh radio</h3>
         <p class="hint">Choose only the settings you want to change. The radio settings may require a restart; the page does not restart the radio automatically. Check the settings for your region.</p>
+        <label for="wadamesh-config-preset">Primary radio preset</label><select id="wadamesh-config-preset" data-lock><option value="custom">Custom</option></select>
+        <p id="wadamesh-config-timezone" class="hint" role="status" aria-live="polite" hidden></p>
+        <p class="hint">Presets fill the primary radio fields only. Other network settings, including path hash size, are not changed.</p>
+        <p id="wadamesh-config-preset-status" class="hint" role="status" aria-live="polite">Community presets from api.meshcore.nz, or enter custom values.</p>
         <label><input id="wadamesh-config-primary" type="checkbox" autocomplete="off" data-lock> Change primary radio</label>
         <div class="radio-defaults-fields">
           <div><label for="wadamesh-config-frequency">Frequency (MHz)</label><input id="wadamesh-config-frequency" type="number" min="150" max="2500" step="0.001" placeholder="For example 910.525" data-lock></div>
@@ -109,6 +113,7 @@
           <div><label for="wadamesh-config-media">MediaMesh (radio2)</label><select id="wadamesh-config-media" data-lock><option value="unchanged">Leave unchanged</option><option value="off">Off</option><option value="mediamesh">MediaMesh · 911.150 / 250 / SF7</option><option value="mediamesh-range">MediaMesh range · 911.150 / 125 / SF7</option><option value="custom">Custom MediaMesh settings</option></select></div>
           <div><label for="wadamesh-config-cross">Crossing between radio profiles</label><select id="wadamesh-config-cross" data-lock><option value="unchanged">Leave unchanged</option><option value="off">Off</option><option value="on">On</option><option value="auto">Automatic</option></select></div>
         </div>
+        <p class="hint">Standard MediaMesh presets set crossing to Off. Choose custom MediaMesh to change crossing.</p>
         <div id="wadamesh-config-custom" class="radio-defaults-fields" hidden>
           <div><label for="wadamesh-config-media-frequency">MediaMesh frequency (MHz)</label><input id="wadamesh-config-media-frequency" type="number" min="150" max="2500" step="0.001" value="911.150" data-lock></div>
           <div><label for="wadamesh-config-media-bandwidth">MediaMesh bandwidth (kHz)</label><select id="wadamesh-config-media-bandwidth" data-lock><option value="62500">62.5</option><option value="125000">125</option><option value="250000" selected>250</option><option value="500000">500</option></select></div>

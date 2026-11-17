@@ -114,8 +114,12 @@ export async function prepareWadameshConfig(plan, { request, isCurrent, maxTxDbm
       const m = canonical.mediaMesh;
       warnings.push('MediaMesh routing and region permissions are not changed; check the device settings if needed.');
       warnings.push(...media.radio.warnings);
-      if (m.preset !== 'unchanged' && !mediaMatches(media.radio,m)) changes.push(Object.freeze({section:'mediaMesh',setting:'radio2',before:media.radio,after:m,requiresReboot:false}));
-      if (m.cross !== 'unchanged' && m.cross !== media.cross) changes.push(Object.freeze({section:'mediaMesh',setting:'cross',before:media.cross,after:m.cross,requiresReboot:false}));
+      const radioChange=m.preset !== 'unchanged' && !mediaMatches(media.radio,m),crossChange=m.cross !== 'unchanged' && m.cross !== media.cross;
+      const activeMedia=!['unchanged','off'].includes(m.preset),crossFirst=activeMedia&&m.cross==='off';
+      // Turn crossing off and read it back before enabling or changing radio2.
+      if (crossChange && crossFirst) changes.push(Object.freeze({section:'mediaMesh',setting:'cross',before:media.cross,after:m.cross,requiresReboot:false}));
+      if (radioChange) changes.push(Object.freeze({section:'mediaMesh',setting:'radio2',before:media.radio,after:m,requiresReboot:false}));
+      if (crossChange && !crossFirst) changes.push(Object.freeze({section:'mediaMesh',setting:'cross',before:media.cross,after:m.cross,requiresReboot:false}));
     }
   }
   if (changes.some(change => change.requiresReboot)) warnings.push('Radio settings require a manual reboot to take effect.');
@@ -151,6 +155,7 @@ export async function applyWadameshConfig(prepared, { request, isCurrent } = {})
         mediaChecked = true;
       }
       if (change.setting === 'tx' && await ask('get tx',powerValue) !== state.power) reject('TX power changed after review. No further settings were sent.');
+      if (change.setting === 'radio2' && !['unchanged','off'].includes(state.canonical.mediaMesh.preset) && state.canonical.mediaMesh.cross==='off' && await ask('get radio2.cross',crossValue) !== 'off') reject('Radio crossing is not off. MediaMesh was not enabled; no further settings were sent.');
       stage = 'write'; current();
       const m = state.canonical.mediaMesh;
       const command = change.setting === 'radio' ? radioCommand(p) : change.setting === 'tx' ? `set tx ${p.txPowerDbm}` : change.setting === 'radio2' ? mediaCommand(m) : `set radio2.cross ${m.cross}`;
@@ -175,6 +180,8 @@ export async function applyWadameshConfig(prepared, { request, isCurrent } = {})
       const actual = change.setting === 'radio' ? await ask('get radio', radioTuple) : change.setting === 'tx' ? await ask('get tx', powerValue) : change.setting === 'radio2' ? await ask('get radio2',radio2Value) : await ask('get radio2.cross',crossValue);
       if (change.setting === 'radio' ? !matches(actual, p) : change.setting === 'tx' ? actual !== p.txPowerDbm : change.setting === 'radio2' ? !mediaMatches(actual,m) : actual !== m.cross) reject('Settings readback did not match; earlier changes may have been saved.');
       if (change.setting === 'radio2' && m.cross === 'unchanged' && await ask('get radio2.cross',crossValue) !== state.media.cross) reject('Radio2 crossing changed unexpectedly; earlier changes may have been saved.');
+      if (change.setting === 'radio2' && !['unchanged','off'].includes(m.preset) && m.cross==='off' && await ask('get radio2.cross',crossValue) !== 'off') reject('Radio2 crossing is not off after the MediaMesh change; earlier changes may have been saved.');
+      if (change.setting === 'radio2' && ['on','auto'].includes(m.cross) && !prepared.changes.some(row=>row.setting==='cross') && await ask('get radio2.cross',crossValue) !== m.cross) reject('Radio2 crossing changed unexpectedly; earlier changes may have been saved.');
       result.applied.push({ section:change.section, setting:change.setting, readbackMatched:true, pendingReboot:change.requiresReboot });
     }
     current();result.complete=result.skipped.length===0;

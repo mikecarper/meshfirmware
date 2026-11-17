@@ -4,7 +4,7 @@ import { createPostFlashSettingsPlan } from '../src/post-flash-settings.js';
 import { prepareWadameshConfig, applyWadameshConfig } from '../src/wadamesh-config.js';
 
 const primary = {enabled:true,frequencyHz:910525000,bandwidthHz:125000,spreadingFactor:7,codingRate:5,preambleSymbols:null,txPowerDbm:18};
-const desired = () => createPostFlashSettingsPlan({primary,mediaMesh:{preset:'mediamesh',cross:'on'}});
+const desired = () => createPostFlashSettingsPlan({primary,mediaMesh:{preset:'mediamesh',cross:'off'}});
 function fixture() {
   const state={radio:'910.000,125.000,8,5',tx:10,radio2:'off',cross:'off',temp:'off',schedule:'slots:',tempSchedule:'slots:',current:true}, calls=[];
   const isCurrent=()=>state.current;
@@ -32,13 +32,66 @@ function fixture() {
 const setters = calls => calls.filter(call=>call.startsWith('set '));
 
 test('review is read-only and confirmed changes use TAK four-field and numeric radio2 commands',async()=>{
-  const f=fixture(),prep=await prepareWadameshConfig(desired(),f);
-  assert.deepEqual(setters(f.calls),[]);assert.deepEqual(prep.changes.map(change=>change.setting),['radio','tx','radio2','cross']);assert.equal(prep.skipped.length,0);
+  const f=fixture();f.state.cross='on';const prep=await prepareWadameshConfig(desired(),f);
+  assert.deepEqual(setters(f.calls),[]);assert.deepEqual(prep.changes.map(change=>change.setting),['radio','tx','cross','radio2']);assert.equal(prep.skipped.length,0);
+  assert.match(prep.summary,/Radio crossing: off/);
   const result=await applyWadameshConfig(prep,f);
   assert.equal(result.complete,true);assert.deepEqual(result.errors,[]);assert.equal(result.rebootRequired,true);
-  assert.deepEqual(setters(f.calls),['set radio 910.525,125,7,5','set tx 18','set radio2 911.15,250,7,5,rxtx,auto','set radio2.cross on']);
+  assert.deepEqual(setters(f.calls),['set radio 910.525,125,7,5','set tx 18','set radio2.cross off','set radio2 911.15,250,7,5,rxtx,auto']);assert.equal(f.state.cross,'off');
   assert.ok(result.applied.every(change=>change.readbackMatched));assert.ok(result.applied.find(change=>change.setting==='radio').pendingReboot);
   await assert.rejects(applyWadameshConfig(prep,f),/invalid/);
+});
+
+test('crossing must be verified off before MediaMesh is enabled',async()=>{
+  for(const fault of ['rejected','no-change']){
+    const f=fixture();f.state.cross='on';const original=f.request;
+    f.request=async command=>command==='set radio2.cross off'?(f.calls.push(command),fault==='rejected'?'Error: rejected':'OK'):original(command);
+    const prep=await prepareWadameshConfig(createPostFlashSettingsPlan({mediaMesh:{preset:'mediamesh'}}),f);
+    const result=await applyWadameshConfig(prep,f);
+    assert.equal(result.complete,false);assert.equal(result.errors.length,1);assert.deepEqual(setters(f.calls),['set radio2.cross off'],fault);
+    assert.equal(f.state.radio2,'off');assert.equal(f.state.cross,'on');
+  }
+});
+
+test('a radio2 failure reports the previously verified crossing change',async()=>{
+  const f=fixture();f.state.cross='on';const original=f.request;
+  f.request=async command=>command.startsWith('set radio2 911.')?(f.calls.push(command),'Error: rejected'):original(command);
+  const prep=await prepareWadameshConfig(createPostFlashSettingsPlan({mediaMesh:{preset:'mediamesh'}}),f);
+  const result=await applyWadameshConfig(prep,f);
+  assert.equal(result.complete,false);assert.deepEqual(setters(f.calls),['set radio2.cross off','set radio2 911.15,250,7,5,rxtx,auto']);
+  assert.ok(result.applied.some(change=>change.setting==='cross'&&change.readbackMatched));
+  assert.match(result.errors[0].reason,/may already have changed/);assert.equal(f.state.cross,'off');assert.equal(f.state.radio2,'off');
+});
+
+test('custom MediaMesh may enable crossing after radio2, or leave crossing unchanged',async()=>{
+  for(const cross of ['on','auto','unchanged']){
+    const f=fixture(),mediaMesh={preset:'custom',frequencyHz:911300000,bandwidthHz:250000,spreadingFactor:7,codingRate:5,preambleSymbols:0,mode:'rxtx',cross};if(cross==='unchanged')f.state.cross='on';
+    const prep=await prepareWadameshConfig(createPostFlashSettingsPlan({mediaMesh}),f);
+    const result=await applyWadameshConfig(prep,f);
+    assert.equal(result.complete,true,cross);
+    assert.deepEqual(setters(f.calls),cross==='unchanged'?['set radio2 911.3,250,7,5,rxtx,auto']:['set radio2 911.3,250,7,5,rxtx,auto',`set radio2.cross ${cross}`]);
+    assert.equal(f.state.cross,cross==='unchanged'?'on':cross);
+  }
+});
+
+test('custom MediaMesh requesting crossing off also disables it before radio2',async()=>{
+  const f=fixture();f.state.cross='on';
+  const mediaMesh={preset:'custom',frequencyHz:911300000,bandwidthHz:250000,spreadingFactor:7,codingRate:5,preambleSymbols:0,mode:'rxtx',cross:'off'};
+  const prep=await prepareWadameshConfig(createPostFlashSettingsPlan({mediaMesh}),f),result=await applyWadameshConfig(prep,f);
+  assert.equal(result.complete,true);assert.deepEqual(setters(f.calls),['set radio2.cross off','set radio2 911.3,250,7,5,rxtx,auto']);
+});
+
+test('custom MediaMesh verifies already-matching crossing after changing radio2',async()=>{
+  for(const cross of ['on','auto']){
+    const f=fixture();f.state.cross=cross;const original=f.request;
+    f.request=async command=>{const reply=await original(command);if(command.startsWith('set radio2 911.'))f.state.cross='off';return reply;};
+    const mediaMesh={preset:'custom',frequencyHz:911300000,bandwidthHz:250000,spreadingFactor:7,codingRate:5,preambleSymbols:0,mode:'rxtx',cross};
+    const prep=await prepareWadameshConfig(createPostFlashSettingsPlan({mediaMesh}),f);
+    assert.ok(!prep.changes.some(change=>change.setting==='cross'));
+    const result=await applyWadameshConfig(prep,f);
+    assert.equal(result.complete,false);assert.match(result.errors[0].reason,/crossing changed unexpectedly/);
+    assert.deepEqual(setters(f.calls),['set radio2 911.3,250,7,5,rxtx,auto']);
+  }
 });
 
 test('unsupported preamble skips primary without silently discarding the explicit choice',async()=>{
@@ -82,7 +135,7 @@ test('a lost radio acknowledgement remains an uncertain change and never retries
 });
 
 test('unchanged values do not trigger writes or unrequested region changes',async()=>{
-  const f=fixture();f.state.radio='910.525,125.000,7,5';f.state.tx=18;f.state.radio2='911.150,250.000,7,5,rxtx,32 (auto)';f.state.cross='on';
+  const f=fixture();f.state.radio='910.525,125.000,7,5';f.state.tx=18;f.state.radio2='911.150,250.000,7,5,rxtx,32 (auto)';f.state.cross='off';
   const prep=await prepareWadameshConfig(desired(),f);assert.equal(prep.changes.length,0);assert.ok(prep.warnings.some(value=>/region permissions are not changed/));
   const result=await applyWadameshConfig(prep,f);assert.equal(result.complete,true);assert.deepEqual(setters(f.calls),[]);
 });

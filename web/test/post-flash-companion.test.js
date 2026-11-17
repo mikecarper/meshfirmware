@@ -188,7 +188,7 @@ test('the settings runner applies and reads back a legacy tuple/TX while preserv
       return Uint8Array.of(0);
     }, async cli() { assert.fail('Legacy settings must not use CMD66.'); }
   };
-  const plan = createPostFlashSettingsPlan({ primary: { enabled: true, frequencyHz: 911300000, bandwidthHz: 250000, spreadingFactor: 8, codingRate: 7, preambleSymbols: null, txPowerDbm: 10 }, mediaMesh: { preset: 'mediamesh', cross: 'on' } });
+  const plan = createPostFlashSettingsPlan({ primary: { enabled: true, frequencyHz: 911300000, bandwidthHz: 250000, spreadingFactor: 8, codingRate: 7, preambleSymbols: null, txPowerDbm: 10 }, mediaMesh: { preset: 'mediamesh', cross: 'off' } });
   const result = await applyPostFlashSettings(plan, { request: createPostFlashCompanionRequest(mc, device), isCurrent: () => true });
   assert.equal(result.complete, false); assert.deepEqual(result.errors, []);
   assert.equal(result.applied[0].section, 'primary'); assert.equal(result.applied[0].preambleVerified, false); assert.equal(result.applied[0].txPowerVerified, true);

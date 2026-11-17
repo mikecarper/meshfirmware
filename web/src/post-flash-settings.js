@@ -26,12 +26,15 @@ function primarySettings(value){
 function mediaSettings(value){
   if(value==null)return Object.freeze({preset:'unchanged',cross:'unchanged'});
   ownKeys(value,['preset','mode','cross',...tupleKeys],'MediaMesh');
-  const {preset='unchanged',cross='unchanged'}=value;
+  const {preset='unchanged'}=value;
+  const cross=value.cross===undefined?(['mediamesh','mediamesh-range','custom'].includes(preset)?'off':'unchanged'):value.cross;
   if(!['unchanged','off','mediamesh','mediamesh-range','custom'].includes(preset)||!['unchanged','on','off','auto'].includes(cross))reject('Invalid MediaMesh preset or crossing choice.');
   if(['unchanged','off'].includes(preset)){
     if([...tupleKeys,'mode'].some(key=>Object.hasOwn(value,key)))reject('Unchanged/off MediaMesh settings must not include ignored radio fields.');
+    if(!['unchanged','off'].includes(cross))reject('Radio crossing can only be enabled for custom MediaMesh.');
     return Object.freeze({preset,cross});
   }
+  if(preset!=='custom'&&cross!=='off')reject('Radio crossing must be off for a MediaMesh preset.');
   const base={frequencyHz:911150000,bandwidthHz:preset==='mediamesh-range'?125000:250000,spreadingFactor:7,codingRate:5,preambleSymbols:0,mode:'rxtx'};
   if(preset==='custom'&&['frequencyHz','bandwidthHz','spreadingFactor','codingRate'].some(key=>!Object.hasOwn(value,key)))reject('Custom MediaMesh needs the complete radio tuple.');
   const desired={...base,...value};if(!['rx','rxtx'].includes(desired.mode))reject('MediaMesh mode must be rx or rxtx.');
@@ -133,6 +136,14 @@ export async function applyPostFlashSettings(plan,{request,isCurrent,log=()=>{}}
       section='mediaMesh';stage='write';const m=media.desired;let changed=false;
       log('Applying approved MediaMesh settings.');current();
       const writeRadio2=async(command,desired)=>{stage='write';await set(command);changed=true;stage='readback';const actual=await ask('get radio2',parseRadio2,{warningLines:true});if(!sameRadio2(actual.value,desired))throw Error('Radio2 readback did not match. Earlier settings may already have changed.');media.actual=actual.value;};
+      if(m.preset!=='unchanged'&&m.preset!=='off'&&m.cross==='off'){
+        stage='readback';const before=await ask('get radio2.cross',parseCross);
+        if(before.value!=='off'){
+          stage='write';await set('set radio2.cross off');changed=true;
+          stage='readback';const verified=await ask('get radio2.cross',parseCross);
+          if(verified.value!=='off')throw Error('Radio2 crossing could not be verified off; MediaMesh was not enabled.');
+        }
+      }
       if(m.preset==='off')await writeRadio2('set radio2 off',{mode:'off'});
       else if(m.preset!=='unchanged'){
         // Establish the firmware-managed public MediaMesh permission first,
