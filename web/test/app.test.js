@@ -3092,6 +3092,37 @@ test('console commands invalidate earlier backup approval and cached board evide
   }
 });
 
+test('console commands keep the page in place and refocus input on success and failure',async()=>{
+  for(const failed of [false,true]){
+    const ui=workbench();await Promise.resolve();serialMock(ui);ui.context.selectedPort=ui.port;
+    ui.context.inventory=[v4Item,{...v4Item,hardware:'Other board'}];
+    ui.evaluate('state.port=selectedPort;state.items=inventory;filterCatalog();');
+    const target=ui.evaluate('state.nextActionElement');assert.equal(target.id,'hardware');
+    const scroll=[],focus=[];let frame=null;
+    const offscreen=()=>({top:-100,bottom:-50,left:50,right:650});
+    for(const element of [target,ui.elements.get('select-port')]){
+      element.getBoundingClientRect=offscreen;element.scrollIntoView=()=>scroll.push(element.id);
+    }
+    ui.context.window.innerHeight=800;ui.context.window.innerWidth=1200;
+    ui.context.window.requestAnimationFrame=callback=>{frame=callback;return 1;};
+    ui.context.window.cancelAnimationFrame=()=>{frame=null;};
+    ui.elements.get('command').focus=options=>focus.push({...options});
+    ui.elements.get('backup-role').value='common-cli';ui.elements.get('command').value='set name Test';
+    if(failed)ui.context.SerialLink=class{async open(){}async close(){}async command(){throw Error('Command failed');}};
+    for(let attempt=0;attempt<2;attempt++){
+      await ui.elements.get('send-command').onclick();
+      if(frame){const render=frame;frame=null;render();}
+      assert.deepEqual(scroll,[],'a command must not scroll to a flashing prerequisite');
+      assert.deepEqual(focus.at(-1),{preventScroll:true});
+      assert.equal(ui.elements.get('command').value,'set name Test');
+      assert.deepEqual(nextHighlight(ui),['hardware']);
+    }
+    if(failed)assert.match(ui.elements.get('log').textContent,/Command failed/);
+    ui.evaluate('state.port=null;controls();');assert.ok(frame,'later workflow changes still reveal the next step');
+    frame();assert.deepEqual(scroll,['select-port']);
+  }
+});
+
 async function quickSettingsWorkbench(device={role:'common-cli',publicKey:'11'.repeat(32),model:'Test radio'}){
   const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.quickDevice=device;
   ui.port.getInfo=()=>({usbVendorId:0x10c4,usbProductId:0xea60});

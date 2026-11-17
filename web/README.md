@@ -281,6 +281,8 @@ amber outline, and the next button also shows **Next**, including USB selection
 after a DFU reconnect. Newly required controls are revealed and scrolled into
 view when needed, including connection controls lower on the page. Repeated
 updates do not keep moving the page; reduced-motion preferences are respected.
+Serial console commands keep the page in place after success or failure and
+return focus to the command box without scrolling.
 This is guidance only; highlighting never focuses, clicks or runs an action.
 If an ordinary bootloader handoff reconnects USB, repeat 1 then 3 for the same
 radio. Supported partition expansion instead uses one scoped confirmation for

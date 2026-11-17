@@ -253,6 +253,7 @@ function setQuickPasswordVisibility(fieldId,shown){
 }
 for(const [fieldId,toggleId] of quickPasswordControls)$(toggleId).onclick=()=>setQuickPasswordVisibility(fieldId,$(fieldId).getAttribute('type')!=='text');
 const nextStepScroller=createNextStepScroller({window,document});
+let nextStepScrolling=true;
 $('skip-backup').checked=false;
 $('show-all-nrf').checked=false;
 $('show-all-esp').checked=false;
@@ -597,7 +598,8 @@ function setNextAction(element=null){
   if(state.nextActionElement){state.nextActionElement.classList.toggle('next-action',false);state.nextActionElement.removeAttribute('aria-current');}
   state.nextActionElement=element&&!element.disabled&&!element.hidden?element:null;
   if(state.nextActionElement){state.nextActionElement.classList.toggle('next-action',true);state.nextActionElement.setAttribute('aria-current','step');}
-  nextStepScroller.update(state.nextActionElement);
+  // Console operations update the cue without pulling readers away from output.
+  nextStepScroller.update(state.nextActionElement,{initial:!nextStepScrolling});
 }
 function nextFlasherControl(){
   if(state.busy)return null;
@@ -735,8 +737,10 @@ function controls() {
   syncFlashStop();
 }
 async function closeEsp() { const esp=state.esp;state.esp=null;state.plan=null;if(esp)await esp.close(); }
-async function operation(callback) {
-  if (state.busy) return; state.busy = true; controls();
+async function operation(callback,{scrollNextStep=true}={}) {
+  if (state.busy) return;
+  const previousScrolling=nextStepScrolling;nextStepScrolling=previousScrolling&&scrollNextStep;
+  state.busy = true; controls();
   let outcome;
   try { outcome=await callback(); }
   catch (error) {
@@ -761,7 +765,7 @@ async function operation(callback) {
     }
   }
   finally {
-    state.busy=false;controls();
+    state.busy=false;controls();nextStepScrolling=previousScrolling;
     if(outcome!==usbChooserCancelled){
       const pending=state.approvalResumeRequested;state.approvalResumeRequested=null;
       if(pending&&state.migrationApproval?.phase===pending.phase)void operation(()=>resumeApprovedPort(pending.port));
@@ -2989,7 +2993,16 @@ $('restore').onclick = () => {
   }
   });
 };
-$('send-command').onclick = () => operation(async () => {requireMeshCoreApplication();const command=$('command').value.trim();if(!command||/[\r\n\x00]/.test(command))fail('Enter one command.');invalidateApplicationEvidence();try{await linkOperation(async link=>{const role=$('backup-role').value==='auto'?(await readApplication(link)).role:$('backup-role').value;requireMeshCoreApplication();log(role==='common-cli'?await link.command(command):await new MeshCore(link).cli(command));});}finally{invalidateApplicationEvidence();}});
+$('send-command').onclick = async () => {
+  await operation(async () => {
+    requireMeshCoreApplication();const command=$('command').value.trim();
+    if(!command||/[\r\n\x00]/.test(command))fail('Enter one command.');
+    invalidateApplicationEvidence();
+    try{await linkOperation(async link=>{const role=$('backup-role').value==='auto'?(await readApplication(link)).role:$('backup-role').value;requireMeshCoreApplication();log(role==='common-cli'?await link.command(command):await new MeshCore(link).cli(command));});}
+    finally{invalidateApplicationEvidence();}
+  },{scrollNextStep:false});
+  if(!state.busy&&!state.nextDialogAction)$('command').focus?.({preventScroll:true});
+};
 $('clear-log').onclick = () => { $('log').textContent = 'Log cleared locally.';syncFlashConsole({follow:true}); };
 $('flash-progress-dialog').addEventListener('cancel',event=>{if(state.flashProgress)event.preventDefault();});
 $('flash-progress-dialog').addEventListener('keydown',event=>{if(state.flashProgress&&event.key==='Escape'){event.preventDefault();event.stopPropagation();}});
