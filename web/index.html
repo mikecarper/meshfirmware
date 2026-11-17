@@ -106,8 +106,8 @@
     <section id="quick-settings" class="card quick-settings" aria-labelledby="quick-settings-title">
       <h2 id="quick-settings-title">Common settings</h2>
       <p id="quick-settings-status" class="hint" role="status" aria-live="polite">Connect the radio’s application USB port to change settings.</p>
-      <section id="wadamesh-live-config" class="radio-defaults" hidden aria-label="Configure Wadamesh radio">
-        <h3>Configure Wadamesh radio</h3>
+      <section id="wadamesh-live-config" class="radio-defaults" hidden aria-label="Wadamesh settings">
+        <h3>Configure Wadamesh</h3>
         <p class="hint">Choose only the settings you want to change. The radio settings may require a restart; the page does not restart the radio automatically. Check the settings for your region.</p>
         <label for="wadamesh-config-preset">Primary radio preset</label><select id="wadamesh-config-preset" data-lock><option value="custom">Custom</option></select>
         <p id="wadamesh-config-timezone" class="hint" role="status" aria-live="polite" hidden></p>
@@ -136,6 +136,52 @@
         </div>
         <button id="wadamesh-config-apply" type="button" class="secondary" data-lock>Review and apply settings</button>
         <p id="wadamesh-config-status" class="hint" role="status" aria-live="polite">No settings have been changed.</p>
+        <details id="wadamesh-manage-channels">
+          <summary>Channels</summary>
+          <p class="hint">Read the pager's channels, then choose one to edit. Channel keys are hidden; leave the key blank to keep it.</p>
+          <button id="wadamesh-manage-channels-load" type="button" class="secondary" data-lock>Read channels</button>
+          <label for="wadamesh-manage-channel">Channel</label><select id="wadamesh-manage-channel" data-lock><option value="">Read channels first</option></select>
+          <label for="wadamesh-manage-channel-name">Channel name</label><input id="wadamesh-manage-channel-name" type="text" maxlength="31" autocomplete="off" data-lock>
+          <label for="wadamesh-manage-channel-secret">Channel key (optional)</label><input id="wadamesh-manage-channel-secret" type="password" maxlength="32" autocomplete="off" spellcheck="false" placeholder="Leave blank to keep the current key" data-lock>
+          <p class="hint">A new channel key must be 32 hexadecimal characters. Channel names and keys must match those used by your peers; renaming does not change the key.</p>
+          <button id="wadamesh-manage-channel-hashtag" type="button" class="secondary" data-lock>Use hashtag channel key</button>
+          <p class="hint">Use this for simple ASCII hashtag channel names. For private channels enter the key manually; configure special #r2 channels on the pager.</p>
+          <div class="inline-actions"><button id="wadamesh-manage-channel-apply" type="button" class="secondary" data-lock>Review channel change</button><button id="wadamesh-manage-channel-remove" type="button" class="secondary" data-lock>Review channel removal</button></div>
+          <p class="hint">Removing a channel clears its slot and stored key.</p>
+          <p id="wadamesh-manage-channels-status" class="hint" role="status" aria-live="polite">Read channels to get started.</p>
+        </details>
+        <details id="wadamesh-manage-contacts">
+          <summary>Contacts</summary>
+          <p class="hint">Read contacts, then choose one to rename. A later advertisement from the contact may replace this name.</p>
+          <button id="wadamesh-manage-contacts-load" type="button" class="secondary" data-lock>Read contacts</button>
+          <label for="wadamesh-manage-contact">Contact</label><select id="wadamesh-manage-contact" data-lock><option value="">Read contacts first</option></select>
+          <label for="wadamesh-manage-contact-name">Contact name</label><input id="wadamesh-manage-contact-name" type="text" maxlength="31" autocomplete="off" data-lock>
+          <div class="inline-actions"><button id="wadamesh-manage-contact-apply" type="button" class="secondary" data-lock>Review contact change</button><button id="wadamesh-manage-contact-remove" type="button" class="secondary" data-lock>Review contact removal</button></div>
+          <p class="hint">Removing a contact also removes its associated stored data and chat thread.</p>
+          <h4>Add a contact</h4>
+          <label for="wadamesh-manage-contact-add-key">Full public key</label><input id="wadamesh-manage-contact-add-key" type="text" maxlength="64" autocomplete="off" spellcheck="false" data-lock>
+          <label for="wadamesh-manage-contact-add-name">Contact name</label><input id="wadamesh-manage-contact-add-name" type="text" maxlength="31" autocomplete="off" data-lock>
+          <label for="wadamesh-manage-contact-add-type">Contact type</label><select id="wadamesh-manage-contact-add-type" data-lock><option value="1">Chat user</option><option value="2">Repeater</option><option value="3">Room server</option><option value="4">Sensor</option></select>
+          <button id="wadamesh-manage-contact-add" type="button" class="secondary" data-lock>Review new contact</button>
+          <p id="wadamesh-manage-contacts-status" class="hint" role="status" aria-live="polite">Read contacts to get started.</p>
+        </details>
+        <details id="wadamesh-manage-autoadd">
+          <summary>Automatically add contacts</summary>
+          <p class="hint">Choose which newly heard nodes are added to Contacts.</p>
+          <button id="wadamesh-manage-autoadd-load" type="button" class="secondary" data-lock>Read auto-add settings</button>
+          <label for="wadamesh-manage-autoadd-mode">Add contacts</label><select id="wadamesh-manage-autoadd-mode" data-lock><option value="all">All types</option><option value="selected">Only selected types</option></select>
+          <fieldset><legend>Types to add when using selected types</legend>
+            <label><input id="wadamesh-manage-autoadd-chat" type="checkbox" data-lock> Chat users</label>
+            <label><input id="wadamesh-manage-autoadd-repeater" type="checkbox" data-lock> Repeaters</label>
+            <label><input id="wadamesh-manage-autoadd-room" type="checkbox" data-lock> Room servers</label>
+            <label><input id="wadamesh-manage-autoadd-sensor" type="checkbox" data-lock> Sensors</label>
+          </fieldset>
+          <label><input id="wadamesh-manage-autoadd-overwrite" type="checkbox" data-lock> Replace the oldest non-favorite contact when full</label>
+          <label for="wadamesh-manage-autoadd-hops">Maximum hops</label><input id="wadamesh-manage-autoadd-hops" type="number" min="0" max="64" step="1" data-lock>
+          <p class="hint">0 means no limit; 1 means direct only; higher values allow up to one fewer hop than the number entered.</p>
+          <button id="wadamesh-manage-autoadd-apply" type="button" class="secondary" data-lock>Review auto-add changes</button>
+          <p id="wadamesh-manage-autoadd-status" class="hint" role="status" aria-live="polite">Read auto-add settings to get started.</p>
+        </details>
       </section>
       <div class="quick-settings-grid">
         <div class="quick-setting"><h3>USB logging</h3><div class="inline-actions"><button id="quick-logging-on" class="secondary" type="button" aria-label="Enable USB logging" data-lock disabled>On</button><button id="quick-logging-off" class="secondary" type="button" aria-label="Disable USB logging" data-lock disabled>Off</button></div><p class="hint">On may switch Companion USB from binary to text mode.</p></div>

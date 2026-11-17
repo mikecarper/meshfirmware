@@ -50,6 +50,8 @@ import { createPostFlashSettingsPlan, applyPostFlashSettings } from './post-flas
 import { createPostFlashCompanionRequest } from './post-flash-companion.js';
 import { loadRadioPresets } from './radio-presets.js';
 import { browserTimezonePresetSuggestions } from './timezone-presets.js';
+import { readChannels, saveChannel, deleteChannel, hashtagChannel, readAutoAdd, saveAutoAdd } from './wadamesh-contacts-settings.js';
+import { readManagedContacts, renameManagedContact, addManagedContact, removeManagedContact } from './managed-contacts.js';
 
 const $ = id => document.getElementById(id);
 const usbChooserCancelled=Symbol('usb-chooser-cancelled');
@@ -90,6 +92,7 @@ state.quickSettingsMessage=null;
 state.radioDefaults=null;
 state.postFlashSettingsApproval=null;state.postFlashSettingsResult=null;
 state.wadameshConfigTarget=null;
+state.wadameshManaged={target:null,channels:null,contacts:null,autoadd:null,hashtag:null};
 state.radioPresets=null;
 state.radioPresetsWarning=null;
 state.radioPresetsSource=null;
@@ -701,6 +704,7 @@ function controls() {
   syncRadioDefaultsControls();
   $('wadamesh-config-cross').disabled ||= $('wadamesh-config-media').value!=='custom';
   $('wadamesh-live-config').hidden=!wadameshConfigTargetCurrent(state.wadameshConfigTarget);
+  syncWadameshManagedControls();
   $('verify-app').disabled ||= (!state.verification&&!canVerifyWadameshProfile())||!!state.esp||!!state.plan?.written||$('already-bootloader').checked||dfuIds.has(portId(state.port))||!!state.migration||!!state.recovery||!!state.espRecovery;
   $('fetch-firmware').disabled ||= !$('artifact').value;
   $('load-bootloader').disabled ||= !$('bootloader-source').value;
@@ -794,7 +798,9 @@ function confirmationActionLabel(action,pkg=null,plan=null) {
     'EXPAND PARTITIONS':'Expand partitions',
     'DISCARD RETRY STATE':'Discard retry record',
     'READ ESP32 CHIP':'Restart & read chip',
-    'APPLY SETTINGS':'Apply settings'
+    'APPLY SETTINGS':'Apply settings',
+    'REMOVE CHANNEL':'Remove channel',
+    'REMOVE CONTACT':'Remove contact'
   };
   if(Object.hasOwn(labels,action))return labels[action];
   if(/^WRITE 0x[0-9a-f]+$/i.test(action))return 'Write at '+action.slice(6);
@@ -1548,6 +1554,181 @@ async function configureWadamesh(){
 }
 $('wadamesh-config-media').onchange=()=>{selectMediaMesh('wadamesh-config-media','wadamesh-config-cross');$('wadamesh-config-cross').disabled=state.busy||$('wadamesh-config-media').value!=='custom';$('wadamesh-config-custom').hidden=$('wadamesh-config-media').value!=='custom';};
 $('wadamesh-config-apply').onclick=()=>operation(configureWadamesh);
+// These snapshots stay in this tab and belong only to the verified session.
+// In particular, channel records contain keys and must never enter logs or DOM.
+function syncWadameshManagedControls(){
+  const managed=state.wadameshManaged,target=state.wadameshConfigTarget;
+  if(managed.target!==target||!wadameshConfigTargetCurrent(target)){
+    if(managed.target||managed.channels||managed.contacts||managed.autoadd){
+      managed.channels=null;managed.contacts=null;managed.autoadd=null;
+      managed.hashtag=null;
+      $('wadamesh-manage-channel').replaceChildren(new Option('Read channels first',''));
+      $('wadamesh-manage-contact').replaceChildren(new Option('Read contacts first',''));
+      for(const id of ['channel-name','channel-secret','contact-name','contact-add-key','contact-add-name','autoadd-hops'])$('wadamesh-manage-'+id).value='';
+      $('wadamesh-manage-channels-status').textContent='Read channels to get started.';
+      $('wadamesh-manage-contacts-status').textContent='Read contacts to get started.';
+      $('wadamesh-manage-autoadd-status').textContent='Read auto-add settings to get started.';
+    }
+    managed.target=wadameshConfigTargetCurrent(target)?target:null;
+  }
+  const ready=!!managed.target&&!state.busy,channel=managed.channels?.find(row=>String(row.index)===$('wadamesh-manage-channel').value),contact=managed.contacts?.find(row=>row.publicKey===$('wadamesh-manage-contact').value),auto=managed.autoadd;
+  for(const id of ['channels-load','contacts-load','autoadd-load'])$('wadamesh-manage-'+id).disabled=!ready;
+  $('wadamesh-manage-channel').disabled=!ready||!managed.channels;
+  for(const id of ['channel-name','channel-secret','channel-apply','channel-hashtag'])$('wadamesh-manage-'+id).disabled=!ready||!channel;
+  $('wadamesh-manage-channel-remove').disabled=!ready||!channel||(!channel.name&&!channel.hasSecret);
+  $('wadamesh-manage-contact').disabled=!ready||!managed.contacts;
+  for(const id of ['contact-name','contact-apply'])$('wadamesh-manage-'+id).disabled=!ready||!contact;
+  $('wadamesh-manage-contact-remove').disabled=!ready||!contact;
+  for(const id of ['contact-add-key','contact-add-name','contact-add-type','contact-add'])$('wadamesh-manage-'+id).disabled=!ready||!managed.contacts;
+  for(const id of ['autoadd-mode','autoadd-overwrite','autoadd-apply'])$('wadamesh-manage-'+id).disabled=!ready||!auto;
+  for(const id of ['autoadd-chat','autoadd-repeater','autoadd-room','autoadd-sensor'])$('wadamesh-manage-'+id).disabled=!ready||!auto||$('wadamesh-manage-autoadd-mode').value!=='selected';
+  $('wadamesh-manage-autoadd-hops').disabled=!ready||!auto||auto.maxHops===null;
+}
+async function withManagedWadamesh(target,action,isCurrent=()=>true){
+  const current=()=>wadameshConfigTargetCurrent(target)&&state.wadameshManaged.target===target&&isCurrent();
+  const assertCurrent=()=>{if(!current())fail('The selected radio or settings changed. No further changes were sent.');};
+  assertCurrent();const link=new SerialLink(target.port);let result;
+  try{
+    await link.open(115200,{application:true});assertCurrent();const core=new MeshCore(link);
+    const verify=async()=>{const profile=await readWadameshProfile(core,assertCurrent);if(!profile.touch||profile.publicKey!==target.publicKey)fail('The connected application identity or reviewed profile changed. No settings were sent.');return profile;};
+    await verify();result=await action(core,{assertCurrent,publicKey:target.publicKey,verify});
+  }finally{await link.close();}
+  if(!wadameshConfigTargetCurrent(target)||state.wadameshManaged.target!==target)fail('The radio changed while closing the connection. Reconnect and check its settings.');
+  return result;
+}
+function managedTarget(){const target=state.wadameshManaged.target;if(!target||!wadameshConfigTargetCurrent(target))fail('Run Verify and Configure on the intended Wadamesh radio first.');return target;}
+function validateManagedName(name,label){if(typeof name!=='string'||!name.trim()||/[\p{Cc}\p{Cf}\p{Cs}\u2028\u2029]/u.test(name)||new TextEncoder().encode(name).length>31)fail(`${label} must be 1–31 UTF-8 bytes without control characters.`);}
+function selectManagedChannel(){
+  const row=state.wadameshManaged.channels?.find(item=>String(item.index)===$('wadamesh-manage-channel').value);
+  state.wadameshManaged.hashtag=null;$('wadamesh-manage-channel-name').value=row?.name||'';$('wadamesh-manage-channel-secret').value='';syncWadameshManagedControls();
+}
+function chooseManagedHashtag(){
+  const managed=state.wadameshManaged;if(!wadameshConfigTargetCurrent(managed.target)||state.busy||!managed.channels?.some(row=>String(row.index)===$('wadamesh-manage-channel').value))return;
+  const suggestion=hashtagChannel($('wadamesh-manage-channel-name').value);managed.hashtag=suggestion;
+  $('wadamesh-manage-channel-name').value=suggestion.name;$('wadamesh-manage-channel-secret').value=suggestion.secretHex;
+  $('wadamesh-manage-channels-status').textContent='Hashtag name and key prepared. Review the channel change to save.';
+}
+function selectManagedContact(){
+  const row=state.wadameshManaged.contacts?.find(item=>item.publicKey===$('wadamesh-manage-contact').value);
+  $('wadamesh-manage-contact-name').value=row?.name||'';syncWadameshManagedControls();
+}
+async function loadManagedChannels(){
+  const target=managedTarget();$('wadamesh-manage-channels-status').textContent='Reading channels…';
+  const rows=await withManagedWadamesh(target,(core,options)=>readChannels(core,options));
+  state.wadameshManaged.channels=rows;$('wadamesh-manage-channel').replaceChildren(new Option('Choose a channel',''),...rows.map(row=>new Option(`Channel ${row.index}: ${row.name||'Empty'}`,String(row.index))));
+  $('wadamesh-manage-channel-name').value='';$('wadamesh-manage-channel-secret').value='';$('wadamesh-manage-channels-status').textContent=`${rows.length} channels read. Keys are hidden.`;
+}
+async function applyManagedChannel(){
+  const target=managedTarget(),managed=state.wadameshManaged,row=managed.channels?.find(item=>String(item.index)===$('wadamesh-manage-channel').value),name=$('wadamesh-manage-channel-name').value,secretHex=$('wadamesh-manage-channel-secret').value;
+  if(!row)fail('Read and choose a channel first.');
+  validateManagedName(name,'Channel name');
+  if(secretHex&&!/^[0-9a-fA-F]{32}$/.test(secretHex))fail('Channel key must be 32 hexadecimal characters, or blank to keep it.');
+  if(!row.name&&!secretHex)fail('A new channel needs a channel key.');
+  const current=()=>managed.channels?.includes(row)&&$('wadamesh-manage-channel').value===String(row.index)&&$('wadamesh-manage-channel-name').value===name&&$('wadamesh-manage-channel-secret').value===secretHex;
+  await withManagedWadamesh(target,async(core,options)=>{
+    const keyAction=secretHex?(managed.hashtag?.name===name&&managed.hashtag.secretHex===secretHex?'Use the derived hashtag key':'Replace with the entered key'):'Keep existing key';
+    const warning=['Channel settings affect who can read messages on this channel.',!secretHex&&name!==row.name&&(name.startsWith('#')||row.name.startsWith('#'))?'Renaming keeps the old key; peers deriving a key from the new hashtag may not match.':''].filter(Boolean).join(' ');
+    const accepted=await confirm('Save this channel?',`Channel ${row.index}\nCurrent name: ${row.name||'Empty'}\nNew name: ${name}\nKey: ${keyAction}`,warning,'APPLY SETTINGS',{detailLines:true,primaryAction:true});
+    options.assertCurrent();if(!accepted)return;
+    await options.verify();options.assertCurrent();
+    try{const saved=await saveChannel(core,{expected:row,name,secretHex},options);managed.channels=managed.channels.map(item=>item===row?saved:item);const option=Array.from($('wadamesh-manage-channel').options).find(item=>item.value===String(row.index));if(option)option.text=`Channel ${saved.index}: ${saved.name}`;managed.hashtag=null;$('wadamesh-manage-channel-secret').value='';$('wadamesh-manage-channels-status').textContent='Channel saved and verified.';}
+    catch(error){managed.channels=null;managed.hashtag=null;$('wadamesh-manage-channel-secret').value='';$('wadamesh-manage-channels-status').textContent='Reload channels before trying again.';throw error;}
+  },current);
+}
+async function removeManagedChannel(){
+  const target=managedTarget(),managed=state.wadameshManaged,row=managed.channels?.find(item=>String(item.index)===$('wadamesh-manage-channel').value);
+  if(!row||(!row.name&&!row.hasSecret))fail('Choose a saved channel first.');
+  const current=()=>managed.channels?.includes(row)&&$('wadamesh-manage-channel').value===String(row.index);
+  await withManagedWadamesh(target,async(core,options)=>{
+    const accepted=await confirm('Remove this channel?',`Channel ${row.index}: ${row.name||'Unnamed'}`,'This clears the channel and its stored key on this radio. You may lose access until you rejoin.','REMOVE CHANNEL');
+    options.assertCurrent();if(!accepted)return;await options.verify();options.assertCurrent();
+    try{const saved=await deleteChannel(core,{expected:row},options);managed.channels=managed.channels.map(item=>item===row?saved:item);const option=Array.from($('wadamesh-manage-channel').options).find(item=>item.value===String(row.index));if(option)option.text=`Channel ${saved.index}: Empty`;managed.hashtag=null;$('wadamesh-manage-channel-name').value='';$('wadamesh-manage-channel-secret').value='';$('wadamesh-manage-channels-status').textContent='Channel removed and verified.';}
+    catch(error){managed.channels=null;managed.hashtag=null;$('wadamesh-manage-channel-secret').value='';$('wadamesh-manage-channels-status').textContent='Reload channels before trying again.';throw error;}
+  },current);
+}
+async function loadManagedContacts(){
+  const target=managedTarget();$('wadamesh-manage-contacts-status').textContent='Reading contacts…';
+  const rows=await withManagedWadamesh(target,(core,options)=>readManagedContacts(core,{...options,maxContacts:2000}));
+  state.wadameshManaged.contacts=rows;$('wadamesh-manage-contact').replaceChildren(new Option('Choose a contact',''),...rows.map(row=>new Option(`${row.name||'Unnamed'} · ${row.publicKey.slice(0,12)}`,row.publicKey)));
+  $('wadamesh-manage-contact-name').value='';$('wadamesh-manage-contacts-status').textContent=`${rows.length} contacts read.`;
+}
+async function applyManagedContact(){
+  const target=managedTarget(),managed=state.wadameshManaged,row=managed.contacts?.find(item=>item.publicKey===$('wadamesh-manage-contact').value),name=$('wadamesh-manage-contact-name').value;
+  if(!row)fail('Read and choose a contact first.');
+  validateManagedName(name,'Contact name');
+  const current=()=>managed.contacts?.includes(row)&&$('wadamesh-manage-contact').value===row.publicKey&&$('wadamesh-manage-contact-name').value===name;
+  await withManagedWadamesh(target,async(core,options)=>{
+    const accepted=await confirm('Save this contact name?',`Contact: ${row.publicKey.slice(0,12)}\nCurrent: ${row.name||'Unnamed'}\nNew: ${name}`,'The contact’s next advertisement may replace this name.','APPLY SETTINGS',{detailLines:true,primaryAction:true});
+    options.assertCurrent();if(!accepted)return;
+    await options.verify();options.assertCurrent();
+    try{const saved=await renameManagedContact(core,{...options,maxContacts:2000,contact:row,name});managed.contacts=managed.contacts.map(item=>item===row?saved:item);const option=Array.from($('wadamesh-manage-contact').options).find(item=>item.value===row.publicKey);if(option)option.text=`${saved.name||'Unnamed'} · ${saved.publicKey.slice(0,12)}`;$('wadamesh-manage-contacts-status').textContent='Contact name saved and verified.';}
+    catch(error){managed.contacts=null;$('wadamesh-manage-contacts-status').textContent='Reload contacts before trying again.';throw error;}
+  },current);
+}
+async function addManagedContactFromForm(){
+  const target=managedTarget(),managed=state.wadameshManaged,rows=managed.contacts;
+  const key=$('wadamesh-manage-contact-add-key').value.trim(),name=$('wadamesh-manage-contact-add-name').value,typeValue=$('wadamesh-manage-contact-add-type').value,type=Number(typeValue);
+  if(!rows)fail('Read contacts before adding one.');validateManagedName(name,'Contact name');
+  if(!/^[a-f0-9]{64}$/i.test(key)||/^0{64}$/.test(key)||key.toLowerCase()===target.publicKey.toLowerCase())fail('Enter the full public key of another node.');
+  if(!['1','2','3','4'].includes(typeValue))fail('Choose a contact type.');
+  if(rows.some(row=>row.publicKey===key.toLowerCase()))fail('This contact is already present.');
+  const typeName={'1':'Chat user','2':'Repeater','3':'Room server','4':'Sensor'}[typeValue];
+  const current=()=>managed.contacts===rows&&$('wadamesh-manage-contact-add-key').value.trim()===key&&$('wadamesh-manage-contact-add-name').value===name&&$('wadamesh-manage-contact-add-type').value===typeValue;
+  await withManagedWadamesh(target,async(core,options)=>{
+    const accepted=await confirm('Add this contact?',`Name: ${name}\nType: ${typeName}\nPublic key: ${key}`,'Check the public key and type before adding.','APPLY SETTINGS',{detailLines:true,primaryAction:true});
+    options.assertCurrent();if(!accepted)return;await options.verify();options.assertCurrent();
+    try{const saved=await addManagedContact(core,{...options,maxContacts:2000,contactPublicKey:key,name,type});managed.contacts=[...rows,saved];$('wadamesh-manage-contact').replaceChildren(new Option('Choose a contact',''),...managed.contacts.map(item=>new Option(`${item.name||'Unnamed'} · ${item.publicKey.slice(0,12)}`,item.publicKey)));$('wadamesh-manage-contact').value=saved.publicKey;$('wadamesh-manage-contact-name').value=saved.name;$('wadamesh-manage-contact-add-key').value='';$('wadamesh-manage-contact-add-name').value='';$('wadamesh-manage-contacts-status').textContent='Contact added and verified.';}
+    catch(error){managed.contacts=null;$('wadamesh-manage-contacts-status').textContent='Reload contacts before trying again.';throw error;}
+  },current);
+}
+async function removeManagedContactFromForm(){
+  const target=managedTarget(),managed=state.wadameshManaged,row=managed.contacts?.find(item=>item.publicKey===$('wadamesh-manage-contact').value);
+  if(!row)fail('Read and choose a contact first.');
+  const current=()=>managed.contacts?.includes(row)&&$('wadamesh-manage-contact').value===row.publicKey;
+  await withManagedWadamesh(target,async(core,options)=>{
+    const accepted=await confirm('Remove this contact?',`Contact: ${row.name||'Unnamed'}\nPublic key: ${row.publicKey}`,'This also deletes the contact’s associated stored data and removes its chat thread. Restoring a contact backup may not recover that data.','REMOVE CONTACT',{detailLines:true});
+    options.assertCurrent();if(!accepted)return;await options.verify();options.assertCurrent();
+    try{await removeManagedContact(core,{...options,maxContacts:2000,contact:row});managed.contacts=managed.contacts.filter(item=>item!==row);$('wadamesh-manage-contact').replaceChildren(new Option('Choose a contact',''),...managed.contacts.map(item=>new Option(`${item.name||'Unnamed'} · ${item.publicKey.slice(0,12)}`,item.publicKey)));$('wadamesh-manage-contact-name').value='';$('wadamesh-manage-contacts-status').textContent='Contact removed and verified.';}
+    catch(error){managed.contacts=null;$('wadamesh-manage-contacts-status').textContent='Reload contacts before trying again.';throw error;}
+  },current);
+}
+function showManagedAutoAdd(auto){
+  $('wadamesh-manage-autoadd-mode').value=auto.manual?'selected':'all';
+  for(const field of ['chat','repeater','room','sensor','overwrite'])$('wadamesh-manage-autoadd-'+field).checked=auto[field];
+  $('wadamesh-manage-autoadd-hops').value=auto.maxHops===null?'':String(auto.maxHops);
+}
+async function loadManagedAutoAdd(){
+  const target=managedTarget();$('wadamesh-manage-autoadd-status').textContent='Reading auto-add settings…';
+  const auto=await withManagedWadamesh(target,(core,options)=>readAutoAdd(core,options));state.wadameshManaged.autoadd=auto;showManagedAutoAdd(auto);
+  $('wadamesh-manage-autoadd-status').textContent=auto.maxHops===null?'Auto-add settings read. This firmware did not report a hop limit.':'Auto-add settings read.';
+}
+function managedAutoAddChoice(auto){
+  const mode=$('wadamesh-manage-autoadd-mode').value;if(!['all','selected'].includes(mode))fail('Choose an auto-add mode.');
+  const fields=Object.fromEntries(['chat','repeater','room','sensor','overwrite'].map(field=>[field,$('wadamesh-manage-autoadd-'+field).checked]));
+  const raw=$('wadamesh-manage-autoadd-hops').value.trim(),maxHops=auto.maxHops===null?null:raw===''?NaN:Number(raw);
+  if(maxHops!==null&&(!Number.isInteger(maxHops)||maxHops<0||maxHops>64))fail('Maximum hops must be between 0 and 64.');
+  return {manual:mode==='selected',...fields,maxHops};
+}
+async function applyManagedAutoAdd(){
+  const target=managedTarget(),managed=state.wadameshManaged,auto=managed.autoadd;if(!auto)fail('Read auto-add settings first.');
+  const choice=managedAutoAddChoice(auto),fingerprint=JSON.stringify(choice),current=()=>managed.autoadd===auto&&JSON.stringify(managedAutoAddChoice(auto))===fingerprint;
+  const types=['chat','repeater','room','sensor'].filter(field=>choice[field]).join(', ')||'none';
+  const hops=choice.maxHops===null?'Unchanged':choice.maxHops===0?'Unlimited':choice.maxHops===1?'Direct only':`Up to ${choice.maxHops-1} hops`;
+  await withManagedWadamesh(target,async(core,options)=>{
+    const accepted=await confirm('Save auto-add settings?',`Add contacts: ${choice.manual?'Selected types ('+types+')':'All types'}\nWhen full: ${choice.overwrite?'Replace oldest non-favorite':'Do not replace'}\nMaximum hops: ${hops}`,'Some changes may be saved if a later setting fails.','APPLY SETTINGS',{detailLines:true,primaryAction:true});
+    options.assertCurrent();if(!accepted)return;
+    await options.verify();options.assertCurrent();
+    try{const saved=await saveAutoAdd(core,{expected:auto,...choice},options);managed.autoadd=saved;showManagedAutoAdd(saved);$('wadamesh-manage-autoadd-status').textContent='Auto-add settings saved and verified.';}
+    catch(error){managed.autoadd=null;$('wadamesh-manage-autoadd-status').textContent='Reload auto-add settings before trying again.';throw error;}
+  },current);
+}
+$('wadamesh-manage-channel').onchange=selectManagedChannel;
+$('wadamesh-manage-contact').onchange=selectManagedContact;
+$('wadamesh-manage-autoadd-mode').onchange=syncWadameshManagedControls;
+$('wadamesh-manage-channel-name').addEventListener('input',()=>{const managed=state.wadameshManaged;if(managed.hashtag&&$('wadamesh-manage-channel-name').value!==managed.hashtag.name){if($('wadamesh-manage-channel-secret').value===managed.hashtag.secretHex)$('wadamesh-manage-channel-secret').value='';managed.hashtag=null;}});
+$('wadamesh-manage-channel-secret').addEventListener('input',()=>{state.wadameshManaged.hashtag=null;});
+$('wadamesh-manage-channel-hashtag').onclick=()=>{try{chooseManagedHashtag();}catch(error){notice(error.message||String(error),true);}};
+for(const [id,handler] of [['channels-load',loadManagedChannels],['channel-apply',applyManagedChannel],['channel-remove',removeManagedChannel],['contacts-load',loadManagedContacts],['contact-apply',applyManagedContact],['contact-add',addManagedContactFromForm],['contact-remove',removeManagedContactFromForm],['autoadd-load',loadManagedAutoAdd],['autoadd-apply',applyManagedAutoAdd]])$('wadamesh-manage-'+id).onclick=()=>operation(handler);
 async function verifyApplication({automaticApproval=null,automaticReconnect=false}={}) {
   if(!state.verification&&wadameshSelected())return verifyWadameshProfile();
   const expected=state.verification;if(!expected)fail('No flashed application is awaiting verification.');
