@@ -1227,6 +1227,22 @@ test('same-device and flash confirmations use enabled action buttons without typ
   ui.elements.get('confirm-dialog').returnValue='confirm';close();assert.equal(await flash,true);assert.deepEqual(ui.calls,[]);
 });
 
+test('Wadamesh settings confirmation uses readable lines and a normal button without changing flash styling',async()=>{
+  const ui=workbench();await Promise.resolve();let close;
+  ui.elements.get('confirm-dialog').addEventListener=(_type,handler)=>{close=handler;};
+  const settings=ui.evaluate("confirm('Apply settings?','Primary radio\\nCurrent: 869.6179809 MHz\\nNew: 910.525 MHz','Restart manually','APPLY SETTINGS',{detailLines:true,primaryAction:true});");
+  assert.equal(ui.elements.get('confirm-submit').textContent,'Apply settings');
+  assert.equal(ui.elements.get('confirm-submit').classList.contains('primary'),true);
+  assert.equal(ui.elements.get('confirm-submit').classList.contains('danger'),false);
+  assert.equal(ui.elements.get('confirm-detail').classList.contains('confirm-detail-lines'),true);
+  ui.elements.get('confirm-dialog').returnValue='cancel';close();assert.equal(await settings,false);
+  const flash=ui.evaluate("confirm('Erase and flash?','Image','Warning','WIPE WITHOUT BACKUP');");
+  assert.equal(ui.elements.get('confirm-submit').classList.contains('danger'),true);
+  assert.equal(ui.elements.get('confirm-submit').classList.contains('primary'),false);
+  assert.equal(ui.elements.get('confirm-detail').classList.contains('confirm-detail-lines'),false);
+  ui.elements.get('confirm-dialog').returnValue='cancel';close();assert.equal(await flash,false);
+});
+
 test('same-radio button confirmation rejects cancel, Escape and a disconnected or replaced interface',async()=>{
   for(const action of ['cancel','escape','disconnect','replace','generation']){
     const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.evaluate('state.port=selectedPort;');let close;
@@ -5267,7 +5283,7 @@ test('presets cached by Wadamesh are also offered when inspecting ordinary firmw
 
 test('Wadamesh Verify and configure offers controls and applies only explicitly approved settings with readback',async()=>{
   const ui=await wadameshConfigWorkbench();assert.equal(ui.elements.get('wadamesh-live-config').hidden,false);
-  ui.context.confirm=async(title,detail,warning)=>{ui.calls.push('confirm');assert.match(title,/Apply these Wadamesh settings/);assert.match(detail,/Primary radio.*MediaMesh/s);assert.match(detail,/915 MHz \/ 125 kHz \/ SF7 \/ CR4\/5 → 910\.525 MHz/);assert.match(detail,/MediaMesh: Off → 911\.15 MHz/);assert.doesNotMatch(detail,/frequencyHz|bandwidthHz|\{"/);assert.match(warning,/manual reboot/);return true;};
+  ui.context.confirm=async(title,detail,warning,action,options)=>{ui.calls.push('confirm');assert.match(title,/Apply these Wadamesh settings/);assert.match(detail,/Primary radio\nCurrent: 915 MHz \/ 125 kHz \/ SF7 \/ CR4\/5\nNew: 910\.525 MHz/);assert.match(detail,/MediaMesh\nCurrent: Off\nNew: 911\.15 MHz/);assert.equal((detail.match(/Primary radio/g)||[]).length,1);assert.doesNotMatch(detail,/frequencyHz|bandwidthHz|\{"/);assert.match(warning,/manual reboot/);assert.equal(action,'APPLY SETTINGS');assert.equal(options.detailLines,true);assert.equal(options.primaryAction,true);return true;};
   await ui.evaluate('configureWadamesh();');
   assert.ok(ui.calls.indexOf('confirm')<ui.calls.findIndex(call=>call.startsWith('set ')));
   assert.deepEqual(ui.calls.filter(call=>call.startsWith('set ')),['set radio 910.525,125,7,5','set tx 15','set radio2.cross off','set radio2 911.15,250,7,5,rxtx,auto']);

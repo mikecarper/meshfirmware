@@ -793,7 +793,8 @@ function confirmationActionLabel(action,pkg=null,plan=null) {
     'EXPAND AND FLASH':'Expand & flash firmware',
     'EXPAND PARTITIONS':'Expand partitions',
     'DISCARD RETRY STATE':'Discard retry record',
-    'READ ESP32 CHIP':'Restart & read chip'
+    'READ ESP32 CHIP':'Restart & read chip',
+    'APPLY SETTINGS':'Apply settings'
   };
   if(Object.hasOwn(labels,action))return labels[action];
   if(/^WRITE 0x[0-9a-f]+$/i.test(action))return 'Write at '+action.slice(6);
@@ -838,11 +839,12 @@ function renderConfirmSlots(context){
   $('confirm-esp-slot-summary').textContent='';
   if(context)$('confirm-esp-slot-'+context.selection).onchange();
 }
-function confirm(title, detail, warning, action, {espSlots=null}={}) {
+function confirm(title, detail, warning, action, {espSlots=null,detailLines=false,primaryAction=false}={}) {
   const port=state.port,generation=state.generation,pkg=state.pkg,plan=state.plan,installMode=state.installMode;
-  $('confirm-title').textContent = title; $('confirm-detail').textContent = detail; $('confirm-warning').textContent = warning;
+  $('confirm-title').textContent = title; $('confirm-detail').textContent = detail; $('confirm-detail').classList.toggle('confirm-detail-lines',detailLines); $('confirm-warning').textContent = warning;
   $('confirm-submit').textContent=confirmationActionLabel(action,pkg,plan);$('confirm-submit').disabled=false;
-  $('confirm-submit').classList.toggle('primary',action==='SAME DEVICE');$('confirm-submit').classList.toggle('danger',action!=='SAME DEVICE');
+  const primary=action==='SAME DEVICE'||primaryAction;
+  $('confirm-submit').classList.toggle('primary',primary);$('confirm-submit').classList.toggle('danger',!primary);
   renderConfirmSlots(espSlots);
   const dialog = $('confirm-dialog'); dialog.returnValue = ''; dialog.showModal();
   state.nextDialogAction=$('confirm-submit');updateNextAction();
@@ -1512,10 +1514,10 @@ function selectedWadameshConfig(){
 function describeWadameshChange(change){
   const radio=value=>`${value.frequencyHz===undefined?value.frequencyMHz:value.frequencyHz/1e6} MHz / ${value.bandwidthHz===undefined?value.bandwidthKHz:value.bandwidthHz/1000} kHz / SF${value.spreadingFactor} / CR4/${value.codingRate}`;
   const media=value=>value.mode==='off'||value.preset==='off'?'Off':`${radio(value)} / ${value.mode==='rx'?'receive only':'receive & transmit'} / preamble ${value.preambleSymbols===0?'auto':value.preambleSymbols}`;
-  if(change.setting==='radio')return `Primary radio: ${radio(change.before)} → ${radio(change.after)}`;
-  if(change.setting==='tx')return `TX power: ${change.before} → ${change.after} dBm`;
-  if(change.setting==='radio2')return `MediaMesh: ${media(change.before)} → ${media(change.after)}`;
-  if(change.setting==='cross')return `Crossing: ${change.before} → ${change.after}`;
+  if(change.setting==='radio')return `Primary radio\nCurrent: ${radio(change.before)}\nNew: ${radio(change.after)}`;
+  if(change.setting==='tx')return `TX power\nCurrent: ${change.before} dBm\nNew: ${change.after} dBm`;
+  if(change.setting==='radio2')return `MediaMesh\nCurrent: ${media(change.before)}\nNew: ${media(change.after)}`;
+  if(change.setting==='cross')return `Crossing\nCurrent: ${change.before}\nNew: ${change.after}`;
   fail('Unsupported Wadamesh setting in the review plan.');
 }
 async function configureWadamesh(){
@@ -1532,8 +1534,8 @@ async function configureWadamesh(){
     const prepared=await prepareWadameshConfig(plan,{request,isCurrent,maxTxDbm:profile.maxTxDbm});assertCurrent();
     const skipped=prepared.skipped.map(row=>row.reason),warnings=prepared.warnings||[];
     if(!prepared.changes.length){const message=skipped.length?`No settings changed. ${skipped.join(' ')}`:'The selected settings already match. No changes were sent.';$('wadamesh-config-status').textContent=message;notice(message);return;}
-    const changes=prepared.changes.map(describeWadameshChange).join('\n');
-    const accepted=await confirm('Apply these Wadamesh settings?',`${prepared.summary}\n\n${changes}`,[...skipped,...warnings,'The connected application profile answered, but the exact release and physical board are not independently verified. Earlier changes may be saved if a later command fails.'].join(' '),'APPLY SETTINGS');
+    const changes=prepared.changes.map(describeWadameshChange).join('\n\n');
+    const accepted=await confirm('Apply these Wadamesh settings?',changes,[...skipped,...warnings,'The connected application profile answered, but the exact release and physical board are not independently verified. Earlier changes may be saved if a later command fails.'].join(' '),'APPLY SETTINGS',{detailLines:true,primaryAction:true});
     assertCurrent();if(!accepted){$('wadamesh-config-status').textContent='Settings changes cancelled. Nothing was changed.';return;}
     const fresh=await readWadameshProfile(core,assertCurrent);
     if(!fresh.touch||fresh.publicKey!==target.publicKey||fresh.maxTxDbm!==profile.maxTxDbm)fail('The application identity or limits changed. No settings were sent.');

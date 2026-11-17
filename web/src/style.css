@@ -108,6 +108,7 @@ button, .button { display: inline-flex; justify-content: flex-start; align-items
 .secondary:hover:not(:disabled) { background: #eef5f6; }
 .text-link { padding: 4px; min-height: 32px; color: var(--teal); font-size: 11px; border: 0; background: none; cursor: pointer; }
 .danger { background: #ae4435; color: white; }
+.confirm-detail-lines { white-space: pre-line; }
 .next-action:not(:disabled) { border-color: #a96708; box-shadow: 0 0 0 3px #f3bf61, 0 4px 14px #9c5c1929; }
 button.next-action:not(:disabled) { flex-wrap: wrap; row-gap: 6px; min-width: 0; }
 button.next-action:not(:disabled)::after { content: "Next"; display: inline-flex; align-items: center; flex: 0 0 auto; max-width: 100%; padding: 3px 8px; border: 1px solid #cf922d; border-radius: 999px; background: #ffdc91; color: #503409; font-size: 11px; font-weight: 800; line-height: 1.2; }
