@@ -20,6 +20,8 @@ import {lookupUsbConnectionMap} from '../src/usb-connection-map.js';
 import {createNextStepScroller} from '../src/next-step-scroll.js';
 import {tryNativeUsbFallback,xiaoS3ManualBootAdvice} from '../src/connection-fallback.js';
 import {catalogProvider,catalogItemKey} from '../src/catalog.js';
+import {firmwareChoices,firmwareChoiceLabel} from '../src/catalog-choices.js';
+import {rakCatalogItems,rakHardware,rakVersion,rakLegacy} from './fixtures/rak-catalog.js';
 import {hash as firmwareHash,md5hex,partitionTable as parsePartitionTable,crc32,inspectFirmware as inspectFirmwareBytes} from '../src/firmware.js';
 import {assessFirmwareBoard} from '../src/firmware-board.js';
 import {espSlotChoices,selectEspWriteSlots} from '../src/esp-slots.js';
@@ -66,7 +68,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
   if(espRecovery)storage.set('meshfirmware.espRecovery',JSON.stringify(espRecovery));
   if(verification)storage.set('meshfirmware.verifyApplication',JSON.stringify(verification));
   const context=vm.createContext({quickSettingPlan,commonCliReplyState,canonicalHardware,nrfDfuUsbIds,lookupUsbConnectionMap,usbConnectionMap:{schemaVersion:1,builds:[]},document:{getElementById:id=>{assert.ok(elements.has(id),`Missing HTML id ${id}`);return elements.get(id);},querySelectorAll:()=>[...elements.values()]},navigator:{serial:{requestPort:async()=>{calls.push('chooser');return port;},getPorts(){throw new Error('must not enumerate automatically');},addEventListener(type,handler){serialEvents[type]=handler;}}},window:{performance:performanceApi,location:{search},addEventListener(type,handler){windowEvents[type]=handler;}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},Option,URL,URLSearchParams,Blob,Uint8Array,TextEncoder,TextDecoder,console,setTimeout,clearTimeout,AbortSignal,Date,
-    fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,parseUsbMode,MigrationApproval,cleanCliReply,assessBootloaderVersion,firmwareFilesLinks,fetch:async()=>{throw Error('Unexpected network request');},fetchFirmwareBytes:(url,options)=>verifiedDownload(url,{...options,mirrorBase:'https://mirror.example.test/firmware/',pageOrigin:'https://mirror.example.test',fetchImpl:(target,init)=>target==='https://mirror.example.test/firmware/index.json'?Promise.resolve({ok:false,status:404}):options.fetchImpl(target,init)}),assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),commonCliRestorePreview:()=>({operations:[],skipped:[],warnings:[]}),restoreCommonCli:async()=>{throw Error('Unexpected CommonCLI restore');},
+    fail(message){throw new Error(message);},text:b=>new TextDecoder().decode(b),hash:()=>'',getCatalog:async()=>catalogPromise||({items:[],warnings:[],generatedAt:new Date().toISOString()}),catalogProvider,catalogItemKey,firmwareChoices,firmwareChoiceLabel,httpsUrl:value=>value,compareVersions:(a,b)=>b.localeCompare(a),detectBoard,detectRecoveryProfile,chooseFirmware,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,chooseConnection,parseUsbMode,MigrationApproval,cleanCliReply,assessBootloaderVersion,firmwareFilesLinks,fetch:async()=>{throw Error('Unexpected network request');},fetchFirmwareBytes:(url,options)=>verifiedDownload(url,{...options,mirrorBase:'https://mirror.example.test/firmware/',pageOrigin:'https://mirror.example.test',fetchImpl:(target,init)=>target==='https://mirror.example.test/firmware/index.json'?Promise.resolve({ok:false,status:404}):options.fetchImpl(target,init)}),assessBoard:()=>({requiresOverride:false,payloadFamily:'unknown'}),endfIdentity:()=>null,rakFamily:value=>/rak4631/i.test(value)?'rak4631':'unknown',detectMeshCore(){},exportNativeBackup(){},backupSummary:()=>({complete:true,privateIdentity:true,reasons:[]}),commonCliRestorePreview:()=>({operations:[],skipped:[],warnings:[]}),restoreCommonCli:async()=>{throw Error('Unexpected CommonCLI restore');},
     backupCoverage,createNextStepScroller,tryNativeUsbFallback,xiaoS3ManualBootAdvice,SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
   });
   context.assessFirmwareBoard=()=>({status:'match',requiresOverride:false,reason:'Test board identity.'});context.espSlotChoices=espSlotChoices;context.isRunningWadameshTak=isRunningWadameshTak;context.rememberPagerVariant=rememberPagerVariant;context.recallPagerVariant=recallPagerVariant;context.forgetPagerVariant=forgetPagerVariant;
@@ -81,6 +83,46 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
   vm.runInContext(source,context);
   return {context,elements,calls,port,serialEvents,windowEvents,evaluate:code=>vm.runInContext(code,context)};
 }
+
+test('RAK dropdown defaults to four merged choices and the older-build switch restores exact files',async()=>{
+  const items=rakCatalogItems(),ui=workbench({catalogPromise:Promise.resolve({items,warnings:[],generatedAt:new Date().toISOString()}),
+    search:'?'+new URLSearchParams({provider:'Keymind Cascade',hardware:rakHardware,role:'repeater',version:rakVersion})});
+  await new Promise(resolve=>setImmediate(resolve));
+  const choices=()=>ui.elements.get('artifact').options.filter(option=>option.value!=='');
+  assert.equal(choices().length,4);
+  assert(choices().every(option=>/Repeater \/ (Unified|Ethernet) - /.test(option.text)));
+  assert(choices().every(option=>!option.text.includes('RAK_4631')),'normal labels describe the choices without repeating filenames');
+  assert.equal(ui.elements.get('older-builds-option').hidden,false);
+  ui.elements.get('show-older-builds').checked=true;
+  await ui.elements.get('show-older-builds').onchange();
+  assert.equal(choices().length,14);
+  assert.deepEqual(new Set(choices().map(option=>items[Number(option.value)].name)),new Set(items.map(item=>item.name)));
+  ui.elements.get('show-older-builds').checked=false;
+  await ui.elements.get('show-older-builds').onchange();
+  assert.equal(choices().length,4);
+  assert(!ui.calls.some(call=>['serial','rom','chooser'].includes(call)),'browsing never touches a radio');
+});
+
+test('an exact shared legacy RAK build remains selected without showing every older file',async()=>{
+  const items=rakCatalogItems(),ui=workbench({catalogPromise:Promise.resolve({items,warnings:[],generatedAt:new Date().toISOString()}),
+    search:'?'+new URLSearchParams({provider:'Keymind Cascade',hardware:rakHardware,role:'repeater',version:rakVersion,build:items[0].name})});
+  await new Promise(resolve=>setImmediate(resolve));
+  const options=ui.elements.get('artifact').options.filter(option=>option.value!=='');
+  assert.equal(options.length,5);
+  assert.equal(ui.elements.get('artifact').value,'0');
+  assert.equal(ui.elements.get('download-selected-build').href,items[0].url);
+});
+
+test('a running exact RAK UART1 target retains both sensor profiles in the normal dropdown',async()=>{
+  const items=rakCatalogItems(),ui=workbench({catalogPromise:Promise.resolve({items,warnings:[],generatedAt:new Date().toISOString()}),
+    search:'?'+new URLSearchParams({provider:'Keymind Cascade',hardware:rakHardware,role:'repeater',version:rakVersion})});
+  await new Promise(resolve=>setImmediate(resolve));
+  ui.context.runningRakTarget=rakLegacy;
+  ui.evaluate('state.device={firmwareTarget:runningRakTarget};filterCatalog("version");');
+  const names=ui.elements.get('artifact').options.filter(option=>option.value!=='').map(option=>items[Number(option.value)].name);
+  assert.equal(names.length,6);
+  assert(names.includes(items[0].name)&&names.includes(items[1].name));
+});
 
 async function espSlotWorkbench({selection='both',boot=0x210000}={}){
   const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;

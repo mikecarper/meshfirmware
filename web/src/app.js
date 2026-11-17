@@ -34,6 +34,7 @@ import { assessBootloaderVersion } from './bootloader-version.js';
 import { fetchFirmwareBytes } from './downloads.js';
 import { firmwareFilesLinks } from './firmware-links.js';
 import { selectionLink } from './selection-link.js';
+import {firmwareChoices,firmwareChoiceLabel} from './catalog-choices.js';
 import { canonicalHardware } from './hardware-aliases.js';
 import { nrfDfuUsbIds } from './nrf-usb-ids.js';
 import { nrfBoardCandidates } from './nrf-board-candidates.js';
@@ -2001,8 +2002,16 @@ function filterCatalog(changed = 'project',{preserveArtifact=false}={}) {
   }
   if($('provider').value==='Custom'){items=[];$('custom-firmware').hidden=false;$('custom-firmware').open=true;}
   items=items.filter(item=>matchesCatalogInstallMode(item,state.installMode));
+  const choices=firmwareChoices(items,{showOlder:$('show-older-builds').checked,
+    installedTarget:state.device?.firmwareTarget||state.device?.exactTarget||'',
+    keepNames:[state.item?.name,linkedCatalogSelections().build,
+      preserveArtifact&&priorArtifact!==''?state.items[Number(priorArtifact)]?.name:'']});
+  $('older-builds-option').hidden=choices.olderCount===0;
+  $('older-builds-hint').hidden=choices.olderCount===0;
+  items=choices.items;
   items.sort((a,b)=>compareVersions(a.version,b.version));
-  $('artifact').replaceChildren(new Option(`${items.length} artifacts · choose a file`,''),...items.map(item => new Option(`${[item.title,item.subtitle].filter(Boolean).join(' / ')} · ${item.name} · ${item.action}`,String(state.items.indexOf(item)))));
+  const labelOptions={showHardware:!$('hardware').value,showVersion:!$('version').value};
+  $('artifact').replaceChildren(new Option(`${items.length} builds - choose firmware`,''),...items.map(item => new Option(firmwareChoiceLabel(item,labelOptions),String(state.items.indexOf(item)))));
   if(preserveArtifact&&[...$('artifact').options].some(option=>option.value===priorArtifact))$('artifact').value=priorArtifact;
   try{localStorage.setItem('meshfirmware.selections',JSON.stringify({...Object.fromEntries(['provider','hardware','role','version'].map(id=>[id,$(id).value])),providerExplicit:!!state.manualSelections.provider,versionExplicit:Object.hasOwn(state.manualSelections,'version')}));}catch{}
   updateDownload(); controls();
@@ -2266,6 +2275,9 @@ $('skip-backup').onchange=()=>operation(async()=>{
 $('firmware-file').onchange = () => operation(async () => { const file = $('firmware-file').files[0]; if (!file) return; const allowModeSync=customInstallModeSyncAllowed();$('firmware-file').value='';clearAutomaticSha(file.name);await clearFirmwareSelection();if (file.size > 64 << 20) fail('Firmware exceeds 64 MiB.'); await loadFirmware(file.name,new Uint8Array(await file.arrayBuffer()),null,{allowModeSync}); });
 $('load-entry').onclick = () => operation(async () => { const entry=$('archive-entry').value,archive=state.archive,context=state.archiveContext,item=context?.hardware?context:null,allowModeSync=customInstallModeSyncAllowed()&&context?.allowModeSync!==false;await clearFirmwareSelection();if(!archive || !entry) fail('Select an archive entry.');const expected=$('expected-sha').value.trim().toLowerCase();if(expected&&(!/^[a-f0-9]{64}$/.test(expected)||hash(archive)!==expected))fail('Release ZIP SHA-256 does not match.');const files=checkedZip(archive,{maxEntries:8192,maxExpanded:512<<20,select:name=>name===entry});$('expected-sha').value='';await loadFirmware(entry.split('/').pop(),files[entry],item,{allowModeSync}); });
 $('fetch-custom').onclick = () => operation(async () => { const allowModeSync=customInstallModeSyncAllowed();clearAutomaticSha();await clearFirmwareSelection();const url=httpsUrl($('custom-url').value),name=new URL(url).pathname.split('/').pop();$('download-firmware').href=url;const bytes=await downloadFirmwareBytes(url,name);await loadFirmware(name,bytes,null,{allowModeSync}); });
+$('show-older-builds').onchange=()=>operation(async()=>{
+  filterCatalog('version',{preserveArtifact:true});updateFirmwareSelectionSummary();
+});
 $('artifact').onchange = () => operation(async()=>{await clearFirmwareSelection();updateDownload();updateFirmwareSelectionSummary();controls();});
 $('radio-defaults-load').onclick=()=>operation(inspectSelectedRadioDefaults);
 $('radio-defaults-apply').onclick=()=>operation(applyRadioDefaults);

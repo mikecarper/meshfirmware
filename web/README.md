@@ -319,6 +319,14 @@ start collapsed. Required recovery, migration, connection or archive controls
 open automatically when needed; warnings, progress and final confirmations stay
 visible. The top navigation opens the corresponding tools without touching USB.
 
+Keymind Cascade RAK4631 and RAK3401 repeater choices prefer a published Unified
+build over the older storage-specific profiles from the same release and sensor
+policy. RAK4631 also folds the separate serial-port profiles into that default
+list. Full and reduced sensor builds remain separate, as does Ethernet.
+**Show older hardware-specific builds** exposes the original files. Exact
+installed targets, selected files and shared build links stay visible, including
+legacy UART1 wiring; filtering never changes a download or migrates a device.
+
 ### Shared selection links
 
 Choose any board and use **Copy selection link** beside the firmware-file links.
