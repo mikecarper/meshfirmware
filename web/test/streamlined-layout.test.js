@@ -88,7 +88,7 @@ test('collapsed optional tools use the same readable type as the console and com
   assert.ok(declarationsFor('.capability-grid').some(rule=>rule['grid-template-columns']==='minmax(0, 1fr)'),'Larger help content stacks on phones');
 });
 
-test('common settings follow the console with explicit initially disabled actions and private credential fields',()=>{
+test('common settings include initially disabled actions and private credential fields',()=>{
   const settings=get('quick-settings');assert.equal(settings.tag,'section');assert.equal(settings.attrs['aria-labelledby'],'quick-settings-title');
   assert.equal(get('quick-settings-status').attrs.role,'status');assert.equal(get('quick-settings-status').attrs['aria-live'],'polite');
   for(const id of ['quick-logging-on','quick-logging-off','quick-wifi-status','quick-wifi-on','quick-wifi-off','quick-wifi-ota-ap','quick-name-save','quick-password-save','quick-wifi-save']){
@@ -170,10 +170,11 @@ test('new users see no-folder guidance near the USB button and original-file gui
   assert.match(readme,/Normal ESP32\/nRF52 flashing needs no firmware folders/);
 });
 
-test('extras stay collapsed while the console is open directly after the main flashing area',()=>{
+test('settings follow the main flashing area, with the console open and extras collapsed',()=>{
   for(const id of ['advanced-options','backups','capabilities']){const node=get(id);assert.equal(node.tag,'details',id);assert.ok(!has(node,'open'),`#${id} must start collapsed`);}
   const workflow=nodes.find(node=>hasClass(node,'workflow')),console=get('console'),settings=get('quick-settings'),siblings=workflow.parent.children,index=siblings.indexOf(workflow);
-  assert.equal(console.tag,'details');assert.ok(has(console,'open'));assert.equal(siblings[index+1],console);assert.equal(siblings[index+2],settings);assert.ok(settings.start<get('advanced-options').start);
+  assert.equal(console.tag,'details');assert.ok(has(console,'open'));assert.equal(siblings[index+1],settings);assert.equal(siblings[index+2],console);assert.ok(settings.start<get('advanced-options').start);
+  assert.ok(inside(get('wadamesh-live-config'),settings),'Wadamesh radio settings belong in the common settings card');
   for(const id of ['connection-options','bootloader-options','nrf-actions','migration-options','verification-options','esp-retry-options','image-details']){
     const node=get(id);assert.equal(node.tag,'details',id);assert.ok(!has(node,'open'),id);assert.ok(inside(node,get('advanced-options')),`#${id} belongs under extras`);
   }

@@ -1473,6 +1473,7 @@ async function verifyWadameshProfile(){
   progress(1,'A Wadamesh-compatible application responded over USB.');
   notice('A Wadamesh-compatible application responded over USB. The exact TAK release, physical board, running slot and screen are not verified. Check the device screen.'+(profile.touch?' Choose radio settings below if desired.':' Radio configuration is not available for this unreviewed profile.'));
   log('Wadamesh-compatible application profile answered. No settings or firmware were changed.');
+  if(profile.touch)$('quick-settings').scrollIntoView?.({behavior:'smooth',block:'start'});
 }
 const wadameshConfigFields=['wadamesh-config-frequency','wadamesh-config-bandwidth','wadamesh-config-sf','wadamesh-config-cr','wadamesh-config-tx','wadamesh-config-media','wadamesh-config-cross','wadamesh-config-media-frequency','wadamesh-config-media-bandwidth','wadamesh-config-media-sf','wadamesh-config-media-cr','wadamesh-config-media-mode','wadamesh-config-media-preamble'];
 const wadameshPresetBandwidths=new Set([62500,125000,250000,500000]);

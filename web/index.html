@@ -94,6 +94,18 @@
       <progress id="progress" value="0" max="1" aria-label="Operation progress"></progress><p id="progress-label" class="hint" aria-live="polite">Waiting for an image and a selected USB port.</p>
       <p id="post-flash-advice" class="post-flash-advice" role="status" aria-live="polite" hidden></p>
       <p id="image-warning" class="hint" aria-live="polite"></p>
+      <details id="firmware-details"><summary>Firmware details</summary>
+        <p id="workflow-guidance" class="hint">Step 3 offers a backup by default. Select Skip backup to go straight to step 4; firmware and device checks run automatically before confirmation.<br>Step 4 asks once for supported expansion + final firmware, then completes both automatically. A new USB interface may still need step 1.</p>
+        <p id="install-mode-hint" class="hint" role="status" aria-live="polite">Update preserves settings. Erase &amp; new install deletes them.</p>
+        <p id="automatic-summary" class="selection-summary" aria-live="polite">Keymind Cascade is selected by default. Matching hardware and firmware are selected after connecting.</p>
+        <div class="selected-image"><span>Loaded image</span><strong id="image-name">No image loaded</strong></div>
+        <p id="catalog-detail" class="hint"></p>
+      </details>
+    </section>
+
+    <section id="quick-settings" class="card quick-settings" aria-labelledby="quick-settings-title">
+      <h2 id="quick-settings-title">Common settings</h2>
+      <p id="quick-settings-status" class="hint" role="status" aria-live="polite">Connect the radio’s application USB port to change settings.</p>
       <section id="wadamesh-live-config" class="radio-defaults" hidden aria-label="Configure Wadamesh radio">
         <h3>Configure Wadamesh radio</h3>
         <p class="hint">Choose only the settings you want to change. The radio settings may require a restart; the page does not restart the radio automatically. Check the settings for your region.</p>
@@ -125,21 +137,6 @@
         <button id="wadamesh-config-apply" type="button" class="secondary" data-lock>Review and apply settings</button>
         <p id="wadamesh-config-status" class="hint" role="status" aria-live="polite">No settings have been changed.</p>
       </section>
-      <details id="firmware-details"><summary>Firmware details</summary>
-        <p id="workflow-guidance" class="hint">Step 3 offers a backup by default. Select Skip backup to go straight to step 4; firmware and device checks run automatically before confirmation.<br>Step 4 asks once for supported expansion + final firmware, then completes both automatically. A new USB interface may still need step 1.</p>
-        <p id="install-mode-hint" class="hint" role="status" aria-live="polite">Update preserves settings. Erase &amp; new install deletes them.</p>
-        <p id="automatic-summary" class="selection-summary" aria-live="polite">Keymind Cascade is selected by default. Matching hardware and firmware are selected after connecting.</p>
-        <div class="selected-image"><span>Loaded image</span><strong id="image-name">No image loaded</strong></div>
-        <p id="catalog-detail" class="hint"></p>
-      </details>
-    </section>
-
-    <details class="card disclosure" id="console" open><summary>Serial console &amp; operation log</summary><div class="disclosure-body"><div class="card-title"><p>Commands and output stay in this tab.</p><button id="clear-log" class="text-link">Clear</button></div><pre id="log" aria-label="Serial and operation log">Mesh Firmware workbench ready.
-No hardware operations have been performed.</pre><div class="console-input"><label class="sr-only" for="command">Serial command</label><input id="command" placeholder="version" data-lock><button id="send-command" class="secondary" data-lock>Send command</button></div></div></details>
-
-    <section id="quick-settings" class="card quick-settings" aria-labelledby="quick-settings-title">
-      <h2 id="quick-settings-title">Common settings</h2>
-      <p id="quick-settings-status" class="hint" role="status" aria-live="polite">Connect the radio’s application USB port to change settings.</p>
       <div class="quick-settings-grid">
         <div class="quick-setting"><h3>USB logging</h3><div class="inline-actions"><button id="quick-logging-on" class="secondary" type="button" aria-label="Enable USB logging" data-lock disabled>On</button><button id="quick-logging-off" class="secondary" type="button" aria-label="Disable USB logging" data-lock disabled>Off</button></div><p class="hint">On may switch Companion USB from binary to text mode.</p></div>
         <div class="quick-setting"><h3>Wi-Fi</h3><div class="inline-actions"><button id="quick-wifi-status" class="secondary" type="button" aria-label="Read Wi-Fi status" data-lock disabled>Status</button><button id="quick-wifi-on" class="secondary" type="button" aria-label="Enable Wi-Fi" data-lock disabled>On</button><button id="quick-wifi-off" class="secondary" type="button" aria-label="Disable Wi-Fi" data-lock disabled>Off</button><button id="quick-wifi-ota-ap" class="secondary" type="button" data-lock disabled>Start update hotspot</button></div><p class="hint">Changes may restart Wi-Fi or need a reboot.</p></div>
@@ -149,6 +146,9 @@ No hardware operations have been performed.</pre><div class="console-input"><lab
       </div>
       <p class="hint">These buttons keep passwords out of the console.</p>
     </section>
+
+    <details class="card disclosure" id="console" open><summary>Serial console &amp; operation log</summary><div class="disclosure-body"><div class="card-title"><p>Commands and output stay in this tab.</p><button id="clear-log" class="text-link">Clear</button></div><pre id="log" aria-label="Serial and operation log">Mesh Firmware workbench ready.
+No hardware operations have been performed.</pre><div class="console-input"><label class="sr-only" for="command">Serial command</label><input id="command" placeholder="version" data-lock><button id="send-command" class="secondary" data-lock>Send command</button></div></div></details>
 
     <details id="advanced-options" class="card disclosure">
       <summary>Advanced options &amp; troubleshooting</summary>

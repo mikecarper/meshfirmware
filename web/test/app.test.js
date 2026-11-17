@@ -5161,11 +5161,22 @@ test('standalone firmware does not queue MeshCore USB settings or claim MeshCore
   assert.match(ui.elements.get('notice').textContent,/not verified.*No MeshCore startup check or settings commands/s);assert.deepEqual(ui.calls,[]);
 });
 
+test('Wadamesh radio settings and common settings share one card with unique control IDs',()=>{
+  assert.equal(new Set(ids).size,ids.length,'control IDs must remain unique');
+  const sections=[];let found=false;
+  for(const token of html.matchAll(/<section\b([^>]*)>|<\/section\s*>/gi)){
+    if(token[0].startsWith('</'))sections.pop();
+    else {const id=/\bid="([^"]+)"/.exec(token[1])?.[1]||'';if(id==='wadamesh-live-config'){assert.ok(sections.includes('quick-settings'));found=true;}sections.push(id);}
+  }
+  assert.equal(found,true,'the Wadamesh radio form must be in Common settings');
+  assert.ok(html.indexOf('id="quick-settings"')<html.indexOf('id="console"'),'settings follow the flasher before the console');
+});
+
 function wadameshSelf(key=1){const self=new Uint8Array(58);self.set([5,1,20,22]);self.fill(key,4,36);return self;}
 test('Wadamesh Step 5 checks the selected application even without a prior verification record',async()=>{
   const ui=workbench();await Promise.resolve();ui.elements.get('provider').value='Wadamesh TAK';ui.context.port=ui.port;
   ui.evaluate('state.port=port;state.item={provider:"Wadamesh TAK"};state.finishedFirmware={sha256:"a".repeat(64),provider:"Wadamesh TAK",verified:false};controls();');
-  assert.equal(ui.elements.get('verify-app').disabled,false);
+  assert.equal(ui.elements.get('verify-app').disabled,false);ui.elements.get('quick-settings').scrollIntoView=()=>assert.fail('Unreviewed profiles must not scroll to configuration');
   ui.context.SerialLink=class{constructor(port){assert.equal(port,ui.port);}async open(baud,options){assert.equal(baud,115200);assert.equal(options.application,true);ui.calls.push('open');}async close(){ui.calls.push('close');}};
   ui.context.MeshCore=class{async self(){ui.calls.push('self');return wadameshSelf();}async info(){ui.calls.push('info');return Uint8Array.from([13,12,232,40]);}async cli(command){ui.calls.push(command);return 'Meshcomod v2.4';}};
   await ui.evaluate('verifyApplication();');
@@ -5186,10 +5197,11 @@ test('Wadamesh Step 5 rejects unrecognized profiles and changed ports without cl
 
 test('Wadamesh Step 5 recognizes the reviewed touch profile using ver when version is unsupported',async()=>{
   const ui=workbench();await Promise.resolve();ui.elements.get('provider').value='Wadamesh TAK';ui.context.port=ui.port;ui.evaluate('state.port=port;state.item={provider:"Wadamesh TAK"};');
+  const scroll=[];ui.elements.get('quick-settings').scrollIntoView=options=>scroll.push(options);
   ui.context.SerialLink=class{async open(){ui.calls.push('open');}async close(){ui.calls.push('close');}};
   ui.context.MeshCore=class{async self(){ui.calls.push('self');return wadameshSelf();}async info(){ui.calls.push('info');const info=new Uint8Array(82);info.set([13,27,232,40]);info.set(new TextEncoder().encode('v1.18.0.1-touch'),60);return info;}async cli(command){ui.calls.push(command);return command==='version'?'Unknown command':'v1.18.0.1-touch (Build: Nov 17 2026)';}};
   await ui.evaluate('verifyApplication();');assert.deepEqual(ui.calls,['open','self','info','version','ver','close']);
-  assert.match(ui.elements.get('notice').textContent,/Wadamesh-compatible application responded/);assert.equal(ui.evaluate('state.finishedFirmware'),null);
+  assert.match(ui.elements.get('notice').textContent,/Wadamesh-compatible application responded/);assert.equal(ui.evaluate('state.finishedFirmware'),null);assert.equal(scroll.length,1);assert.equal(scroll[0].behavior,'smooth');assert.equal(scroll[0].block,'start');
 });
 
 test('Wadamesh Step 5 stays disabled during pending recovery and does not touch the radio',async()=>{
