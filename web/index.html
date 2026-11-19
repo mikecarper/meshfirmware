@@ -96,6 +96,21 @@
       <progress id="progress" value="0" max="1" aria-label="Operation progress"></progress><p id="progress-label" class="hint" aria-live="polite">Waiting for an image and a selected USB port.</p>
       <p id="post-flash-advice" class="post-flash-advice" role="status" aria-live="polite" hidden></p>
       <p id="image-warning" class="hint" aria-live="polite"></p>
+      <section id="nrf-dfu-help" class="nrf-dfu-help" aria-labelledby="nrf-dfu-help-title" hidden>
+        <h3 id="nrf-dfu-help-title">DFU stopped: what to do next</h3>
+        <p id="nrf-dfu-help-detail" role="status" aria-live="polite"></p>
+        <p id="nrf-dfu-help-settle" role="status" aria-live="polite" hidden></p>
+        <ol>
+          <li>Keep power and USB connected. The update may be incomplete; neither the old nor the new firmware is confirmed to start. The flasher sent no further reset or flash after the error; the radio may restart on its own.</li>
+          <li>Close other serial terminals and apps using the radio.</li>
+          <li id="nrf-dfu-help-cable">After the transfer has stopped, check the USB connection. If needed, try a known data cable connected directly to the computer.</li>
+          <li id="nrf-dfu-help-reset">If this is a standard RAK4631 with the Adafruit-compatible bootloader, double-press its RESET button to enter bootloader mode. A RAK4631-R or a different installed bootloader may need different steps.</li>
+          <li id="nrf-dfu-help-retry">Choose the same physical radio's DFU USB port. Keep or reselect the exact validated ZIP for the interrupted operation and your board, inspect it again, and review the operation before choosing to retry. This error alone does not call for an erase or bootloader replacement.</li>
+        </ol>
+        <p id="nrf-dfu-help-assess" hidden>Identify the exact interrupted operation and check the radio's state before choosing any reset or retry. For a bootloader or SoftDevice change, do not reset or retry until its state has been assessed; ask for help if unsure.</p>
+        <p>If an erase or recovery step was already pending, follow the retained recovery instructions for that step. An acknowledged packet does not verify the flash or prove startup.</p>
+        <button id="nrf-dfu-help-dismiss" type="button" class="secondary">Dismiss guidance</button>
+      </section>
       <details id="firmware-details"><summary>Firmware details</summary>
         <p id="workflow-guidance" class="hint">Step 3 offers a backup by default. Select Skip backup to go straight to step 4; firmware and device checks run automatically before confirmation.<br>Step 4 asks once for supported expansion + final firmware, then completes both automatically. A new USB interface may still need step 1.</p>
         <p id="install-mode-hint" class="hint" role="status" aria-live="polite">Update preserves settings. Erase &amp; new install deletes them.</p>

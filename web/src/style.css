@@ -74,6 +74,11 @@ h1 { font-size: 28px; line-height: 1.15; letter-spacing: -.9px; font-weight: 700
 
 .notice { padding: 10px 14px; border: 1px solid #cce0df; background: #eaf4f2; color: #276b64; font-size: 12px; border-radius: 7px; line-height: 1.55; margin: 0 0 12px; overflow-wrap: anywhere; }
 .notice.error { background: #fff0ed; border-color: #efcdc4; color: #9e3c2e; }
+.nrf-dfu-help { margin: 16px 0; padding: 16px; border: 1px solid #e6c48b; border-radius: 8px; background: #fff8eb; color: #483315; }
+.nrf-dfu-help h3 { margin: 0 0 8px; }
+.nrf-dfu-help p, .nrf-dfu-help li { line-height: 1.55; }
+.nrf-dfu-help ol { padding-left: 22px; }
+.nrf-dfu-help li { margin: 8px 0; }
 .notice a { color: inherit; text-decoration: underline; font-weight: 600; }
 .detection-status { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-start; gap: 8px 16px; padding: 12px 14px; margin: 0 0 12px; border: 1px solid #cce0df; border-radius: 7px; background: #eaf4f2; color: #276b64; font-size: 16px; overflow-wrap: anywhere; }
 #detection-timer { font-size: 24px; font-variant-numeric: tabular-nums; line-height: 1.2; white-space: nowrap; }

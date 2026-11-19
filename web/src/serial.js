@@ -68,10 +68,33 @@ export async function flashNrf(link, pkg, onProgress, {delay = sleep, now = Date
   if(!Number.isInteger(ackTimeoutMs)||ackTimeoutMs<1||ackTimeoutMs>60000)fail('DFU acknowledgement timeout must be 1–60000 ms.');
   if(activationCheck!==null&&typeof activationCheck!=='function')fail('DFU activation check must be a function or null.');
   if (hash(pkg.payload) !== pkg.payloadHash || hash(pkg.init) !== pkg.initHash || nrfMetadataHash(pkg)!==pkg.metadataHash) fail('DFU bytes or component metadata changed after validation.');
-  let sequence = 0, receive = [];
+  // A transport ACK confirms receipt of a packet, not flash validity or app
+  // startup. Track accepted payload separately so timeout guidance can say
+  // where the transfer stopped without claiming that the image is complete.
+  let sequence = 0, receive = [], acknowledgedBytes = 0;
   await link.port.setSignals({ dataTerminalReady: true, requestToSend: false });
   link.buffer.length = 0;
-  async function send(payload) {
+  function failureDetail(stage){
+    const kind=['application','bootloader','softdevice','softdevice_bootloader'].includes(pkg.kind)?pkg.kind:'unknown';
+    return Object.freeze({stage,acknowledgedBytes,totalBytes:pkg.payload.length,sequence,kind,erase:pkg.erase===true,activationWaitMs:activationWait});
+  }
+  function uncertainFailure(error,stage){
+    if(error?.code==='NRF_DFU_ACK_TIMEOUT'&&error.nrfDfu?.stage===stage)return error;
+    const detail=failureDetail(stage);
+    if(error!==null&&(typeof error==='object'||typeof error==='function')){
+      try{
+        Object.defineProperty(error,'nrfDfu',{value:detail,enumerable:true,configurable:true});
+        Object.defineProperty(error,'nrfDfuUncertain',{value:true,enumerable:true,configurable:true});
+        if(error.nrfDfu===detail&&error.nrfDfuUncertain===true)return error;
+      }catch{/* Non-extensible errors need a wrapper. */}
+    }
+    const message=typeof error?.message==='string'?error.message:String(error);
+    const wrapped=new Error(message,{cause:error});
+    if(typeof error?.name==='string')wrapped.name=error.name;
+    if(error!=null&&'code' in Object(error))Object.defineProperty(wrapped,'code',{value:error.code,enumerable:true,configurable:true});
+    wrapped.nrfDfu=detail;wrapped.nrfDfuUncertain=true;return wrapped;
+  }
+  async function send(payload,stage) {
     sequence = (sequence + 1) & 7; const packet = hciPacket(payload, sequence);
     for (let attempt = 0; attempt < 3; attempt++) {
       // Match the native CLI's bounded ten-second allowance for old
@@ -88,7 +111,10 @@ export async function flashNrf(link, pkg, onProgress, {delay = sleep, now = Date
         }
       }
     }
-    fail(`DFU did not acknowledge packet ${sequence}. No reset will be attempted.`);
+    const error=new Error(`DFU did not acknowledge packet ${sequence}. No reset will be attempted.`);
+    error.code='NRF_DFU_ACK_TIMEOUT';
+    error.nrfDfu=failureDetail(stage);
+    throw error;
   }
   async function waitWithProgress(milliseconds,fraction,phase){
     // Unknown bootloaders/components retain the full conservative wait.
@@ -98,16 +124,33 @@ export async function flashNrf(link, pkg, onProgress, {delay = sleep, now = Date
       const interval=Math.min(1000,remaining);await delay(interval);remaining-=interval;
     }
   }
-  const pages = Math.ceil(pkg.payload.length / 4096) + 1, eraseWait = Math.min(30000,Math.max(500,Math.ceil(pages * 89.7)));
-  onProgress(0,'Preparing DFU'); await send(words(3,pkg.mode,pkg.sdSize,pkg.blSize,pkg.appSize)); await waitWithProgress(eraseWait,0,'Preparing DFU');
-  await send(Uint8Array.from([...words(1),...pkg.init,0,0]));
+  const pages = Math.ceil(pkg.payload.length / 4096) + 1, eraseWait = Math.min(30000,Math.max(500,Math.ceil(pages * 89.7))), activationWait=eraseWait+Math.ceil(pages*204.8);
+  onProgress(0,'Preparing DFU');
+  try{await send(words(3,pkg.mode,pkg.sdSize,pkg.blSize,pkg.appSize),'start');}
+  catch(error){
+    // START may have been accepted and triggered an erase even if the host
+    // could not write/read or parse its acknowledgement. Keep the connection
+    // stable for the full preparation allowance, then report the failure.
+    await waitWithProgress(eraseWait,0,'Preparation unconfirmed; waiting before closing USB');
+    throw uncertainFailure(error,'start');
+  }
+  await waitWithProgress(eraseWait,0,'Preparing DFU');
+  await send(Uint8Array.from([...words(1),...pkg.init,0,0]),'init');
   await delay(205);
   for (let offset = 0; offset < pkg.payload.length; offset += 512) {
-    const end = Math.min(offset + 512,pkg.payload.length); await send(Uint8Array.from([...words(4),...pkg.payload.subarray(offset,end)]));
+    const end = Math.min(offset + 512,pkg.payload.length); await send(Uint8Array.from([...words(4),...pkg.payload.subarray(offset,end)]),'data'); acknowledgedBytes=end;
     onProgress(end / pkg.payload.length * .95,'Writing DFU'); if ((offset / 512 + 1) % 8 === 0) await delay(205);
   }
-  await delay(205); await send(words(5));
-  const activationWait=eraseWait+Math.ceil(pages*204.8);
+  await delay(205);
+  try{await send(words(5),'activate');}
+  catch(error){
+    // STOP might have reached the bootloader even if the serial write, read,
+    // acknowledgement parse, or timeout failed. Keep the link and power
+    // stable for the full conservative activation interval; the outcome is
+    // still unknown and must not be auto-retried.
+    await waitWithProgress(activationWait,.95,'Activation unconfirmed; waiting before closing USB');
+    throw uncertainFailure(error,'activate');
+  }
   const applicationOnly=pkg.kind==='application'&&pkg.mode===4&&!pkg.erase&&!pkg.expert&&pkg.sdSize===0&&pkg.blSize===0&&pkg.appSize===pkg.payload.length&&!/(?:with[-_]bootloader|bootloader[-_]updater|^R_)/i.test(pkg.name||'');
   if(activationCheck&&applicationOnly){
     const started=now();let ready=false;

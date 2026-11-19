@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {chooseConnection,parseUsbMode} from '../src/connection-choice.js';
+import {chooseConnection,parseUsbMode,captureNrfDfuEvidence,nrfDfuEvidenceCurrent} from '../src/connection-choice.js';
+import {zipSync} from 'fflate';
+import {crc16,nrfPackage} from '../src/firmware.js';
 const usb=(usbVendorId,usbProductId)=>({usbVendorId,usbProductId});
 
 test('USB mode parser accepts only a complete canonical bounded reply',()=>{
@@ -86,4 +88,40 @@ test('XIAO S3 application endpoint can use software CDC but neighboring Seeed ID
 test('invalid USB inputs and unrelated descriptors leave the method manual',()=>{
   for(const usbInfo of [null,{},usb('303a',2),usb(0x303a,-1),usb(0x10000,2)])assert.equal(chooseConnection({usbInfo}).mode,null);
   assert.equal(chooseConnection({usbInfo:usb(0x1234,0x5678),usbDescription:'TinyUSB Serial'}).mode,null);
+});
+
+function nrfEvidencePackage(){
+  const payload=new Uint8Array(1300),init=new Uint8Array(12),view=new DataView(init.buffer);view.setUint16(0,0x52,true);view.setUint16(10,crc16(payload),true);
+  return nrfPackage('example.zip',zipSync({'manifest.json':new TextEncoder().encode(JSON.stringify({manifest:{dfu_version:.5,application:{bin_file:'app.bin',dat_file:'app.dat'}}})),'app.bin':payload,'app.dat':init}));
+}
+function ackTimeout(pkg,{stage='init',acknowledgedBytes=0,sequence=2,...overrides}={}){
+  return {code:'NRF_DFU_ACK_TIMEOUT',nrfDfu:Object.freeze({stage,acknowledgedBytes,totalBytes:pkg.payload.length,sequence,kind:pkg.kind,erase:pkg.erase===true,activationWaitMs:910,...overrides})};
+}
+test('only a prior acknowledged nRF packet provides a same-session DFU connection hint',()=>{
+  const pkg=nrfEvidencePackage(),info=usb(0x1234,0x5678),port={getInfo:()=>info},generation=4;
+  for(const error of [ackTimeout(pkg),ackTimeout(pkg,{stage:'data',sequence:3}),ackTimeout(pkg,{stage:'data',acknowledgedBytes:512,sequence:4})]){
+    const evidence=captureNrfDfuEvidence({error,port,generation,pkg});assert.ok(evidence);assert.ok(Object.isFrozen(evidence));
+    assert.equal(nrfDfuEvidenceCurrent({evidence,port,generation,pkg}),true);
+    const choice=chooseConnection({usbInfo:info,nrfDfuEvidence:evidence,port,generation,pkg});
+    assert.equal(choice.mode,'nrf52');assert.equal(choice.alreadyBootloader,true);assert.equal(choice.source,'dfu-ack');assert.match(choice.reason,/not physical-board proof or permission to retry/);
+    const conflict=chooseConnection({usbInfo:info,device:{architecture:'esp32'},nrfDfuEvidence:evidence,port,generation,pkg});assert.equal(conflict.source,'conflict');assert.equal(conflict.mode,null);
+  }
+});
+test('missing ACK, inconsistent packet metadata or a proposed package alone cannot manufacture evidence',()=>{
+  const pkg=nrfEvidencePackage(),port={getInfo:()=>usb(0x1234,0x5678)},generation=4;
+  for(const error of [null,{},ackTimeout(pkg,{stage:'start',sequence:1}),ackTimeout(pkg,{stage:'activate',sequence:6,acknowledgedBytes:1300}),ackTimeout(pkg,{stage:'data',sequence:2}),ackTimeout(pkg,{totalBytes:42}),ackTimeout(pkg,{kind:'bootloader'}),{code:'NRF_DFU_ACK_TIMEOUT',nrfDfu:{stage:'init',acknowledgedBytes:0,totalBytes:1300,sequence:2,kind:'application',erase:false}}])
+    assert.equal(captureNrfDfuEvidence({error,port,generation,pkg}),null);
+  assert.equal(chooseConnection({usbInfo:port.getInfo(),port,generation,pkg,packageArchitecture:'nrf52'}).mode,null);
+  assert.equal(nrfDfuEvidenceCurrent({evidence:{},port,generation,pkg}),false);
+});
+test('ACK evidence cannot follow a port, selection generation, package, USB identity or image mutation',()=>{
+  const pkg=nrfEvidencePackage(),info=usb(0x1234,0x5678),port={getInfo:()=>info},generation=4,evidence=captureNrfDfuEvidence({error:ackTimeout(pkg),port,generation,pkg});
+  const valid={evidence,port,generation,pkg};assert.equal(nrfDfuEvidenceCurrent(valid),true);
+  for(const changes of [{port:{getInfo:()=>info}},{generation:5},{pkg:{...pkg}},{pkg:null}])assert.equal(nrfDfuEvidenceCurrent({...valid,...changes}),false);
+  assert.equal(chooseConnection({usbInfo:usb(0x1234,0x9999),nrfDfuEvidence:evidence,port,generation,pkg}).mode,null);
+  info.usbProductId=0x9999;assert.equal(nrfDfuEvidenceCurrent(valid),false);info.usbProductId=0x5678;
+  pkg.payload[0]^=1;assert.equal(nrfDfuEvidenceCurrent(valid),false);pkg.payload[0]^=1;
+  pkg.init[0]^=1;assert.equal(nrfDfuEvidenceCurrent(valid),false);pkg.init[0]^=1;
+  const digest=pkg.sha256;pkg.sha256='a'.repeat(64);assert.equal(nrfDfuEvidenceCurrent(valid),false);pkg.sha256=digest;
+  pkg.kind='bootloader';assert.equal(nrfDfuEvidenceCurrent(valid),false);
 });

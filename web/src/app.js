@@ -24,7 +24,7 @@ import { recoveryPackage } from './bootloader-recovery.js';
 import { detectBoard, detectRecoveryProfile } from './board-detection.js';
 import { chooseFirmware, defaultFirmwareProvider, firmwareVersionWarning, matchesCatalogInstallMode, isRunningWadameshTak } from './automatic.js';
 import { rememberPagerVariant, recallPagerVariant, forgetPagerVariant } from './remembered-pager.js';
-import { chooseConnection, parseUsbMode } from './connection-choice.js';
+import { chooseConnection, parseUsbMode, captureNrfDfuEvidence, nrfDfuEvidenceCurrent } from './connection-choice.js';
 import { lookupUsbConnectionMap } from './usb-connection-map.js';
 import usbConnectionMap from './data/usb-connection-map.json';
 import { createNextStepScroller } from './next-step-scroll.js';
@@ -74,6 +74,9 @@ state.backupApplicationRequest=null;
 // Resume preparation only, never a write, after this page's own nRF52 reset.
 // Keep the exact image, install mode and pre-reset backup decision in memory.
 state.nrfPrepareResume=null;
+// In-memory proof/confirmation applies only to one selected port, generation,
+// and exact package. It never authorizes a firmware write or another reset.
+state.nrfManualDfu=null;state.nrfDfuEvidence=null;state.nrfLastAttempt=null;
 state.connectionTrial=null;
 state.restorePreview=null;
 state.rippleBackup=null;
@@ -93,6 +96,7 @@ state.quickSettingsMessage=null;
 state.radioDefaults=null;
 state.postFlashSettingsApproval=null;state.postFlashSettingsResult=null;
 state.wadameshConfigTarget=null;
+state.nrfDfuHelpVisible=false;
 state.wadameshManaged={target:null,channels:null,contacts:null,autoadd:null,hashtag:null};
 state.radioPresets=null;
 state.radioPresetsWarning=null;
@@ -483,6 +487,7 @@ function updateStepGuidance(buildChoiceNeeded=false){
   let message;
   if(state.migrationApproval)message=state.busy?'Completing expansion and firmware automatically. Keep USB connected.':'Waiting for the same radio. Use step 1 only if it does not reconnect.';
   else if(state.busy)message='Keep USB connected. Follow the current prompt.';
+  else if(state.nrfDfuHelpVisible&&!$('nrf-dfu-help').hidden)message='DFU stopped. Review the recovery guidance before continuing.';
   else if(canStartNewRadio())message='Next: Flash a new device, or optionally verify the previous radio’s startup.';
   else if(state.verification)message=state.port?'Optional step 5: verify startup on the same radio.':'Optional verification: choose the same radio’s application USB port.';
   else if(state.plan?.written)message='Transfer finished. Use step 5 to check startup.';
@@ -603,6 +608,7 @@ function setNextAction(element=null){
 }
 function nextFlasherControl(){
   if(state.busy)return null;
+  if(state.nrfDfuHelpVisible&&!$('nrf-dfu-help').hidden)return null;
   if(state.backupApplicationRequest)return 'select-backup-application';
   if(state.nrfPrepareResume&&(!state.port||!dfuIds.has(portId(state.port))))return 'select-port';
   if(state.migrationApproval)return !state.port&&['waiting-rom','waiting-application'].includes(state.migrationApproval.phase)?'select-port':null;
@@ -628,7 +634,7 @@ function nextFlasherControl(){
   if(state.plan)return 'flash';
   if(state.finishedFirmware&&state.finishedFirmware.sha256===state.pkg?.sha256)return null;
   if(state.pkg?.expert&&!/^(?:0x[0-9a-f]+|[0-9]+)$/i.test($('expert-offset').value.trim()))return 'expert-offset';
-  if(state.pkg?.architecture!=='uf2'&&$('transport-mode').value==='auto'&&!state.connection?.mode&&!canTryConnectionFallback())return 'transport-mode';
+  if(state.pkg?.architecture!=='uf2'&&$('transport-mode').value==='auto'&&!state.connection?.mode&&!canTryConnectionFallback()&&!selectedNrfFirmware())return 'transport-mode';
   return directFlashSelected()?'flash':'prepare';
 }
 function updateNextAction(){
@@ -737,6 +743,26 @@ function controls() {
   syncFlashStop();
 }
 async function closeEsp() { const esp=state.esp;state.esp=null;state.plan=null;if(esp)await esp.close(); }
+function nrfDfuFailureDetail(error){
+  const message=typeof error?.message==='string'?error.message:'';
+  const info=error?.nrfDfu,ackTimeout=error?.code==='NRF_DFU_ACK_TIMEOUT'||(state.pkg?.architecture==='nrf52'&&/\bDFU did not (?:acknowledge|ack) (?:the )?packet\b/i.test(message));
+  const uncertain=error?.nrfDfuUncertain===true&&!!info&&Object.isFrozen(info)&&['start','activate'].includes(info.stage);
+  if(!ackTimeout&&!uncertain)return null;
+  const stages={start:'starting the transfer',init:'sending the firmware metadata',data:'sending firmware data',activate:'requesting activation'};
+  const knownStage=Object.hasOwn(stages,info?.stage),stage=knownStage?` while ${stages[info.stage]}`:'';
+  const count=Number.isSafeInteger(info?.acknowledgedBytes)&&Number.isSafeInteger(info?.totalBytes)&&info.acknowledgedBytes>=0&&info.totalBytes>0&&info.acknowledgedBytes<=info.totalBytes?` The transport acknowledged ${info.acknowledgedBytes} of ${info.totalBytes} firmware bytes; this is not flash verification.`:'';
+  // START may have begun a single-bank erase and STOP may have begun applying
+  // the image even when the acknowledgement was lost. Allow the full wait;
+  // when stage/size is unknown, use three minutes. Waiting proves nothing.
+  const needsSettling=!knownStage||info.stage==='start'||info.stage==='activate';
+  const pages=Number.isSafeInteger(info?.totalBytes)&&info.totalBytes>0&&info.totalBytes<=900*1024?Math.ceil(info.totalBytes/4096)+1:null;
+  const activationMs=pages===null?180000:Math.min(30000,Math.max(500,Math.ceil(pages*89.7)))+Math.ceil(pages*204.8);
+  const settleSeconds=needsSettling?Math.ceil(Math.max(180000,activationMs)/1000):0;
+  const pkg=state.pkg,ordinaryApp=pkg?.architecture==='nrf52'&&pkg.kind==='application'&&pkg.mode===4&&!pkg.erase&&!pkg.destructive&&!pkg.expert&&pkg.sdSize===0&&pkg.blSize===0&&pkg.appSize===pkg.payload?.length&&!/(?:with[-_]bootloader|bootloader[-_]updater|^R_)/i.test(pkg.name||'')&&!state.recovery;
+  const text=ackTimeout?`No expected DFU acknowledgement was received${stage}. The cause is not yet known.${count}`:`The DFU transfer stopped${stage}.${message?' Error: '+message:''}${count}`;
+  return {text,settleSeconds,canGuideRetry:!needsSettling&&ordinaryApp};
+}
+$('nrf-dfu-help-dismiss').onclick=()=>{state.nrfDfuHelpVisible=false;$('nrf-dfu-help').hidden=true;controls();};
 async function operation(callback,{scrollNextStep=true}={}) {
   if (state.busy) return;
   const previousScrolling=nextStepScrolling;nextStepScrolling=previousScrolling&&scrollNextStep;
@@ -744,6 +770,14 @@ async function operation(callback,{scrollNextStep=true}={}) {
   let outcome;
   try { outcome=await callback(); }
   catch (error) {
+    const nrfDfuDetail=nrfDfuFailureDetail(error);
+    if(nrfDfuDetail){
+      $('nrf-dfu-help-detail').textContent=nrfDfuDetail.text;state.nrfDfuHelpVisible=true;$('nrf-dfu-help').hidden=false;
+      $('nrf-dfu-help-settle').hidden=!nrfDfuDetail.settleSeconds;
+      $('nrf-dfu-help-settle').textContent=nrfDfuDetail.settleSeconds?`The radio may still be preparing or applying firmware. Keep power and USB connected; do not reset or unplug it. Wait at least ${nrfDfuDetail.settleSeconds} seconds from this error before assessing its state. Waiting is a minimum, not proof that it has finished.`:'';
+      for(const id of ['cable','reset','retry'])$('nrf-dfu-help-'+id).hidden=!nrfDfuDetail.canGuideRetry;
+      $('nrf-dfu-help-assess').hidden=nrfDfuDetail.canGuideRetry;
+    }
     state.nrfPrepareResume=null;
     revokeMigrationAutomation('Automatic migration approval revoked after an error. No automatic write or reset retry is permitted.');
     let retry=null;if(error.recovery)try{retry=validateEspWriteRecovery(error.recovery);}catch{}
@@ -754,6 +788,7 @@ async function operation(callback,{scrollNextStep=true}={}) {
       const fresh=retry.attempts>=3||(retry.merged&&!retry.eraseComplete);
       notice(`${error.message} `+(fresh?'Chunked retry cannot continue: use Discard ESP retry record, then explicitly inspect and authorize a fresh write/wipe. Any partition migration remains pending.':"Select the SAME physical radio's waiting ROM port without resetting, inspect the original image, then acknowledge a bounded chunked retry."),true);
     }else notice(error.message || String(error),!error.backupApplicationRequired&&!(error.code==='APPLICATION_UNIDENTIFIED'&&error.usbSerialAvailable===true));
+    if(nrfDfuDetail)$('nrf-dfu-help').scrollIntoView?.({behavior:'smooth',block:'start'});
     log(`${error.code==='APPLICATION_UNIDENTIFIED'&&error.usbSerialAvailable===true?'USB open; application unidentified':error.backupApplicationRequired?'Backup waiting':'Stopped'}: ${error.message || error}`);
     if(error.rippleRestartDetail)log('Ripple USB restart: '+error.rippleRestartDetail);
     if(state.flashResult&&$('flash-progress-dialog').open){
@@ -778,7 +813,7 @@ async function linkOperation(callback) {
   if(state.recovery) fail('Finish the pending nRF52 recovery before opening application commands.');
   if(state.espRecovery) fail('An ESP32 write retry is pending. Re-select the same ROM radio and finish or explicitly discard its retry record before application commands.');
   if (!state.port) fail('Choose a USB port first.');
-  if (dfuIds.has(portId(state.port)) || $('already-bootloader').checked) fail('Backup/application commands cannot run in DFU/ROM. Select the application port and clear Already in bootloader.');
+  if (dfuIds.has(portId(state.port)) || $('already-bootloader').checked || currentManualNrfDfu() || currentAcknowledgedNrfDfu()) fail('Backup/application commands cannot run on a selected DFU port. Choose the running application port instead.');
   const port=state.port,generation=state.generation,assertCurrent=()=>{if(state.port!==port||state.generation!==generation)fail('Selected port changed or disconnected while opening the application. Re-select and detect again.');};
   await closeEsp();assertCurrent();const link = new SerialLink(port);
   try { await link.open(115200,{application:true});assertCurrent();return await callback(link); } finally { await link.close(); }
@@ -790,6 +825,7 @@ function confirmationActionLabel(action,pkg=null,plan=null) {
   }
   const labels={
     'SAME DEVICE':'Yes, this is the same radio',
+    'USE NRF DFU PORT':'Use this DFU port',
     'FLASH':'Flash firmware',
     'WIPE WITHOUT BACKUP':'Erase & flash without backup',
     'CONTINUE WITHOUT BACKUP':'Continue without backup',
@@ -1047,9 +1083,23 @@ function resetAutomaticBoardSelection(message) {
   if(provider&&[...$('provider').options].some(o=>o.value===provider)){$('provider').value=provider;filterCatalog('provider');}
   $('automatic-summary').textContent=message+(manualFile?` Manual file ${manualFile} remains loaded; review it explicitly against this radio.`:'');
 }
+// A catalog entry or inspected ZIP selects only the wire protocol. It does
+// not identify the USB port, confirm its bootloader, or authorize a reset.
+function selectedNrfFirmware(){
+  if(state.pkg)return state.pkg.architecture==='nrf52';
+  const value=$('artifact').value;
+  return /^(?:0|[1-9]\d*)$/.test(value)&&state.items[Number(value)]?.architecture==='nrf52';
+}
+function currentManualNrfDfu(){
+  const evidence=state.nrfManualDfu;
+  return !!evidence&&!!state.port&&state.port===evidence.port&&state.generation===evidence.generation&&state.pkg===evidence.pkg&&state.pkg?.sha256===evidence.sha256&&state.installMode===evidence.installMode&&selectedHardware()===evidence.hardware;
+}
+function currentNrfLastAttempt(){const attempt=state.nrfLastAttempt;return !!attempt&&state.port===attempt.port&&state.generation===attempt.generation&&state.pkg===attempt.pkg&&state.pkg?.sha256===attempt.sha256;}
+function currentAcknowledgedNrfDfu(){return (!state.device?.architecture||state.device.architecture==='nrf52')&&nrfDfuEvidenceCurrent({evidence:state.nrfDfuEvidence,port:state.port,generation:state.generation,pkg:state.pkg});}
 function updateConnectionChoice(){
-  let result=chooseConnection({usbInfo:state.port?.getInfo()||{},device:state.device,alreadyBootloader:$('already-bootloader').checked,handoff:state.handoff,packageArchitecture:state.pkg?.architecture});
-  if($('transport-mode').value==='auto'&&state.connectionTrial?.failed&&state.connectionTrial.port===state.port&&state.connectionTrial.generation===state.generation&&!state.handoff&&!$('already-bootloader').checked)result={mode:null,alreadyBootloader:false,source:'trial-failed',reason:'Automatic connection verification stopped. Choose the bootloader connection manually; no further reset will be tried automatically.'};
+  let result=chooseConnection({usbInfo:state.port?.getInfo()||{},device:state.device,alreadyBootloader:$('already-bootloader').checked||currentManualNrfDfu(),handoff:state.handoff,packageArchitecture:state.pkg?.architecture,nrfDfuEvidence:state.nrfDfuEvidence,port:state.port,generation:state.generation,pkg:state.pkg});
+  if(result.mode!=='nrf52'&&result.source!=='conflict'&&state.port&&selectedNrfFirmware()&&(!state.device?.architecture||state.device.architecture==='nrf52'))result={mode:'nrf52',alreadyBootloader:false,source:'selected-nrf-firmware',reason:'The selected firmware uses nRF52 serial DFU. The USB port mode and physical board are not yet verified.'};
+  if($('transport-mode').value==='auto'&&!selectedNrfFirmware()&&state.connectionTrial?.failed&&state.connectionTrial.port===state.port&&state.connectionTrial.generation===state.generation&&!state.handoff&&!$('already-bootloader').checked)result={mode:null,alreadyBootloader:false,source:'trial-failed',reason:'Automatic connection verification stopped. Choose the bootloader connection manually; no further reset will be tried automatically.'};
   state.connection=result;$('connection-summary').textContent=$('transport-mode').value==='auto'?canTryConnectionFallback()?`Automatic connection: ${result.mode?'provisional '+result.mode+' hint; ':''}test the qualified USB methods during preparation, after backup. A real ROM response is required; the map alone is not connection verification. No firmware is written during these connection checks.`:`Automatic connection: ${result.mode||'needs a manual choice'}. ${result.reason}`:'Manual connection override selected.';
   return result;
 }
@@ -1141,7 +1191,7 @@ function backupApplicationRequired(){
 }
 async function readBackupApplicationPort(port,{expectedPublicKey=null}={}){
   requireBackupReconnectAllowed();
-  if(!port||dfuIds.has(portId(port)))fail('That is still a DFU port. Restart the radio and choose its application USB port for backup.');
+  if(!port||dfuIds.has(portId(port))||(port===state.port&&(currentManualNrfDfu()||currentAcknowledgedNrfDfu())))fail('That is still a DFU port. Restart the radio and choose its application USB port for backup.');
   const originalPort=state.port,generation=state.generation,pkg=state.pkg,request=state.backupApplicationRequest,known=state.knownApplicationPort;
   const assertCurrent=()=>{if(state.port!==originalPort||state.generation!==generation||state.pkg!==pkg||state.backupApplicationRequest!==request||state.knownApplicationPort!==known)throw Object.assign(new Error('The selected radio or firmware changed while checking application mode. Choose the application port again.'),{backupReconnectStale:true});requireBackupReconnectAllowed();};
   const link=new SerialLink(port);let opened=false,device;
@@ -1182,7 +1232,7 @@ async function readBackupApplicationPort(port,{expectedPublicKey=null}={}){
 async function tryBackupApplication(){
   requireBackupReconnectAllowed();
   const known=state.knownApplicationPort;
-  if(!known||known.available===false||!/^[a-f0-9]{64}$/i.test(known.publicKey||'')||dfuIds.has(portId(known.port))){
+  if(!known||known.available===false||!/^[a-f0-9]{64}$/i.test(known.publicKey||'')||dfuIds.has(portId(known.port))||(known.port===state.port&&(currentManualNrfDfu()||currentAcknowledgedNrfDfu()))){
     showBackupApplicationHelp('There is no available, previously identified application connection to reuse. This bootloader has no supported safe USB restart command.');return false;
   }
   progress(0,'Checking the previously authorized application connection for backup…');
@@ -1232,7 +1282,7 @@ async function captureBackup({wadamesh=false}={}) {
     $('backup-role').value='companion';
   }
   if($('backup-role').value==='ripple')return captureRippleBackup();
-  if(dfuIds.has(portId(state.port))||$('already-bootloader').checked){if(!await tryBackupApplication())throw backupApplicationRequired();}
+  if(dfuIds.has(portId(state.port))||$('already-bootloader').checked||currentManualNrfDfu()||currentAcknowledgedNrfDfu()){if(!await tryBackupApplication())throw backupApplicationRequired();}
   requireMeshCoreApplication();
   clearBackupJson();state.backup=null;state.backupApproved=null;
   const port=state.port,generation=state.generation;
@@ -1277,7 +1327,7 @@ async function ensureBackup() {
     state.backupApproved={sha256:state.pkg?.sha256||'touch',port,publicKey:payload.publicKey,sourceMac:payload.source.mac,sourceFirmware:'ripple'};
     return;
   }
-  const bootloader=dfuIds.has(portId(state.port))||$('already-bootloader').checked;
+  const bootloader=dfuIds.has(portId(state.port))||$('already-bootloader').checked||currentManualNrfDfu()||currentAcknowledgedNrfDfu();
   if(bootloader) {
     const port=state.port,generation=state.generation,pkg=state.pkg;
     const answer=await choose('Backup needs application mode','Settings cannot be read from DFU/ROM. Try the previously authorized application connection, or continue without backup. If it stays in DFU, restart the radio and choose its application USB port. No firmware is written to attempt a backup.',[['cancel','Stop'],['application','Try application connection'],['skip','Continue without backup']]);
@@ -2405,6 +2455,35 @@ $('binary-mode').onclick=()=>operation(async()=>{
   invalidateApplicationEvidence();await linkOperation(link=>enterCompanionBinary(link,{allowLoggingChange:true}));
   notice('Binary mode confirmed. USB logging is off; it will not be re-enabled automatically. Read the running node or create a backup.');
 });
+function currentNrfApplication(){
+  return !!state.device&&state.portLabelEvidence?.port===state.port&&state.portLabelEvidence?.device===state.device&&!isBootloaderInfo()&&state.device.architecture==='nrf52';
+}
+// Selecting an nRF52 ZIP establishes the protocol, never the current USB mode.
+// Probe only an unidentified selected port, without sending a reset or DFU command;
+// opening a USB adapter may nevertheless restart the attached device.
+// an ambiguous result needs an explicit confirmation that DFU is already ready.
+async function resolveNrfPortMode(pkg){
+  if(state.recovery||dfuIds.has(portId(state.port))||$('already-bootloader').checked||currentManualNrfDfu()||currentAcknowledgedNrfDfu())return;
+  const port=state.port,generation=state.generation,installMode=state.installMode,hardware=selectedHardware();
+  const assertCurrent=()=>{if(state.port!==port||state.generation!==generation||state.pkg!==pkg||state.installMode!==installMode||selectedHardware()!==hardware)fail('The selected radio or firmware changed. Prepare again; no reset command or firmware write was sent.');};
+  if(!currentNrfLastAttempt()&&currentNrfApplication())return;
+  if(!currentNrfLastAttempt()&&!state.handoff&&!state.device&&!state.applicationProbeFailed&&$('auto-detect-board').checked){
+    notice('Checking the selected USB port for a running application. No reset command or firmware write is sent; some USB adapters may restart when opened.');
+    try{await linkOperation(readApplication);assertCurrent();}
+    catch(error){
+      assertCurrent();
+      if(error?.code!=='APPLICATION_UNIDENTIFIED')throw error;
+      state.applicationProbeFailed=true;
+      log('The running application was not identified. No reset command or DFU command was sent.');
+    }
+  }
+  if(!currentNrfLastAttempt()&&currentNrfApplication())return;
+  const fresh=state.portLabelEvidence?.port===state.port&&state.portLabelEvidence?.device===state.device&&!isBootloaderInfo();
+  if(!currentNrfLastAttempt()&&fresh&&state.device)fail('The running application did not identify this port as nRF52. Select the intended radio or its DFU port; no reset or firmware write was sent.');
+  const accepted=await confirm('Is this the radio’s DFU port?',`${hardware||'Selected nRF52 radio'} · ${portId(port)}`,'The port mode is unverified. Continue only if this is the same physical radio and it is already waiting in Adafruit-compatible serial DFU. This confirmation does not reset or flash it; the image and board still require review.','USE NRF DFU PORT');
+  assertCurrent();if(!accepted)fail('DFU port confirmation cancelled. No reset or firmware write was sent.');
+  state.nrfManualDfu=Object.freeze({port,generation,pkg,sha256:pkg.sha256,installMode,hardware});updateConnectionChoice();
+}
 async function prepareSelectedFirmware({waitForRom=false}={}) {
   assertRadioDefaultsReady();
   assertFirmwareNotCompleted();
@@ -2427,9 +2506,10 @@ async function prepareSelectedFirmware({waitForRom=false}={}) {
   }
   if (pkg.architecture === 'nrf52') {
     if (connectionMode() !== 'nrf52') fail('Select nRF52 DFU mode and its bootloader port.');
+    await resolveNrfPortMode(pkg);
     await ensureBackup();
     if(state.pkg!==pkg||!state.port)fail('The radio or firmware changed before DFU preparation. Prepare the intended radio again.');
-    if(!state.recovery&&!dfuIds.has(portId(state.port))&&!$('already-bootloader').checked){
+    if(!state.recovery&&!dfuIds.has(portId(state.port))&&!$('already-bootloader').checked&&!currentManualNrfDfu()&&!currentAcknowledgedNrfDfu()){
       await requestNrf52Handoff({resumePreparation:true});return;
     }
     const wipe=!pkg.erase&&(state.recovery?!state.recovery.eraseComplete:pkg.kind==='application'&&$('flash-action').value==='wipe'),erasePkg=wipe?await erasePackage():null;
@@ -2656,7 +2736,25 @@ async function flashPreparedFirmware() {
     if(approval&&state.migrationApproval!==approval){notice('Verified write completed. Automatic continuation was stopped; no next reset or write was sent. Use the manual verification/recovery controls to continue.');return;}
     if((approval||$('auto-finish').checked)&&!pkg.expert)await finishVerifiedEsp();
   }
-  else { const activationCheck=nrfApplicationActivationCheck(pkg),link = new SerialLink(state.port); try { await link.open(); await withFlashProgress(pkg.name,'Preparing DFU…',()=>activationCheck?flashNrf(link,pkg,progress,{activationCheck}):flashNrf(link,pkg,progress),{completionAdvice:postFlashBleAdvice(pkg,state.item),startupAdvice:firstStartupAdvice(pkg),sha256:pkg.sha256});completeNrfTransfer(pkg); } finally { await link.close(); state.plan = null; } }
+  else {
+    const activationCheck=nrfApplicationActivationCheck(pkg),port=state.port,generation=state.generation,link=new SerialLink(port);let transferStarted=false;
+    try {
+      await link.open();
+      try{await withFlashProgress(pkg.name,'Preparing DFU…',()=>{transferStarted=true;return activationCheck?flashNrf(link,pkg,progress,{activationCheck}):flashNrf(link,pkg,progress);},{completionAdvice:postFlashBleAdvice(pkg,state.item),startupAdvice:firstStartupAdvice(pkg),sha256:pkg.sha256});}
+      catch(error){
+        // A prior ACK is a hint about this port during this one attempt, not
+        // proof of board identity, current boot mode, or permission to retry.
+        if(transferStarted&&state.port===port&&state.generation===generation&&state.pkg===pkg){
+          state.nrfLastAttempt=Object.freeze({port,generation,pkg,sha256:pkg.sha256});
+          state.nrfDfuEvidence=null;state.nrfManualDfu=null;
+          state.nrfDfuEvidence=captureNrfDfuEvidence({error,port,generation,pkg});
+          updateConnectionChoice();
+        }
+        throw error;
+      }
+      completeNrfTransfer(pkg);state.nrfDfuEvidence=null;state.nrfLastAttempt=null;state.nrfManualDfu=null;state.nrfDfuHelpVisible=false;$('nrf-dfu-help').hidden=true;
+    } finally { await link.close(); state.plan = null; }
+  }
 }
 async function reviewAndFlashSelectedFirmware(){
   if(state.plan?.written)fail('Firmware has already been transferred. Finish the pending reset before starting another update.');
@@ -2863,19 +2961,20 @@ $('cancel-backup-application').onclick=()=>{
 function restoreWorkflowBlocked(){return !!(state.migrationApproval||state.migration||state.recovery||state.espRecovery||state.esp||state.plan?.written||state.handoff);}
 function quickSettingsBlocked(){return restoreWorkflowBlocked()||!!state.verification;}
 function updateQuickSettingsControls(){
-  const blocked=state.busy||!state.port||isNonMeshCore()||quickSettingsBlocked()||$('already-bootloader').checked||dfuIds.has(portId(state.port));
+  const bootloader=$('already-bootloader').checked||dfuIds.has(portId(state.port))||currentManualNrfDfu()||currentAcknowledgedNrfDfu();
+  const blocked=state.busy||!state.port||isNonMeshCore()||quickSettingsBlocked()||bootloader;
   for(const id of [...quickSettingButtons,...quickSettingFields])$(id).disabled=blocked;
   // start ota means BLE DFU on nRF52. Only a fresh application identity can
   // expose the ESP32 Wi-Fi hotspot shortcut, never the hardware picker alone.
   $('quick-wifi-ota-ap').disabled ||= state.device?.architecture!=='esp32';
   const message=state.quickSettingsMessage;
-  $('quick-settings-status').textContent=state.busy?'Working… Keep USB connected.':quickSettingsBlocked()?'Finish the current flash or USB handoff before changing settings.':!state.port?'Connect the radio’s application USB port to change settings.':isNonMeshCore()?'These settings require a running MeshCore application.':$('already-bootloader').checked||dfuIds.has(portId(state.port))?'Settings are unavailable in DFU/ROM. Choose the application USB port.':message?.port===state.port&&message.generation===state.generation?message.text:'Buttons send settings over USB. Unsupported features are reported by the firmware.';
+  $('quick-settings-status').textContent=state.busy?'Working… Keep USB connected.':quickSettingsBlocked()?'Finish the current flash or USB handoff before changing settings.':!state.port?'Connect the radio’s application USB port to change settings.':isNonMeshCore()?'These settings require a running MeshCore application.':bootloader?'Settings are unavailable on this DFU port. Choose the application USB port.':message?.port===state.port&&message.generation===state.generation?message.text:'Buttons send settings over USB. Unsupported features are reported by the firmware.';
 }
 async function runQuickSetting(action){
   requireMeshCoreApplication();
   if(!state.port)fail('Choose a MeshCore application USB port first.');
   if(quickSettingsBlocked())fail('Finish the current flash, verification or USB handoff before changing settings.');
-  if(dfuIds.has(portId(state.port))||$('already-bootloader').checked)fail('Settings cannot run in DFU/ROM. Choose the application USB port.');
+  if(dfuIds.has(portId(state.port))||$('already-bootloader').checked||currentManualNrfDfu()||currentAcknowledgedNrfDfu())fail('Settings cannot run on this DFU port. Choose the application USB port.');
   const port=state.port,generation=state.generation,publicKey=state.device?.publicKey;
   const values={name:$('quick-name').value,password:action==='password'?$('quick-admin-password').value:$('quick-wifi-password').value,ssid:$('quick-wifi-ssid').value};
   // Validate before opening USB. The planner never includes supplied values in

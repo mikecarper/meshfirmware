@@ -15,7 +15,7 @@ import {parseBootloaderInfo,detectBootloaderBoard} from '../src/bootloader-info.
 import {xiaoInstalledStatus,xiaoInfoProfile,xiaoBootloaderItem} from '../src/xiao-bootloader.js';
 import {chooseFirmware,defaultFirmwareProvider,firmwareVersionWarning,matchesInstallMode,matchesCatalogInstallMode,isRunningWadameshTak} from '../src/automatic.js';
 import {rememberPagerVariant,recallPagerVariant,forgetPagerVariant,PAGER_VARIANTS_KEY} from '../src/remembered-pager.js';
-import {chooseConnection,parseUsbMode} from '../src/connection-choice.js';
+import {chooseConnection,parseUsbMode,captureNrfDfuEvidence,nrfDfuEvidenceCurrent} from '../src/connection-choice.js';
 import {lookupUsbConnectionMap} from '../src/usb-connection-map.js';
 import {createNextStepScroller} from '../src/next-step-scroll.js';
 import {tryNativeUsbFallback,xiaoS3ManualBootAdvice} from '../src/connection-fallback.js';
@@ -72,7 +72,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
     backupCoverage,createNextStepScroller,tryNativeUsbFallback,xiaoS3ManualBootAdvice,SerialLink:class{constructor(){calls.push('serial');throw new Error('Unexpected serial open');}},EspSession:class{constructor(){calls.push('rom');throw new Error('Unexpected ROM session');}},validateEspWriteRecovery:value=>value,MeshCore:class{},BrowserPlanner:class{},inspectFirmware(){throw new Error('Bad image');},checkedZip(){return [];},recoveryPackage(){throw new Error('No verified recovery package');},verifyBackup(){},parseBackup(){},enterCompanionBinary(){},backupCommonCli(){},touch1200(){},flashNrf(){},waitForMigration(){}
   });
   context.assessFirmwareBoard=()=>({status:'match',requiresOverride:false,reason:'Test board identity.'});context.espSlotChoices=espSlotChoices;context.isRunningWadameshTak=isRunningWadameshTak;context.rememberPagerVariant=rememberPagerVariant;context.recallPagerVariant=recallPagerVariant;context.forgetPagerVariant=forgetPagerVariant;
-  context.quickHotspotUrl=quickHotspotUrl;context.postFlashBleAdvice=postFlashBleAdvice;context.createNrfActivationCheck=()=>null;
+  context.quickHotspotUrl=quickHotspotUrl;context.postFlashBleAdvice=postFlashBleAdvice;context.createNrfActivationCheck=()=>null;context.captureNrfDfuEvidence=captureNrfDfuEvidence;context.nrfDfuEvidenceCurrent=nrfDfuEvidenceCurrent;
   context.inspectRadioDefaults=inspectRadioDefaults;context.customizeRadioDefaults=customizeRadioDefaults;
   context.browserTimezonePresetSuggestions=browserTimezonePresetSuggestions;
   context.prepareWadameshConfig=prepareWadameshConfig;context.applyWadameshConfig=applyWadameshConfig;
@@ -137,6 +137,89 @@ async function espSlotWorkbench({selection='both',boot=0x210000}={}){
 }
 function pickModalSlot(ui,value){for(const choice of ['a','b','both'])ui.elements.get('confirm-esp-slot-'+choice).checked=choice===value;ui.elements.get('confirm-esp-slot-'+value).onchange();}
 function closeConfirm(ui,value='confirm'){const dialog=ui.elements.get('confirm-dialog');dialog.returnValue=value;dialog.emit('close');}
+
+test('nRF DFU acknowledgement failures display recovery guidance without resetting or changing recovery state',async()=>{
+  const ui=workbench();await Promise.resolve();ui.elements.get('nrf-dfu-help').hidden=true;let scrolled=0;ui.elements.get('nrf-dfu-help').scrollIntoView=()=>{scrolled++;};
+  ui.context.failure={code:'NRF_DFU_ACK_TIMEOUT',message:'DFU did not acknowledge packet 4. No reset will be attempted.',nrfDfu:{stage:'data',acknowledgedBytes:1024,totalBytes:8192,sequence:4}};
+  ui.evaluate("state.recovery={phase:'reselect-dfu',eraseComplete:false,sha256:'a'.repeat(64)};");
+  await ui.evaluate('operation(async()=>{throw failure;})');
+  assert.equal(ui.elements.get('nrf-dfu-help').hidden,false);
+  assert.equal(scrolled,1);
+  assert.match(ui.elements.get('nrf-dfu-help-detail').textContent,/sending firmware data.*1024 of 8192.*not flash verification/i);
+  assert.equal(ui.evaluate('state.recovery.phase'),'reselect-dfu');assert.equal(ui.evaluate('state.recovery.eraseComplete'),false);assert.deepEqual(ui.calls,[]);
+  ui.elements.get('nrf-dfu-help-dismiss').onclick();assert.equal(ui.elements.get('nrf-dfu-help').hidden,true);
+});
+test('nRF DFU guidance supports the legacy error without matching unrelated failures',async()=>{
+  const ui=workbench();await Promise.resolve();ui.context.pkg=fakePackage({architecture:'nrf52'});ui.evaluate('state.pkg=pkg;');
+  ui.elements.get('nrf-dfu-help').hidden=true;ui.context.failure={message:'DFU did not acknowledge packet 1. No reset will be attempted.'};
+  await ui.evaluate('operation(async()=>{throw failure;})');assert.equal(ui.elements.get('nrf-dfu-help').hidden,false);assert.match(ui.elements.get('nrf-dfu-help-detail').textContent,/cause is not yet known/i);
+  assert.equal(ui.elements.get('nrf-dfu-help-settle').hidden,false);assert.match(ui.elements.get('nrf-dfu-help-settle').textContent,/at least 180 seconds.*not proof/i);assert.equal(ui.elements.get('nrf-dfu-help-reset').hidden,true);assert.equal(ui.elements.get('nrf-dfu-help-retry').hidden,true);
+  ui.elements.get('nrf-dfu-help').hidden=true;ui.context.failure={message:'Unable to open serial port.'};await ui.evaluate('operation(async()=>{throw failure;})');assert.equal(ui.elements.get('nrf-dfu-help').hidden,true);assert.deepEqual(ui.calls,[]);
+});
+test('DFU start, activation and component failures never suggest an immediate reset or retry',async()=>{
+  for(const [stage,kind] of [['start','application'],['activate','application'],['data','bootloader']]){
+    const ui=workbench();await Promise.resolve();ui.context.pkg=fakePackage({architecture:'nrf52',kind,mode:4,sdSize:0,blSize:0,appSize:64,destructive:kind!=='application'});ui.evaluate('state.pkg=pkg;');
+    ui.context.failure={code:'NRF_DFU_ACK_TIMEOUT',message:'DFU did not acknowledge packet.',nrfDfu:{stage,acknowledgedBytes:64,totalBytes:64}};
+    await ui.evaluate('operation(async()=>{throw failure;})');assert.equal(ui.elements.get('nrf-dfu-help-reset').hidden,true);assert.equal(ui.elements.get('nrf-dfu-help-retry').hidden,true);assert.equal(ui.elements.get('nrf-dfu-help-cable').hidden,true);assert.equal(ui.elements.get('nrf-dfu-help-assess').hidden,false);
+    assert.equal(ui.elements.get('nrf-dfu-help-settle').hidden,!['start','activate'].includes(stage));if(['start','activate'].includes(stage))assert.match(ui.elements.get('nrf-dfu-help-settle').textContent,/do not reset or unplug.*not proof/i);assert.deepEqual(ui.calls,[]);
+  }
+  const ui=workbench();await Promise.resolve();ui.context.pkg=fakePackage({mode:4,sdSize:0,blSize:0,appSize:64});ui.evaluate('state.pkg=pkg;');ui.context.failure={code:'NRF_DFU_ACK_TIMEOUT',message:'DFU did not acknowledge packet.',nrfDfu:{stage:'data',acknowledgedBytes:32,totalBytes:64}};
+  await ui.evaluate('operation(async()=>{throw failure;})');assert.equal(ui.elements.get('nrf-dfu-help-reset').hidden,false);assert.equal(ui.elements.get('nrf-dfu-help-retry').hidden,false);assert.deepEqual(ui.calls,[]);
+});
+test('structured START and STOP connection failures show settling guidance and retain the original error',async()=>{
+  for(const stage of ['start','activate']){
+    const ui=workbench();await Promise.resolve();ui.elements.get('nrf-dfu-help').hidden=true;
+    ui.context.failure={message:'Serial device disconnected.',nrfDfuUncertain:true,nrfDfu:Object.freeze({stage,acknowledgedBytes:stage==='start'?0:64,totalBytes:64})};
+    await ui.evaluate('operation(async()=>{throw failure;})');
+    assert.equal(ui.elements.get('nrf-dfu-help').hidden,false);assert.match(ui.elements.get('nrf-dfu-help-detail').textContent,/transfer stopped.*Serial device disconnected/i);assert.doesNotMatch(ui.elements.get('nrf-dfu-help-detail').textContent,/No expected DFU acknowledgement/i);
+    assert.equal(ui.elements.get('nrf-dfu-help-settle').hidden,false);assert.match(ui.elements.get('nrf-dfu-help-settle').textContent,/at least 180 seconds.*not proof/i);assert.equal(ui.elements.get('nrf-dfu-help-reset').hidden,true);assert.equal(ui.elements.get('nrf-dfu-help-retry').hidden,true);assert.deepEqual(ui.calls,[]);
+  }
+  const ui=workbench();await Promise.resolve();ui.elements.get('nrf-dfu-help').hidden=true;ui.context.failure={message:'Serial device disconnected.',nrfDfuUncertain:true,nrfDfu:Object.freeze({stage:'data'})};
+  await ui.evaluate('operation(async()=>{throw failure;})');assert.equal(ui.elements.get('nrf-dfu-help').hidden,true);assert.deepEqual(ui.calls,[]);
+});
+test('DFU failure guidance suppresses the unrelated bootloader-connection next step until dismissed',async()=>{
+  const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({mode:4,sdSize:0,blSize:0,appSize:64});
+  ui.elements.get('transport-mode').value='auto';ui.evaluate('state.port=selectedPort;state.pkg=pkg;state.plan=null;state.connection=null;controls();');
+  assert.notEqual(ui.evaluate('nextFlasherControl()'),'transport-mode');ui.elements.get('transport-mode').disabled=false;ui.evaluate('setNextAction($("transport-mode"));');assert.equal(ui.elements.get('transport-mode').classList.contains('next-action'),true);
+  ui.elements.get('connection-options').open=false;let helpScrolled=0;ui.elements.get('nrf-dfu-help').scrollIntoView=()=>helpScrolled++;
+  ui.context.failure={code:'NRF_DFU_ACK_TIMEOUT',message:'DFU did not acknowledge packet.',nrfDfu:{stage:'data',acknowledgedBytes:32,totalBytes:64}};
+  await ui.evaluate('operation(async()=>{throw failure;})');
+  assert.equal(ui.elements.get('nrf-dfu-help').hidden,false);assert.equal(helpScrolled,1);assert.equal(ui.evaluate('nextFlasherControl()'),null);
+  assert.equal(ui.elements.get('transport-mode').classList.contains('next-action'),false);assert.equal(ui.elements.get('transport-mode').getAttribute('aria-current'),null);assert.equal(ui.elements.get('connection-options').open,false);
+  assert.match(ui.elements.get('step-guidance').textContent,/review the recovery guidance/i);assert.equal(ui.evaluate('state.port'),ui.port);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);assert.deepEqual(ui.calls,[]);
+  ui.elements.get('nrf-dfu-help-dismiss').onclick();assert.equal(ui.elements.get('nrf-dfu-help').hidden,true);assert.notEqual(ui.evaluate('nextFlasherControl()'),null);assert.equal(ui.elements.get('transport-mode').classList.contains('next-action'),false);assert.deepEqual(ui.calls,[]);
+});
+
+test('selected nRF firmware chooses the protocol without claiming the USB port is DFU',async()=>{
+  const ui=workbench({productionDefaults:true});await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({architecture:'nrf52'});
+  ui.evaluate('state.port=selectedPort;state.pkg=pkg;updateConnectionChoice();');
+  assert.equal(ui.evaluate('state.connection.mode'),'nrf52');assert.equal(ui.evaluate('state.connection.alreadyBootloader'),false);
+  assert.equal(ui.evaluate('state.connection.source'),'selected-nrf-firmware');assert.notEqual(ui.evaluate('nextFlasherControl()'),'transport-mode');
+  ui.evaluate("state.device={architecture:'esp32'};updateConnectionChoice();");assert.notEqual(ui.evaluate('state.connection.source'),'selected-nrf-firmware');assert.deepEqual(ui.calls,[]);
+});
+
+test('an unknown nRF USB adapter gets at most one read-only application check and requires DFU confirmation',async()=>{
+  for(const auto of [true,false]){
+    const ui=workbench({productionDefaults:true});await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({architecture:'nrf52'});
+    ui.elements.get('auto-detect-board').checked=auto;ui.evaluate('state.port=selectedPort;state.pkg=pkg;updateConnectionChoice();');
+    ui.context.linkOperation=async()=>{ui.calls.push('application-check');throw Object.assign(new Error('unidentified'),{code:'APPLICATION_UNIDENTIFIED'});};
+    ui.context.confirm=async(_title,_detail,warning,token)=>{assert.match(warning,/same physical radio.*already waiting/i);ui.calls.push(token);return true;};
+    await ui.evaluate('resolveNrfPortMode(pkg)');await ui.evaluate('resolveNrfPortMode(pkg)');
+    assert.deepEqual(ui.calls,auto?['application-check','USE NRF DFU PORT']:['USE NRF DFU PORT']);
+    assert.equal(ui.evaluate('currentManualNrfDfu()'),true);assert.equal(ui.evaluate('state.connection.alreadyBootloader'),true);
+    ui.evaluate('state.generation++');assert.equal(ui.evaluate('currentManualNrfDfu()'),false);
+  }
+});
+
+test('DFU evidence blocks settings and never reopens the same port for backup',async()=>{
+  const ui=workbench({productionDefaults:true});await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage({architecture:'nrf52'});
+  ui.evaluate("state.port=selectedPort;state.pkg=pkg;state.device={role:'companion',architecture:'nrf52'};state.nrfManualDfu={port:state.port,generation:state.generation,pkg:state.pkg,sha256:state.pkg.sha256,installMode:state.installMode,hardware:selectedHardware()};state.knownApplicationPort={port:state.port,publicKey:'11'.repeat(32),available:true};updateQuickSettingsControls();");
+  assert.equal(ui.elements.get('quick-name-save').disabled,true);
+  await assert.rejects(ui.evaluate('runQuickSetting("name")'),/DFU port/i);
+  assert.equal(await ui.evaluate('tryBackupApplication()'),false);
+  await assert.rejects(ui.evaluate('readBackupApplicationPort(selectedPort)'),/DFU port/i);
+  assert.deepEqual(ui.calls,[]);
+});
 
 test('ESP32 final modal defaults to the boot-selected slot and holds edits until confirmation',async()=>{
   for(const [boot,expected] of [[0x10000,'a'],[0x210000,'b']]){
@@ -889,7 +972,7 @@ test('file hints expire on operation changes, disconnect and selection of anothe
 });
 
 test('an info file does not assert DFU mode on an unknown port or grant protected-board identity evidence',async()=>{
-  const ui=await bootloaderInfoWorkbench();ui.context.chooseBootloaderInfoFile=async()=>({name:'INFO_UF2.TXT',text:bootloaderInfoText()});await ui.elements.get('read-bootloader-info').onclick();assert.equal(ui.elements.get('already-bootloader').checked,false);assert.equal(ui.elements.get('transport-mode').value,'auto');assert.equal(ui.evaluate('state.connection.mode'),null);assert.equal(ui.evaluate('state.backupApproved'),null);assert.deepEqual(nextHighlight(ui),['select-port']);assert.match(ui.elements.get('step-guidance').textContent,/same radio’s DFU serial port/);
+  const ui=await bootloaderInfoWorkbench();ui.context.chooseBootloaderInfoFile=async()=>({name:'INFO_UF2.TXT',text:bootloaderInfoText()});await ui.elements.get('read-bootloader-info').onclick();assert.equal(ui.elements.get('already-bootloader').checked,false);assert.equal(ui.elements.get('transport-mode').value,'auto');assert.equal(ui.evaluate('state.connection.mode'),'nrf52');assert.equal(ui.evaluate('state.connection.alreadyBootloader'),false);assert.equal(ui.evaluate('state.backupApproved'),null);assert.deepEqual(nextHighlight(ui),['select-port']);assert.match(ui.elements.get('step-guidance').textContent,/same radio’s DFU serial port/);
   let assessment;ui.context.assessBoard=(_pkg,input)=>{assessment=input;return {requiresOverride:true,payloadFamily:'unknown'};};ui.context.pkg=fakePackage({architecture:'nrf52'});ui.evaluate('boardAssessment(pkg);');assert.equal(assessment.deviceModel,'');assert.equal(ui.evaluate('verificationRecord(pkg).model'),null);
   await assert.rejects(ui.evaluate('captureBackup();'),/Only bootloader information/);assert.equal(ui.evaluate('state.backup'),null);assert.equal(ui.elements.get('restore').disabled,true);assert.equal(ui.elements.get('binary-mode').disabled,true);
   ui.calls.length=0;ui.elements.get('command').value='set name Test';for(const id of ['backup','restore','send-command','binary-mode']){await ui.elements.get(id).onclick();assert.match(ui.elements.get('notice').textContent,/Only bootloader information/);}assert.deepEqual(ui.calls,[]);
@@ -1067,6 +1150,21 @@ async function nrfActivationWorkbench(){
   ui.context.confirm=async()=>true;ui.context.createNrfActivationCheck=options=>{ui.activationOptions=options;return ui.activationCallback||null;};
   ui.appPort=appPort;return ui;
 }
+
+test('every nRF transfer failure invalidates stale application evidence before another preparation',async()=>{
+  for(const message of ['Malformed DFU acknowledgement','Serial read failed','Serial write failed']){
+    const ui=await nrfActivationWorkbench();ui.port.getInfo=()=>({usbVendorId:0x1a86,usbProductId:0x7523});
+    ui.evaluate('state.handoff=false;state.portLabelEvidence={port:state.port,device:state.device};state.nrfDfuEvidence={old:true};state.nrfManualDfu={old:true};');
+    ui.context.flashNrf=async()=>{ui.calls.push('transfer');throw Error(message);};
+    await ui.elements.get('flash').onclick();
+    assert.ok(ui.evaluate('currentNrfLastAttempt()'),message);assert.equal(ui.evaluate('state.nrfDfuEvidence'),null,message);assert.equal(ui.evaluate('state.nrfManualDfu'),null,message);
+    ui.context.confirm=async(_title,_detail,_warning,token)=>{assert.equal(token,'USE NRF DFU PORT');ui.calls.push('dfu-confirmation');return false;};
+    ui.context.linkOperation=async()=>assert.fail('Must not probe a port after a failed transfer');
+    ui.context.touch1200=async()=>assert.fail('Must not reset using stale application evidence');
+    await assert.rejects(ui.evaluate('resolveNrfPortMode(pkg)'),/confirmation cancelled/i);
+    assert.deepEqual(ui.calls,['dfu-open','transfer','dfu-close','dfu-confirmation'],message);
+  }
+});
 
 test('a qualified nRF update passes only its read-only activation callback without prematurely marking startup verified',async()=>{
   const ui=await nrfActivationWorkbench();
@@ -2543,7 +2641,7 @@ test('Stop or Escape on either complete or partial backup prevents preparation a
 
 test('nRF52 backup Continue enters DFU once without another typed prompt and Stop sends no reset',async()=>{
   for(const answer of ['continue','stop','cancel']){
-    const ui=await backupJsonWorkbench();ui.context.pkg=fakePackage({architecture:'nrf52',kind:'application'});ui.evaluate('state.pkg=pkg;');ui.elements.get('auto-backup').checked=true;ui.elements.get('transport-mode').value='nrf52';
+    const ui=await backupJsonWorkbench();ui.context.pkg=fakePackage({architecture:'nrf52',kind:'application'});ui.evaluate('state.pkg=pkg;state.device.architecture="nrf52";state.portLabelEvidence={port:state.port,device:state.device};');ui.elements.get('auto-backup').checked=true;ui.elements.get('transport-mode').value='nrf52';
     ui.context.backupSummary=()=>({complete:false,privateIdentity:true,reasons:[]});
     ui.context.choose=async(title,_detail,buttons,options)=>{assert.equal(title,'Backup JSON');assert.deepEqual(Array.from(buttons,pair=>Array.from(pair)),[['stop','Stop'],['continue','Continue with flashing']]);assert.match(options.backupDetails,/Not backed up:/);assert.doesNotMatch(options.backupDetails,/partial backup/i);return answer;};
     ui.context.confirm=async()=>{throw Error('nRF52 DFU entry must not ask for another typed confirmation');};
@@ -2559,7 +2657,7 @@ test('nRF52 backup Continue enters DFU once without another typed prompt and Sto
 async function queuedNrfPreparationWorkbench({action='prepare',wipe=false,disconnect=false,interrupted=false}={}){
   const ui=await backupJsonWorkbench(),dfuPort={getInfo:()=>({usbVendorId:0x2886,usbProductId:0x0057})};
   ui.port.getInfo=()=>({usbVendorId:0x239a,usbProductId:0x8029});ui.context.pkg=fakePackage();
-  ui.evaluate('state.pkg=pkg;state.device={role:"companion",model:"Seeed Tracker T1000-E",architecture:"nrf52",publicKey:"11".repeat(32)};');
+  ui.evaluate('state.pkg=pkg;state.device={role:"companion",model:"Seeed Tracker T1000-E",architecture:"nrf52",publicKey:"11".repeat(32)};state.portLabelEvidence={port:state.port,device:state.device};');
   ui.elements.get('auto-backup').checked=true;ui.elements.get('transport-mode').value='nrf52';
   if(wipe)ui.evaluate('state.installMode="install";syncInstallMode();');
   ui.context.choose=async title=>{assert.equal(title,'Backup JSON');ui.calls.push('backup-popup');return 'continue';};
@@ -2707,7 +2805,7 @@ test('explicit nRF52 Enter USB bootloader uses the considered backup without a r
 test('an interrupted final nRF52 reset request guides DFU selection instead of reporting a flash error',async()=>{
   for(const action of ['prepare','touch'])for(const disconnected of [false,true]){
     const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage();
-    ui.evaluate('state.port=selectedPort;state.pkg=pkg;state.device={model:"Seeed Tracker T1000-E",role:"companion"};');ui.elements.get('transport-mode').value='nrf52';
+    ui.evaluate('state.port=selectedPort;state.pkg=pkg;state.device={model:"Seeed Tracker T1000-E",role:"companion",architecture:"nrf52"};state.portLabelEvidence={port:state.port,device:state.device};');ui.elements.get('transport-mode').value='nrf52';
     ui.context.ensureBackup=async()=>ui.calls.push('backup-considered');
     ui.context.touch1200=async(port,kind)=>{assert.equal(port,ui.port);assert.equal(kind,'nrf52');ui.calls.push('enter-dfu');if(disconnected)ui.serialEvents.disconnect({port:ui.port});throw Object.assign(Error('Failed to set control signals.'),{name:'NetworkError',nrf52HandoffPending:true});};
     await ui.elements.get(action).onclick();
@@ -2719,7 +2817,7 @@ test('an interrupted final nRF52 reset request guides DFU selection instead of r
 
 test('nRF52 open, permission and early reset failures remain errors and never pretend DFU was requested',async()=>{
   for(const action of ['prepare','touch'])for(const name of ['NotAllowedError','SecurityError','NetworkError','Error']){
-    const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage();ui.evaluate('state.port=selectedPort;state.pkg=pkg;');ui.elements.get('transport-mode').value='nrf52';
+    const ui=workbench();await Promise.resolve();ui.context.selectedPort=ui.port;ui.context.pkg=fakePackage();ui.evaluate('state.port=selectedPort;state.pkg=pkg;state.device={architecture:"nrf52"};state.portLabelEvidence={port:state.port,device:state.device};');ui.elements.get('transport-mode').value='nrf52';
     ui.context.ensureBackup=async()=>{};ui.context.touch1200=async()=>{ui.calls.push('reset-attempt');throw Object.assign(Error('Original failure before final DTR'),{name});};
     await ui.elements.get(action).onclick();assert.equal(ui.evaluate('state.handoff'),false);assert.equal(ui.evaluate('state.port'),ui.port);assert.equal(ui.evaluate('state.plan'),null);assert.equal(ui.evaluate('state.pkg'),ui.context.pkg);assert.match(ui.elements.get('notice').textContent,/Original failure/);assert.deepEqual(ui.calls,['reset-attempt']);
   }
@@ -4476,7 +4574,7 @@ async function skipBackupWorkbench({catalogOnly=false,runtime=false,architecture
   const ui=workbench();await Promise.resolve();serialMock(ui);ui.context.selectedPort=ui.port;
   ui.context.pkg=fakePackage({name:architecture==='esp32'?'sample.bin':'sample.zip',architecture,kind:'application'});
   ui.context.inventory=[{...v4Item,architecture,name:ui.context.pkg.name,url:'https://example.test/'+ui.context.pkg.name,action:architecture==='esp32'?'flash-update':'flash'}];
-  ui.evaluate('state.items=inventory;state.port=selectedPort;state.device={model:"Sample radio",role:"common-cli"};');
+  ui.context.fixtureArchitecture=architecture;ui.evaluate('state.items=inventory;state.port=selectedPort;state.device={model:"Sample radio",role:"common-cli",architecture:fixtureArchitecture};state.portLabelEvidence={port:state.port,device:state.device};');
   if(catalogOnly){ui.elements.get('artifact').value='0';ui.context.downloadFirmwareBytes=async()=>{ui.calls.push('download');return new Uint8Array(64);};ui.context.checkedZip=()=>[{name:'manifest.json'},{name:'application.bin'},{name:'application.dat'}];ui.context.inspectFirmware=()=>{ui.calls.push('validate-image');return ui.context.pkg;};}
   else ui.evaluate('state.pkg=pkg;');
   ui.elements.get('transport-mode').value=architecture==='esp32'?'no_reset':'nrf52';ui.elements.get('auto-backup').checked=true;ui.elements.get('skip-backup').checked=true;
@@ -4490,7 +4588,7 @@ async function skipBackupWorkbench({catalogOnly=false,runtime=false,architecture
 }
 
 async function meshtasticDirectWorkbench(options={}){
-  const ui=await skipBackupWorkbench(options);ui.elements.get('skip-backup').checked=false;ui.context.sourceDevice=meshtasticDevice();ui.evaluate('state.device=sourceDevice;controls();');
+  const ui=await skipBackupWorkbench(options);ui.elements.get('skip-backup').checked=false;ui.context.sourceDevice=meshtasticDevice({architecture:ui.context.pkg.architecture});ui.evaluate('state.device=sourceDevice;state.portLabelEvidence={port:state.port,device:state.device};controls();');
   ui.context.choose=async()=>{throw Error('No separate backup dialog is needed for Meshtastic');};
   ui.context.confirm=async(_title,_detail,warning,token)=>{if(token!=='SAME DEVICE'){assert.match(warning,/Meshtastic.*not backed up/i);assert.doesNotMatch(warning,/You chose to skip backup/);}ui.calls.push('confirm:'+token);return true;};
   return ui;
