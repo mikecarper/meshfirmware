@@ -13,6 +13,7 @@
     "@probe-web/client": "0.6.0",
     "@noble/curves": "1.9.7",
     "@noble/hashes": "2.4.0",
+    "@sindresorhus/transliterate": "2.3.1",
     "esptool-js": "0.7.0",
     "fflate": "0.8.3",
     "pyodide": "0.29.3"

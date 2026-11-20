@@ -30,6 +30,47 @@ not a remote USB-only node.
 
 ## Use
 
+### Reader books
+
+Reader ships empty on compatible Full Companion builds. In the web flasher,
+select the running radio's USB port and open **Reader books**. Import a file or
+choose **Load field guides** (Survivor Guide, Land Navigation, and First Aid). Select one
+book and choose **Add to radio**.
+**Read radio library** shows installed books and available space. Removing one
+book does not change firmware, settings, or other books. Open Reader from the
+radio page on a display-equipped Companion: press Select or hold the user
+button. On single-button devices, click to move, double-click to select, and
+hold to go back. While reading, double-click goes to the previous page.
+Triple- and quadruple-click jump through menus or go directly to the next
+and previous passage, respectively.
+
+Use UTF-8 text (`.txt`), Markdown (`.md`), or JSON. Blank lines split plain-text
+passages and Markdown headings name chapters. The numbered text format uses
+`### Book title` and one `[chapter:passage] Text` per line, numbered from 1.
+Passages longer than 767 UTF-8 bytes become consecutive passages on the radio.
+JSON is better for custom titles and boundaries:
+
+```json
+{"books":[{"title":"Field notes","chapters":[{"title":"Navigation","passages":["First note.","Second note."]}]}]}
+```
+
+Guide JSON with `title`, `category`, `steps` and `doNotDo` is also accepted.
+Optional ASCII transliteration can improve display coverage and may reduce the
+packed size; leave it off to retain the original characters. Each independently
+installable book uses indexed DEFLATE blocks. The nRF52 library requires mounted
+secondary user storage. Capacity depends on the device and existing files;
+split oversized books into smaller titles. Keep original files: books are not
+part of configuration backups, and a filesystem erase removes them.
+RAK4631 Full Companion includes Reader and optional RAK15002 archive support.
+Ethernet is available on the RAK4631 Repeater and Room Server profiles only.
+
+Field guide references: [NPS Outdoor Emergency Plan](https://www.nps.gov/articles/gtgemergencyplan.htm),
+[NPS Ten Essentials](https://www.nps.gov/articles/10essentials.htm), and
+[USGS Finding Your Way With Map and Compass](https://www.usgs.gov/educational-resources/finding-your-way-map-and-compass).
+First Aid is a quick reference, not a substitute for training. See the
+[Red Cross first aid guides](https://www.redcross.org/take-a-class/resources/learn-first-aid)
+and [American Heart Association CPR resources](https://cpr.heart.org/en/resources/what-is-cpr).
+
 ### Wadamesh TAK
 
 Choose **Wadamesh TAK** in **Firmware** for its standalone touchscreen builds.

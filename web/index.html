@@ -10,7 +10,7 @@
 <body>
   <aside class="sidebar">
     <a class="brand" href="#flasher"><svg viewBox="0 0 40 40" aria-hidden="true"><path d="M7 29V11l13 9 13-9v18M7 11l13-7 13 7M20 20v16"/></svg><span>mesh<span class="brand-light">firmware</span><small>USB FLASHER</small></span></a>
-    <nav aria-label="Tools"><a href="#flasher" class="active">Flash firmware</a><a href="#console">Serial console</a><a href="#backups">Backup &amp; restore</a><a href="#capabilities">Help</a><a href="https://mikecarper.github.io/MeshCore/">MeshCore docs</a></nav>
+    <nav aria-label="Tools"><a href="#flasher" class="active">Flash firmware</a><a href="#console">Serial console</a><a href="#reader-books">Reader books</a><a href="#backups">Backup &amp; restore</a><a href="#capabilities">Help</a><a href="https://mikecarper.github.io/MeshCore/">MeshCore docs</a></nav>
   </aside>
   <main>
     <header class="page-header" id="flasher">
@@ -212,6 +212,22 @@
 
     <details class="card disclosure" id="console" open><summary>Serial console &amp; operation log</summary><div class="disclosure-body"><div class="card-title"><p>Commands and output stay in this tab.</p><button id="clear-log" class="text-link">Clear</button></div><pre id="log" aria-label="Serial and operation log">Mesh Firmware workbench ready.
 No hardware operations have been performed.</pre><div class="console-input"><label class="sr-only" for="command">Serial command</label><input id="command" placeholder="version" data-lock><button id="send-command" class="secondary" data-lock>Send command</button></div></div></details>
+
+    <details class="card disclosure" id="reader-books"><summary>Reader books</summary>
+      <div class="disclosure-body backup-options">
+        <div class="inline-actions">
+          <button id="reader-refresh" class="secondary" type="button" disabled data-lock>Read radio library</button>
+          <button id="reader-guides" class="secondary" type="button" data-lock>Load field guides</button>
+        </div>
+        <div><label for="reader-files">Import books</label><input id="reader-files" type="file" accept=".txt,.md,.markdown,.json" multiple data-lock></div>
+        <label><input id="reader-ascii" type="checkbox" data-lock> Transliterate to ASCII</label>
+        <div><label for="reader-imported">Imported book</label><select id="reader-imported" disabled data-lock><option value="">No books imported</option></select></div>
+        <div class="inline-actions"><button id="reader-add" type="button" class="secondary" disabled data-lock>Add to radio</button><span id="reader-pack-size" class="hint"></span></div>
+        <div><label for="reader-installed">Installed books</label><select id="reader-installed" disabled data-lock><option value="">Library not read</option></select></div>
+        <div class="inline-actions"><button id="reader-remove" class="secondary" type="button" disabled data-lock>Remove from radio</button><span id="reader-free" class="hint"></span></div>
+        <p id="reader-status" class="hint" role="status" aria-live="polite"></p>
+      </div>
+    </details>
 
     <details id="advanced-options" class="card disclosure">
       <summary>Advanced options &amp; troubleshooting</summary>

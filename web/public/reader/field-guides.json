@@ -1,0 +1,120 @@
+{
+  "books": [
+    {
+      "title": "Survivor Guide",
+      "chapters": [
+        {
+          "title": "Before You Leave",
+          "passages": [
+            "Leave a trip plan with someone who is not going. Include names, your start point, intended route, backup route, vehicle details, expected return, and when they should call for help. Check in when you return.",
+            "Check weather, daylight, closures, and water availability. Agree on a turnaround time and a lower-risk alternate outing. Take a paper map even when you have offline maps on a phone.",
+            "Pack navigation, sun protection, spare layers and rain gear, a headlamp, first-aid supplies, emergency shelter, water and treatment supplies, extra food, simple repair tools, and a fire starter only where appropriate. Know how to use what you carry."
+          ]
+        },
+        {
+          "title": "Lost or Delayed",
+          "passages": [
+            "Stop and assess. Check the time, your last confirmed location, nearby landmarks, and any immediate hazards. Retrace only if you know the return route and it is safe. Do not keep walking on a guess.",
+            "If you cannot safely return, call the local emergency number or use a suitable satellite SOS device. Give your location and coordinate format, time and place last known, number of people, injuries, clothing, equipment, and visible landmarks.",
+            "After requesting rescue, stay at the reported location unless immediate danger forces you to move. If you must move, tell responders the new location and direction when possible. Do not assume a mesh message reached a dispatcher."
+          ]
+        },
+        {
+          "title": "Shelter and Water",
+          "passages": [
+            "Protect yourself from exposure before it worsens. Get out of wind and rain where safe, put on dry layers, and insulate yourself from the ground. Avoid flood channels, exposed ridges, and ground beneath unstable trees.",
+            "Start with safe drinking water and a backup supply. Plan for dry sources. Treat collected water using a method appropriate to the source and follow the product directions; ordinary filters do not remove every hazard.",
+            "Do not attempt to cross fast or rising water to stay on schedule. Turn back or wait in a safe place. A marked crossing on a map is not evidence that it is passable today."
+          ]
+        },
+        {
+          "title": "Signal and Wait",
+          "passages": [
+            "Keep a whistle and headlamp where you can reach them. Three whistle blasts with a pause can attract attention. Make yourself visible with bright gear if it can be done without leaving shelter or taking risks.",
+            "Keep the group together. Inventory water, food, layers, light, and battery power. Keep your primary signaling device available and agree who will monitor it. Avoid unnecessary travel while waiting for help.",
+            "Further reading: U.S. National Park Service Outdoor Emergency Plan and Ten Essentials. Review local advice before leaving and practice with your equipment."
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Land Navigation",
+      "chapters": [
+        {
+          "title": "Read the Map",
+          "passages": [
+            "Check the legend, scale, contour interval, and map date. At 1:24,000, one centimeter on paper represents 240 meters on the ground. Use the scale bar if the map was resized when printed.",
+            "Contour lines join equal elevations. Closely spaced lines mean a steeper slope. Along a stream, contours typically bend upstream. Identify ridges, valleys, and saddles before choosing a route.",
+            "A distance measured on the map is horizontal, not walking distance. Switchbacks, elevation gain, brush, and obstacles can add time. Use the marked trail and consider conditions, not just the shortest line."
+          ]
+        },
+        {
+          "title": "Use a Compass",
+          "passages": [
+            "Distinguish true, grid, and magnetic north. Declination is the angle between true and magnetic north and changes with time and place. Get a current value for the area and know which north reference your map uses.",
+            "To measure a map bearing, place the compass edge from your known point toward the destination. Align the dial's orienting lines with the selected map north. Convert to the compass reference if needed; do not correct twice on an adjusted compass.",
+            "Hold the compass level and away from metal, loudspeakers, phones, and other magnetic objects. Turn until the needle matches the orienting mark, then pick a visible landmark along the direction of travel. Cross-check with terrain."
+          ]
+        },
+        {
+          "title": "Follow a Route",
+          "passages": [
+            "Break a route into short legs with recognizable checkpoints. Record each leg's expected direction, distance, and terrain. Use a trail, ridge, or another safe linear feature as a handrail where practical.",
+            "Choose a clear feature beyond a difficult turn as a catching feature. If you reach that feature, you went too far. Count junctions and note direction changes as you travel, rather than trying to remember them after a mistake.",
+            "Use time, pace, and terrain together. Calibrate your pace on a measured route, then expect it to vary with grade, surface, and fatigue. Confirm progress against the map at every reliable checkpoint."
+          ]
+        },
+        {
+          "title": "Recover Your Position",
+          "passages": [
+            "Stop when the map and terrain no longer agree. Look for the last confirmed point. Orient your map, compare several independent landmarks, and use your GPS if available. Avoid committing to a guess.",
+            "To estimate your position, take bearings to two or more distinct mapped landmarks. Convert to the map's reference and plot the reciprocal bearings back from those landmarks. Crossings indicate an area of uncertainty, not an exact point.",
+            "Before sharing coordinates, say the format and datum. A point in decimal degrees is not the same as degrees and decimal minutes. For a UTM grid, give the zone, hemisphere, easting, northing, and datum.",
+            "Practice on a familiar route where mistakes are easy to reverse. Further reading: U.S. Geological Survey, Finding Your Way With Map and Compass."
+          ]
+        }
+      ]
+    },
+    {
+      "title": "First Aid",
+      "chapters": [
+        {
+          "title": "Check and Call",
+          "passages": [
+            "If someone is seriously ill or injured, call the local emergency number (911 in the U.S.). This is a quick reference, not a substitute for training or instructions from emergency dispatch.",
+            "Before you approach, check for hazards such as traffic, fire, electricity, or unstable ground. Use gloves or a barrier when available. Ask permission to help if the person is alert.",
+            "Check quickly for a response, normal breathing, and severe bleeding. Gasping is not normal breathing. If the person cannot respond, has trouble breathing, or is bleeding severely, call immediately or point to someone and tell them to call.",
+            "Give dispatch your location, how to reach you, what happened, and how many people need help. Use speakerphone if possible and follow their instructions. Keep watching for changes until help takes over."
+          ]
+        },
+        {
+          "title": "CPR and AED",
+          "passages": [
+            "If an adult is unresponsive and is not breathing normally, call emergency services, send someone for an AED, and start CPR. Follow the dispatcher's instructions. Do not wait for the AED to start CPR.",
+            "For a teen or adult who suddenly collapses, begin chest compressions on a firm surface. Push hard in the center of the chest at 100 to 120 compressions per minute. Let the chest rise fully after each push.",
+            "Give rescue breaths if trained, especially for infants, children, or someone pulled from water. Use age-appropriate CPR and follow the dispatcher. Do not delay chest compressions while looking up instructions.",
+            "When the AED arrives, turn it on and follow its prompts and pad diagrams. Do not touch the person during analysis or a shock. Resume CPR immediately when the AED instructs you to."
+          ]
+        },
+        {
+          "title": "Severe Bleeding",
+          "passages": [
+            "Call for emergency help and expose the source of the bleeding. Press firmly and continuously on the wound with gauze or clean cloth. For an embedded object, leave it in place and apply pressure around it.",
+            "For life-threatening bleeding from an arm or leg, use a manufactured tourniquet if trained or directed by emergency dispatch. Record when it was applied and leave it in place for responders.",
+            "Stay with the person. Protect them from cold or heat and watch their breathing and responsiveness. Tell responders what happened, how the person changed, and exactly what care was given."
+          ]
+        },
+        {
+          "title": "Burns, Heat, and Stroke",
+          "passages": [
+            "For a thermal burn, stop the source safely and cool the affected skin with clean, cool running water. Do not use ice, butter, or creams, and do not pull off anything stuck to the skin. Protect the rest of the body from chilling.",
+            "Get prompt medical help for deep or extensive burns, burns to the face, hands, feet or genitals, and chemical or electrical burns. Call emergency services immediately if the person has breathing problems.",
+            "Confusion or collapse during heat exposure may be heat stroke. Call emergency services and begin cooling immediately. Move out of heat if safe, remove excess clothing, and wet and fan the skin if faster cooling is not available. Monitor breathing and follow dispatch.",
+            "Sudden facial droop, arm weakness, or slurred speech may be a stroke. Call emergency services even if the signs improve. Note when symptoms began or when the person was last known to be well.",
+            "Further reading and hands-on courses: American Red Cross First Aid and American Heart Association CPR and AED resources."
+          ]
+        }
+      ]
+    }
+  ]
+}
