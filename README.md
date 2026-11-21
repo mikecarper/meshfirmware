@@ -26,6 +26,11 @@ For Linux, see the [quick starts and videos below](#linux).
 Merged/full installs and wipes erase stored settings. Back up first and keep
 the node powered until the operation finishes.
 
+For MeshCore nRF52, `firmware.cmd` compares the DFU ZIP's declared SoftDevice
+IDs with `INFO_UF2.TXT` when Windows can associate a mounted bootloader drive
+with the selected radio. A mismatch prompts before erase or upload; choose
+**Yes** to continue without bypassing the radio's own checks. No drive is required.
+
 ## Backup and restore
 
 Windows offers a backup-only option; both platforms offer backup before flashing.

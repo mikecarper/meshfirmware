@@ -126,6 +126,20 @@ export function nrfPackage(name, bytes) {
   pkg.metadataHash=nrfMetadataHash(pkg); return pkg;
 }
 
+export function nrfSoftDeviceWarning(pkg, installed) {
+  if (pkg?.architecture !== 'nrf52' || pkg.kind !== 'application' || !pkg.init || pkg.init.length < 12) return '';
+  const match = /^S140 (0x[0-9a-f]{1,4}|[0-9]{1,5}|6\.1\.1|7\.[23]\.0)$/i.exec(installed || '');
+  if (!match) return '';
+  const fwid = ({'6.1.1':0x00b6, '7.2.0':0x0100, '7.3.0':0x0123})[match[1]] ?? Number(match[1]);
+  if (fwid <= 0 || fwid >= 0xfffe) return '';
+  const view = new DataView(pkg.init.buffer, pkg.init.byteOffset, pkg.init.byteLength), count = view.getUint16(8, true);
+  if (!count || count > 32 || pkg.init.length !== 12 + count * 2) return '';
+  const required = Array.from({length:count}, (_, i) => view.getUint16(10 + i * 2, true));
+  if (required.includes(fwid) || required.includes(0xfffe)) return '';
+  const hex = id => '0x' + id.toString(16).toUpperCase().padStart(4, '0');
+  return `SoftDevice mismatch for ${pkg.name}: INFO_UF2.TXT reports ${installed} (FWID ${hex(fwid)}), but the DFU package lists ${required.map(hex).join(', ')}. The radio may reject the transfer or fail to boot. You can continue, but this does not override checks on the radio.`;
+}
+
 export function partitionTable(data, flashBytes = 128 << 20) {
   if (data.length !== 4096) fail('Partition table must contain exactly 4096 bytes.');
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength), parts = [], labels=new Set();

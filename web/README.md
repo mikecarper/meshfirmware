@@ -554,6 +554,11 @@ selections. The usual backup, device checks and flash confirmation still apply.
    do not authorize an identity override, recovery or bootloader replacement,
    and they expire when the selected port or operation generation changes. They
    never stand in for an application backup or a startup-verification response.
+   When an nRF52 application flash is prepared, **Read INFO_UF2.TXT** can also
+   compare the SoftDevice reported by that radio with the IDs declared in the
+   DFU ZIP. A mismatch is a warning in **Review & flash**, not a block. The
+   radio's own DFU checks still apply. Without the file you can continue, and
+   selecting or disconnecting a USB port clears the SoftDevice information.
    Exact `Heltec V4.2 none detected` and `Heltec V4.3 none detected` models are
    recognized as the base V4 running without an attached display. R8, unknown
    revisions and truncated model strings are not guessed. Hardware/provider/role

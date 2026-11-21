@@ -6789,6 +6789,90 @@ function Get-UsbComPortIdentity {
 	}
 }
 
+function Get-Nrf52BootloaderInfoForUsbParent {
+	param([Parameter(Mandatory)][string]$UsbParent)
+
+	$infoFiles = @(foreach ($disk in Get-CimInstance -ClassName Win32_DiskDrive -Filter "InterfaceType='USB'" -ErrorAction Stop) {
+		if (-not $disk.PNPDeviceID) { continue }
+		$diskParent = Resolve-UsbParentInstanceId -InitialInstanceId $disk.PNPDeviceID -ParentResolver {
+			param($instanceId)
+			$properties = Get-UsbPnpProperties -InstanceId $instanceId -KeyNames @('DEVPKEY_Device_Parent')
+			return [string]$properties['DEVPKEY_Device_Parent']
+		}
+		if ($diskParent -ne $UsbParent) { continue }
+		foreach ($partition in Get-CimAssociatedInstance -InputObject $disk -Association Win32_DiskDriveToDiskPartition -ErrorAction Stop) {
+			foreach ($volume in Get-CimAssociatedInstance -InputObject $partition -Association Win32_LogicalDiskToPartition -ErrorAction Stop) {
+				if ($volume.DeviceID -notmatch '^[A-Z]:$') { continue }
+				$path = '{0}\INFO_UF2.TXT' -f $volume.DeviceID
+				if ([System.IO.File]::Exists($path)) { $path }
+			}
+		}
+	})
+	if ($infoFiles.Count -ne 1) { return }
+	$reader = [System.IO.File]::OpenText($infoFiles[0])
+	try {
+		$buffer = New-Object char[] 8193
+		$count = $reader.ReadBlock($buffer, 0, $buffer.Length)
+		if ($count -lt $buffer.Length) { return [string]::new($buffer, 0, $count) }
+	}
+	finally { $reader.Dispose() }
+}
+
+function Get-Nrf52ApplicationSoftDeviceWarning {
+	param([string]$PackageFile, [string]$BootloaderInfo)
+
+	$fields = [regex]::Matches($BootloaderInfo, '(?im)^SoftDevice:[ \t]*([^\r\n]*)')
+	if ($fields.Count -ne 1 -or $fields[0].Groups[1].Value.Trim() -notmatch '^S140[ \t]+(0x[0-9a-f]{1,4}|[0-9]{1,5}|6\.1\.1|7\.[23]\.0)$') { return }
+	$installed = $matches[1]
+	$fwid = switch -Regex ($installed) {
+		'^6\.1\.1$' { 0x00B6; break }
+		'^7\.2\.0$' { 0x0100; break }
+		'^7\.3\.0$' { 0x0123; break }
+		'^0x' { [Convert]::ToInt32($installed.Substring(2), 16); break }
+		default { [int]$installed }
+	}
+	if ($fwid -le 0 -or $fwid -ge 0xFFFE) { return }
+
+	Add-Type -AssemblyName System.IO.Compression.FileSystem
+	$archive = [System.IO.Compression.ZipFile]::OpenRead($PackageFile)
+	try {
+		$manifest = $archive.GetEntry('manifest.json')
+		if (-not $manifest -or $manifest.Length -gt 65536) { return }
+		$reader = New-Object System.IO.StreamReader($manifest.Open())
+		try { $package = $reader.ReadToEnd() | ConvertFrom-Json -ErrorAction Stop }
+		finally { $reader.Dispose() }
+		$datName = [string]$package.manifest.application.dat_file
+		if (-not $datName) { return }
+		$dat = $archive.GetEntry($datName)
+		if (-not $dat -or $dat.Length -lt 12 -or $dat.Length -gt 76) { return }
+		$reader = New-Object System.IO.BinaryReader($dat.Open())
+		try { $packet = $reader.ReadBytes([int]$dat.Length) }
+		finally { $reader.Dispose() }
+		if ($packet.Length -ne $dat.Length) { return }
+		$count = [BitConverter]::ToUInt16($packet, 8)
+		if ($count -eq 0 -or $packet.Length -ne (12 + 2 * $count)) { return }
+		$required = @(for ($i = 0; $i -lt $count; $i++) { [BitConverter]::ToUInt16($packet, (10 + 2 * $i)) })
+		if ($required -contains $fwid -or $required -contains 0xFFFE) { return }
+		$ids = ($required | ForEach-Object { '0x{0:X4}' -f $_ }) -join ', '
+		return ('SoftDevice mismatch for {0}: INFO_UF2.TXT reports S140 {1} (FWID 0x{2:X4}), but the DFU package lists {3}. The radio may reject the transfer or fail to boot.' -f (Split-Path -Path $PackageFile -Leaf), $installed, $fwid, $ids)
+	}
+	finally { $archive.Dispose() }
+}
+
+function Confirm-Nrf52ApplicationLayout {
+	param([string]$PackageFile, [string]$UsbParent)
+
+	$layoutWarning = $null
+	try {
+		$info = Get-Nrf52BootloaderInfoForUsbParent -UsbParent $UsbParent
+		if ($info) { $layoutWarning = Get-Nrf52ApplicationSoftDeviceWarning -PackageFile $PackageFile -BootloaderInfo $info }
+	}
+	catch { Write-Verbose 'SoftDevice could not be checked. No layout assumption was made.' }
+	if (-not $layoutWarning) { return $true }
+	Write-Warning $layoutWarning
+	return ((Read-Host 'Continue anyway without bypassing checks on the radio? [y/N]') -match '^y(?:es)?$')
+}
+
 function Test-UsbIdentityIsNrf52Dfu {
 	param([Parameter(Mandatory)][psobject]$Identity)
 
@@ -7542,7 +7626,8 @@ function Invoke-NrfutilSerialDfu {
 		[string]$TouchComPort = "",
 		[int]$TimeoutSec = 45,
 		[string]$ProgressActivity = "nRF52 DFU",
-		[psobject]$UsbIdentity = $null
+		[psobject]$UsbIdentity = $null,
+		[string]$CheckApplicationLayout = ''
 	)
 
 	if (-not (Test-Path $PackageFile)) {
@@ -7634,6 +7719,17 @@ function Invoke-NrfutilSerialDfu {
 			throw "Could not verify that DFU COM port $dfuComPort belongs to the selected USB radio."
 		}
 		Assert-UsbIdentityIsNrf52Dfu -Identity $resolvedDfuIdentity -ComPort $dfuComPort
+		if ($CheckApplicationLayout -and $resolvedDfuIdentity.ParentInstanceId) {
+			if (-not (Confirm-Nrf52ApplicationLayout -PackageFile $CheckApplicationLayout -UsbParent $resolvedDfuIdentity.ParentInstanceId)) {
+				throw 'Cancelled at the SoftDevice warning. No DFU transfer was started.'
+			}
+			$currentDfuIdentity = Get-UsbComPortIdentity -ComPort $dfuComPort
+			if ($null -eq $currentDfuIdentity -or $currentDfuIdentity.ParentInstanceId -ne $resolvedDfuIdentity.ParentInstanceId -or
+				-not (Test-UsbComPortIdentityMatch -Expected $UsbIdentity -Actual $currentDfuIdentity)) {
+				throw 'The DFU USB device changed during the SoftDevice check. No DFU transfer was started.'
+			}
+			Assert-UsbIdentityIsNrf52Dfu -Identity $currentDfuIdentity -ComPort $dfuComPort
+		}
 	}
 
 	$dfuArgs = @(
@@ -8466,7 +8562,7 @@ function flashMeshCoreNrf52 {
 		Write-Host "Erasing UF2 area using $eraseFile"
 		Start-Sleep -Seconds 1
 		try {
-			$eraseResult = Invoke-NrfutilSerialDfu -PackageFile $eraseFile -ComPort $runtimeComPort -NrfutilTouchBaud 1200 -ProgressActivity "nRF52 Erase" -UsbIdentity $usbIdentity
+			$eraseResult = Invoke-NrfutilSerialDfu -PackageFile $eraseFile -ComPort $runtimeComPort -NrfutilTouchBaud 1200 -ProgressActivity "nRF52 Erase" -UsbIdentity $usbIdentity -CheckApplicationLayout $selectedFirmwareFile
 		}
 		catch {
 			$message = $_.Exception.Message
@@ -8489,7 +8585,8 @@ function flashMeshCoreNrf52 {
 		# The erase payload normally leaves the node in DFU, but some bootloader or
 		# erase combinations return to runtime first. Request a touch in both cases;
 		# Invoke-NrfutilSerialDfu verifies the mode and skips it when already in DFU.
-		$flashResult = Invoke-NrfutilSerialDfu -PackageFile $selectedFirmwareFile -ComPort $runtimeComPort -NrfutilTouchBaud 1200 -ProgressActivity "nRF52 Flash" -UsbIdentity $usbIdentity
+		$layoutCheck = if ($action -ne 'flash-wipe') { $selectedFirmwareFile } else { '' }
+		$flashResult = Invoke-NrfutilSerialDfu -PackageFile $selectedFirmwareFile -ComPort $runtimeComPort -NrfutilTouchBaud 1200 -ProgressActivity "nRF52 Flash" -UsbIdentity $usbIdentity -CheckApplicationLayout $layoutCheck
 	}
 	catch {
 		$message = $_.Exception.Message

@@ -1,5 +1,5 @@
 import './style.css';
-import { inspectFirmware, checkedZip, hash, fail, text } from './firmware.js';
+import { inspectFirmware, checkedZip, hash, fail, text, nrfSoftDeviceWarning } from './firmware.js';
 import { SerialLink, flashNrf, touch1200 } from './serial.js';
 import { readerPanel } from './reader-panel.js';
 import { EspSession, validateEspWriteRecovery } from './esp.js';
@@ -83,7 +83,7 @@ state.connectionTrial=null;
 state.restorePreview=null;
 state.rippleBackup=null;
 state.wadameshBackup=null;
-state.bootloaderInfo=null;state.applicationProbeFailed=false;
+state.bootloaderInfo=null;state.nrfSoftDeviceInfo=null;state.applicationProbeFailed=false;
 state.bootloaderCatalog=null;
 state.catalogScope='';
 state.transportModePort=null;
@@ -923,27 +923,52 @@ function isMeshtasticMigration(){return isMeshtastic()||state.recovery?.sourceFi
 function directFlashSelected(){return isMeshtasticMigration()||$('skip-backup').checked;}
 const meshtasticMigrationWarning='Meshtastic is running. Installing MeshCore replaces it; Meshtastic settings, channels and identity are not converted into a MeshCore backup. Export any Meshtastic settings separately before continuing.';
 const bootloaderInfoWarning='INFO_UF2.TXT is a file-based board hint, not proof of the selected USB device or its current mode. Select the same physical radio’s DFU serial port before flashing. No file is copied to the drive.';
-function clearBootloaderInfoEvidence(){state.bootloaderInfo=null;if(isBootloaderInfo()){state.device=null;state.detectedHardware=null;state.boardDetected=false;state.backupApproved=null;state.knownApplicationPort=null;}}
-function discardStaleBootloaderInfo(){if(state.bootloaderInfo&&(state.bootloaderInfo.port!==state.port||state.bootloaderInfo.generation!==state.generation))clearBootloaderInfoEvidence();}
+function clearBootloaderInfoEvidence({keepLayout=false}={}){if(!keepLayout)state.nrfSoftDeviceInfo=null;state.bootloaderInfo=null;if(isBootloaderInfo()){state.device=null;state.detectedHardware=null;state.boardDetected=false;state.backupApproved=null;state.knownApplicationPort=null;}}
+function discardStaleBootloaderInfo(){
+  // The advisory layout stays valid when the firmware selection changes, but
+  // must never carry into another USB connection or authorize a board override.
+  if(state.nrfSoftDeviceInfo&&state.nrfSoftDeviceInfo.port!==state.port)state.nrfSoftDeviceInfo=null;
+  if(state.bootloaderInfo&&(state.bootloaderInfo.port!==state.port||state.bootloaderInfo.generation!==state.generation))clearBootloaderInfoEvidence({keepLayout:true});
+}
+function preparedNrfLayoutCheck(){const plan=state.plan;return !!state.port&&state.pkg?.architecture==='nrf52'&&state.pkg.kind==='application'&&plan?.port===state.port&&plan.generation===state.generation&&plan.sha256===state.pkg.sha256;}
+function selectedNrfSoftDevice(){return state.nrfSoftDeviceInfo?.port===state.port?state.nrfSoftDeviceInfo?.softDevice:null;}
 function bootloaderInfoAvailable(){
   // A UART bridge is not a UF2 drive. Silence from a BLE-only application
   // must not offer an unrelated file-based nRF52 identification path.
   if(!state.port||chooseConnection({usbInfo:state.port.getInfo()||{}}).source==='uart-usb')return false;
   return !state.migration&&!state.migrationApproval&&!state.recovery&&!state.espRecovery&&!state.verification&&!state.handoff&&!state.esp&&!state.plan&&(state.applicationProbeFailed||dfuIds.has(portId(state.port))||isBootloaderInfo());
 }
-function updateBootloaderInfoPanel(){const available=bootloaderInfoAvailable();$('bootloader-info-fallback').hidden=!available;$('read-bootloader-info').disabled=state.busy||!available;const result=isBootloaderInfo()?applicationBoard():null;$('bootloader-info-status').textContent=result?[result.hardware?`Read INFO_UF2.TXT; selected ${result.hardware}.`:result.reason,result.candidates.length>1?'Candidates: '+result.candidates.join(', ')+'.':'',bootloaderInfoWarning].filter(Boolean).join(' '):'Optional: only use this if the radio exposes a bootloader drive with INFO_UF2.TXT. No drive mounted? Choose Hardware instead. Serial DFU flashing needs no drive.';}
+function updateBootloaderInfoPanel(){
+  const layoutOnly=preparedNrfLayoutCheck(),available=layoutOnly||bootloaderInfoAvailable(),status=$('bootloader-info-status');
+  $('bootloader-info-fallback').hidden=!available;$('read-bootloader-info').disabled=state.busy||!available;
+  if(layoutOnly){
+    const softDevice=selectedNrfSoftDevice();
+    status.textContent=softDevice?`Read ${softDevice} from INFO_UF2.TXT. ${nrfSoftDeviceWarning(state.pkg,softDevice)||'This file is not proof of USB identity.'}`:'Optional: choose INFO_UF2.TXT from this radio to check the SoftDevice. No drive mounted? Serial DFU flashing can continue without it.';
+    return;
+  }
+  const result=isBootloaderInfo()?applicationBoard():null;
+  status.textContent=result?[result.hardware?`Read INFO_UF2.TXT; selected ${result.hardware}.`:result.reason,result.candidates.length>1?'Candidates: '+result.candidates.join(', ')+'.':'',bootloaderInfoWarning].filter(Boolean).join(' '):'Optional: only use this if the radio exposes a bootloader drive with INFO_UF2.TXT. No drive mounted? Choose Hardware instead. Serial DFU flashing needs no drive.';
+}
 function applicationBoard(device=state.device){return isBootloaderInfo(device)?detectBootloaderBoard({items:state.items,info:state.bootloaderInfo?.info,usbInfo:state.port?.getInfo()||{}}):isMeshtastic(device)?detectMeshtasticBoard({items:state.items,hwModel:device.meshtasticHardware,pioEnv:device.meshtasticPioEnv}):detectBoard({items:state.items,deviceModel:device?.model||'',usbInfo:state.port?.getInfo()||{}});}
 function currentApplicationEvidence(){return !!state.port&&state.portLabelEvidence?.port===state.port&&state.portLabelEvidence?.device===state.device&&!continuingDeviceFlow();}
 function requireMeshCoreApplication(){if(isBootloaderInfo())fail('Only bootloader information has been read. Select the running MeshCore application before backup, restore or serial-console commands.');if(isMeshtastic())fail('Meshtastic is running. MeshCore backup, restore and serial commands are available after MeshCore is installed. Export Meshtastic settings separately with a Meshtastic client.');}
 async function readSelectedBootloaderInfo(){
-  if(!bootloaderInfoAvailable())fail('Select an unidentified radio or its DFU USB port first. Finish any pending write, recovery or verification before reading a bootloader file.');
-  const port=state.port,generation=state.generation,pkg=state.pkg;
+  const layoutOnly=preparedNrfLayoutCheck(),available=layoutOnly?preparedNrfLayoutCheck:bootloaderInfoAvailable;
+  if(!available())fail('Select an unidentified radio or its DFU USB port first. Finish any pending write, recovery or verification before reading a bootloader file.');
+  const port=state.port,generation=state.generation,pkg=state.pkg,plan=state.plan;
   const file=await chooseBootloaderInfoFile({window,document,maxBytes:8192});if(!file)return;
-  if(state.port!==port||state.generation!==generation||state.pkg!==pkg||!bootloaderInfoAvailable())fail('Selected radio or workflow changed while the file chooser was open. No file evidence was retained; choose the same radio and try again.');
+  if(state.port!==port||state.generation!==generation||state.pkg!==pkg||state.plan!==plan||!available())fail('Selected radio or workflow changed while the file chooser was open. No file evidence was retained; choose the same radio and try again.');
+  if(layoutOnly){
+    state.nrfSoftDeviceInfo=null;
+    const {softDevice}=parseBootloaderInfo(file.text);
+    if(softDevice&&softDevice!=='not found')state.nrfSoftDeviceInfo=Object.freeze({port,softDevice});
+    notice(nrfSoftDeviceWarning(pkg,selectedNrfSoftDevice())||(state.nrfSoftDeviceInfo?'SoftDevice information read for flash review.':'This INFO_UF2.TXT does not report an installed SoftDevice. You can still continue.'));return;
+  }
   let info;try{info=parseBootloaderInfo(file.text);}catch(error){clearBootloaderInfoEvidence();state.device=null;state.detectedHardware=null;state.boardDetected=false;state.applicationProbeFailed=true;delete state.manualSelections.hardware;resetAutomaticBoardSelection('The bootloader file was invalid. No previous automatic board choice was retained.');throw error;}
   const result=detectBootloaderBoard({items:state.items,info,usbInfo:port.getInfo()});
   clearBackupJson();state.backup=null;state.backupApproved=null;state.knownApplicationPort=null;state.autoVerifyAttempt=null;invalidateFirmwareSelection();
   delete state.manualSelections.hardware;
+  if(info.softDevice&&info.softDevice!=='not found')state.nrfSoftDeviceInfo=Object.freeze({port,softDevice:info.softDevice});else state.nrfSoftDeviceInfo=null;
   state.bootloaderInfo={info,port,generation:state.generation};state.device={firmwareFamily:'bootloader',role:'bootloader',model:result.model||info.model||'Bootloader information',name:result.model||info.model||'Bootloader information',version:'',publicKey:null,catalogRole:null,architecture:result.hardware?'nrf52':undefined,bootloaderVersion:null,usbMode:null,usbModeStatus:'unavailable'};
   state.boardDetected=true;state.applicationProbeFailed=false;
   $('device-name').textContent=state.device.name;$('device-meta').textContent=`Read from INFO_UF2.TXT${info.version?' · bootloader '+info.version:''} · USB device identity and mode are not verified`;
@@ -994,7 +1019,7 @@ async function readApplication(link) {
   }
   state.device=device;
   state.portLabelEvidence={port,device};
-  state.bootloaderInfo=null;state.applicationProbeFailed=false;
+  state.bootloaderInfo=null;state.nrfSoftDeviceInfo=null;state.applicationProbeFailed=false;
   if(isMeshtastic(device))state.knownApplicationPort=null;
   updateConnectionChoice();
   if(!state.verification&&!dfuIds.has(portId(port))&&!$('already-bootloader').checked&&/^[a-f0-9]{64}$/i.test(device.publicKey||''))state.knownApplicationPort={port,publicKey:device.publicKey,available:true};
@@ -1217,7 +1242,7 @@ async function readBackupApplicationPort(port,{expectedPublicKey=null}={}){
   device.usbMode=null;device.usbModeStatus='unavailable';device.bootloaderVersion=null;
   state.port=port;state.generation++;state.device=device;state.portLabelEvidence={port,device};
   state.knownApplicationPort={port,publicKey:device.publicKey,available:true};state.autoVerifyAttempt=null;
-  state.backupApplicationRequest=null;state.handoff=false;state.plan=null;state.backupApproved=null;state.bootloaderInfo=null;state.applicationProbeFailed=false;state.boardDetected=false;
+  state.backupApplicationRequest=null;state.handoff=false;state.plan=null;state.backupApproved=null;state.bootloaderInfo=null;state.nrfSoftDeviceInfo=null;state.applicationProbeFailed=false;state.boardDetected=false;
   state.nrfPrepareResume=null;
   if(!expectedPublicKey){
     // An explicit chooser grants access, not proof that this is the old radio.
@@ -2667,6 +2692,8 @@ async function flashPreparedFirmware() {
   assertInstallModePackage(pkg);
   const slots=flashSlotControls(pkg,plan,settingsPlan);
   const assertBoardScope=firmwareWriteScope(pkg,plan);
+  const installedSoftDevice=selectedNrfSoftDevice();
+  const softDeviceWarnings=[nrfSoftDeviceWarning(pkg,installedSoftDevice),nrfSoftDeviceWarning(plan.erasePkg,installedSoftDevice)].filter(Boolean);
   const temporary=selectedRecovery(pkg);
   if(temporary&&!await confirm('Install this temporary allow-all recovery bridge?',`${pkg.name}\nInstalled profile: ${temporary.id}\nInstalled identity retained: ${temporary.installedIdentity}\nSHA-256 ${pkg.sha256}`,recoveryWarning,`RECOVERY ${temporary.id}`))return;
   assertBoardScope();
@@ -2690,10 +2717,11 @@ async function flashPreparedFirmware() {
     state.migrationApproval=approval=candidate;state.approvalPort=state.port;state.approvalResetPort=state.port;controls();
   }else if(!approval){
     if(bridge&&!await confirm('Run USB partition expansion first?',`${plan.board} · ${plan.firmware_version} · ${plan.mac}`,'The verified middle firmware preserves supported identity/settings, not all logs or optional files. Power loss during partition-table replacement can require physical recovery. Keep this tab open and re-select the same chip when asked.','EXPAND PARTITIONS'))return;
-    if(!await confirm('Write this firmware?',detail,backupWarning+[firmwareDowngradeWarning(pkg),...pkg.warnings,...(plan.compatibilityWarnings||[])].filter(Boolean).join(' ')+' Settings backups exclude firmware/bootloader images, stored messages and runtime logs. Keep power connected. Wrong bootloader firmware may require SWD recovery.',token,{espSlots:slots}))return;
+    if(!await confirm('Write this firmware?',detail,backupWarning+[...softDeviceWarnings,firmwareDowngradeWarning(pkg),...pkg.warnings,...(plan.compatibilityWarnings||[])].filter(Boolean).join(' ')+' Settings backups exclude firmware/bootloader images, stored messages and runtime logs. Keep power connected. Wrong bootloader firmware may require SWD recovery.',token,{espSlots:slots}))return;
   }
   if (plan.generation !== state.generation || plan.port !== state.port) fail('Device disconnected or selection changed during confirmation.');
   assertBoardScope();
+  if(selectedNrfSoftDevice()!==installedSoftDevice)fail('SoftDevice information changed during confirmation. Review the operation again.');
   if((state.radioDefaults?.postFlashPlan||null)!==settingsPlan)fail('Post-flash settings changed during confirmation. Review the operation again.');
   if(slots){
     const option=slots.options.find(option=>option.value===slots.selection);
@@ -2755,7 +2783,7 @@ async function flashPreparedFirmware() {
         }
         throw error;
       }
-      completeNrfTransfer(pkg);state.nrfDfuEvidence=null;state.nrfLastAttempt=null;state.nrfManualDfu=null;state.nrfDfuHelpVisible=false;$('nrf-dfu-help').hidden=true;
+      state.nrfSoftDeviceInfo=null;completeNrfTransfer(pkg);state.nrfDfuEvidence=null;state.nrfLastAttempt=null;state.nrfManualDfu=null;state.nrfDfuHelpVisible=false;$('nrf-dfu-help').hidden=true;
     } finally { await link.close(); state.plan = null; }
   }
 }

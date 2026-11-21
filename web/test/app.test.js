@@ -22,7 +22,7 @@ import {tryNativeUsbFallback,xiaoS3ManualBootAdvice} from '../src/connection-fal
 import {catalogProvider,catalogItemKey} from '../src/catalog.js';
 import {firmwareChoices,firmwareChoiceLabel} from '../src/catalog-choices.js';
 import {rakCatalogItems,rakHardware,rakVersion,rakLegacy} from './fixtures/rak-catalog.js';
-import {hash as firmwareHash,md5hex,partitionTable as parsePartitionTable,crc32,inspectFirmware as inspectFirmwareBytes} from '../src/firmware.js';
+import {hash as firmwareHash,md5hex,partitionTable as parsePartitionTable,crc32,inspectFirmware as inspectFirmwareBytes,nrfSoftDeviceWarning} from '../src/firmware.js';
 import {assessFirmwareBoard} from '../src/firmware-board.js';
 import {espSlotChoices,selectEspWriteSlots} from '../src/esp-slots.js';
 import {isWadamesh,wadameshDisplayAssessment,WADAMESH_STARTUP_NOTICE} from '../src/wadamesh.js';
@@ -79,6 +79,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
   context.createPostFlashSettingsPlan=createPostFlashSettingsPlan;context.applyPostFlashSettings=applyPostFlashSettings;context.createPostFlashCompanionRequest=createPostFlashCompanionRequest;context.loadRadioPresets=async()=>({presets:[],source:'bundled',warning:'Test preset inventory.'});
   context.detectApplication=(...args)=>context.detectMeshCore(...args);context.detectMeshtasticBoard=detectMeshtasticBoard;
   context.parseBootloaderInfo=parseBootloaderInfo;context.detectBootloaderBoard=detectBootloaderBoard;context.xiaoInstalledStatus=xiaoInstalledStatus;context.xiaoInfoProfile=xiaoInfoProfile;context.xiaoBootloaderItem=xiaoBootloaderItem;context.chooseBootloaderInfoFile=async()=>{calls.push('file-picker');throw Error('Unexpected file chooser');};
+  context.nrfSoftDeviceWarning=nrfSoftDeviceWarning;
   context.selectionLink=selectionLink;context.nrfBoardCandidates=nrfBoardCandidates;context.espBoardCandidates=espBoardCandidates;context.isWadamesh=isWadamesh;context.wadameshDisplayAssessment=wadameshDisplayAssessment;context.isWadameshProtocolProfile=isWadameshProtocolProfile;context.isWadameshTakTouchProfile=isWadameshTakTouchProfile;context.WADAMESH_STARTUP_NOTICE=WADAMESH_STARTUP_NOTICE;context.defaultFirmwareProvider=defaultFirmwareProvider;
   context.readerPanel=()=>({controls(){}});
   vm.runInContext(source,context);
@@ -2434,6 +2435,46 @@ test('nRF52 mode never opens a mounted-drive picker even for a non-Nordic UF2',a
 });
 const fakePackage=(extra={})=>({name:'final.zip',architecture:'nrf52',kind:'application',sha256:'a'.repeat(64),payloadHash:'b'.repeat(64),payload:new Uint8Array(64),warnings:[],destructive:false,...extra});
 function serialMock(ui){ui.context.SerialLink=class{async open(){ui.calls.push('open');}async close(){ui.calls.push('close');}async command(command){ui.calls.push(command);return '';}};}
+
+function softDeviceDat(...ids){
+  const init=new Uint8Array(12+ids.length*2),view=new DataView(init.buffer);
+  view.setUint16(8,ids.length,true);ids.forEach((id,index)=>view.setUint16(10+2*index,id,true));return init;
+}
+
+test('SoftDevice warning uses the DFU DAT requirements, not a version in the filename or a wide layout match',()=>{
+  const pkg=fakePackage({init:softDeviceDat(0x0123)});
+  for(const value of ['S140 6.1.1','S140 0x00B6','S140 182'])assert.match(nrfSoftDeviceWarning(pkg,value),/FWID 0x00B6.*lists 0x0123/);
+  assert.match(nrfSoftDeviceWarning(pkg,'S140 7.2.0'),/FWID 0x0100.*lists 0x0123/);
+  for(const value of ['S140 7.3.0','S140 291','S140 9.0.0','not found',null])assert.equal(nrfSoftDeviceWarning(pkg,value),'');
+  assert.equal(nrfSoftDeviceWarning({...pkg,init:softDeviceDat(0x0123,0xfffe)},'S140 6.1.1'),'');
+  assert.equal(nrfSoftDeviceWarning({...pkg,kind:'bootloader'},'S140 6.1.1'),'');
+});
+
+test('prepared DFU can read SoftDevice information without changing the plan and warns before flash or wipe',async()=>{
+  for(const outcome of ['cancel','continue','wipe','no-info','changed']){
+    const ui=workbench();serialMock(ui);ui.context.selectedPort=ui.port;
+    ui.context.pkg=fakePackage({init:softDeviceDat(0x0123)});ui.context.erase=outcome==='wipe'?fakePackage({name:'erase.zip',erase:true,destructive:true,init:softDeviceDat(0x00b6)}):null;
+    ui.evaluate('state.port=selectedPort;state.pkg=pkg;state.handoff=true;state.plan={generation:state.generation,port:selectedPort,sha256:pkg.sha256,erasePkg:erase};controls();');
+    const plan=ui.evaluate('state.plan');
+    assert.equal(ui.elements.get('read-bootloader-info').disabled,false,outcome);
+    if(outcome!=='no-info'){
+      ui.context.chooseBootloaderInfoFile=async()=>({name:'INFO_UF2.TXT',text:bootloaderInfoText()});
+      await ui.elements.get('read-bootloader-info').onclick();assert.equal(ui.evaluate('state.plan'),plan);assert.equal(ui.evaluate('state.device'),null);
+      assert.match(ui.elements.get('bootloader-info-status').textContent,/SoftDevice mismatch/);
+    }
+    ui.context.confirm=async(_title,_detail,warning,token)=>{
+      assert.deepEqual(ui.calls,[]);assert.equal(token,outcome==='wipe'?'WIPE WITHOUT BACKUP':'FLASH');
+      if(outcome==='no-info')assert.doesNotMatch(warning,/SoftDevice mismatch/);
+      else assert.match(warning,/SoftDevice mismatch for final\.zip.*0x00B6.*0x0123/);
+      if(outcome==='changed')ui.evaluate('state.nrfSoftDeviceInfo=null;');
+      return outcome!=='cancel';
+    };
+    ui.context.flashNrf=async(_link,pkg)=>ui.calls.push('flash:'+pkg.name);
+    await ui.elements.get('flash').onclick();
+    assert.deepEqual(ui.calls,['cancel','changed'].includes(outcome)?[]:['open',outcome==='wipe'?'flash:erase.zip':'flash:final.zip','close'],outcome);
+    if(outcome==='changed')assert.match(ui.elements.get('notice').textContent,/SoftDevice information changed/);
+  }
+});
 
 test('manual catalog downgrade is warned before loading and stays loadable without a device operation',async()=>{
   const ui=workbench();await Promise.resolve();ui.context.inventory=[v4Item];ui.context.pkg=fakePackage({name:v4Item.name,architecture:'esp32'});ui.evaluate("state.items=inventory;state.device={version:'v1.19.0'};filterCatalog();");ui.elements.get('artifact').value='0';ui.evaluate('updateDownload();controls();');
