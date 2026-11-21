@@ -297,6 +297,14 @@ Copy and run this in your linux terminal
 ```bash
 cd ~ && git clone https://github.com/mikecarper/meshfirmware.git && cd meshfirmware && ./mtfirmware.sh
 ```
+
+On a mounted nRF52 UF2 drive, `mtfirmware.sh` compares the application start
+address with the installed S140 layout reported in `INFO_UF2.TXT`. A mismatch
+stops the copy, or stops erase first if the operation starts on that drive.
+Older drives without a recognized layout produce a warning; the script cannot
+verify their application start address. Use serial DFU for an image that also
+replaces the SoftDevice.
+
 <details>
   <summary>Readable Code</summary>  
     

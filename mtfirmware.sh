@@ -2348,8 +2348,9 @@ get_firmware_metadata_display_name() {
 	fi
 }
 
-nrf52_firmware_version_from_artifact() {
+nrf52_inspect_firmware_artifact() {
 	local firmware_file=$1
+	local bootloader_info=${2:-}
 
 	if [[ ! -f "$firmware_file" ]]; then
 		echo "Cannot inspect the selected nRF52 firmware artifact: $firmware_file" >&2
@@ -2360,7 +2361,7 @@ nrf52_firmware_version_from_artifact() {
 		return 1
 	fi
 
-	"$PYTHON" - "$firmware_file" <<'PY'
+	"$PYTHON" - "$firmware_file" "$bootloader_info" <<'PY'
 import json
 import pathlib
 import re
@@ -2375,10 +2376,15 @@ UF2_MAGIC_START0 = 0x0A324655
 UF2_MAGIC_START1 = 0x9E5D5157
 UF2_MAGIC_END = 0x0AB16F30
 UF2_FLAG_NOFLASH = 0x00000001
+UF2_FLAG_FAMILY_ID_PRESENT = 0x00002000
+UF2_BOOTLOADER_FAMILY = 0xD663823C
+bootloader_info = sys.argv[2]
 
 
 def fail(message):
-    print(f"Cannot derive the selected nRF52 firmware version: {message}", file=sys.stderr)
+    operation = ("validate the mounted nRF52 application UF2 layout" if bootloader_info
+                 else "derive the selected nRF52 firmware version")
+    print(f"Cannot {operation}: {message}", file=sys.stderr)
     raise SystemExit(1)
 
 
@@ -2411,6 +2417,9 @@ def decode_uf2(data):
             fail(f"invalid UF2 magic in block {offset // UF2_BLOCK_SIZE}")
         if payload_size == 0 or payload_size > 476:
             fail(f"invalid UF2 payload size {payload_size}")
+        if (bootloader_info and flags & UF2_FLAG_FAMILY_ID_PRESENT
+                and struct.unpack_from("<I", block, 28)[0] == UF2_BOOTLOADER_FAMILY):
+            fail("a bootloader UF2 cannot be copied as application firmware")
         if total_blocks:
             advertised_counts.add(total_blocks)
         if block_number in records:
@@ -2442,7 +2451,38 @@ def decode_uf2(data):
                 image.append(0)
         image.extend(payload)
         previous_end = target + len(payload)
-    return checked_size(bytes(image), "decoded UF2 image")
+    return checked_size(bytes(image), "decoded UF2 image"), flash_records[0][0]
+
+
+def check_installed_layout(info_path, first_address):
+    # Addresses and FWIDs come from the shipped nRF52 S140 images, not the
+    # file name, USB product string, or order in which UF2 blocks appear.
+    layouts = {
+        "6.1.1": 0x26000, "0x00b6": 0x26000,
+        "7.2.0": 0x27000, "0x0100": 0x27000,
+        "7.3.0": 0x27000, "0x0123": 0x27000,
+    }
+    try:
+        with open(info_path, "rb") as stream:
+            info = stream.read(4097)
+    except FileNotFoundError:
+        info = b""  # Older boot volumes may not expose layout information.
+    except OSError as error:
+        fail(f"could not read the selected bootloader information: {error}")
+    if len(info) > 4096:
+        fail("the selected bootloader information is larger than 4096 bytes")
+    fields = re.findall(rb"^SoftDevice:[ \t]*([^\r\n]*)", info, re.IGNORECASE | re.MULTILINE)
+    if len(fields) > 1:
+        fail("the selected bootloader reports more than one SoftDevice")
+    match = (re.fullmatch(rb"S140[ \t]+([^ \t]+)", fields[0].strip(), re.IGNORECASE)
+             if fields else None)
+    base = layouts.get(match[1].decode("ascii", errors="replace").lower()) if match else None
+    if base is None:
+        print("Warning: the selected UF2 drive did not report a recognized S140 layout; "
+              "the application start could not be compared.", file=sys.stderr)
+    elif first_address != base:
+        fail(f"application starts at 0x{first_address:X}, but the installed S140 "
+             f"expects 0x{base:X}; choose the matching application UF2 or use the appropriate serial DFU package")
 
 
 def decode_intel_hex(data):
@@ -2535,13 +2575,19 @@ def image_from_zip(path):
 
 artifact = pathlib.Path(sys.argv[1])
 try:
-    raw = checked_size(artifact.read_bytes(), "selected artifact")
+    with artifact.open("rb") as stream:
+        raw = checked_size(stream.read(MAX_IMAGE_SIZE + 1), "selected artifact")
 except OSError as error:
     fail(f"could not read {artifact}: {error}")
 
 suffix = artifact.suffix.lower()
-if suffix == ".uf2":
-    image = decode_uf2(raw)
+if bootloader_info or suffix == ".uf2":
+    if suffix != ".uf2":
+        fail("the mounted write path requires an application UF2")
+    image, first_address = decode_uf2(raw)
+    if bootloader_info:
+        check_installed_layout(bootloader_info, first_address)
+        raise SystemExit(0)
 elif suffix == ".hex":
     image = decode_intel_hex(raw)
 elif suffix == ".zip":
@@ -2600,6 +2646,14 @@ if filename_version and embedded_version.lower() != filename_version.lower():
     )
 print(embedded_version)
 PY
+}
+
+nrf52_firmware_version_from_artifact() {
+	nrf52_inspect_firmware_artifact "$1"
+}
+
+nrf52_validate_uf2_layout() {
+	nrf52_inspect_firmware_artifact "$1" "${2%/}/INFO_UF2.TXT"
 }
 
 choose_nrf52_flash_action() {
@@ -3224,6 +3278,10 @@ copy_nrf52_uf2_to_storage() {
 		release_nrf52_flash_lock || true
 		return 1
 	fi
+	if [[ "$stage" == firmware ]] && ! nrf52_validate_uf2_layout "$uf2_file" "$mount_dir"; then
+		release_nrf52_flash_lock || true
+		return 1
+	fi
 	if ! capture_nrf52_pre_flash_endpoint block "$source"; then
 		release_nrf52_flash_lock || true
 		return 1
@@ -3694,6 +3752,10 @@ run_update_script() {
 			echo "nRF52 USB storage mode detected at $nrf52_uf2_mount; using UF2 copy."
 
 			if [[ "$nrf52_action" == "flash-wipe" ]]; then
+				# Catch a mismatched application before erasing the existing installation.
+				if ! nrf52_validate_uf2_layout "$app_uf2" "$nrf52_uf2_mount"; then
+					return 1
+				fi
 				erase_uf2="$(find_nrf52_erase_uf2 "$abs_selected" "$abs_selected")"
 				if [[ -z "$erase_uf2" ]]; then
 					echo "No Meshtastic nRF52 erase UF2 file was found next to $abs_selected" >&2
@@ -3788,6 +3850,9 @@ run_update_script() {
 					"$NRF52_SELECTED_VENDOR_ID" || true)"
 				erase_uf2="$(find_nrf52_erase_uf2 "$abs_selected" "$abs_selected" || true)"
 				if [[ -n "$nrf52_uf2_mount" && -n "$erase_uf2" ]]; then
+					if [[ -n "$app_uf2" ]] && ! nrf52_validate_uf2_layout "$app_uf2" "$nrf52_uf2_mount"; then
+						return 1
+					fi
 					echo "nrfutil failed, but UF2 storage is available; retrying erase with UF2 copy."
 					if ! copy_nrf52_uf2_to_storage "$erase_uf2" "erase" \
 						"$NRF52_SELECTED_SERIAL" "$NRF52_SELECTED_PATH_STEM" \

@@ -25,7 +25,7 @@ for function_name in cleanup serial_port_from_detection detect_device \
 	nrf52_endpoint_instance capture_nrf52_pre_flash_endpoint \
 	nrf52_pre_flash_endpoint_changed nrf52_candidate_proves_transition \
 	nrf52_runtime_version_from_port nrf52_versions_match \
-	nrf52_firmware_version_from_artifact \
+	nrf52_inspect_firmware_artifact nrf52_firmware_version_from_artifact nrf52_validate_uf2_layout \
 	resolve_nrf52_runtime_serial_port check_nrf52_after_flash \
 	nrf52_validate_uf2_mount_identity ensure_nrf52_flash_lock_file \
 	acquire_nrf52_flash_lock release_nrf52_flash_lock \
@@ -329,7 +329,26 @@ uf2_file="${tmp_dir}/firmware.uf2"
 uf2_mount="${tmp_dir}/uf2"
 uf2_device="${tmp_dir}/uf2-device"
 mkdir -p "$uf2_mount"
-printf 'UF2 payload\n' >"$uf2_file"
+"$PYTHON" - "$uf2_file" <<'PY'
+from pathlib import Path
+import struct
+import sys
+
+path = Path(sys.argv[1])
+for name, address, family in ((path.name, 0x26000, 0xADA52840),
+                              ("v7.uf2", 0x27000, 0xADA52840),
+                              ("bootloader.uf2", 0xF4000, 0xD663823C)):
+    image = bytearray()
+    # Host preflight must look at all targets, not the order in the file.
+    for number in (1, 0):
+        block = bytearray(512)
+        struct.pack_into("<8I", block, 0, 0x0A324655, 0x9E5D5157, 0x2000,
+                         address + number * 256, 256, number, 2, family)
+        struct.pack_into("<I", block, 508, 0x0AB16F30)
+        image.extend(block)
+    path.with_name(name).write_bytes(image)
+PY
+printf 'UF2 Bootloader 0.11.0\r\nSoftDevice: S140 0x00B6\r\n' >"$uf2_mount/INFO_UF2.TXT"
 touch "$uf2_device"
 
 find_uf2_mount_dir() {
@@ -359,6 +378,51 @@ NRF52_FLASH_LOCK_FILE="${tmp_dir}/nrf52-flash.lock"
 
 export UF2_CP_RESULT=success UF2_SYNC_RESULT=success
 export UF2_REVALIDATE_RESULT=success
+if copy_nrf52_uf2_to_storage "${tmp_dir}/v7.uf2" firmware selected-serial selected-path selected-vendor \
+	>"${tmp_dir}/wrong-layout.out" 2>"${tmp_dir}/wrong-layout.err"; then
+	echo "FAIL: wrong SoftDevice application was accepted" >&2
+	exit 1
+fi
+grep -Fq 'application starts at 0x27000, but the installed S140 expects 0x26000' "${tmp_dir}/wrong-layout.err"
+[[ ! -e "$uf2_mount/v7.uf2" && ! -e "$UF2_SYNC_ARGUMENT_LOG" ]]
+[[ "$NRF52_FLASH_LOCK_DEPTH" == 0 ]]
+
+for version in 7.2.0 7.3.0 0x0100 0x0123; do
+	printf 'SoftDevice: S140 %s\n' "$version" >"$uf2_mount/INFO_UF2.TXT"
+	nrf52_validate_uf2_layout "${tmp_dir}/v7.uf2" "$uf2_mount"
+	if nrf52_validate_uf2_layout "$uf2_file" "$uf2_mount" 2>"${tmp_dir}/wrong-layout.err"; then
+		echo "FAIL: v6 UF2 was accepted for installed S140 $version" >&2
+		exit 1
+	fi
+done
+if nrf52_validate_uf2_layout "${tmp_dir}/bootloader.uf2" "$uf2_mount" 2>"${tmp_dir}/wrong-layout.err"; then
+	echo "FAIL: bootloader UF2 was accepted as an application" >&2
+	exit 1
+fi
+grep -Fq 'a bootloader UF2 cannot be copied as application' "${tmp_dir}/wrong-layout.err"
+
+printf 'UF2 Bootloader 0.6.2\n' >"$uf2_mount/INFO_UF2.TXT"
+nrf52_validate_uf2_layout "$uf2_file" "$uf2_mount" 2>"${tmp_dir}/unknown-layout.err"
+grep -Fq 'the application start could not be compared' "${tmp_dir}/unknown-layout.err"
+printf 'SoftDevice: S140 6.1.1\nSoftDevice: S140 7.3.0\n' >"$uf2_mount/INFO_UF2.TXT"
+if nrf52_validate_uf2_layout "$uf2_file" "$uf2_mount" 2>"${tmp_dir}/wrong-layout.err"; then
+	echo "FAIL: ambiguous SoftDevice banner was accepted" >&2
+	exit 1
+fi
+printf 'SoftDevice: S140 6.1.1\n' >"$uf2_mount/INFO_UF2.TXT"
+echo "PASS: mounted application UF2 layout rejects before copy and sync"
+
+"$PYTHON" - "$script_path" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text()
+mounted = source.index("nRF52 USB storage mode detected at $nrf52_uf2_mount;")
+check = source.index('nrf52_validate_uf2_layout "$app_uf2" "$nrf52_uf2_mount"', mounted)
+erase = source.index('copy_nrf52_uf2_to_storage "$erase_uf2" "erase"', mounted)
+assert check < erase, "mounted flash-wipe must check the application before copying the erase image"
+PY
+
 copy_nrf52_uf2_to_storage "$uf2_file" firmware selected-serial selected-path selected-vendor \
 	>"${tmp_dir}/copy-success.out"
 cmp "$uf2_file" "${uf2_mount}/$(basename "$uf2_file")"
