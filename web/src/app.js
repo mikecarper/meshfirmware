@@ -1,6 +1,7 @@
 import './style.css';
 import { inspectFirmware, checkedZip, hash, fail, text, nrfSoftDeviceWarning } from './firmware.js';
 import { SerialLink, flashNrf, touch1200 } from './serial.js';
+import { petPanel } from './pet-panel.js';
 import { readerPanel } from './reader-panel.js';
 import { EspSession, validateEspWriteRecovery } from './esp.js';
 import {espSlotChoices} from './esp-slots.js';
@@ -56,7 +57,7 @@ import { readChannels, saveChannel, deleteChannel, hashtagChannel, readAutoAdd, 
 import { readManagedContacts, renameManagedContact, addManagedContact, removeManagedContact } from './managed-contacts.js';
 
 const $ = id => document.getElementById(id);
-let readerBooks;
+let readerBooks, petTracking;
 const usbChooserCancelled=Symbol('usb-chooser-cancelled');
 // A detected Meshtastic radio defaults to a fresh install. A later manual
 // choice belongs to that radio; automatic defaults never authorize a write.
@@ -407,7 +408,7 @@ function revealPanel(id) {
 function openLinkedPanel() {
   const id=window.location?.hash?.slice(1);
   // Only known tool links are expanded; arbitrary fragments are not selectors.
-  if(['firmware-choices','backups','console','capabilities','advanced-options','reader-books'].includes(id))revealPanel(id);
+  if(['firmware-choices','backups','console','capabilities','advanced-options','reader-books','pet-tracking'].includes(id))revealPanel(id);
 }
 function installModeLocked(){
   return !!(state.migrationApproval||state.migration||state.recovery||state.espRecovery||state.verification||state.plan?.written||(state.handoff&&!state.esp));
@@ -675,6 +676,7 @@ function controls() {
   $('hardware-filter-status').textContent=esp&&!$('show-all-esp').checked&&pagerModelCandidates().length?'The running firmware reports a T-LoRa Pager. Choose its SX1262 or LR1121 radio variant; the model name does not identify the radio.':nrf?$('show-all-nrf').checked?'Showing all nRF52 boards. Confirm the physical hardware before flashing.':candidates.candidates.length?candidates.source==='identified-hardware'?'Showing the previously identified nRF52 hardware.':`Showing ${candidates.candidates.length} matching nRF52 board candidates. The USB bootloader identity may be shared; choose the physical board.`:'Showing nRF52 boards only. The exact hardware has not been identified.':esp?($('show-all-esp').checked?'Showing all ESP32 boards; chip compatibility checks still apply. ':candidates.source==='rom-chip'?`Showing ${candidates.candidates.length} possible ${candidates.chipFamily} boards. `:'Showing ESP32-family boards from the USB/application hint. Exact chip and board are not identified. ')+(chip?.flashBytes?`${size(chip.flashBytes)} physical flash. `:'')+(candidates.source==='rom-chip'?'Boards with unknown chip metadata remain available. Flash size, PSRAM and screen resolution are not used to guess the model.':'Read the ESP32 chip to narrow further; this briefly restarts the radio.') :'';
   document.querySelectorAll('[data-lock]').forEach(el => { el.disabled = state.busy; });
   readerBooks?.controls();
+  petTracking?.controls();
   $('show-all-nrf').disabled ||= continuingDeviceFlow()||!!state.plan?.written;
   $('show-all-esp').disabled ||= continuingDeviceFlow()||!!state.plan?.written;
   $('inspect-esp-chip').disabled ||= !canInspectEspChip();
@@ -3123,6 +3125,12 @@ $('restore').onclick = () => {
   }
   });
 };
+petTracking = petPanel({
+  $, operation, linkOperation, confirmChange: message => window.confirm(message),
+  target: () => ({port: state.port, generation: state.generation}),
+  available: () => !!state.port && !state.busy && !restoreWorkflowBlocked()
+    && !$('already-bootloader').checked && !dfuIds.has(portId(state.port)),
+});
 readerBooks = readerPanel({
   $, operation, linkOperation,
   getTarget: () => ({ port: state.port, generation: state.generation }),
@@ -3153,7 +3161,7 @@ window.addEventListener('click',event=>{
   // A same-fragment link does not emit hashchange; reopen a tool even if the
   // user collapsed it after the previous visit.
   const link=event.target?.closest?.('a[href^="#"]'),id=link?.getAttribute('href')?.slice(1);
-  if(['firmware-choices','backups','console','capabilities','advanced-options','reader-books'].includes(id))revealPanel(id);
+  if(['firmware-choices','backups','console','capabilities','advanced-options','reader-books','pet-tracking'].includes(id))revealPanel(id);
 });
 if(state.migration) notice('A partition migration is pending in this browser. Keep power connected, select its original firmware and the same device. Application commands are blocked until final verification.');
 if(state.recovery)notice('An nRF52 erase/recovery is pending. Select its original final ZIP and explicitly choose the same radio’s DFU port.');

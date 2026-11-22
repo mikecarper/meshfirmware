@@ -81,6 +81,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
   context.parseBootloaderInfo=parseBootloaderInfo;context.detectBootloaderBoard=detectBootloaderBoard;context.xiaoInstalledStatus=xiaoInstalledStatus;context.xiaoInfoProfile=xiaoInfoProfile;context.xiaoBootloaderItem=xiaoBootloaderItem;context.chooseBootloaderInfoFile=async()=>{calls.push('file-picker');throw Error('Unexpected file chooser');};
   context.nrfSoftDeviceWarning=nrfSoftDeviceWarning;
   context.selectionLink=selectionLink;context.nrfBoardCandidates=nrfBoardCandidates;context.espBoardCandidates=espBoardCandidates;context.isWadamesh=isWadamesh;context.wadameshDisplayAssessment=wadameshDisplayAssessment;context.isWadameshProtocolProfile=isWadameshProtocolProfile;context.isWadameshTakTouchProfile=isWadameshTakTouchProfile;context.WADAMESH_STARTUP_NOTICE=WADAMESH_STARTUP_NOTICE;context.defaultFirmwareProvider=defaultFirmwareProvider;
+  context.petPanel=()=>({controls(){}});
   context.readerPanel=()=>({controls(){}});
   vm.runInContext(source,context);
   return {context,elements,calls,port,serialEvents,windowEvents,evaluate:code=>vm.runInContext(code,context)};
