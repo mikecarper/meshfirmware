@@ -32,11 +32,23 @@ not a remote USB-only node.
 
 ### Nearby MeshCore scopes
 
-This optional lookup lists nearby scopes observed forwarding traffic. Choose an
-approximate IP lookup or enter coordinates; neither accesses USB or changes the
-radio. The hosted feature requires the separately deployed
+Use approximate IP location or enter coordinates to open MeshMapper centered on
+the search area. This works without a scopes service. A requested IP lookup uses
+[GeoJS](https://www.geojs.io/privacy/) when the scopes service cannot supply a
+result. GeoJS sees the request's public IP; the flasher does not store it.
+Opening the map link shares rounded coordinates with MeshMapper.
+
+Forwarding results require the separately deployed
 [nearby scopes service](../services/nearby-scopes/README.md) and an authorized
-MeshMapper integration key. The flasher does not store the key or the location.
+MeshMapper integration key. With results, regional map links open the Repeater
+Scopes overlay. Neither lookup accesses USB or changes the radio.
+
+### Pet tracking
+
+The panel lists the card-style tracker builds and their compatibility. Full
+collar controls require the combined RAK WisMesh Tag Sensor or USB tracker
+Companion firmware. **Preview notes** plays the current draft in the browser;
+**Play saved tune on collar** is a separate USB action.
 
 ### Reader books
 

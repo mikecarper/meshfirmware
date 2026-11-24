@@ -17,21 +17,89 @@ export function boundaryCommand(text, radius) {
   return 'fence ' + args.join(' ');
 }
 
-export function tuneCommand(notes, interval) {
+export function parseTuneNotes(notes) {
   const parts = notes.trim().split(',').map(part => part.trim().split(':'));
   if (parts.length > 8 || parts.some(note => note.length !== 2)) throw Error('Enter up to eight frequency:duration pairs.');
-  const parsed = parts.map(([hz, ms]) => {
+  return parts.map(([hz, ms]) => {
     const frequency = hz === '0' ? hz : unsigned(hz, 200, 5000, 'a frequency in Hz');
-    return frequency + ':' + unsigned(ms, 50, 1000, 'a duration in milliseconds');
+    return [+frequency, +unsigned(ms, 50, 1000, 'a duration in milliseconds')];
   });
-  return 'tune ' + unsigned(interval, 1, 3600, 'a repeat interval in seconds') + ' ' + parsed.join(',');
+}
+
+export function tuneCommand(notes, interval) {
+  const parsed = parseTuneNotes(notes);
+  return 'tune ' + unsigned(interval, 1, 3600, 'a repeat interval in seconds') + ' ' + parsed.map(note => note.join(':')).join(',');
+}
+
+export function scheduleTunePreview(audio, notes, ended) {
+  const oscillator = audio.createOscillator();
+  const gain = audio.createGain();
+  oscillator.connect(gain);
+  gain.connect(audio.destination);
+  const start = audio.currentTime + 0.02;
+  let at = start;
+  gain.gain.value = 0;
+  for (const [hz, ms] of notes) {
+    const end = at + ms / 1000;
+    if (hz) {
+      oscillator.frequency.setValueAtTime(hz, at);
+      gain.gain.setValueAtTime(0, at);
+      gain.gain.linearRampToValueAtTime(0.12, at + 0.005);
+      gain.gain.setValueAtTime(0.12, end - 0.005);
+      gain.gain.linearRampToValueAtTime(0, end);
+    }
+    at = end;
+  }
+  oscillator.onended = ended;
+  oscillator.start(start);
+  oscillator.stop(at);
+}
+
+export function installTunePreview($, createAudio = () => {
+  const Audio = globalThis.AudioContext ?? globalThis.webkitAudioContext;
+  if (!Audio) throw Error('Audio preview is unavailable in this browser.');
+  return new Audio();
+}) {
+  const button = $('pet-tune-preview'), status = $('pet-preview-status');
+  let playing = null;
+  function show(active) {
+    const label = active ? 'Stop tune preview' : 'Play tune preview';
+    button.setAttribute('aria-label', label);
+    button.title = label;
+    $('pet-preview-icon').textContent = active ? '\u25a0' : '\u25b6';
+    $('pet-preview-label').textContent = active ? 'Stop preview' : 'Preview notes';
+  }
+  function finish(audio) {
+    if (playing !== audio) return;
+    playing = null;
+    show(false);
+    void audio.close().catch(() => {});
+  }
+  button.onclick = async () => {
+    if (playing) { finish(playing); return; }
+    status.hidden = true;
+    let audio;
+    try {
+      const notes = parseTuneNotes($('pet-notes').value);
+      if (!notes.some(([hz]) => hz)) throw Error('Add at least one audible note to preview.');
+      audio = playing = createAudio();
+      show(true);
+      await audio.resume();
+      if (playing === audio) scheduleTunePreview(audio, notes, () => finish(audio));
+    } catch (error) {
+      if (audio && playing !== audio) return;
+      if (audio) finish(audio);
+      status.textContent = error.message || 'Audio preview failed.';
+      status.hidden = false;
+    }
+  };
 }
 
 const clean = text => text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/\r/g, '\n').split('\n').map(s => s.trim()).filter(Boolean);
 export async function readCollar(link) {
   const lines = clean(await link.command('pet status'));
   if (!lines.some(s => /^role=tracker-(sensor|companion)$/.test(s)) ||
-      !lines.includes('pet_api=1')) throw Error('Select a combined RAK pet collar with hike and tune support.');
+      !lines.includes('pet_api=1')) throw Error('This firmware does not expose collar controls. Check the card-style tracker list.');
   return lines.filter(s => /^(role|id|radio_params|owner_radio)=/.test(s));
 }
 export async function collarCommand(link, command) {
@@ -46,6 +114,7 @@ export async function collarCommand(link, command) {
 }
 
 export function petPanel({$, operation, linkOperation, target, available, confirmChange}) {
+  installTunePreview($);
   const value = id => $('pet-' + id).value.trim();
   const output = $('pet-result');
   const commands = {

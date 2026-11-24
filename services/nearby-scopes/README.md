@@ -28,7 +28,9 @@ are opt-in. Disable request/body logging that could retain visitor data.
 4. Set **Settings > Secrets and variables > Actions > Variables** in
    `mikecarper/meshfirmware` to `NEARBY_SCOPES_URL=https://YOUR-WORKER/nearby-scopes`.
    Re-run the Browser USB flasher Pages workflow. The public endpoint must be
-   HTTPS. Without that variable the panel offers a link to MeshMapper instead.
+   HTTPS. Without that variable the panel still offers approximate IP location
+   through GeoJS and a centered MeshMapper link. It does not display forwarding
+   results until the Worker is configured.
 
 `https://mikecarper.github.io` is the allowed browser origin. For local testing,
 set `EXTRA_ORIGIN` on a test Worker to the exact Vite origin and set

@@ -215,18 +215,17 @@ No hardware operations have been performed.</pre><div class="console-input"><lab
 
     <details id="nearby-scopes" class="nearby-scopes">
       <summary>Nearby MeshCore scopes</summary>
-      <p id="nearby-scopes-fallback" class="hint">Automatic lookup isn&rsquo;t available on this deployment. <a href="https://meshmapper.net/" target="_blank" rel="noopener noreferrer">Open MeshMapper</a></p>
-      <div id="nearby-scopes-controls" hidden>
-        <p class="hint">IP location is approximate and can be wrong on a VPN or mobile network. Either lookup leaves the radio unchanged.</p>
+      <div id="nearby-scopes-controls">
+        <p class="hint">IP location is approximate, especially on VPNs and mobile networks. An IP lookup may share your public IP with <a href="https://www.geojs.io/privacy/" target="_blank" rel="noopener noreferrer">GeoJS</a>.</p>
         <div class="nearby-scope-actions">
-          <div><label for="nearby-scopes-radius">Search radius</label><select id="nearby-scopes-radius"><option value="25">25 km</option><option value="50" selected>50 km</option><option value="100">100 km</option></select></div>
-          <button id="nearby-scopes-ip" class="secondary" type="button">Find using my IP</button>
+          <div id="nearby-scopes-radius-field" hidden><label for="nearby-scopes-radius">Search radius</label><select id="nearby-scopes-radius"><option value="25">25 km</option><option value="50" selected>50 km</option><option value="100">100 km</option></select></div>
+          <button id="nearby-scopes-ip" class="secondary" type="button">Use approximate IP location</button>
         </div>
         <details class="nearby-scopes-manual"><summary>Enter coordinates instead</summary>
           <form id="nearby-scopes-form" class="nearby-scope-actions" autocomplete="off">
             <div><label for="nearby-scopes-lat">Latitude</label><input id="nearby-scopes-lat" type="number" required min="-90" max="90" step="any"></div>
             <div><label for="nearby-scopes-lon">Longitude</label><input id="nearby-scopes-lon" type="number" required min="-180" max="180" step="any"></div>
-            <button id="nearby-scopes-search" class="secondary" type="submit">Find at this location</button>
+            <button id="nearby-scopes-search" class="secondary" type="submit">Use these coordinates</button>
           </form>
         </details>
         <p id="nearby-scopes-status" class="hint" role="status" aria-live="polite"></p>
@@ -239,10 +238,19 @@ No hardware operations have been performed.</pre><div class="console-input"><lab
           </table>
         </div>
       </div>
+      <p id="nearby-scopes-fallback" class="hint">Scope results aren&rsquo;t available on this deployment. <a href="https://global.meshmapper.net/" target="_blank" rel="noopener noreferrer">Open MeshMapper</a></p>
     </details>
 
     <details class="card disclosure" id="pet-tracking"><summary>Pet tracking</summary><div class="disclosure-body">
-      <p>Connect a RAK WisMesh Tag running the combined Keymind Cascade Sensor or USB tracker Companion firmware. <a href="#flasher">Choose its USB port</a> to read or change the collar.</p>
+      <p><a href="#flasher">Choose the tracker&rsquo;s USB port</a> to read its collar settings.</p>
+      <details class="pet-board-list"><summary>Card-style trackers</summary>
+        <dl>
+          <dt>RAK WisMesh Tag</dt><dd>Full collar controls on the combined Sensor or USB tracker Companion build.</dd>
+          <dt>Seeed SenseCAP T1000-E</dt><dd>Basic pet tracking on Sensor firmware; not the collar controls below.</dd>
+          <dt>Seeed SenseCAP MeshTracker X1</dt><dd>No collar controls on current Keymind Cascade builds.</dd>
+          <dt>LILYGO T-Echo Card</dt><dd>No collar controls on current Keymind Cascade builds.</dd>
+        </dl>
+      </details>
       <div class="inline-actions"><button id="pet-read" class="primary" data-lock>Read collar settings</button><a href="https://github.com/mikecarper/MeshCore/blob/keymindCascade/docs/sensor_tracker.md#return-home-tune-and-hike-mode">Pet tracking guide</a></div>
       <div class="quick-settings-grid">
         <section class="quick-setting"><h3>Home boundary</h3>
@@ -256,7 +264,11 @@ No hardware operations have been performed.</pre><div class="console-input"><lab
           <label for="pet-notes">Notes (frequency in Hz:duration in ms)</label><input id="pet-notes" value="1568:175,0:100,1047:350" data-lock>
           <p class="hint">Enter up to eight notes separated by commas. Use 0 Hz for a rest. Playback repeats outside the boundary and stops on return.</p>
           <label for="pet-repeat">Seconds between tune starts</label><input id="pet-repeat" type="number" min="1" max="3600" value="30" data-lock>
-          <div class="inline-actions"><button id="pet-tune-save" class="secondary" data-lock>Save tune</button><button id="pet-tune-play" class="secondary" data-lock>Play saved tune</button><button id="pet-tune-off" class="secondary" data-lock>Mute repeats</button></div>
+          <div class="inline-actions">
+            <button id="pet-tune-preview" class="secondary pet-preview" type="button" aria-label="Play tune preview" title="Play tune preview"><span id="pet-preview-icon" aria-hidden="true">&#9654;</span><span id="pet-preview-label">Preview notes</span></button>
+            <button id="pet-tune-save" class="secondary" data-lock>Save tune</button><button id="pet-tune-play" class="secondary" data-lock>Play saved tune on collar</button><button id="pet-tune-off" class="secondary" data-lock>Mute repeats</button>
+          </div>
+          <p id="pet-preview-status" class="hint" role="status" aria-live="polite" hidden></p>
         </section>
         <section class="quick-setting"><h3>Hike mode</h3>
           <p>Either owner phone can keep the collar nearby. When both disconnect, the collar waits before switching to lost mode.</p>

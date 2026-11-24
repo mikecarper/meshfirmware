@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { lookup, nearby, point, refresh, snapshot } from '../../services/nearby-scopes/worker.mjs';
-import { lookupUrl } from '../src/nearby-scopes.js';
+import { estimateIpLocation, lookupUrl, mapUrl } from '../src/nearby-scopes.js';
 
 const now = 1_795_510_000;
 const day = 86400;
@@ -121,4 +121,27 @@ test('flasher lookup accepts only the configured HTTPS service path', () => {
     `${endpoint}?key=test`, 'https://user:password@lookup.test/nearby-scopes', 'https://lookup.test/']) {
     assert.equal(lookupUrl(invalid), null);
   }
+});
+
+test('IP location works independently of the optional scopes endpoint', async () => {
+  const at = await estimateIpLocation(async (url, options) => {
+    assert.equal(url, 'https://get.geojs.io/v1/ip/geo.json');
+    assert.equal(options.credentials, 'omit');
+    assert.equal(options.referrerPolicy, 'no-referrer');
+    return Response.json({ latitude: '47.12345', longitude: '-122.56789', city: 'Olympia',
+      region: 'Washington', country: 'United States', ip: '192.0.2.1' });
+  });
+  assert.deepEqual(at, { lat: 47.12, lon: -122.57, label: 'Olympia, Washington, United States' });
+  await assert.rejects(estimateIpLocation(async () => Response.json({ latitude: '', longitude: '0' })));
+  await assert.rejects(estimateIpLocation(async () => Response.json({ latitude: 0, longitude: 0 })));
+  await assert.rejects(estimateIpLocation(async () => new Response(null, { status: 429 })));
+});
+
+test('MeshMapper deep links center on coarse coordinates and enable scopes on regional maps', () => {
+  const location = { lat: 47.12345, lon: -122.56789 };
+  assert.equal(mapUrl('pnw', location), 'https://pnw.meshmapper.net/?lat=47.12&lon=-122.57&zoom=10&l=rep.sc');
+  assert.equal(mapUrl(null, location), 'https://global.meshmapper.net/?lat=47.12&lon=-122.57&zoom=10');
+  assert.equal(mapUrl('example.net/path', location), mapUrl(null, location));
+  assert.equal(mapUrl('global', location), mapUrl(null, location));
+  assert.equal(mapUrl(null, { lat: null, lon: Infinity }), 'https://global.meshmapper.net/');
 });

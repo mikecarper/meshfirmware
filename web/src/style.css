@@ -334,7 +334,10 @@ dialog p { font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
 .workflow .artifact-step-number { min-width: 66px; height: 48px; font-size: 33.6px; }
 .workflow button.next-action:not(:disabled)::after, .page-header button.next-action:not(:disabled)::after { font-size: 15.4px; }
 #notice { font-size: 16.8px; }
-#console > summary { font-size: 16.8px; }
+#console > summary, #pet-tracking > summary, #reader-books > summary { font-size: 16.8px; }
+.pet-board-list dt { font-weight: 650; }
+.pet-board-list dd { margin: 3px 0 9px; color: var(--muted); }
+.pet-preview { min-width: 123px; }
 #console .card-title { margin: 10px 0; }
 #console .card-title p { font-size: 15.4px; }
 #console button, #console input { font-size: 16.8px; }

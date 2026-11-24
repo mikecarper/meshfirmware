@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {boundaryCommand, tuneCommand, collarCommand, readCollar, petPanel} from '../src/pet-panel.js';
+import {boundaryCommand, tuneCommand, parseTuneNotes, installTunePreview, collarCommand, readCollar, petPanel} from '../src/pet-panel.js';
 
 test('boundary and tune controls build one validated shell command', () => {
   assert.equal(boundaryCommand('47.5, -121.3','120'),'fence 47.5 -121.3 120');
@@ -20,6 +20,46 @@ test('requires role and feature version and positive shell acknowledgement', asy
   await assert.rejects(collarCommand(link('uart:~$ pet tune play\r\n'),'tune play'));
   await assert.rejects(collarCommand(link('Mesh unavailable (-2)\r\nOK\r\n'),'hike on'),/required owner/);
   assert.deepEqual(await collarCommand(link('uart:~$ pet hike\r\nhike=off\r\n\x1b[32mOK\x1b[0m\r\n'),'hike'),['hike=off']);
+});
+
+test('browser preview plays draft notes with rests, can stop, and never needs USB', async () => {
+  const elements = new Map(), $ = id => {
+    if (!elements.has(id)) elements.set(id, { value: '', setAttribute(key, value) { this[key] = value; } });
+    return elements.get(id);
+  };
+  const calls = [], created = [];
+  installTunePreview($, () => {
+    const oscillator = {
+      connect() {}, frequency: { setValueAtTime: (...args) => calls.push(args) },
+      start: t => calls.push(['start', t]), stop: t => calls.push(['stop', t]),
+    };
+    created.push(oscillator);
+    return {
+      currentTime: 10, resume: async () => {}, close: async () => calls.push(['closed']),
+      createOscillator: () => oscillator,
+      createGain: () => ({ connect() {}, gain: { setValueAtTime() {}, linearRampToValueAtTime() {} } }),
+    };
+  });
+  const button = $('pet-tune-preview');
+  $('pet-notes').value = '900:100,0:50,1200:200';
+  assert.deepEqual(parseTuneNotes($('pet-notes').value), [[900,100],[0,50],[1200,200]]);
+  await button.onclick();
+  assert.equal(button['aria-label'], 'Stop tune preview');
+  assert.deepEqual(calls.map(call => call[0]), [900, 1200, 'start', 'stop']);
+  assert.ok(Math.abs(calls[1][1] - calls[0][1] - .15) < 1e-8);
+  assert.ok(Math.abs(calls[3][1] - calls[2][1] - .35) < 1e-8);
+  await button.onclick();
+  assert.equal(button['aria-label'], 'Play tune preview');
+  assert.deepEqual(calls.at(-1), ['closed']);
+  await button.onclick();
+  created[0].onended();
+  assert.equal(button['aria-label'], 'Stop tune preview');
+  created[1].onended();
+  assert.equal(button['aria-label'], 'Play tune preview');
+  $('pet-notes').value = '0:100';
+  await button.onclick();
+  assert.match($('pet-preview-status').textContent, /audible note/);
+  assert.equal(created.length, 2);
 });
 test('flasher reads settings, enrolls selected slot and clears old device status', async () => {
   const els = new Map(), $ = id => { if (!els.has(id)) els.set(id,{value:'',textContent:''}); return els.get(id); };
