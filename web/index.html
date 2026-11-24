@@ -10,7 +10,7 @@
 <body>
   <aside class="sidebar">
     <a class="brand" href="#flasher"><svg viewBox="0 0 40 40" aria-hidden="true"><path d="M7 29V11l13 9 13-9v18M7 11l13-7 13 7M20 20v16"/></svg><span>mesh<span class="brand-light">firmware</span><small>USB FLASHER</small></span></a>
-    <nav aria-label="Tools"><a href="#flasher" class="active">Flash firmware</a><a href="#console">Serial console</a><a href="#pet-tracking">Pet tracking</a><a href="#reader-books">Reader books</a><a href="#backups">Backup &amp; restore</a><a href="#capabilities">Help</a><a href="https://mikecarper.github.io/MeshCore/">MeshCore docs</a></nav>
+    <nav aria-label="Tools"><a href="#flasher" class="active">Flash firmware</a><a href="#console">Serial console</a><a href="#nearby-scopes">Nearby scopes</a><a href="#pet-tracking">Pet tracking</a><a href="#reader-books">Reader books</a><a href="#backups">Backup &amp; restore</a><a href="#capabilities">Help</a><a href="https://mikecarper.github.io/MeshCore/">MeshCore docs</a></nav>
   </aside>
   <main>
     <header class="page-header" id="flasher">
@@ -213,6 +213,34 @@
     <details class="card disclosure" id="console" open><summary>Serial console &amp; operation log</summary><div class="disclosure-body"><div class="card-title"><p>Commands and output stay in this tab.</p><button id="clear-log" class="text-link">Clear</button></div><pre id="log" aria-label="Serial and operation log">Mesh Firmware workbench ready.
 No hardware operations have been performed.</pre><div class="console-input"><label class="sr-only" for="command">Serial command</label><input id="command" placeholder="version" data-lock><button id="send-command" class="secondary" data-lock>Send command</button></div></div></details>
 
+    <details id="nearby-scopes" class="nearby-scopes">
+      <summary>Nearby MeshCore scopes</summary>
+      <p id="nearby-scopes-fallback" class="hint">Automatic lookup isn&rsquo;t available on this deployment. <a href="https://meshmapper.net/" target="_blank" rel="noopener noreferrer">Open MeshMapper</a></p>
+      <div id="nearby-scopes-controls" hidden>
+        <p class="hint">IP location is approximate and can be wrong on a VPN or mobile network. Either lookup leaves the radio unchanged.</p>
+        <div class="nearby-scope-actions">
+          <div><label for="nearby-scopes-radius">Search radius</label><select id="nearby-scopes-radius"><option value="25">25 km</option><option value="50" selected>50 km</option><option value="100">100 km</option></select></div>
+          <button id="nearby-scopes-ip" class="secondary" type="button">Find using my IP</button>
+        </div>
+        <details class="nearby-scopes-manual"><summary>Enter coordinates instead</summary>
+          <form id="nearby-scopes-form" class="nearby-scope-actions" autocomplete="off">
+            <div><label for="nearby-scopes-lat">Latitude</label><input id="nearby-scopes-lat" type="number" required min="-90" max="90" step="any"></div>
+            <div><label for="nearby-scopes-lon">Longitude</label><input id="nearby-scopes-lon" type="number" required min="-180" max="180" step="any"></div>
+            <button id="nearby-scopes-search" class="secondary" type="submit">Find at this location</button>
+          </form>
+        </details>
+        <p id="nearby-scopes-status" class="hint" role="status" aria-live="polite"></p>
+        <div id="nearby-scopes-results" hidden>
+          <p id="nearby-scopes-maps" class="hint"></p>
+          <table id="nearby-scopes-table" hidden>
+            <caption>Scopes seen forwarding traffic</caption>
+            <thead><tr><th scope="col">Scope</th><th scope="col">Repeaters</th><th scope="col">Last seen</th></tr></thead>
+            <tbody id="nearby-scopes-rows"></tbody>
+          </table>
+        </div>
+      </div>
+    </details>
+
     <details class="card disclosure" id="pet-tracking"><summary>Pet tracking</summary><div class="disclosure-body">
       <p>Connect a RAK WisMesh Tag running the combined Keymind Cascade Sensor or USB tracker Companion firmware. <a href="#flasher">Choose its USB port</a> to read or change the collar.</p>
       <div class="inline-actions"><button id="pet-read" class="primary" data-lock>Read collar settings</button><a href="https://github.com/mikecarper/MeshCore/blob/keymindCascade/docs/sensor_tracker.md#return-home-tune-and-hike-mode">Pet tracking guide</a></div>
@@ -361,5 +389,6 @@ No hardware operations have been performed.</pre><div class="console-input"><lab
     <div class="inline-actions"><button id="flash-progress-close" type="button" class="primary" hidden disabled>Close</button></div>
   </dialog>
   <script type="module" src="/src/app.js"></script>
+  <script type="module" src="/src/nearby-scopes.js"></script>
 </body>
 </html>

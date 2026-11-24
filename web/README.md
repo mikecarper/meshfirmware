@@ -30,6 +30,14 @@ not a remote USB-only node.
 
 ## Use
 
+### Nearby MeshCore scopes
+
+This optional lookup lists nearby scopes observed forwarding traffic. Choose an
+approximate IP lookup or enter coordinates; neither accesses USB or changes the
+radio. The hosted feature requires the separately deployed
+[nearby scopes service](../services/nearby-scopes/README.md) and an authorized
+MeshMapper integration key. The flasher does not store the key or the location.
+
 ### Reader books
 
 Reader ships empty on compatible Full Companion builds. In the web flasher,

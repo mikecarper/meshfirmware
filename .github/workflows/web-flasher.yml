@@ -3,9 +3,9 @@ name: Browser USB flasher
 on:
   push:
     branches: [main]
-    paths: ['web/**', 'tools/meshcore_partition_expansion*', 'tools/generate_partition_helper_manifest.py', 'tests/test_partition_helper_manifest.py', 'tools/meshcore_backup.py', '.github/workflows/web-flasher.yml']
+    paths: ['web/**', 'services/nearby-scopes/**', 'tools/meshcore_partition_expansion*', 'tools/generate_partition_helper_manifest.py', 'tests/test_partition_helper_manifest.py', 'tools/meshcore_backup.py', '.github/workflows/web-flasher.yml']
   pull_request:
-    paths: ['web/**', 'tools/meshcore_partition_expansion*', 'tools/generate_partition_helper_manifest.py', 'tests/test_partition_helper_manifest.py', 'tools/meshcore_backup.py', '.github/workflows/web-flasher.yml']
+    paths: ['web/**', 'services/nearby-scopes/**', 'tools/meshcore_partition_expansion*', 'tools/generate_partition_helper_manifest.py', 'tests/test_partition_helper_manifest.py', 'tools/meshcore_backup.py', '.github/workflows/web-flasher.yml']
   workflow_dispatch:
   schedule:
     - cron: '17 */4 * * *'
@@ -69,6 +69,8 @@ jobs:
       - name: Build static browser app
         run: pnpm build
         working-directory: web
+        env:
+          VITE_NEARBY_SCOPES_URL: ${{ vars.NEARBY_SCOPES_URL }}
       - name: Verify public artifact boundaries
         run: node scripts/check-dist.mjs
         working-directory: web

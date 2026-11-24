@@ -122,6 +122,18 @@ select, input:not([type=checkbox]):not([type=radio]):not([type=file]) { width: 1
 select { padding-right: 25px; text-overflow: ellipsis; }
 input[type=checkbox] { accent-color: var(--teal); vertical-align: middle; }
 .two-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.nearby-scopes { padding: 13px 0; margin: 0 0 16px; border-bottom: 1px solid var(--line); }
+.nearby-scopes > summary { cursor: pointer; font-size: 15px; font-weight: 700; }
+.nearby-scopes-manual { margin-top: 12px; }
+.nearby-scopes-manual > summary { cursor: pointer; color: var(--teal); font-size: 13px; }
+.nearby-scope-actions { display: flex; align-items: end; flex-wrap: wrap; gap: 10px; }
+.nearby-scope-actions > div { flex: 1 1 130px; max-width: 190px; }
+.nearby-scope-actions label { margin-top: 6px; }
+.nearby-scopes a { color: var(--teal); text-decoration: underline; }
+.nearby-scopes table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.nearby-scopes caption { text-align: left; font-weight: 650; margin: 8px 0; }
+.nearby-scopes td, .nearby-scopes th { padding: 7px 5px; text-align: left; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.nearby-scopes td:first-child { font-family: ui-monospace, monospace; }
 .firmware-fields { display: grid; grid-template-columns: 1fr 1.65fr 1fr 1.15fr; gap: 12px; }
 .firmware-fields > *, .artifact-field { min-width: 0; }
 .firmware-fields label { margin-top: 6px; }

@@ -59,7 +59,7 @@ test('USB selection is the first initially visible main-page control in the comp
 
 test('Serial console is immediately after Flash firmware in the top navigation',()=>{
   const navigation=nodes.find(node=>node.tag==='nav'&&node.attrs['aria-label']==='Tools');
-  assert.ok(navigation);assert.deepEqual(navigation.children.filter(node=>node.tag==='a').map(node=>node.attrs.href),['#flasher','#console','#pet-tracking','#reader-books','#backups','#capabilities','https://mikecarper.github.io/MeshCore/']);
+  assert.ok(navigation);assert.deepEqual(navigation.children.filter(node=>node.tag==='a').map(node=>node.attrs.href),['#flasher','#console','#nearby-scopes','#pet-tracking','#reader-books','#backups','#capabilities','https://mikecarper.github.io/MeshCore/']);
 });
 
 test('main workflow and console controls use 140 percent type without page zoom',()=>{
@@ -171,7 +171,7 @@ test('new users see no-folder guidance near the USB button and original-file gui
 });
 
 test('settings follow the main flashing area, with the console open and extras collapsed',()=>{
-  for(const id of ['pet-tracking','reader-books','advanced-options','backups','capabilities']){const node=get(id);assert.equal(node.tag,'details',id);assert.ok(!has(node,'open'),`#${id} must start collapsed`);}
+  for(const id of ['nearby-scopes','pet-tracking','reader-books','advanced-options','backups','capabilities']){const node=get(id);assert.equal(node.tag,'details',id);assert.ok(!has(node,'open'),`#${id} must start collapsed`);}
   const workflow=nodes.find(node=>hasClass(node,'workflow')),console=get('console'),settings=get('quick-settings'),siblings=workflow.parent.children,index=siblings.indexOf(workflow);
   assert.equal(console.tag,'details');assert.ok(has(console,'open'));assert.equal(siblings[index+1],settings);assert.equal(siblings[index+2],console);assert.ok(settings.start<get('advanced-options').start);
   assert.ok(inside(get('wadamesh-live-config'),settings),'Wadamesh radio settings belong in the common settings card');
