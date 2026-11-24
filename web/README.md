@@ -38,9 +38,17 @@ the search area. This works without a scopes service. A requested IP lookup uses
 result. GeoJS sees the request's public IP; the flasher does not store it.
 Opening the map link shares rounded coordinates with MeshMapper.
 
+Without a confirmed matching region, the flasher suggests a map using a checked
+shortlist of MeshMapper airport codes and coordinates from
+[OurAirports](https://ourairports.com/data/). It prefers a large commercial
+airport within 100 km, then the nearest airport of the same size. This is a
+map suggestion, not a coverage or boundary match. The global map remains
+available. Add more candidates in `src/meshmapper-airports.js` only after
+confirming that the IATA code has a published map.
+
 Forwarding results require the separately deployed
 [nearby scopes service](../services/nearby-scopes/README.md) and an authorized
-MeshMapper integration key. With results, regional map links open the Repeater
+MeshMapper integration key. Regional map links open the Repeater
 Scopes overlay. Neither lookup accesses USB or changes the radio.
 
 ### Pet tracking

@@ -1,5 +1,8 @@
+import { meshMapperAirports } from './meshmapper-airports.js';
+
 const MAP_HOME = 'https://global.meshmapper.net/';
 const GEO_IP = 'https://get.geojs.io/v1/ip/geo.json';
+const AIRPORT_RADIUS_KM = 100;
 
 export function lookupUrl(configured) {
   try {
@@ -14,6 +17,24 @@ export function lookupUrl(configured) {
 function coordinate(value, limit) {
   const n = typeof value === 'number' || (typeof value === 'string' && value.trim()) ? Number(value) : NaN;
   return Number.isFinite(n) && Math.abs(n) <= limit ? Number(n.toFixed(2)) : null;
+}
+
+export function airportMapSuggestion(location) {
+  const lat = coordinate(location?.lat, 90), lon = coordinate(location?.lon, 180);
+  if (lat === null || lon === null) return null;
+  const radians = Math.PI / 180;
+  let best = null;
+  for (const [code, name, country, airportLat, airportLon, category] of meshMapperAirports) {
+    if (location.countryCode && country !== location.countryCode) continue;
+    const a = Math.sin((airportLat - lat) * radians / 2) ** 2
+      + Math.cos(lat * radians) * Math.cos(airportLat * radians)
+      * Math.sin((airportLon - lon) * radians / 2) ** 2;
+    const km = 12742 * Math.asin(Math.sqrt(Math.min(1, a)));
+    if (km > AIRPORT_RADIUS_KM) continue;
+    const rank = category === 'large' ? 2 : 1;
+    if (!best || rank > best.rank || (rank === best.rank && km < best.km)) best = { code, name, rank, km };
+  }
+  return best && { code: best.code, name: best.name, map: best.code.toLowerCase() };
 }
 
 export function mapUrl(map, location) {
@@ -40,7 +61,8 @@ export async function estimateIpLocation(fetcher = fetch) {
   if (lat === null || lon === null || (lat === 0 && lon === 0)) throw Error('IP location unavailable');
   const label = [...new Set([data.city, data.region, data.country]
     .filter(part => typeof part === 'string' && part.trim() && part.length <= 80).map(part => part.trim()))].join(', ');
-  return { lat, lon, label };
+  const countryCode = typeof data.country_code === 'string' && /^[A-Z]{2}$/.test(data.country_code) ? data.country_code : null;
+  return { lat, lon, label, countryCode };
 }
 
 export function initNearbyScopes(doc, endpoint, fetcher = fetch) {
@@ -68,9 +90,20 @@ export function initNearbyScopes(doc, endpoint, fetcher = fetch) {
     return mode === 'ip' ? `Approximate IP location: ${label}.` : `Search location: ${label}.`;
   }
 
+  function showSuggestedMap(location) {
+    const suggested = airportMapSuggestion(location);
+    const global = link('Open global map', null, location);
+    el('maps').replaceChildren(...(suggested ? [
+      doc.createTextNode('Suggested by nearby airport: '),
+      link(`${suggested.name} (${suggested.code}) scopes`, suggested.map, location),
+      doc.createTextNode(' · '),
+      global,
+    ] : [doc.createTextNode('No known airport map nearby. '), global]));
+  }
+
   function showMapOnly(location, mode) {
     status.textContent = `${areaLabel(location, mode)} Scope results aren’t available here.`;
-    el('maps').replaceChildren(link('Open MeshMapper at this location', null, location));
+    showSuggestedMap(location);
     el('table').hidden = true;
     el('results').hidden = false;
     el('fallback').hidden = true;
@@ -84,12 +117,14 @@ export function initNearbyScopes(doc, endpoint, fetcher = fetch) {
       ? `${data.scopeCount} observed scope${data.scopeCount === 1 ? '' : 's'}${data.scopeCount > scopes.length ? ` (showing ${scopes.length})` : ''}.`
       : 'No recent forwarding observed in available data.';
     status.textContent = [area, window, result, data.partial ? 'Some regional data is temporarily unavailable.' : ''].filter(Boolean).join(' ');
-    const maps = el('maps');
-    maps.replaceChildren(doc.createTextNode(regions.length ? 'MeshMapper: ' : 'No matching MeshMapper boundary. '));
-    (regions.length ? regions : [{ name: 'Open MeshMapper at this location' }]).forEach((region, i) => {
-      if (i) maps.append(', ');
-      maps.append(link(region.code ? `${region.name} (${region.code})` : region.name, region.map, location));
-    });
+    if (regions.length) {
+      const maps = el('maps');
+      maps.replaceChildren(doc.createTextNode('MeshMapper: '));
+      regions.forEach((region, i) => {
+        if (i) maps.append(', ');
+        maps.append(link(region.code ? `${region.name} (${region.code})` : region.name, region.map, location));
+      });
+    } else showSuggestedMap(location);
     const date = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
     el('rows').replaceChildren(...scopes.map(({ name, repeaters, lastSeen }) => {
       const row = doc.createElement('tr');

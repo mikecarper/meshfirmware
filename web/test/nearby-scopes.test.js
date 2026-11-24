@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { lookup, nearby, point, refresh, snapshot } from '../../services/nearby-scopes/worker.mjs';
-import { estimateIpLocation, lookupUrl, mapUrl } from '../src/nearby-scopes.js';
+import { airportMapSuggestion, estimateIpLocation, lookupUrl, mapUrl } from '../src/nearby-scopes.js';
 
 const now = 1_795_510_000;
 const day = 86400;
@@ -129,9 +129,9 @@ test('IP location works independently of the optional scopes endpoint', async ()
     assert.equal(options.credentials, 'omit');
     assert.equal(options.referrerPolicy, 'no-referrer');
     return Response.json({ latitude: '47.12345', longitude: '-122.56789', city: 'Olympia',
-      region: 'Washington', country: 'United States', ip: '192.0.2.1' });
+      region: 'Washington', country: 'United States', country_code: 'US', ip: '192.0.2.1' });
   });
-  assert.deepEqual(at, { lat: 47.12, lon: -122.57, label: 'Olympia, Washington, United States' });
+  assert.deepEqual(at, { lat: 47.12, lon: -122.57, label: 'Olympia, Washington, United States', countryCode: 'US' });
   await assert.rejects(estimateIpLocation(async () => Response.json({ latitude: '', longitude: '0' })));
   await assert.rejects(estimateIpLocation(async () => Response.json({ latitude: 0, longitude: 0 })));
   await assert.rejects(estimateIpLocation(async () => new Response(null, { status: 429 })));
@@ -144,4 +144,23 @@ test('MeshMapper deep links center on coarse coordinates and enable scopes on re
   assert.equal(mapUrl('example.net/path', location), mapUrl(null, location));
   assert.equal(mapUrl('global', location), mapUrl(null, location));
   assert.equal(mapUrl(null, { lat: null, lon: Infinity }), 'https://global.meshmapper.net/');
+});
+
+test('airport suggestion prefers a large airport over a closer medium airport and keeps the user coordinates', () => {
+  const tacoma = { lat: 47.32, lon: -122.32 };
+  assert.deepEqual(airportMapSuggestion(tacoma), { code: 'SEA', name: 'Seattle-Tacoma', map: 'sea' });
+  assert.equal(mapUrl(airportMapSuggestion(tacoma).map, tacoma),
+    'https://sea.meshmapper.net/?lat=47.32&lon=-122.32&zoom=10&l=rep.sc');
+  // Paine Field is closer here, but Sea-Tac is the larger airport.
+  assert.equal(airportMapSuggestion({ lat: 47.90, lon: -122.28, countryCode: 'US' }).map, 'sea');
+});
+
+test('airport suggestions stay local, honor a known country, and do not guess unlisted subdomains', () => {
+  assert.equal(airportMapSuggestion({ lat: 45.59, lon: -122.60 }).map, 'pdx');
+  assert.equal(airportMapSuggestion({ lat: 44.12, lon: -123.21 }).map, 'eug');
+  assert.equal(airportMapSuggestion({ lat: 37.5, lon: -122.15 }).map, 'sfo');
+  assert.equal(airportMapSuggestion({ lat: 42.28, lon: -83.04, countryCode: 'CA' }), null);
+  assert.equal(airportMapSuggestion({ lat: 32, lon: -26 }), null);
+  assert.equal(airportMapSuggestion({ lat: 91, lon: 0 }), null);
+  assert.equal(airportMapSuggestion(undefined), null);
 });
