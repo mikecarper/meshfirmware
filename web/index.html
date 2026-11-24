@@ -242,46 +242,73 @@ No hardware operations have been performed.</pre><div class="console-input"><lab
     </details>
 
     <details class="card disclosure" id="pet-tracking"><summary>Pet tracking</summary><div class="disclosure-body">
-      <p><a href="#flasher">Choose the tracker&rsquo;s USB port</a> to read its collar settings.</p>
+      <p><a href="#flasher">Choose the tracker&rsquo;s USB port</a> to read its settings.</p>
       <details class="pet-board-list"><summary>Card-style trackers</summary>
         <dl>
           <dt>RAK WisMesh Tag</dt><dd>Full collar controls on the combined Sensor or USB tracker Companion build.</dd>
-          <dt>Seeed SenseCAP T1000-E</dt><dd>Basic pet tracking on Sensor firmware; not the collar controls below.</dd>
-          <dt>Seeed SenseCAP MeshTracker X1</dt><dd>No collar controls on current Keymind Cascade builds.</dd>
-          <dt>LILYGO T-Echo Card</dt><dd>No collar controls on current Keymind Cascade builds.</dd>
+          <dt>Seeed SenseCAP T1000-E</dt><dd>GPS tracking on Sensor firmware. Manual check-in uses the side button on supported builds.</dd>
+          <dt>Seeed SenseCAP MeshTracker X1</dt><dd>GPS tracking on Sensor firmware. Manual check-in uses the user button.</dd>
+          <dt>LILYGO T-Echo Card</dt><dd>GPS tracking on Sensor firmware. Manual check-in uses Button C.</dd>
         </dl>
       </details>
-      <div class="inline-actions"><button id="pet-read" class="primary" data-lock>Read collar settings</button><a href="https://github.com/mikecarper/MeshCore/blob/keymindCascade/docs/sensor_tracker.md#return-home-tune-and-hike-mode">Pet tracking guide</a></div>
+      <div class="inline-actions"><button id="pet-read" class="primary" data-lock>Read tracker settings</button><a href="https://github.com/mikecarper/MeshCore/blob/keymindCascade/docs/sensor_tracker.md">Pet tracking guide</a></div>
+      <pre id="pet-result" role="status" aria-live="polite">Choose the tracker’s USB port, then read its settings.</pre>
+      <section id="pet-sensor-controls" hidden>
+        <p class="hint">The owner’s Companion must have this tracker saved as a contact and have lost replies enabled. Match the two radios’ mesh settings.</p>
+        <div class="quick-settings-grid">
+          <section class="quick-setting"><h3>Owner and route</h3>
+            <label for="pet-sensor-owner">Owner radio public key (64 hex characters)</label>
+            <input id="pet-sensor-owner" maxlength="64" spellcheck="false" autocomplete="off" data-lock>
+            <button id="pet-sensor-owner-save" class="secondary" data-lock>Save owner</button>
+            <p id="pet-sensor-path-current" class="hint"></p>
+            <label for="pet-sensor-path">New route</label>
+            <input id="pet-sensor-path" placeholder="direct, clear, or aabb,ccdd" spellcheck="false" autocomplete="off" data-lock>
+            <button id="pet-sensor-path-save" class="secondary" data-lock>Save route</button>
+          </section>
+          <section class="quick-setting"><h3>GPS check-ins</h3>
+            <label for="pet-sensor-interval">Normal interval (seconds)</label>
+            <input id="pet-sensor-interval" type="number" min="60" max="86400" data-lock>
+            <button id="pet-sensor-interval-save" class="secondary" data-lock>Save normal interval</button>
+            <label for="pet-sensor-lost">Lost interval (seconds)</label>
+            <input id="pet-sensor-lost" type="number" min="60" max="86400" data-lock>
+            <button id="pet-sensor-lost-save" class="secondary" data-lock>Save lost interval</button>
+            <div class="inline-actions"><button id="pet-sensor-on" class="secondary" data-lock>Start tracking</button><button id="pet-sensor-off" class="secondary" data-lock>Pause tracking</button><button id="pet-sensor-check" class="secondary" data-lock>Check in now</button></div>
+          </section>
+        </div>
+      </section>
       <div class="quick-settings-grid">
-        <section class="quick-setting"><h3>Home boundary</h3>
+        <section id="pet-collar-fence" class="quick-setting" hidden><h3>Home boundary</h3>
           <label for="pet-boundary">Latitude and longitude, one point per line</label>
           <textarea id="pet-boundary" rows="4" data-lock placeholder="47.6205 -122.3493"></textarea>
           <label for="pet-radius">Radius in meters for a single point</label><input id="pet-radius" type="number" min="1" max="4294967295" value="100" data-lock>
           <p class="hint">Use one point for a circle, two opposite corners for a box, or 3 to 9 points around a polygon.</p>
           <div class="inline-actions"><button id="pet-fence-save" class="secondary" data-lock>Save boundary</button><button id="pet-fence-off" class="secondary" data-lock>Clear boundary</button></div>
         </section>
-        <section class="quick-setting"><h3>Return-home tune</h3>
+        <section class="quick-setting"><h3 id="pet-tune-title">Return-home tune preview</h3>
           <label for="pet-notes">Notes (frequency in Hz:duration in ms)</label><input id="pet-notes" value="1568:175,0:100,1047:350" data-lock>
-          <p class="hint">Enter up to eight notes separated by commas. Use 0 Hz for a rest. Playback repeats outside the boundary and stops on return.</p>
-          <label for="pet-repeat">Seconds between tune starts</label><input id="pet-repeat" type="number" min="1" max="3600" value="30" data-lock>
+          <p class="hint">Enter up to eight notes separated by commas. Use 0 Hz for a rest.</p>
           <div class="inline-actions">
             <button id="pet-tune-preview" class="secondary pet-preview" type="button" aria-label="Play tune preview" title="Play tune preview"><span id="pet-preview-icon" aria-hidden="true">&#9654;</span><span id="pet-preview-label">Preview notes</span></button>
-            <button id="pet-tune-save" class="secondary" data-lock>Save tune</button><button id="pet-tune-play" class="secondary" data-lock>Play saved tune on collar</button><button id="pet-tune-off" class="secondary" data-lock>Mute repeats</button>
           </div>
           <p id="pet-preview-status" class="hint" role="status" aria-live="polite" hidden></p>
+          <div id="pet-collar-tune" hidden>
+            <p class="hint">Playback repeats outside the boundary and stops on return.</p>
+            <label for="pet-repeat">Seconds between tune starts</label><input id="pet-repeat" type="number" min="1" max="3600" value="30" data-lock>
+            <div class="inline-actions"><button id="pet-tune-save" class="secondary" data-lock>Save tune</button><button id="pet-tune-play" class="secondary" data-lock>Play saved tune on collar</button><button id="pet-tune-off" class="secondary" data-lock>Mute repeats</button></div>
+          </div>
         </section>
-        <section class="quick-setting"><h3>Hike mode</h3>
+        <section id="pet-collar-hike" class="quick-setting" hidden><h3>Hike mode</h3>
           <p>Either owner phone can keep the collar nearby. When both disconnect, the collar waits before switching to lost mode.</p>
           <label for="pet-timeout">Seconds without either phone</label><input id="pet-timeout" type="number" min="1" max="3600" value="180" data-lock>
           <div class="inline-actions"><button id="pet-timeout-save" class="secondary" data-lock>Save timeout</button><button id="pet-hike-on" class="secondary" data-lock>Start hike</button><button id="pet-hike-off" class="secondary" data-lock>End hike</button></div>
         </section>
-        <section class="quick-setting"><h3>Owner phones</h3>
+        <section id="pet-collar-phones" class="quick-setting" hidden><h3>Owner phones</h3>
           <p>Choose a slot and enroll. On the phone, connect to Pet Collar in <a href="https://www.nordicsemi.com/Products/Development-tools/nRF-Connect-for-mobile">nRF Connect for Mobile</a>, accept pairing, and write the six digits as text to the characteristic whose UUID starts with CAA50002. Keep the app connected for the hike.</p>
           <label for="pet-slot">Phone slot</label><select id="pet-slot" data-lock><option value="1">Owner phone 1</option><option value="2">Owner phone 2</option></select>
           <div class="inline-actions"><button id="pet-enroll" class="secondary" data-lock>Enroll phone</button><button id="pet-forget" class="secondary" data-lock>Forget selected phone</button></div>
         </section>
       </div>
-      <details><summary>MeshCore radio and tracking</summary>
+      <details id="pet-collar-radio" hidden><summary>MeshCore radio and tracking</summary>
         <p>Set the collar and owner radio to the same frequency, bandwidth, spreading factor and coding rate. Pause tracking before changing these settings.</p>
         <label for="pet-radio">Radio settings (Hz, kHz, SF, CR)</label><input id="pet-radio" placeholder="915000000 125 9 5" data-lock>
         <label for="pet-owner">Owner radio public key (64 hex characters)</label><input id="pet-owner" maxlength="64" data-lock>
@@ -289,7 +316,6 @@ No hardware operations have been performed.</pre><div class="console-input"><lab
           <button id="pet-on" class="secondary" data-lock>Start tracking</button><button id="pet-off" class="secondary" data-lock>Pause tracking</button>
           <button id="pet-motion-on" class="secondary" data-lock>Enable motion GPS</button><button id="pet-motion-off" class="secondary" data-lock>Disable motion GPS</button></div>
       </details>
-      <pre id="pet-result" role="status" aria-live="polite">Choose the collar's USB port, then read its settings.</pre>
     </div></details>
 
     <details class="card disclosure" id="reader-books"><summary>Reader books</summary>

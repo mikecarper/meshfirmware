@@ -338,6 +338,8 @@ dialog p { font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
 .pet-board-list dt { font-weight: 650; }
 .pet-board-list dd { margin: 3px 0 9px; color: var(--muted); }
 .pet-preview { min-width: 123px; }
+#pet-result { height: auto; max-height: 225px; }
+#pet-sensor-controls .quick-setting > button { margin: 6px 0 12px; }
 #console .card-title { margin: 10px 0; }
 #console .card-title p { font-size: 15.4px; }
 #console button, #console input { font-size: 16.8px; }

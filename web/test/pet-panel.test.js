@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {boundaryCommand, tuneCommand, parseTuneNotes, installTunePreview, collarCommand, readCollar, petPanel} from '../src/pet-panel.js';
+import {boundaryCommand, tuneCommand, parseTuneNotes, installTunePreview, collarCommand, readCollar, petPanel, trackerRoute} from '../src/pet-panel.js';
 
 test('boundary and tune controls build one validated shell command', () => {
   assert.equal(boundaryCommand('47.5, -121.3','120'),'fence 47.5 -121.3 120');
@@ -75,4 +75,101 @@ test('flasher reads settings, enrolls selected slot and clears old device status
   assert.equal($('pet-notes').value,'800:100,0:50'); assert.equal($('pet-radius').value,'20');
   $('pet-slot').value='1'; await $('pet-enroll').onclick(); assert.match($('pet-result').textContent,/123456/);
   ++generation; panel.controls(); assert.doesNotMatch($('pet-result').textContent,/123456/);
+});
+
+function sensorPanel() {
+  const elements = new Map(), $ = id => {
+    if (!elements.has(id)) elements.set(id, {value:'',textContent:''});
+    return elements.get(id);
+  };
+  const calls = [];
+  const radio = {generation:1, mode:'off', lost:'unknown', interval:1800, storage:'ok',
+    owner:'0'.repeat(64), path:'path=unknown hops=0 hash.bytes=0'};
+  const link = {async command(cmd) {
+    calls.push(cmd);
+    const reply = await radio.override?.(cmd);
+    if (reply !== undefined) return reply;
+    let result;
+    switch (cmd) {
+      case 'pet status': result = 'unknown command'; break;
+      case 'get tracker status': result = `mode=${radio.mode} status=${radio.lost} interval=${radio.interval} lost.interval=60 flood=6h clock=ok storage=${radio.storage}`; break;
+      case 'get tracker.owner': result = radio.owner; break;
+      case 'get tracker.path': result = radio.path; break;
+      case 'set tracker.mode pet': radio.mode = 'pet'; result = 'OK'; break;
+      case 'set tracker.path direct': radio.path = 'path=direct hops=0 hash.bytes=1'; result = 'OK'; break;
+      case 'tracker check': result = 'OK scheduled'; break;
+      default: assert.match(cmd, /^set tracker.owner [a-f\d]{64}$/); radio.owner = cmd.split(' ').at(-1); result = 'OK';
+    }
+    return cmd + '\r\n  -> ' + result + '\r\n';
+  }};
+  const panel = petPanel({$, operation:fn=>fn(), linkOperation:fn=>fn(link),
+    target:()=>({port:1,generation:radio.generation}), available:()=>true});
+  panel.controls();
+  return { $, click:id=>$('pet-'+id).onclick(), radio, calls, panel };
+}
+
+test('Sensor tracker is detected over the text console and does not expose RAK-only functions', async () => {
+  const { $, click, radio, calls } = sensorPanel();
+  await click('read');
+  assert.equal($('pet-sensor-controls').hidden,false);
+  assert.equal($('pet-collar-hike').hidden,true);
+  assert.equal($('pet-tune-preview').disabled,undefined);
+  assert.equal($('pet-sensor-interval').value,'1800');
+  assert.equal($('pet-sensor-on').disabled,true);
+  assert.equal($('pet-sensor-check').disabled,true);
+  assert.equal($('pet-sensor-owner').value,'');
+  $('pet-sensor-owner').value = 'a1'.repeat(32);
+  await click('sensor-owner-save');
+  assert.equal(radio.owner,'a1'.repeat(32));
+  assert.equal($('pet-sensor-on').disabled,false);
+  $('pet-sensor-path').value = 'direct';
+  await click('sensor-path-save');
+  assert.equal($('pet-sensor-path-current').textContent,'Current route: direct');
+  await click('sensor-on');
+  assert.equal($('pet-sensor-check').disabled,false);
+  await click('sensor-check');
+  assert.match($('pet-result').textContent,/GPS check-in scheduled/);
+  assert.equal(calls.at(-1),'tracker check');
+  assert.deepEqual(calls.filter(cmd=>cmd.startsWith('pet ')),['pet status']);
+});
+
+test('tracker writes stop on disconnect, storage failure, or an unrecognized tracker response', async () => {
+  const { $, click, radio, calls, panel } = sensorPanel();
+  radio.owner = 'a1'.repeat(32);
+  await click('read');
+  radio.storage = 'fault';
+  await assert.rejects(click('sensor-on'), /storage is not writable/);
+  assert.equal($('pet-sensor-on').disabled,true);
+  radio.storage = 'ok';
+  await click('read');
+  radio.override = cmd => {
+    if (cmd === 'get tracker status') {
+      ++radio.generation;
+      panel.controls();
+    }
+  };
+  await assert.rejects(click('sensor-on'), /changed/);
+  assert.equal($('pet-sensor-controls').hidden,true);
+  assert.equal($('pet-sensor-owner').value,'');
+  assert.match($('pet-result').textContent,/Read settings/);
+  radio.override = cmd => cmd === 'get tracker status' ? 'command: get tracker status\nOK\n' : undefined;
+  await assert.rejects(click('read'), /did not report pet tracker settings/);
+  assert.ok(!calls.some(cmd=>cmd.startsWith('set tracker.')));
+});
+
+test('tracker validates routes against firmware encoding and console capacity', () => {
+  assert.equal(trackerRoute('AABB, CCdd'),'aabb,ccdd');
+  assert.equal(trackerRoute('clear'),'clear');
+  assert.throws(()=>trackerRoute('aa,bbbb'));
+  assert.throws(()=>trackerRoute('aa,bb\rtracker check'));
+  assert.throws(()=>trackerRoute(Array(32).fill('aabb').join(',')),/too long/);
+});
+
+test('an acknowledgement without the saved value is not reported as success', async () => {
+  const { $, click, radio } = sensorPanel();
+  radio.owner = 'a1'.repeat(32);
+  await click('read');
+  radio.override = cmd => cmd === 'set tracker.mode pet' ? '  -> OK\r\n' : undefined;
+  await assert.rejects(click('sensor-on'), /did not report the requested setting/);
+  assert.equal($('pet-sensor-check').disabled,true);
 });
