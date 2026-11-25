@@ -322,13 +322,15 @@ No hardware operations have been performed.</pre><div class="console-input"><lab
       <div class="disclosure-body backup-options">
         <div class="inline-actions">
           <button id="reader-refresh" class="secondary" type="button" disabled data-lock>Read radio library</button>
-          <button id="reader-guides" class="secondary" type="button" data-lock>Load field guides</button>
+          <button id="reader-guides" class="secondary" type="button" hidden>Retry loading field guides</button>
         </div>
+        <p id="reader-guide-status" class="hint" role="status" aria-live="polite"></p>
         <div><label for="reader-files">Import books</label><input id="reader-files" type="file" accept=".txt,.md,.markdown,.json" multiple data-lock></div>
         <label><input id="reader-ascii" type="checkbox" data-lock> Transliterate to ASCII</label>
-        <div><label for="reader-imported">Imported book</label><select id="reader-imported" disabled data-lock><option value="">No books imported</option></select></div>
+        <div><label for="reader-imported">Book</label><select id="reader-imported" disabled data-lock><option value="">Loading field guides…</option></select></div>
+        <details class="reader-text"><summary>Read selected book</summary><pre id="reader-text">Select a book to read.</pre></details>
         <div class="inline-actions"><button id="reader-add" type="button" class="secondary" disabled data-lock>Add to radio</button><span id="reader-pack-size" class="hint"></span></div>
-        <div><label for="reader-installed">Installed books</label><select id="reader-installed" disabled data-lock><option value="">Library not read</option></select></div>
+        <div><label for="reader-installed">Installed books</label><select id="reader-installed" disabled data-lock><option value="">Library not read</option></select><p class="hint">To read a book here, select a field guide or import its file. The radio library lists installed books but cannot send their text to this page.</p></div>
         <div class="inline-actions"><button id="reader-remove" class="secondary" type="button" disabled data-lock>Remove from radio</button><span id="reader-free" class="hint"></span></div>
         <p id="reader-status" class="hint" role="status" aria-live="polite"></p>
       </div>

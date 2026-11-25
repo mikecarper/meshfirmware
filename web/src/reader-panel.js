@@ -4,7 +4,8 @@ const size = bytes => bytes < 1024 ? `${bytes} bytes` : `${(bytes / 1024).toFixe
 
 export function readerPanel({ $, operation, linkOperation, getTarget, allowed, busy, confirmRemove }) {
   let imported = [], packed = null, installed = [], inventory = null, verified = null;
-  const guideAsset = new URL(`${import.meta.env.BASE_URL}reader/field-guides.json`, document.baseURI);
+  let guidesLoaded = false, guidesLoading = null;
+  const guideAsset = new URL(`${import.meta.env?.BASE_URL ?? './'}reader/field-guides.json`, document.baseURI);
   const status = text => { $('reader-status').textContent = text; };
   const select = (id, labels, empty, keep = '') => {
     const node = $(id);
@@ -37,25 +38,28 @@ export function readerPanel({ $, operation, linkOperation, getTarget, allowed, b
     $('reader-add').disabled = locked || !connected || !packed || (!!inventory && (inventory.free < packed.bytes.length || installed.length >= 32));
     $('reader-remove').disabled = locked || !connected || !installed.length;
   }
-  function choose() {
+  function choose({ preserveStatus = false } = {}) {
     packed = null;
     $('reader-pack-size').textContent = '';
     const book = imported[+$('reader-imported').value];
+    $('reader-text').textContent = book
+      ? [book.title, ...book.chapters.map(chapter => [chapter.title, ...chapter.passages].join('\n\n'))].join('\n\n')
+      : 'Select a book to read.';
     if (book) {
       try {
         packed = packBook(book, { ascii: $('reader-ascii').checked });
         $('reader-pack-size').textContent = `${size(packed.bytes.length)} packed`;
-        status('');
-      } catch (error) { status(error.message); }
+        if (!preserveStatus) status('');
+      } catch (error) { if (!preserveStatus) status(error.message); }
     }
     controls();
   }
-  function importBooks(books) {
+  function importBooks(books, keepSelection = false) {
     if (imported.length + books.length > 1024) throw new Error('Import limit reached. Reload this tab to start a new collection.');
     const first = imported.length;
     imported = imported.concat(books);
-    select('reader-imported', imported.map(book => book.title), 'No books imported', first);
-    choose();
+    select('reader-imported', imported.map(book => book.title), 'No books imported', keepSelection && first ? $('reader-imported').value : first);
+    choose({ preserveStatus: keepSelection });
   }
   const action = fn => operation(async () => {
     try { await fn(); } catch (error) { status(error.message || String(error)); }
@@ -80,12 +84,25 @@ export function readerPanel({ $, operation, linkOperation, getTarget, allowed, b
     for (const file of files) books.push(...parseBooks(decoder.decode(await file.arrayBuffer()), file.name));
     importBooks(books);
   });
-  $('reader-guides').onclick = () => action(async () => {
-    const response = await fetch(guideAsset);
-    if (!response.ok) throw new Error('The field guides could not be loaded.');
-    importBooks(parseBooks(await response.text(), 'field-guides.json'));
-  });
-  $('reader-imported').onchange = $('reader-ascii').onchange = choose;
+  function loadGuides() {
+    if (guidesLoaded) return Promise.resolve();
+    if (guidesLoading) return guidesLoading;
+    $('reader-guides').hidden = true;
+    guidesLoading = (async () => { try {
+      const response = await fetch(guideAsset);
+      if (!response.ok) throw new Error('The field guides could not be loaded.');
+      importBooks(parseBooks(await response.text(), 'field-guides.json'), true);
+      guidesLoaded = true;
+      $('reader-guide-status').textContent = '';
+    } catch {
+      $('reader-guides').hidden = false;
+      if (!imported.length) select('reader-imported', [], 'No books available');
+      $('reader-guide-status').textContent = 'The field guides could not be loaded. Try again.';
+    } finally { guidesLoading = null; } })();
+    return guidesLoading;
+  }
+  $('reader-guides').onclick = loadGuides;
+  $('reader-imported').onchange = $('reader-ascii').onchange = () => choose();
   const refresh = async (reader, target) => renderInventory(await reader.inventory(), target);
   $('reader-refresh').onclick = () => serialAction(async (reader, target) => {
     status('Reading library...');
@@ -112,5 +129,6 @@ export function readerPanel({ $, operation, linkOperation, getTarget, allowed, b
     status(`Removed ${book.title}.`);
     try { await refresh(reader, target); } catch { renderInventory(null, null); status(`Removed ${book.title}. Refresh the library to check storage.`); }
   });
+  void loadGuides();
   return { controls };
 }

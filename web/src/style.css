@@ -439,3 +439,11 @@ footer { font-size: 15.4px; line-height: 1.6; overflow-wrap: anywhere; }
   #console #log { height: 220px; }
   .capability-grid { grid-template-columns: minmax(0, 1fr); }
 }
+.reader-text pre {
+  max-height: 32rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  line-height: 1.55;
+}
