@@ -32,11 +32,19 @@ not a remote USB-only node.
 
 ### Nearby MeshCore scopes
 
-Use approximate IP location or enter coordinates to open MeshMapper centered on
-the search area. This works without a scopes service. A requested IP lookup uses
-[GeoJS](https://www.geojs.io/privacy/) when the scopes service cannot supply a
-result. GeoJS sees the request's public IP; the flasher does not store it.
-Opening the map link shares rounded coordinates with MeshMapper.
+Use approximate IP location or enter coordinates to get a regional link.
+Near a listed Pacific Northwest area, the link opens the
+[PNW repeater configurator](https://gessaman.com/meshcore/regions/config/).
+The recommendation uses the published region centers and radii from the
+[PNW region data](https://gessaman.com/meshcore/regions/regions.json) as a
+geographic guide. Enter a city or postal code in the configurator to choose
+repeater settings. The link does not include the coordinates.
+
+For other locations, the link opens MeshMapper centered on the search area and
+shares rounded coordinates when clicked. Regional links work without a scopes
+service. A requested IP lookup uses [GeoJS](https://www.geojs.io/privacy/)
+when the scopes service cannot supply a result. GeoJS sees the request's public
+IP. The flasher does not store it.
 
 Without a confirmed matching region, the flasher suggests a map using a checked
 shortlist of MeshMapper airport codes and coordinates from

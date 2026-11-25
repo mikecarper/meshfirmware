@@ -1,4 +1,5 @@
 import { meshMapperAirports } from './meshmapper-airports.js';
+import { PNW_CONFIG_URL, pnwRegionSuggestion } from './pnw-regions.js';
 
 const MAP_HOME = 'https://global.meshmapper.net/';
 const GEO_IP = 'https://get.geojs.io/v1/ip/geo.json';
@@ -78,9 +79,9 @@ export function initNearbyScopes(doc, endpoint, fetcher = fetch) {
   const status = el('status');
   let busy = false, ipEstimate;
 
-  function link(label, map, location) {
+  function link(label, href) {
     const node = doc.createElement('a');
-    node.href = mapUrl(map, location);
+    node.href = href;
     node.target = '_blank'; node.rel = 'noopener noreferrer'; node.textContent = label;
     return node;
   }
@@ -90,20 +91,40 @@ export function initNearbyScopes(doc, endpoint, fetcher = fetch) {
     return mode === 'ip' ? `Approximate IP location: ${label}.` : `Search location: ${label}.`;
   }
 
-  function showSuggestedMap(location) {
+  function showRegionLinks(location, regions = []) {
+    const maps = el('maps');
+    const pnw = pnwRegionSuggestion(location);
+    if (pnw) {
+      maps.replaceChildren(
+        doc.createTextNode(`Near ${pnw.label}. `),
+        link('Open PNW repeater configurator', PNW_CONFIG_URL),
+        doc.createTextNode(' Enter a city or postal code there for recommended regions.'),
+      );
+      return true;
+    }
+    if (regions.length) {
+      maps.replaceChildren(doc.createTextNode('MeshMapper: '));
+      regions.forEach((region, i) => {
+        if (i) maps.append(', ');
+        const label = region.code ? `${region.name} (${region.code})` : region.name;
+        maps.append(link(label, mapUrl(region.map, location)));
+      });
+      return false;
+    }
     const suggested = airportMapSuggestion(location);
-    const global = link('Open global map', null, location);
-    el('maps').replaceChildren(...(suggested ? [
+    const global = link('Open global map', mapUrl(null, location));
+    maps.replaceChildren(...(suggested ? [
       doc.createTextNode('Suggested by nearby airport: '),
-      link(`${suggested.name} (${suggested.code}) scopes`, suggested.map, location),
+      link(`${suggested.name} (${suggested.code}) scopes`, mapUrl(suggested.map, location)),
       doc.createTextNode(' · '),
       global,
     ] : [doc.createTextNode('No known airport map nearby. '), global]));
+    return false;
   }
 
   function showMapOnly(location, mode) {
-    status.textContent = `${areaLabel(location, mode)} Scope results aren’t available here.`;
-    showSuggestedMap(location);
+    const pnw = showRegionLinks(location);
+    status.textContent = areaLabel(location, mode) + (pnw ? '' : ' Scope results aren’t available here.');
     el('table').hidden = true;
     el('results').hidden = false;
     el('fallback').hidden = true;
@@ -117,14 +138,7 @@ export function initNearbyScopes(doc, endpoint, fetcher = fetch) {
       ? `${data.scopeCount} observed scope${data.scopeCount === 1 ? '' : 's'}${data.scopeCount > scopes.length ? ` (showing ${scopes.length})` : ''}.`
       : 'No recent forwarding observed in available data.';
     status.textContent = [area, window, result, data.partial ? 'Some regional data is temporarily unavailable.' : ''].filter(Boolean).join(' ');
-    if (regions.length) {
-      const maps = el('maps');
-      maps.replaceChildren(doc.createTextNode('MeshMapper: '));
-      regions.forEach((region, i) => {
-        if (i) maps.append(', ');
-        maps.append(link(region.code ? `${region.name} (${region.code})` : region.name, region.map, location));
-      });
-    } else showSuggestedMap(location);
+    showRegionLinks(location, regions);
     const date = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
     el('rows').replaceChildren(...scopes.map(({ name, repeaters, lastSeen }) => {
       const row = doc.createElement('tr');
@@ -142,7 +156,7 @@ export function initNearbyScopes(doc, endpoint, fetcher = fetch) {
     if (busy) return;
     busy = true;
     controls.forEach(control => { control.disabled = true; });
-    status.textContent = endpoint ? 'Looking up nearby scopes...' : 'Looking up approximate location...';
+    status.textContent = endpoint ? 'Looking up nearby scopes...' : 'Finding a regional link...';
     el('results').hidden = true;
     try {
       const manual = mode === 'manual' ? {
@@ -168,7 +182,7 @@ export function initNearbyScopes(doc, endpoint, fetcher = fetch) {
         el('form').parentElement.open = true;
         el('lat').focus();
       }
-      el('maps').replaceChildren(link('Open MeshMapper'));
+      el('maps').replaceChildren(link('Open MeshMapper', MAP_HOME));
       el('table').hidden = true;
       el('results').hidden = false;
     } finally {
