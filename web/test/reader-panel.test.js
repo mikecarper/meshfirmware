@@ -31,7 +31,9 @@ test('guides load on page load and selected text is readable without contacting 
   await tick();
   assert.deepEqual(requests, ['https://example.com/meshfirmware/reader/field-guides.json']);
   assert.deepEqual(ui.$('reader-imported').options.map(option => option.textContent), ['Survivor Guide', 'Land Navigation', 'First Aid']);
-  assert.match(ui.$('reader-text').textContent, /^Survivor Guide\n\nBefore You Leave/);
+  assert.match(ui.$('reader-text').textContent, /^Survivor Guide\n\nChapter 1: [^\n]+\n\n\[1:1\] \S/);
+  assert.match(ui.$('reader-text').textContent, /\n\n\[1:2\] \S/);
+  assert.match(ui.$('reader-text').textContent, /\n\nChapter 2: [^\n]+\n\n\[2:1\] \S/);
   ui.$('reader-imported').value = '1';
   ui.$('reader-imported').onchange();
   assert.match(ui.$('reader-text').textContent, /^Land Navigation\n\n/);
@@ -45,7 +47,7 @@ test('late guide loading preserves early imported selection and status and displ
   let finish;
   const ui = fixture(t, () => new Promise(resolve => { finish = resolve; }));
   const content = '# Notes\n## Heading\n<img src=x onerror=alert(1)> & text';
-  const other = '# Other\nAn earlier book.';
+  const other = '### Other\n[1:1] An earlier book.';
   ui.$('reader-files').files = [other, content].map((text, i) => ({ name: `${i}.md`, size: text.length, arrayBuffer: async () => new TextEncoder().encode(text).buffer }));
   await ui.$('reader-files').onchange();
   ui.$('reader-imported').value = '1';
@@ -55,10 +57,13 @@ test('late guide loading preserves early imported selection and status and displ
   await tick();
   assert.equal(ui.$('reader-imported').value, '1');
   assert.deepEqual(ui.$('reader-imported').options.map(option => option.textContent), ['Other', 'Notes', 'Survivor Guide', 'Land Navigation', 'First Aid']);
-  assert.equal(ui.$('reader-text').textContent, 'Notes\n\nHeading\n\n<img src=x onerror=alert(1)> & text');
+  assert.equal(ui.$('reader-text').textContent, 'Notes\n\nChapter 1: Heading\n\n[1:1] <img src=x onerror=alert(1)> & text');
   assert.equal(ui.$('reader-text').innerHTML, undefined);
   assert.equal(ui.$('reader-status').textContent, 'Radio operation in progress');
   assert.equal(ui.calls().serial, 0);
+  ui.$('reader-imported').value = '0';
+  ui.$('reader-imported').onchange();
+  assert.equal(ui.$('reader-text').textContent, 'Other\n\nChapter 1\n\n[1:1] An earlier book.');
 });
 
 test('failed loading can be retried without duplicating guides, even with repeated requests', async t => {

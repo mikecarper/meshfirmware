@@ -61,9 +61,10 @@ Companion firmware. **Preview notes** plays the current draft in the browser;
 ### Reader books
 
 Reader ships empty on compatible Full Companion builds. In the web flasher,
-select the running radio's USB port and open **Reader books**. Import a file or
-choose **Load field guides** (Survivor Guide, Land Navigation, and First Aid). Select one
-book and choose **Add to radio**.
+**Reader books** loads three field guides automatically: Survivor Guide, Land
+Navigation, and First Aid. Select a guide or import a book, then open **Read
+selected book** for the chapter and passage references. To install one, select
+the running radio's USB port and choose **Add to radio**.
 **Read radio library** shows installed books and available space. Removing one
 book does not change firmware, settings, or other books. Open Reader from the
 radio page on a display-equipped Companion: press Select or hold the user
@@ -71,6 +72,16 @@ button. On single-button devices, click to move, double-click to select, and
 hold to go back. While reading, double-click goes to the previous page.
 Triple- and quadruple-click jump through menus or go directly to the next
 and previous passage, respectively.
+
+The bundled guides focus on what to do during an emergency in the field.
+Their sources include the [NPS Outdoor Emergency Plan](https://www.nps.gov/articles/gtgemergencyplan.htm),
+[USGS map and compass guidance](https://www.usgs.gov/educational-resources/finding-your-way-map-and-compass),
+[NWS outdoor flood safety](https://www.weather.gov/rnk/outdoorsflooding) and
+[lightning safety](https://www.weather.gov/safety/lightning-outdoors),
+[CDC backcountry water treatment](https://www.cdc.gov/drinking-water/prevention/water-treatment-hiking-camping-traveling.html),
+[AHA and Red Cross first aid guidelines](https://cpr.heart.org/en/resuscitation-science/2024-first-aid-guidelines/),
+and Red Cross guidance on [tourniquets](https://www.redcross.org/take-a-class/resources/articles/how-to-apply-a-tourniquet)
+and [adult CPR](https://www.redcross.org/take-a-class/cpr/performing-cpr/cpr-steps).
 
 Use UTF-8 text (`.txt`), Markdown (`.md`), or JSON. Blank lines split plain-text
 passages and Markdown headings name chapters. The numbered text format uses

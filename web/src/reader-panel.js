@@ -2,6 +2,17 @@ import { openReader, packBook, parseBooks, READER_MAX_SOURCE } from './reader-bo
 
 const size = bytes => bytes < 1024 ? `${bytes} bytes` : `${(bytes / 1024).toFixed(1)} KiB`;
 
+function bookText(book) {
+  const chapters = book.chapters.map((chapter, index) => {
+    const number = index + 1;
+    const label = `Chapter ${number}`;
+    const heading = chapter.title === label ? label : `${label}: ${chapter.title}`;
+    const passages = chapter.passages.map((passage, i) => `[${number}:${i + 1}] ${passage}`);
+    return [heading, ...passages].join('\n\n');
+  });
+  return [book.title, ...chapters].join('\n\n');
+}
+
 export function readerPanel({ $, operation, linkOperation, getTarget, allowed, busy, confirmRemove }) {
   let imported = [], packed = null, installed = [], inventory = null, verified = null;
   let guidesLoaded = false, guidesLoading = null;
@@ -42,9 +53,7 @@ export function readerPanel({ $, operation, linkOperation, getTarget, allowed, b
     packed = null;
     $('reader-pack-size').textContent = '';
     const book = imported[+$('reader-imported').value];
-    $('reader-text').textContent = book
-      ? [book.title, ...book.chapters.map(chapter => [chapter.title, ...chapter.passages].join('\n\n'))].join('\n\n')
-      : 'Select a book to read.';
+    $('reader-text').textContent = book ? bookText(book) : 'Select a book to read.';
     if (book) {
       try {
         packed = packBook(book, { ascii: $('reader-ascii').checked });

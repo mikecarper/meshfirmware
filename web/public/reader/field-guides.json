@@ -4,35 +4,56 @@
       "title": "Survivor Guide",
       "chapters": [
         {
-          "title": "Before You Leave",
+          "title": "Lost Right Now",
           "passages": [
-            "Leave a trip plan with someone who is not going. Include names, your start point, intended route, backup route, vehicle details, expected return, and when they should call for help. Check in when you return.",
-            "Check weather, daylight, closures, and water availability. Agree on a turnaround time and a lower-risk alternate outing. Take a paper map even when you have offline maps on a phone.",
-            "Pack navigation, sun protection, spare layers and rain gear, a headlamp, first-aid supplies, emergency shelter, water and treatment supplies, extra food, simple repair tools, and a fire starter only where appropriate. Know how to use what you carry."
+            "Stop somewhere safe and keep the group together. Note the last trail sign, junction, crossing, or other point you can place on the map. Check for injuries, failing light, and weather.",
+            "If everyone can walk safely and you recognize the way back, retrace to the last confirmed point. If the route is uncertain, stop. Don't follow a creek downhill or strike out toward a road you cannot verify.",
+            "If you cannot safely get back, or someone is badly injured or too weak to walk, call the local emergency number (911 in the U.S.). Look for nearby shelter while you wait. See First Aid for immediate care."
           ]
         },
         {
-          "title": "Lost or Delayed",
+          "title": "No Cell Service",
           "passages": [
-            "Stop and assess. Check the time, your last confirmed location, nearby landmarks, and any immediate hazards. Retrace only if you know the return route and it is safe. Do not keep walking on a guess.",
-            "If you cannot safely return, call the local emergency number or use a suitable satellite SOS device. Give your location and coordinate format, time and place last known, number of people, injuries, clothing, equipment, and visible landmarks.",
-            "After requesting rescue, stay at the reported location unless immediate danger forces you to move. If you must move, tell responders the new location and direction when possible. Do not assume a mesh message reached a dispatcher."
+            "Try the emergency call. If it does not connect, use satellite SOS on a supported phone or emergency beacon if available. Follow its prompts and find a clear view of the sky only if you can do so safely.",
+            "If a hiker passes, ask them to call for help. If mesh radio reaches someone, ask them to contact dispatch and confirm back that dispatch received your location. A mesh delivery mark alone does not mean rescue is on the way.",
+            "Use a whistle, bright gear, or a light to make yourself easier to find. Avoid climbing exposed terrain to look for a signal."
           ]
         },
         {
-          "title": "Shelter and Water",
+          "title": "Tell Rescue Where You Are",
           "passages": [
-            "Protect yourself from exposure before it worsens. Get out of wind and rain where safe, put on dry layers, and insulate yourself from the ground. Avoid flood channels, exposed ridges, and ground beneath unstable trees.",
-            "Start with safe drinking water and a backup supply. Plan for dry sources. Treat collected water using a method appropriate to the source and follow the product directions; ordinary filters do not remove every hazard.",
-            "Do not attempt to cross fast or rising water to stay on schedule. Turn back or wait in a safe place. A marked crossing on a map is not evidence that it is passable today."
+            "Give location first. Read your current coordinates, including the format and any minus signs or compass letters. If you have no fix, give the trail or area, last confirmed place and time, direction traveled, and nearby landmarks.",
+            "Report how many people are there, what happened, whether anyone is hurt or unable to move, what you are wearing, and how dispatch can reach you. Say which details are estimates.",
+            "After reporting your position, stay there unless rescuers tell you to move or a hazard forces you to leave. If you must move, get to the nearest safe spot and report the new location as soon as you can."
           ]
         },
         {
-          "title": "Signal and Wait",
+          "title": "Stuck Out After Dark",
           "passages": [
-            "Keep a whistle and headlamp where you can reach them. Three whistle blasts with a pause can attract attention. Make yourself visible with bright gear if it can be done without leaving shelter or taking risks.",
-            "Keep the group together. Inventory water, food, layers, light, and battery power. Keep your primary signaling device available and agree who will monitor it. Avoid unnecessary travel while waiting for help.",
-            "Further reading: U.S. National Park Service Outdoor Emergency Plan and Ten Essentials. Review local advice before leaving and practice with your equipment."
+            "If you cannot safely follow the route, shelter close to where you stopped. Get out of wind and rain. Avoid washes, unstable trees, and exposed ridges. Put dry layers on and place a pad, pack, or spare clothing between you and the ground.",
+            "Put bright gear where it is visible without leaving safety. Use a whistle if you hear people. At night, flash three short, three long, then three short bursts of light to signal distress.",
+            "Keep the group together and conserve energy. Save your phone battery by dimming the screen and closing apps you aren't using. Keep the device you used to call for help ready to receive replies."
+          ]
+        },
+        {
+          "title": "Water Is Rising",
+          "passages": [
+            "If water rises, turns muddy, or carries debris, leave the streambed, wash, or canyon bottom immediately for higher ground. Heavy rain upstream can flood you even under clear skies.",
+            "Do not walk or swim through floodwater. A marked trail crossing may be underwater, and its footing may have washed away. Wait on higher ground and tell rescuers if the crossing blocks your exit."
+          ]
+        },
+        {
+          "title": "Thunder on Exposed Ground",
+          "passages": [
+            "When you hear thunder, get to an enclosed building or hard-topped vehicle if you can reach it safely. If you are stranded outdoors, move away from ridges, peaks, open water, and isolated tall trees without entering a flood channel.",
+            "A tent does not protect you from lightning. Spread the group out while staying in contact, and do not lie flat. Once you reach safer ground, update rescuers if your location changed."
+          ]
+        },
+        {
+          "title": "Drinking Water Runs Low",
+          "passages": [
+            "If you can safely collect clear water and heat it, bring it to a rolling boil for 1 minute, or 3 minutes above 6,500 feet (about 2,000 meters). Let it cool before drinking.",
+            "If boiling is unavailable, filter and then disinfect according to the product directions, including the listed contact time. If you suspect fuel, chemicals, or harmful algal toxins, use another water source. Boiling will not make it safe."
           ]
         }
       ]
@@ -41,36 +62,50 @@
       "title": "Land Navigation",
       "chapters": [
         {
-          "title": "Read the Map",
+          "title": "The Trail Disappeared",
           "passages": [
-            "Check the legend, scale, contour interval, and map date. At 1:24,000, one centimeter on paper represents 240 meters on the ground. Use the scale bar if the map was resized when printed.",
-            "Contour lines join equal elevations. Closely spaced lines mean a steeper slope. Along a stream, contours typically bend upstream. Identify ridges, valleys, and saddles before choosing a route.",
-            "A distance measured on the map is horizontal, not walking distance. Switchbacks, elevation gain, brush, and obstacles can add time. Use the marked trail and consider conditions, not just the shortest line."
+            "Stop when the trail fades or the terrain stops matching the map. Identify the last place you are sure of, such as a numbered junction, bridge, or campsite. Note when you were there and which way you went.",
+            "Check your GPS position or recorded track against signs and terrain. If you can identify your return path and it is still safe, retrace it to the last confirmed point. Avoid unmarked shortcuts or game trails.",
+            "If you cannot confirm the return route, stay in a safe place and call for help. A bearing or a straight line on a screen does not tell you whether the ground between here and there is passable."
           ]
         },
         {
-          "title": "Use a Compass",
+          "title": "Read a GPS Fix for Rescue",
           "passages": [
-            "Distinguish true, grid, and magnetic north. Declination is the angle between true and magnetic north and changes with time and place. Get a current value for the area and know which north reference your map uses.",
-            "To measure a map bearing, place the compass edge from your known point toward the destination. Align the dial's orienting lines with the selected map north. Convert to the compass reference if needed; do not correct twice on an adjusted compass.",
-            "Hold the compass level and away from metal, loudspeakers, phones, and other magnetic objects. Turn until the needle matches the orienting mark, then pick a visible landmark along the direction of travel. Cross-check with terrain."
+            "Open the location or coordinates screen on your phone or GPS. It may show a satellite fix without cell service. Stand still somewhere safe and check that the fix is current. Trees and steep canyon walls can make it less accurate.",
+            "Read latitude and longitude in that order, exactly as displayed including signs or N/S and E/W. Name the format, such as decimal degrees. If you use UTM, give the zone, hemisphere, easting, northing, and datum if shown.",
+            "Send the time and displayed accuracy if available. Say whether the point is current, your last known location, or just an estimate. Add trail names, signs, or nearby landmarks so responders can cross-check it."
           ]
         },
         {
-          "title": "Follow a Route",
+          "title": "GPS Is Dead or Uncertain",
           "passages": [
-            "Break a route into short legs with recognizable checkpoints. Record each leg's expected direction, distance, and terrain. Use a trail, ridge, or another safe linear feature as a handrail where practical.",
-            "Choose a clear feature beyond a difficult turn as a catching feature. If you reach that feature, you went too far. Count junctions and note direction changes as you travel, rather than trying to remember them after a mistake.",
-            "Use time, pace, and terrain together. Calibrate your pace on a measured route, then expect it to vary with grade, surface, and fatigue. Confirm progress against the map at every reliable checkpoint."
+            "Lay the paper map flat and turn it so two or more recognizable features line up with the real terrain. Try different kinds of features, such as a stream bend and a ridge. A single landmark can look like several places.",
+            "If using a compass, hold it level and away from your phone, pack hardware, and other metal. Use the map's north reference and its local magnetic declination if known. If you cannot reconcile the compass and terrain, keep your position uncertain.",
+            "Use your last confirmed point, direction, elapsed time, and the features you passed to narrow the possible area. Tell rescuers the area and landmarks if you cannot pin down a point."
           ]
         },
         {
-          "title": "Recover Your Position",
+          "title": "Two Landmarks in View",
           "passages": [
-            "Stop when the map and terrain no longer agree. Look for the last confirmed point. Orient your map, compare several independent landmarks, and use your GPS if available. Avoid committing to a guess.",
-            "To estimate your position, take bearings to two or more distinct mapped landmarks. Convert to the map's reference and plot the reciprocal bearings back from those landmarks. Crossings indicate an area of uncertainty, not an exact point.",
-            "Before sharing coordinates, say the format and datum. A point in decimal degrees is not the same as degrees and decimal minutes. For a UTM grid, give the zone, hemisphere, easting, northing, and datum.",
-            "Practice on a familiar route where mistakes are easy to reverse. Further reading: U.S. Geological Survey, Finding Your Way With Map and Compass."
+            "If you recognize two or more well-separated mapped landmarks and know how your compass and map reference north, take a bearing from your position to each landmark. Convert each bearing to the map's north reference.",
+            "From each landmark on the map, draw a line in the reverse direction of its bearing. Reverse a bearing by adding 180 degrees if it is below 180, or subtracting 180 if it is 180 or higher. Your position is near where the lines meet.",
+            "A third landmark helps check the estimate. If the lines do not meet closely or the terrain does not fit, report an approximate area. Do not commit to a hazardous route based on the estimate."
+          ]
+        },
+        {
+          "title": "Fog or Darkness Closes In",
+          "passages": [
+            "Stop before visibility prevents you from identifying the path. Retrace a known route only if you have enough light and can verify it is safe. Otherwise shelter nearby and signal or call for help.",
+            "Avoid descending unfamiliar slopes in poor visibility. Tracks can disappear in wind or snowfall, and a GPS arrow cannot show cliffs, ice, or washed-out bridges. If you must move out of danger, report where you moved."
+          ]
+        },
+        {
+          "title": "The Way Back Is Blocked",
+          "passages": [
+            "Stop before the obstacle. Do not test rising water or try to descend an unknown cliff or gully. A mapped bridge or trail can be closed, missing, or impassable today.",
+            "If everyone can travel safely, return to the last confirmed junction or other checkpoint. Use a known, passable alternate route only if you can verify it from the map and terrain. Otherwise call for help and wait somewhere safe.",
+            "If you have a safe way back, move between checkpoints you can identify. Check the map and terrain at each one. If you pass the turn or lose track again, stop and return to the last confirmed point only if safe."
           ]
         }
       ]
@@ -79,39 +114,77 @@
       "title": "First Aid",
       "chapters": [
         {
-          "title": "Check and Call",
+          "title": "Leg or Arm Bleeding Badly",
           "passages": [
-            "If someone is seriously ill or injured, call the local emergency number (911 in the U.S.). This is a quick reference, not a substitute for training or instructions from emergency dispatch.",
-            "Before you approach, check for hazards such as traffic, fire, electricity, or unstable ground. Use gloves or a barrier when available. Ask permission to help if the person is alert.",
-            "Check quickly for a response, normal breathing, and severe bleeding. Gasping is not normal breathing. If the person cannot respond, has trouble breathing, or is bleeding severely, call immediately or point to someone and tell them to call.",
-            "Give dispatch your location, how to reach you, what happened, and how many people need help. Use speakerphone if possible and follow their instructions. Keep watching for changes until help takes over."
+            "Act if blood spurts, keeps flowing, or pools fast. If it is safe to get close, expose the wound and press hard right on it with gauze or a clean cloth. Have someone call emergency services, or use speakerphone while you press.",
+            "Keep steady pressure without lifting the cloth to look. If there is an object stuck in the wound, leave it there and press firmly around it.",
+            "For life-threatening arm or leg bleeding, use a manufactured tourniquet as soon as it is available. Put it 2 to 3 inches toward the heart from the wound, clear of any joint. If that spot is on a joint, place it above the joint.",
+            "Follow the tourniquet's directions. On a windlass model, pull the strap tight and twist until bleeding stops. Lock the rod in place. If bleeding continues with the first fully tightened, add a second above it if available.",
+            "Write down the time. Leave the tourniquet in place for medical professionals, even if rescue is delayed. If you have no tourniquet, keep pressing hard on the wound.",
+            "For a deep wound in the groin or armpit where a tourniquet will not fit, pack with gauze if trained, then maintain firm pressure. Keep pressing if you cannot pack it. Do not pack a chest or belly wound."
           ]
         },
         {
-          "title": "CPR and AED",
+          "title": "Pale or Weak After Injury",
           "passages": [
-            "If an adult is unresponsive and is not breathing normally, call emergency services, send someone for an AED, and start CPR. Follow the dispatcher's instructions. Do not wait for the AED to start CPR.",
-            "For a teen or adult who suddenly collapses, begin chest compressions on a firm surface. Push hard in the center of the chest at 100 to 120 compressions per minute. Let the chest rise fully after each push.",
-            "Give rescue breaths if trained, especially for infants, children, or someone pulled from water. Use age-appropriate CPR and follow the dispatcher. Do not delay chest compressions while looking up instructions.",
-            "When the AED arrives, turn it on and follow its prompts and pad diagrams. Do not touch the person during analysis or a shock. Resume CPR immediately when the AED instructs you to."
+            "Pale, clammy skin, fast breathing, weakness, or confusion after a serious injury may mean shock. Call for medical rescue now and control any bleeding.",
+            "Keep them still and protected from the weather. Put insulation underneath if you can do it without moving an injury. Give no food or drink.",
+            "Keep checking breathing and alertness. Tell dispatch if either changes. Record the injury time, care given, and changes to tell responders."
           ]
         },
         {
-          "title": "Severe Bleeding",
+          "title": "Collapsed and Not Breathing",
           "passages": [
-            "Call for emergency help and expose the source of the bleeding. Press firmly and continuously on the wound with gauze or clean cloth. For an embedded object, leave it in place and apply pressure around it.",
-            "For life-threatening bleeding from an arm or leg, use a manufactured tourniquet if trained or directed by emergency dispatch. Record when it was applied and leave it in place for responders.",
-            "Stay with the person. Protect them from cold or heat and watch their breathing and responsiveness. Tell responders what happened, how the person changed, and exactly what care was given."
+            "If an adult will not wake and is not breathing normally or only gasps, call emergency services, send someone for an AED, and start CPR. Follow dispatch on speakerphone if available.",
+            "Put them on their back on a firm surface. Push in the middle of the chest at 100 to 120 times a minute, about 2 inches deep. Let the chest rise fully after each push.",
+            "If trained and able, give 2 breaths after every 30 compressions. If unable, keep doing chest compressions. Breaths matter especially after drowning and for children. Follow dispatcher instructions.",
+            "Turn on the AED when available and follow its prompts. Keep clear during analysis or a shock and restart compressions as soon as prompted."
           ]
         },
         {
-          "title": "Burns, Heat, and Stroke",
+          "title": "Bad Fall or Broken Leg",
           "passages": [
-            "For a thermal burn, stop the source safely and cool the affected skin with clean, cool running water. Do not use ice, butter, or creams, and do not pull off anything stuck to the skin. Protect the rest of the body from chilling.",
-            "Get prompt medical help for deep or extensive burns, burns to the face, hands, feet or genitals, and chemical or electrical burns. Call emergency services immediately if the person has breathing problems.",
-            "Confusion or collapse during heat exposure may be heat stroke. Call emergency services and begin cooling immediately. Move out of heat if safe, remove excess clothing, and wet and fan the skin if faster cooling is not available. Monitor breathing and follow dispatch.",
-            "Sudden facial droop, arm weakness, or slurred speech may be a stroke. Call emergency services even if the signs improve. Note when symptoms began or when the person was last known to be well.",
-            "Further reading and hands-on courses: American Red Cross First Aid and American Heart Association CPR and AED resources."
+            "Call for rescue if they cannot get out safely, a bone sticks out, or the foot is numb, pale, blue, or cold. Control major bleeding first. Do not push exposed bone back in.",
+            "Support the injured limb in the position you found it. Do not straighten it or make them walk on it. Protect them from cold ground and watch for shock.",
+            "If you suspect a head, neck, or spine injury, keep them still unless danger or immediate lifesaving care requires moving them. Follow dispatch on positioning and watch their breathing."
+          ]
+        },
+        {
+          "title": "Cold, Wet and Confused",
+          "passages": [
+            "Stumbling, slurred speech, confusion, or unusual drowsiness after cold exposure means possible hypothermia. Call for rescue. Handle the person gently.",
+            "Shelter them from wind and rain. Replace soaked clothes with dry layers under shelter if available. Cover the head and neck and insulate underneath, keeping the airway clear.",
+            "If using a heat pack, put a layer between it and the skin and warm the torso. Do not rub or heat the arms and legs. Give nothing by mouth if drowsy, confused, or unable to swallow safely."
+          ]
+        },
+        {
+          "title": "Confused in the Heat",
+          "passages": [
+            "Confusion, staggering, or collapse in the heat can mean heat stroke. Call for rescue and start cooling immediately. Move them to shade if safe and remove excess layers.",
+            "Soak the skin and fan them continuously. If you can safely cool them in cold water with helpers to support them, keep their head and airway above water. Keep checking breathing.",
+            "Do not give fluids to someone who is confused or unable to swallow. Follow dispatch and report when cooling began."
+          ]
+        },
+        {
+          "title": "Trouble Breathing After a Sting",
+          "passages": [
+            "Throat swelling, wheezing, or collapse after a sting or food exposure may be a severe allergic reaction. Call for rescue. Help them use their prescribed epinephrine right away according to its directions.",
+            "Stay with them and keep watching their breathing. Note when the dose was given. Follow their action plan or dispatch instructions if symptoms persist or return."
+          ]
+        },
+        {
+          "title": "Burned by Flame or Hot Water",
+          "passages": [
+            "Move them away from the source if safe. Cool the burned skin with clean, cool running water if available, aiming for 20 minutes. Keep the rest of the person warm.",
+            "Take off tight items near the burn before it swells, leaving anything stuck to the skin. Avoid ice and ointment. After cooling, loosely cover with a clean, nonstick dressing.",
+            "Get medical help for deep or large burns, or burns on the face, hands, feet, or genitals. Call for rescue immediately if they have trouble breathing or inhaled smoke in an enclosed space."
+          ]
+        },
+        {
+          "title": "Face Droops or Speech Slurs",
+          "passages": [
+            "Sudden facial droop, weakness in one arm, or slurred speech can mean stroke. Call for rescue immediately, even if the signs go away.",
+            "Tell dispatch when the signs started or when they were last known to be well. Keep them still, give nothing by mouth, and watch their breathing."
           ]
         }
       ]
