@@ -56,6 +56,42 @@ function parsed(json) {
  * network/path-hash, TX power, preamble, or device configuration is imported. */
 export function parseRadioPresets(json) { return parsed(json).presets; }
 
+const titlesByCountry = new Map(Object.entries({
+  AU: ['Australia', 'Australia (Narrow)', 'Australia (Mid)'],
+  BR: ['Brazil'],
+  CA: ['Canada'],
+  CH: ['Switzerland'],
+  CR: ['Costa Rica'],
+  CZ: ['Czech Republic (Narrow)'],
+  GB: ['EU/UK (Narrow)'],
+  HU: ['Hungary'],
+  NL: ['Netherlands'],
+  NZ: ['New Zealand (Narrow)'],
+  PT: ['Portugal 433', 'Portugal 868'],
+  SK: ['Slovakia'],
+  TH: ['Thailand'],
+  US: ['USA'],
+  VN: ['Vietnam (Narrow)'],
+}));
+
+// MeshCore includes EU/UK (Narrow) as a regional option. Prefer a named
+// country preset when one is available.
+// https://github.com/meshcore-dev/MeshCore/discussions/1650
+const euCountries = new Set([
+  'AT', 'BE', 'BG', 'CY', 'CZ', 'DE', 'DK', 'EE', 'ES', 'FI', 'FR', 'GR', 'HR', 'HU',
+  'IE', 'IT', 'LT', 'LU', 'LV', 'MT', 'NL', 'PL', 'PT', 'RO', 'SE', 'SI', 'SK',
+]);
+
+export function ipLocationPresetSuggestions(presets, location) {
+  if (!Array.isArray(presets)) return [];
+  const country = location?.countryCode;
+  const titles = titlesByCountry.get(country) ?? (euCountries.has(country) ? ['EU/UK (Narrow)'] : []);
+  return titles.flatMap(title => {
+    const matches = presets.filter(preset => preset?.title === title && preset.id);
+    return matches.length === 1 ? matches : [];
+  });
+}
+
 async function boundedJson(response, signal) {
   if (!response?.ok || response.redirected || response.type === 'opaque' || response.url && response.url !== radioPresetsUrl)
     reject('Preset feed is unavailable.');

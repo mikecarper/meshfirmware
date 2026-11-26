@@ -32,7 +32,9 @@ not a remote USB-only node.
 
 ### Nearby MeshCore scopes
 
-Use approximate IP location or enter coordinates to get a regional link.
+When the panel comes into view, the flasher estimates your location from your
+IP and fills the coordinate fields. Edit the coordinates and submit them to
+search a different area.
 Near a listed Pacific Northwest area, the link opens the
 [PNW repeater configurator](https://gessaman.com/meshcore/regions/config/).
 The recommendation uses the published region centers and radii from the
@@ -42,9 +44,9 @@ repeater settings. The link does not include the coordinates.
 
 For other locations, the link opens MeshMapper centered on the search area and
 shares rounded coordinates when clicked. Regional links work without a scopes
-service. A requested IP lookup uses [GeoJS](https://www.geojs.io/privacy/)
-when the scopes service cannot supply a result. GeoJS sees the request's public
-IP. The flasher does not store it.
+service. The IP lookup uses the scopes service when available or
+[GeoJS](https://www.geojs.io/privacy/), which sees your public IP. The approximate
+result is kept in the tab and reused for radio preset suggestions.
 
 Without a confirmed matching region, the flasher suggests a map using a checked
 shortlist of MeshMapper airport codes and coordinates from
@@ -292,9 +294,10 @@ Final flash confirmation lists the customized defaults and source hash.
 **Primary radio preset** offers community radio tuples from
 https://api.meshcore.nz/api/v1/config and **Custom**. The feed is fetched only
 when opening the editor; a validated bundled snapshot works offline. Selecting
-a preset fills frequency, bandwidth, SF and CR for review. No location is
-guessed, and upstream path-hash/network settings, TX power and preamble are not
-silently imported. Additional upstream network settings are explicitly noted.
+a preset fills frequency, bandwidth, SF and CR for review. The visible preset
+editor can suggest options for your approximate IP country, with the browser
+time zone as a fallback. Confirm the preset matches your local mesh before
+choosing it. Additional upstream network settings are noted separately.
 
 **MediaMesh (radio2)** offers unchanged, off, normal/range presets and a custom
 tuple, receive-only/receive-transmit mode, preamble and optional crossing change.

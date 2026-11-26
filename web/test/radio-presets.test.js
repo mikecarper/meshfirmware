@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import bundled from '../src/data/radio-presets-fallback.json' with { type: 'json' };
-import { parseRadioPresets, loadRadioPresets, radioPresetsUrl } from '../src/radio-presets.js';
+import { ipLocationPresetSuggestions, parseRadioPresets, loadRadioPresets, radioPresetsUrl } from '../src/radio-presets.js';
 
 const entry = { title: 'USA', frequency: '910.525', bandwidth: '62.5', spreading_factor: '7', coding_rate: '5' };
 const feed = entries => ({ config: { suggested_radio_settings: { entries } } });
@@ -13,6 +13,20 @@ test('the validated snapshot contains all 27 public presets, including actual US
   for (const [title, frequencyHz, bandwidthHz, spreadingFactor, codingRate] of [
     ['USA', 910525000, 62500, 7, 5], ['New Zealand (Narrow)', 917375000, 62500, 7, 5], ['Australia', 915800000, 250000, 10, 5], ['USA - Southern California', 927875000, 62500, 7, 5]
   ]) { const preset = presets.find(value => value.title === title); assert.deepEqual([preset.frequencyHz, preset.bandwidthHz, preset.spreadingFactor, preset.codingRate], [frequencyHz, bandwidthHz, spreadingFactor, codingRate]); assert.ok(Object.isFrozen(preset)); }
+});
+
+test('IP suggestions use only exact unambiguous presets for the estimated country', () => {
+  const presets = parseRadioPresets(bundled);
+  const titles = countryCode => ipLocationPresetSuggestions(presets, {countryCode}).map(preset => preset.title);
+  assert.deepEqual(titles('US'), ['USA']);
+  assert.deepEqual(titles('CA'), ['Canada']);
+  assert.deepEqual(titles('DE'), ['EU/UK (Narrow)']);
+  assert.deepEqual(titles('FR'), ['EU/UK (Narrow)']);
+  assert.deepEqual(titles('CZ'), ['Czech Republic (Narrow)']);
+  assert.deepEqual(titles('PT'), ['Portugal 433', 'Portugal 868']);
+  assert.deepEqual(titles('ZZ'), []);
+  const ambiguous = parseRadioPresets(feed([entry, {...entry, frequency:'911.300'}]));
+  assert.deepEqual(ipLocationPresetSuggestions(ambiguous, {countryCode:'US'}), []);
 });
 
 test('only RF values and safe generated notes are returned, never network settings, descriptions, preamble or power', () => {

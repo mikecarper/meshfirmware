@@ -51,8 +51,9 @@ import {isWadameshProtocolProfile,isWadameshTakTouchProfile} from './wadamesh-pr
 import {prepareWadameshConfig,applyWadameshConfig} from './wadamesh-config.js';
 import { createPostFlashSettingsPlan, applyPostFlashSettings } from './post-flash-settings.js';
 import { createPostFlashCompanionRequest } from './post-flash-companion.js';
-import { loadRadioPresets } from './radio-presets.js';
+import { ipLocationPresetSuggestions, loadRadioPresets } from './radio-presets.js';
 import { browserTimezonePresetSuggestions } from './timezone-presets.js';
+import { requestIpLocation, subscribeIpLocation, whenVisible } from './ip-location.js';
 import { readChannels, saveChannel, deleteChannel, hashtagChannel, readAutoAdd, saveAutoAdd } from './wadamesh-contacts-settings.js';
 import { readManagedContacts, renameManagedContact, addManagedContact, removeManagedContact } from './managed-contacts.js';
 
@@ -104,6 +105,7 @@ state.wadameshManaged={target:null,channels:null,contacts:null,autoadd:null,hash
 state.radioPresets=null;
 state.radioPresetsWarning=null;
 state.radioPresetsSource=null;
+let presetIpLocation = null;
 const radioDefaultsFields=['radio-defaults-frequency','radio-defaults-bandwidth','radio-defaults-sf','radio-defaults-cr','radio-defaults-preamble','radio-defaults-power'];
 const mediaMeshFields=['media-mesh-frequency','media-mesh-bandwidth','media-mesh-sf','media-mesh-cr','media-mesh-mode','media-mesh-preamble'];
 const activeMediaMesh=preset=>['mediamesh','mediamesh-range','custom'].includes(preset);
@@ -178,6 +180,39 @@ function fillRadioDefaults(settings){
   $('radio-defaults-preamble').value=settings?.enabled?(settings.preambleSymbols===null?'':String(settings.preambleSymbols)):'0';
   $('radio-defaults-power').value=settings?.enabled&&settings.txPowerDbm!==null?String(settings.txPowerDbm):'';
 }
+function radioPresetLabel(preset) {
+  return `${preset.title} · ${preset.frequencyHz / 1e6} MHz / ${preset.bandwidthHz / 1000} kHz / SF${preset.spreadingFactor} / CR4/${preset.codingRate}`;
+}
+function setRadioPresetOptions(id, presets) {
+  const select = $(id), prior = select.value;
+  select.replaceChildren(new Option('Custom', 'custom'), ...presets.map(preset => new Option(radioPresetLabel(preset), preset.id)));
+  if ([...select.options].some(option => option.value === prior)) select.value = prior;
+}
+const radioPresetLocationHelp = 'The flasher uses approximate IP location to suggest presets when this control comes into view.';
+function refreshRadioPresetSuggestions(selectId, hintId) {
+  const options = [...$(selectId).options];
+  const optionIds = new Set(options.map(option => option.value));
+  const presets = (state.radioPresets ?? []).filter(preset => optionIds.has(preset.id));
+  const presetsById = new Map(presets.map(preset => [preset.id, preset]));
+  const usingIp = Boolean(presetIpLocation?.countryCode);
+  const suggestions = usingIp ? ipLocationPresetSuggestions(presets, presetIpLocation) : browserTimezonePresetSuggestions(presets);
+  const suggestedIds = new Set(suggestions.map(preset => preset.id));
+  for (const option of options) {
+    const preset = presetsById.get(option.value);
+    if (preset) option.text = radioPresetLabel(preset) + (suggestedIds.has(preset.id) ? ' · Suggested' : '');
+  }
+  const hint = $(hintId);
+  const names = suggestions.map(preset => preset.title).join(', ');
+  if (!names) {
+    hint.textContent = usingIp && presets.length
+      ? 'No preset suggestion for this approximate IP location. Choose the preset used by your local mesh.'
+      : radioPresetLocationHelp;
+    return;
+  }
+  hint.textContent = usingIp
+    ? `Possible presets based on approximate IP location: ${names}. Choose the preset used by your local mesh.`
+    : `Possible presets based on this browser's time zone: ${names}. A time zone does not identify your location. Choose the correct local preset above.`;
+}
 async function inspectSelectedRadioDefaults(){
   if(wadameshSelected())fail('Configure Wadamesh TAK radio and MediaMesh settings on the device. MeshCore USB settings are not applied to this standalone firmware.');
   if(radioDefaultsLocked())fail('Finish the current device operation before changing firmware defaults.');
@@ -196,9 +231,9 @@ async function inspectSelectedRadioDefaults(){
       state.radioPresetsWarning=loaded.warning;
       state.radioPresetsSource=loaded.source;
     }
-    const prior=$('radio-preset').value;
-    $('radio-preset').replaceChildren(new Option('Custom','custom'),...state.radioPresets.map(p=>new Option(`${p.title} · ${p.frequencyHz/1e6} MHz / ${p.bandwidthHz/1000} kHz / SF${p.spreadingFactor} / CR4/${p.codingRate}`,p.id)));
-    if([...$('radio-preset').options].some(option=>option.value===prior))$('radio-preset').value=prior;
+    if(state.radioDefaults!==draft||!radioSettingsAvailable())return;
+    setRadioPresetOptions('radio-preset', state.radioPresets);
+    refreshRadioPresetSuggestions('radio-preset', 'radio-preset-location');
     $('radio-preset-status').textContent=state.radioPresetsWarning||'Community presets from api.meshcore.nz. Confirm the correct settings for your radio and region.';
   }
 }
@@ -1570,15 +1605,14 @@ const wadameshConfigFields=['wadamesh-config-frequency','wadamesh-config-bandwid
 const wadameshPresetBandwidths=new Set([62500,125000,250000,500000]);
 async function loadWadameshRadioPresets(target){
   $('wadamesh-config-preset').replaceChildren(new Option('Custom','custom'));
-  $('wadamesh-config-timezone').hidden=true;$('wadamesh-config-timezone').textContent='';
+  $('wadamesh-config-timezone').textContent=radioPresetLocationHelp;
   $('wadamesh-config-preset-status').textContent='Loading community radio presets… (up to 5 seconds)';
   const loaded=state.radioPresets?{presets:state.radioPresets,warning:state.radioPresetsWarning,source:state.radioPresetsSource}:await loadRadioPresets();
   if(!wadameshConfigTargetCurrent(target))return;
   state.radioPresets=loaded.presets;state.radioPresetsWarning=loaded.warning;state.radioPresetsSource=loaded.source;
   const compatible=loaded.presets.filter(p=>wadameshPresetBandwidths.has(p.bandwidthHz));
-  $('wadamesh-config-preset').replaceChildren(new Option('Custom','custom'),...compatible.map(p=>new Option(`${p.title} · ${p.frequencyHz/1e6} MHz / ${p.bandwidthHz/1000} kHz / SF${p.spreadingFactor} / CR4/${p.codingRate}`,p.id)));
-  const suggestions=browserTimezonePresetSuggestions(compatible);
-  if(suggestions.length){$('wadamesh-config-timezone').textContent=`Possible presets based on this browser's time zone: ${suggestions.map(p=>p.title).join(', ')}. A time zone does not identify your location; choose the correct local preset above.`;$('wadamesh-config-timezone').hidden=false;}
+  setRadioPresetOptions('wadamesh-config-preset', compatible);
+  refreshRadioPresetSuggestions('wadamesh-config-preset', 'wadamesh-config-timezone');
   const omitted=loaded.presets.length-compatible.length;
   $('wadamesh-config-preset-status').textContent=[loaded.source==='live'?'Live community presets from api.meshcore.nz. Confirm the correct settings for your radio and region.':loaded.warning||'Community presets from api.meshcore.nz. Confirm the correct settings for your radio and region.',loaded.source==='live'?loaded.warning:'',omitted?`${omitted} preset${omitted===1?' uses':'s use'} bandwidths unavailable in this form.`:''].filter(Boolean).join(' ');
 }
@@ -3250,4 +3284,12 @@ getCatalog().then(catalog => {
   if(state.boardDetected&&state.device)selectDetectedBoard();
   else if(state.recoveryDetectionRequested&&!state.recoveryManual&&!state.migration&&!state.recovery&&!state.espRecovery&&(state.port||$('installed-identity').value.trim()))matchInstalledRecovery($('installed-identity').value.trim());
 }).catch(error=>{$('artifact').replaceChildren(new Option('Catalog unavailable · choose local firmware',''));$('catalog-status').textContent=error.message;controls();});
+subscribeIpLocation(location => {
+  presetIpLocation = location;
+  if (radioSettingsAvailable()) refreshRadioPresetSuggestions('radio-preset', 'radio-preset-location');
+  if (wadameshConfigTargetCurrent(state.wadameshConfigTarget)) refreshRadioPresetSuggestions('wadamesh-config-preset', 'wadamesh-config-timezone');
+});
+for (const id of ['radio-preset', 'wadamesh-config-preset']) {
+  whenVisible($(id), () => { void requestIpLocation().catch(() => {}); });
+}
 controls();

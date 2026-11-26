@@ -67,19 +67,22 @@ test('IP and manual lookups use cached records, never a public upstream proxy', 
   const env = { MESHMAPPER_MAPS: 'pnw,other', SCOPE_SNAPSHOTS: { get: async key =>
     key.endsWith(':pnw') ? snapshot(area, rows, now) : null } };
   const res = await lookup(request({ mode: 'ip', radius: 50, lat: 0, lon: 0 }, {
-    cf: { latitude: '47.005', longitude: '-122.5', city: 'Olympia', region: 'Washington' },
+    cf: { latitude: '47.005', longitude: '-122.5', city: 'Olympia', region: 'Washington', country: 'US' },
   }), env, now);
   assert.equal(res.status, 200);
   assert.equal(res.headers.get('Access-Control-Allow-Origin'), origin);
   assert.equal(res.headers.get('Cache-Control'), 'no-store');
   const json = await res.json();
-  assert.equal(json.location.label, 'Olympia, Washington');
+  assert.equal(json.location.label, 'Olympia, Washington, US');
+  assert.equal(json.location.countryCode, 'US');
   assert.equal(json.partial, true);
   assert.equal(json.scopes[0].name, 'oly');
   assert.ok(!JSON.stringify(json).includes('a'.repeat(64)));
-  const manual = await lookup(request({ mode: 'manual', radius: 25, lat: 0, lon: 10 }), env, now);
+  const manual = await lookup(request({ mode: 'manual', radius: 25, lat: 0, lon: 10 }, { cf: { country: 'US' } }), env, now);
   assert.equal(manual.status, 200);
-  assert.deepEqual((await manual.json()).scopes, []);
+  const manualResult = await manual.json();
+  assert.deepEqual(manualResult.scopes, []);
+  assert.equal(manualResult.location.countryCode, undefined);
   assert.equal((await lookup(request({ mode: 'ip', radius: 50 }), env, now)).status, 422);
   assert.equal((await lookup(request({ mode: 'manual', radius: 25, lat: 47, lon: -122.5 }), env, now + 2 * day)).status, 503);
 });

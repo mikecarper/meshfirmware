@@ -4,9 +4,10 @@ This Cloudflare Worker adds optional nearby scope search to the GitHub Pages
 flasher. GitHub Pages receives only the public Worker URL, never a MeshMapper key.
 The Worker estimates IP location from Cloudflare request metadata and queries
 cached observations. It does not send a visitor's IP or coordinates to MeshMapper,
-write them to storage, or log them in the application. For manual search, the
-flasher rounds coordinates to two decimal places before sending them. Both modes
-are opt-in. Disable request/body logging that could retain visitor data.
+write them to storage, or log them in the application. The flasher looks up the
+IP location when Nearby MeshCore scopes comes into view. It rounds coordinate
+searches to two decimal places. Disable request/body logging that could retain
+visitor data.
 
 ## Set up
 
@@ -28,9 +29,9 @@ are opt-in. Disable request/body logging that could retain visitor data.
 4. Set **Settings > Secrets and variables > Actions > Variables** in
    `mikecarper/meshfirmware` to `NEARBY_SCOPES_URL=https://YOUR-WORKER/nearby-scopes`.
    Re-run the Browser USB flasher Pages workflow. The public endpoint must be
-   HTTPS. Without that variable the panel still offers approximate IP location
-   through GeoJS and a centered MeshMapper link. It does not display forwarding
-   results until the Worker is configured.
+   HTTPS. Without that variable the panel still estimates IP location through
+   GeoJS and shows a regional link to the PNW configurator or MeshMapper.
+   Forwarding results require the Worker.
 
 `https://mikecarper.github.io` is the allowed browser origin. For local testing,
 set `EXTRA_ORIGIN` on a test Worker to the exact Vite origin and set

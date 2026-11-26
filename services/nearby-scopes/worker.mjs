@@ -171,10 +171,12 @@ export async function lookup(request, env, now = Math.floor(Date.now() / 1000)) 
     return reply({ error: 'data_unavailable' }, 503);
   }
   if (!feeds.length) return reply({ error: 'data_unavailable' }, 503);
+  const country = request.cf?.country;
+  const countryCode = auto && typeof country === 'string' && /^[A-Z]{2}$/.test(country) ? country : null;
   return reply({
     ...nearby(feeds, at, body.radius, now), radius: body.radius, days: WINDOW / DAY,
     partial: feeds.length < slugs.length, updated: Math.min(...feeds.map(([, data]) => data.updated)),
-    location: { lat: Number(at[1].toFixed(2)), lon: Number(at[0].toFixed(2)),
+    location: { lat: Number(at[1].toFixed(2)), lon: Number(at[0].toFixed(2)), ...(countryCode ? { countryCode } : {}),
       label: auto ? [request.cf?.city, request.cf?.region, request.cf?.country]
         .filter(part => typeof part === 'string' && part.length <= 80).join(', ') : '' },
   });

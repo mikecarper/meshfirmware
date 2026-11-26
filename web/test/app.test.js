@@ -46,6 +46,7 @@ import {quickSettingPlan,quickHotspotUrl} from '../src/quick-settings.js';
 import {commonCliReplyState} from '../src/common-cli.js';
 import {postFlashBleAdvice} from '../src/post-flash-advice.js';
 import {browserTimezonePresetSuggestions} from '../src/timezone-presets.js';
+import {ipLocationPresetSuggestions} from '../src/radio-presets.js';
 import {hashtagChannel} from '../src/wadamesh-contacts-settings.js';
 import {gzipSync} from 'node:zlib';
 const html=await readFile(new URL('../index.html',import.meta.url),'utf8');
@@ -57,6 +58,8 @@ function uiElement(id=''){
 }
 function workbench({pending=null,recovery=null,espRecovery=null,verification=null,catalogPromise=null,productionDefaults=false,search='',performanceApi,savedSelections=null}={}) {
   const calls=[],elements=new Map(),serialEvents={},windowEvents={};
+  const presetVisibility = new Map();
+  let publishIpLocation;
   class Option {constructor(text,value){this.text=text;this.value=value;}}
   for(const id of ids)elements.set(id,uiElement(id));
   elements.get('project').value='MeshCore';elements.get('transport-mode').value='no_reset';elements.get('backup-role').value='companion';
@@ -75,6 +78,10 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
   context.quickHotspotUrl=quickHotspotUrl;context.postFlashBleAdvice=postFlashBleAdvice;context.createNrfActivationCheck=()=>null;context.captureNrfDfuEvidence=captureNrfDfuEvidence;context.nrfDfuEvidenceCurrent=nrfDfuEvidenceCurrent;
   context.inspectRadioDefaults=inspectRadioDefaults;context.customizeRadioDefaults=customizeRadioDefaults;
   context.browserTimezonePresetSuggestions=browserTimezonePresetSuggestions;
+  context.ipLocationPresetSuggestions=ipLocationPresetSuggestions;
+  context.subscribeIpLocation = listener => { publishIpLocation = listener; };
+  context.whenVisible = (element, callback) => { presetVisibility.set(element.id, callback); };
+  context.requestIpLocation = async () => { throw Error('Unexpected IP location request'); };
   context.prepareWadameshConfig=prepareWadameshConfig;context.applyWadameshConfig=applyWadameshConfig;
   context.createPostFlashSettingsPlan=createPostFlashSettingsPlan;context.applyPostFlashSettings=applyPostFlashSettings;context.createPostFlashCompanionRequest=createPostFlashCompanionRequest;context.loadRadioPresets=async()=>({presets:[],source:'bundled',warning:'Test preset inventory.'});
   context.detectApplication=(...args)=>context.detectMeshCore(...args);context.detectMeshtasticBoard=detectMeshtasticBoard;
@@ -84,7 +91,7 @@ function workbench({pending=null,recovery=null,espRecovery=null,verification=nul
   context.petPanel=()=>({controls(){}});
   context.readerPanel=()=>({controls(){}});
   vm.runInContext(source,context);
-  return {context,elements,calls,port,serialEvents,windowEvents,evaluate:code=>vm.runInContext(code,context)};
+  return {context,elements,calls,port,serialEvents,windowEvents,presetVisibility,publishIpLocation,evaluate:code=>vm.runInContext(code,context)};
 }
 
 test('RAK dropdown defaults to three merged choices and the older-build switch restores exact files',async()=>{
@@ -412,6 +419,37 @@ test('community presets fill only radio values for review and custom edits retai
   const ui=await radioDefaultsWorkbench();ui.context.presetRows=[{id:'usa',title:'USA',frequencyHz:910525000,bandwidthHz:62500,spreadingFactor:7,codingRate:5,notes:'Additional network settings are not changed.'}];ui.evaluate('state.radioPresets=presetRows;');ui.elements.get('radio-preset').value='usa';ui.elements.get('radio-preset').onchange();
   assert.equal(ui.elements.get('radio-defaults-frequency').value,'910.525');assert.equal(ui.elements.get('radio-defaults-bandwidth').value,'62500');assert.equal(ui.elements.get('radio-defaults-enabled').checked,true);assert.equal(ui.evaluate('state.radioDefaults.dirty'),true);assert.match(ui.elements.get('radio-preset-status').textContent,/Additional network settings/);assert.equal(ui.evaluate('state.pkg.sha256'),firmwareHash(ui.context.originalImage));
   ui.elements.get('radio-defaults-sf').value='9';ui.elements.get('radio-defaults-sf').oninput();assert.equal(ui.elements.get('radio-preset').value,'custom');assert.equal(ui.elements.get('radio-defaults-sf').value,'9');assert.deepEqual(ui.calls,[]);
+});
+test('a visible radio preset control uses the shared IP suggestion without replacing custom radio fields', async () => {
+  const ui = await radioDefaultsWorkbench();
+  ui.context.presetRows = [
+    {id:'usa',title:'USA',frequencyHz:910525000,bandwidthHz:62500,spreadingFactor:7,codingRate:5},
+    {id:'socal',title:'USA - Southern California',frequencyHz:927875000,bandwidthHz:62500,spreadingFactor:7,codingRate:5},
+  ];
+  ui.context.browserTimezonePresetSuggestions = presets => presets;
+  ui.evaluate('state.radioPresets=presetRows;');
+  await ui.evaluate('inspectSelectedRadioDefaults();');
+  const preset = ui.elements.get('radio-preset'), hint = ui.elements.get('radio-preset-location');
+  assert.match(hint.textContent, /time zone.*USA, USA - Southern California/);
+  const frequency = ui.elements.get('radio-defaults-frequency');
+  frequency.value = '915.123';
+  frequency.oninput();
+  const generation = ui.evaluate('state.generation');
+  let requests = 0;
+  ui.context.requestIpLocation = async () => {
+    requests++;
+    ui.publishIpLocation({countryCode:'US',lat:47.61,lon:-122.33});
+  };
+  ui.presetVisibility.get('radio-preset')();
+  assert.equal(requests, 1);
+  assert.match(hint.textContent, /approximate IP location: USA\./);
+  assert.doesNotMatch(hint.textContent, /Southern California/);
+  assert.match(preset.options.find(option => option.value === 'usa').text, /Suggested/);
+  assert.doesNotMatch(preset.options.find(option => option.value === 'socal').text, /Suggested/);
+  assert.equal(preset.value, 'custom');
+  assert.equal(frequency.value, '915.123');
+  assert.equal(ui.evaluate('state.generation'), generation);
+  assert.deepEqual(ui.calls, []);
 });
 async function queuedSettingsVerificationWorkbench(){
   const ui=await storageVerificationWorkbench('common-cli','int:esp32=8192K'),radio={frequency:869.618,bw:125,sf:8,cr:5,preamble:'auto'};
@@ -5619,7 +5657,32 @@ test('timezone suggestions are local, optional, and do not change a manual choic
   assert.equal(ui.elements.get('wadamesh-config-timezone').hidden,false);assert.equal(frequency.value,'915.123');assert.equal(primary.checked,false);
   assert.equal(ui.elements.get('wadamesh-config-preset').value,'custom');assert.deepEqual(ui.calls,[]);
   ui.context.browserTimezonePresetSuggestions=()=>[];await ui.evaluate('loadWadameshRadioPresets(state.wadameshConfigTarget);');
-  assert.equal(ui.elements.get('wadamesh-config-timezone').hidden,true);assert.equal(frequency.value,'915.123');assert.deepEqual(ui.calls,[]);
+  assert.match(ui.elements.get('wadamesh-config-timezone').textContent,/uses approximate IP location/);assert.equal(frequency.value,'915.123');assert.deepEqual(ui.calls,[]);
+});
+test('Wadamesh uses the cached IP preset hint and leaves a selected preset and review fields untouched', async () => {
+  const ui = await wadameshConfigWorkbench();
+  ui.context.presetRows = [
+    {id:'usa',title:'USA',frequencyHz:910525000,bandwidthHz:62500,spreadingFactor:7,codingRate:5},
+    {id:'canada',title:'Canada',frequencyHz:910525000,bandwidthHz:62500,spreadingFactor:7,codingRate:5},
+  ];
+  ui.context.browserTimezonePresetSuggestions = presets => presets;
+  ui.publishIpLocation({countryCode:'CA',lat:49.28,lon:-123.12});
+  ui.evaluate('state.radioPresets=presetRows;');
+  await ui.evaluate('loadWadameshRadioPresets(state.wadameshConfigTarget);');
+  const select = ui.elements.get('wadamesh-config-preset'), hint = ui.elements.get('wadamesh-config-timezone');
+  assert.match(hint.textContent, /approximate IP location: Canada\./);
+  select.value = 'usa';
+  select.onchange();
+  const frequency = ui.elements.get('wadamesh-config-frequency');
+  const prior = frequency.value;
+  ui.publishIpLocation({countryCode:'US',lat:47.61,lon:-122.33});
+  assert.match(hint.textContent, /approximate IP location: USA\./);
+  assert.equal(select.value, 'usa');
+  assert.equal(frequency.value, prior);
+  ui.evaluate('state.generation++;');
+  ui.publishIpLocation({countryCode:'CA',lat:49.28,lon:-123.12});
+  assert.match(hint.textContent, /approximate IP location: USA\./);
+  assert.deepEqual(ui.calls, []);
 });
 
 test('a late Wadamesh preset response cannot update the form for a different radio',async()=>{

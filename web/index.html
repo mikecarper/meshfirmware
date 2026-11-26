@@ -58,7 +58,8 @@
         <button id="radio-defaults-load" class="secondary" type="button" data-lock>Check selected build</button>
         <p id="radio-defaults-status" class="hint" role="status" aria-live="polite">Load a build to choose primary radio and MediaMesh settings. No radio is accessed by this check.</p>
         <div id="radio-defaults-editor" hidden>
-          <label for="radio-preset">Primary radio preset</label><select id="radio-preset" data-lock><option value="custom">Custom</option></select>
+          <label for="radio-preset">Primary radio preset</label><select id="radio-preset" aria-describedby="radio-preset-location" data-lock><option value="custom">Custom</option></select>
+          <p id="radio-preset-location" class="hint" role="status" aria-live="polite">The flasher uses approximate IP location to suggest presets when this control comes into view.</p>
           <p id="radio-preset-status" class="hint" role="status" aria-live="polite">Community presets from api.meshcore.nz, or enter custom values.</p>
           <label><input id="radio-defaults-enabled" type="checkbox" autocomplete="off" data-lock> <span id="radio-defaults-enable-label">Customize primary radio settings</span></label>
           <div class="radio-defaults-fields">
@@ -126,8 +127,8 @@
       <section id="wadamesh-live-config" class="radio-defaults" hidden aria-label="Wadamesh settings">
         <h3>Configure Wadamesh</h3>
         <p class="hint">Choose only the settings you want to change. The radio settings may require a restart; the page does not restart the radio automatically. Check the settings for your region.</p>
-        <label for="wadamesh-config-preset">Primary radio preset</label><select id="wadamesh-config-preset" data-lock><option value="custom">Custom</option></select>
-        <p id="wadamesh-config-timezone" class="hint" role="status" aria-live="polite" hidden></p>
+        <label for="wadamesh-config-preset">Primary radio preset</label><select id="wadamesh-config-preset" aria-describedby="wadamesh-config-timezone" data-lock><option value="custom">Custom</option></select>
+        <p id="wadamesh-config-timezone" class="hint" role="status" aria-live="polite">The flasher uses approximate IP location to suggest presets when this control comes into view.</p>
         <p class="hint">Presets fill the primary radio fields only. Other network settings, including path hash size, are not changed.</p>
         <p id="wadamesh-config-preset-status" class="hint" role="status" aria-live="polite">Community presets from api.meshcore.nz, or enter custom values.</p>
         <label><input id="wadamesh-config-primary" type="checkbox" autocomplete="off" data-lock> Change primary radio</label>
@@ -213,15 +214,15 @@
     <details class="card disclosure" id="console" open><summary>Serial console &amp; operation log</summary><div class="disclosure-body"><div class="card-title"><p>Commands and output stay in this tab.</p><button id="clear-log" class="text-link">Clear</button></div><pre id="log" aria-label="Serial and operation log">Mesh Firmware workbench ready.
 No hardware operations have been performed.</pre><div class="console-input"><label class="sr-only" for="command">Serial command</label><input id="command" placeholder="version" data-lock><button id="send-command" class="secondary" data-lock>Send command</button></div></div></details>
 
-    <details id="nearby-scopes" class="nearby-scopes">
+    <details id="nearby-scopes" class="nearby-scopes" open>
       <summary>Nearby MeshCore scopes</summary>
       <div id="nearby-scopes-controls">
-        <p class="hint">IP location is approximate, especially on VPNs and mobile networks. An IP lookup may share your public IP with <a href="https://www.geojs.io/privacy/" target="_blank" rel="noopener noreferrer">GeoJS</a>.</p>
+        <p class="hint">This section estimates your location from your IP when it comes into view. VPNs and mobile networks can affect accuracy. The lookup may share your public IP with <a href="https://www.geojs.io/privacy/" target="_blank" rel="noopener noreferrer">GeoJS</a>.</p>
         <div class="nearby-scope-actions">
           <div id="nearby-scopes-radius-field" hidden><label for="nearby-scopes-radius">Search radius</label><select id="nearby-scopes-radius"><option value="25">25 km</option><option value="50" selected>50 km</option><option value="100">100 km</option></select></div>
           <button id="nearby-scopes-ip" class="secondary" type="button">Use approximate IP location</button>
         </div>
-        <details class="nearby-scopes-manual"><summary>Enter coordinates instead</summary>
+        <details class="nearby-scopes-manual" open><summary>Coordinates</summary>
           <form id="nearby-scopes-form" class="nearby-scope-actions" autocomplete="off">
             <div><label for="nearby-scopes-lat">Latitude</label><input id="nearby-scopes-lat" type="number" required min="-90" max="90" step="any"></div>
             <div><label for="nearby-scopes-lon">Longitude</label><input id="nearby-scopes-lon" type="number" required min="-180" max="180" step="any"></div>

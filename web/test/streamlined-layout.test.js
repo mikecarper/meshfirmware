@@ -170,8 +170,10 @@ test('new users see no-folder guidance near the USB button and original-file gui
   assert.match(readme,/Normal ESP32\/nRF52 flashing needs no firmware folders/);
 });
 
-test('settings follow the main flashing area, with the console open and extras collapsed',()=>{
-  for(const id of ['nearby-scopes','pet-tracking','reader-books','advanced-options','backups','capabilities']){const node=get(id);assert.equal(node.tag,'details',id);assert.ok(!has(node,'open'),`#${id} must start collapsed`);}
+test('settings follow the main flashing area, with the console and nearby scopes open',()=>{
+  for(const id of ['pet-tracking','reader-books','advanced-options','backups','capabilities']){const node=get(id);assert.equal(node.tag,'details',id);assert.ok(!has(node,'open'),`#${id} must start collapsed`);}
+  const nearby=get('nearby-scopes');assert.equal(nearby.tag,'details');assert.ok(has(nearby,'open'));
+  assert.equal(closedAncestors(get('nearby-scopes-form')).length,0,'Coordinates must be visible by default');
   const workflow=nodes.find(node=>hasClass(node,'workflow')),console=get('console'),settings=get('quick-settings'),siblings=workflow.parent.children,index=siblings.indexOf(workflow);
   assert.equal(console.tag,'details');assert.ok(has(console,'open'));assert.equal(siblings[index+1],settings);assert.equal(siblings[index+2],console);assert.ok(settings.start<get('advanced-options').start);
   assert.ok(inside(get('wadamesh-live-config'),settings),'Wadamesh radio settings belong in the common settings card');

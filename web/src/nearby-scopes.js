@@ -1,8 +1,9 @@
 import { meshMapperAirports } from './meshmapper-airports.js';
 import { PNW_CONFIG_URL, pnwRegionSuggestion } from './pnw-regions.js';
+import { estimateIpLocation, requestIpLocation, whenVisible } from './ip-location.js';
+export { estimateIpLocation } from './ip-location.js';
 
 const MAP_HOME = 'https://global.meshmapper.net/';
-const GEO_IP = 'https://get.geojs.io/v1/ip/geo.json';
 const AIRPORT_RADIUS_KM = 100;
 
 export function lookupUrl(configured) {
@@ -51,21 +52,6 @@ export function mapUrl(map, location) {
   return url.href;
 }
 
-export async function estimateIpLocation(fetcher = fetch) {
-  const response = await fetcher(GEO_IP, {
-    credentials: 'omit', cache: 'no-store', redirect: 'error', referrerPolicy: 'no-referrer',
-    signal: AbortSignal.timeout(7000),
-  });
-  if (!response.ok) throw Error('IP location unavailable');
-  const data = await response.json();
-  const lat = coordinate(data?.latitude, 90), lon = coordinate(data?.longitude, 180);
-  if (lat === null || lon === null || (lat === 0 && lon === 0)) throw Error('IP location unavailable');
-  const label = [...new Set([data.city, data.region, data.country]
-    .filter(part => typeof part === 'string' && part.trim() && part.length <= 80).map(part => part.trim()))].join(', ');
-  const countryCode = typeof data.country_code === 'string' && /^[A-Z]{2}$/.test(data.country_code) ? data.country_code : null;
-  return { lat, lon, label, countryCode };
-}
-
 export function initNearbyScopes(doc, endpoint, fetcher = fetch) {
   const el = name => doc.getElementById(`nearby-scopes${name ? `-${name}` : ''}`);
   const panel = el('');
@@ -76,8 +62,16 @@ export function initNearbyScopes(doc, endpoint, fetcher = fetch) {
   el('fallback').hidden = Boolean(endpoint);
   el('radius-field').hidden = !endpoint;
   const controls = [el('ip'), el('search'), el('radius')];
+  const latitude = el('lat'), longitude = el('lon');
   const status = el('status');
-  let busy = false, ipEstimate;
+  let busy = false, lookedUp = false, edits = 0;
+  for (const field of [latitude, longitude]) field.addEventListener('input', () => { edits++; });
+
+  function fillIpCoordinates(location, initialEdits, [initialLat, initialLon]) {
+    if (edits !== initialEdits || latitude.value !== initialLat || longitude.value !== initialLon) return;
+    latitude.value = String(location.lat);
+    longitude.value = String(location.lon);
+  }
 
   function link(label, href) {
     const node = doc.createElement('a');
@@ -152,35 +146,71 @@ export function initNearbyScopes(doc, endpoint, fetcher = fetch) {
     el('fallback').hidden = true;
   }
 
-  async function find(mode) {
+  async function lookupScopes(mode, location) {
+    if (!endpoint) return null;
+    const radius = Number(el('radius').value);
+    const body = location ? { mode, radius, lat: location.lat, lon: location.lon } : { mode, radius };
+    try {
+      const response = await fetcher(endpoint, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body), credentials: 'omit', cache: 'no-store', redirect: 'error',
+        signal: AbortSignal.timeout(10_000),
+      });
+      return response.ok ? await response.json() : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function find(mode, automatic = false) {
     if (busy) return;
+    lookedUp = true;
+    const initialEdits = edits;
+    const initialValues = [latitude.value, longitude.value];
     busy = true;
     controls.forEach(control => { control.disabled = true; });
     status.textContent = endpoint ? 'Looking up nearby scopes...' : 'Finding a regional link...';
     el('results').hidden = true;
     try {
       const manual = mode === 'manual' ? {
-        lat: coordinate(el('lat').valueAsNumber, 90), lon: coordinate(el('lon').valueAsNumber, 180),
+        lat: coordinate(latitude.valueAsNumber, 90), lon: coordinate(longitude.valueAsNumber, 180),
       } : null;
       if (manual && (manual.lat === null || manual.lon === null)) throw Error('Invalid coordinates');
-      if (endpoint) {
+
+      let data;
+      let triedWorkerIp = false;
+      const lookupIp = async fallbackToGeoJs => {
+        triedWorkerIp = true;
+        data = await lookupScopes('ip');
+        const lat = coordinate(data?.location?.lat, 90), lon = coordinate(data?.location?.lon, 180);
+        if (lat !== null && lon !== null && (lat !== 0 || lon !== 0)) return data.location;
+        data = null;
+        if (fallbackToGeoJs) return estimateIpLocation(fetcher);
+        throw Error('IP location unavailable');
+      };
+      const location = manual ?? await requestIpLocation(fetcher, () => lookupIp(true)).catch(error => {
+        if (!endpoint || triedWorkerIp) throw error;
+        // Another panel started the GeoJS request. A Worker estimate may still be available.
+        return requestIpLocation(fetcher, () => lookupIp(false));
+      });
+      if (mode === 'ip') fillIpCoordinates(location, initialEdits, initialValues);
+
+      // A location was entered or already estimated by another panel.
+      if (!triedWorkerIp) data = await lookupScopes('manual', location);
+      if (data) {
         try {
-          const response = await fetcher(endpoint, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mode, radius: Number(el('radius').value), ...manual }),
-            credentials: 'omit', cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(10_000),
-          });
-          if (response.ok) { render(await response.json(), mode); return; }
+          render({ ...data, location }, mode);
+          return;
         } catch {
           // The map link does not depend on the optional forwarding-data service.
         }
       }
-      showMapOnly(manual ?? (ipEstimate ??= await estimateIpLocation(fetcher)), mode);
+      showMapOnly(location, mode);
     } catch {
       status.textContent = mode === 'ip' ? 'IP location unavailable. Enter coordinates instead.' : 'Enter valid latitude and longitude.';
-      if (mode === 'ip') {
+      if (mode === 'ip' && !automatic) {
         el('form').parentElement.open = true;
-        el('lat').focus();
+        latitude.focus({ preventScroll: true });
       }
       el('maps').replaceChildren(link('Open MeshMapper', MAP_HOME));
       el('table').hidden = true;
@@ -193,6 +223,10 @@ export function initNearbyScopes(doc, endpoint, fetcher = fetch) {
 
   el('ip').addEventListener('click', () => void find('ip'));
   el('form').addEventListener('submit', event => { event.preventDefault(); void find('manual'); });
+
+  whenVisible(el('controls'), () => {
+    if (!lookedUp && edits === 0 && !latitude.value && !longitude.value) void find('ip', true);
+  });
 }
 
 if (typeof document !== 'undefined') initNearbyScopes(document, lookupUrl(import.meta.env?.VITE_NEARBY_SCOPES_URL));

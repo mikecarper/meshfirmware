@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { initNearbyScopes } from '../src/nearby-scopes.js';
+import { requestIpLocation } from '../src/ip-location.js';
 
 const pnwConfig = 'https://gessaman.com/meshcore/regions/config/';
 const workerUrl = 'https://lookup.test/nearby-scopes';
@@ -25,6 +26,7 @@ function element(tagName = '') {
 
 function panel(endpoint, fetcher) {
   const elements = new Map();
+  let intersect, observed;
   function el(name = '') {
     if (!elements.has(name)) elements.set(name, element());
     return elements.get(name);
@@ -32,17 +34,32 @@ function panel(endpoint, fetcher) {
   el('radius').value = '50';
   el('form').parentElement = element('details');
   el('lat').focus = () => {};
-  initNearbyScopes({
+  const doc = {
     getElementById: id => el(id.slice('nearby-scopes'.length + 1)),
-    defaultView: { location: { hash: '' }, addEventListener() {} },
+    defaultView: {
+      location: { hash: '' },
+      addEventListener() {},
+      IntersectionObserver: class {
+        constructor(callback) { intersect = callback; }
+        observe(target) { observed = target; }
+        disconnect() { intersect = null; }
+      },
+    },
+    visibilityState: 'visible',
+    addEventListener() {},
+    removeEventListener() {},
     createElement: tag => element(tag),
     createTextNode: textContent => ({ textContent }),
-  }, endpoint, fetcher);
+  };
+  el('controls').ownerDocument = doc;
+  initNearbyScopes(doc, endpoint, fetcher);
   const settled = () => new Promise(resolve => setImmediate(resolve));
   return {
     el,
     links: () => el('maps').children.filter(node => node.tagName === 'a'),
     async useCoordinates({ lat, lon }) {
+      el('lat').value = String(lat);
+      el('lon').value = String(lon);
       el('lat').valueAsNumber = lat;
       el('lon').valueAsNumber = lon;
       el('form').dispatch('submit');
@@ -50,6 +67,10 @@ function panel(endpoint, fetcher) {
     },
     async useIp() {
       el('ip').dispatch('click');
+      await settled();
+    },
+    async inViewport(isIntersecting) {
+      intersect?.([{ target: observed, isIntersecting, intersectionRatio: isIntersecting ? 1 : 0 }]);
       await settled();
     },
   };
@@ -112,4 +133,70 @@ test('approximate IP location works for the PNW recommendation without forwardin
   await ui.useIp();
   assertPnwLink(ui);
   assert.equal(ui.el('table').hidden, true);
+});
+
+test('entering the viewport starts one approximate lookup and fills both coordinate fields', async () => {
+  let requests = 0;
+  const ui = panel(null, async () => {
+    requests++;
+    return Response.json({ latitude: 47.6062, longitude: -122.3321, country_code: 'US' });
+  });
+  await ui.inViewport(false);
+  assert.equal(requests, 0);
+  await ui.inViewport(true);
+  assert.equal(ui.el('lat').value, '47.61');
+  assert.equal(ui.el('lon').value, '-122.33');
+  assertPnwLink(ui);
+  await ui.inViewport(false);
+  await ui.inViewport(true);
+  assert.equal(requests, 1);
+});
+
+test('automatic lookup preserves manual coordinates entered before or during the request', async () => {
+  let finishLookup;
+  const ui = panel(null, () => new Promise(resolve => { finishLookup = resolve; }));
+  await ui.inViewport(true);
+  ui.el('lat').value = '45';
+  ui.el('lat').dispatch('input');
+  finishLookup(Response.json({ latitude: 47.6, longitude: -122.3, country_code: 'US' }));
+  await ui.inViewport(true);
+  assert.equal(ui.el('lat').value, '45');
+  assert.equal(ui.el('lon').value, '');
+
+  let requests = 0;
+  const prefilled = panel(null, async () => {
+    requests++;
+    return Response.json({ latitude: 47.6, longitude: -122.3, country_code: 'US' });
+  });
+  prefilled.el('lat').value = '45';
+  prefilled.el('lon').value = '-123';
+  await prefilled.inViewport(true);
+  assert.equal(requests, 0);
+  await prefilled.useIp();
+  assert.equal(prefilled.el('lat').value, '47.6');
+  assert.equal(prefilled.el('lon').value, '-122.3');
+});
+
+test('nearby scopes reuses the preset location and requests only forwarding observations', async () => {
+  const requests = [];
+  let finishLookup;
+  const fetcher = (url, config) => {
+    requests.push([url, config.body]);
+    if (url === workerUrl) return workerResult(seattle, 'SEA', 'sea');
+    return new Promise(resolve => { finishLookup = resolve; });
+  };
+  const presetLocation = requestIpLocation(fetcher);
+  const ui = panel(workerUrl, fetcher);
+  await ui.inViewport(true);
+  finishLookup(Response.json({ latitude: 47.6062, longitude: -122.3321, country_code: 'US' }));
+  await presetLocation;
+  await ui.inViewport(true);
+  assert.deepEqual(requests, [
+    ['https://get.geojs.io/v1/ip/geo.json', undefined],
+    [workerUrl, JSON.stringify({ mode: 'manual', radius: 50, lat: 47.61, lon: -122.33 })],
+  ]);
+  assert.equal(ui.el('lat').value, '47.61');
+  assert.equal(ui.el('lon').value, '-122.33');
+  assert.equal(ui.el('table').hidden, false);
+  assertPnwLink(ui);
 });
